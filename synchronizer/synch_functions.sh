@@ -11,14 +11,15 @@ printInfo "This is synchronization repo: $SYNCH_REPO"
 
 
 this_repos=("codespaces-framework")
-all_repos=("codespaces-framework" "enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "bug-busters" )
-synch_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "bug-busters" )
-synch2_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "bug-busters" )
+all_repos=("codespaces-framework" "enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "demo-bug-busters" )
+synch_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "demo-bug-busters" )
+synch2_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "demo-bug-busters" )
 cs_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dynatrace-log-ingest-101" "enablement-browser-dem-biz-observability")
-fix_repos=("bug-busters")
+fix_repos=("demo-bug-busters")
 migrate_repos=("enablement-dql-301" "enablement-workflow-essentials" "enablement-kubernetes-opentelemetry")
 refactor_repos=("codespaces-framework" "enablement-codespaces-template" "workshop-dynatrace-log-analytics")
 import_repos=("workshop-dynatrace-log-analytics")
+logs_repos=("workshop-dynatrace-log-analytics")
 unguard_repos=("demo-mcp-unguard")
 
 

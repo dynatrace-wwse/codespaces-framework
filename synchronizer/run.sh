@@ -2,18 +2,24 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Dynatrace Enablement Feedback Form"
-export BODY="Adding Enablment feedback form
-- adding feedback.md as a snippet for capturing feedback.
+export TITLE="Dynatrace Enablement Framework synch"
+export BODY="Enhance codespace tracker information.
+Add RUM
+Fix sed -i issue on mounted volumes
+Add ARM automatic deployment of DT OA and AG
+Add shields
+Update RUNME
+Bump Dynakube
 - "
 
 export CHERRYPICK_ID="47b1d0f"
 
-export TAG="v1.0.2"
+#export TAG="v1.0.2"
+export TAG="v1.0.1"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
-export BRANCH="docs/feedback"
+export BRANCH="rfe/misc"
 
 # Flags for copyFramework
 export EXCLUDE_MKDOC=true
@@ -25,27 +31,13 @@ printInfoSection "Running Codepaces-Synchronizer"
 custom(){  
     
     #TODO for this PR
-    # [y] - npm and node to the image
-    # [y] - bump image
-    # [y] - devcontainer.json description of env
-    # [y] - dt-banner (all) -> MCP server
-    # [y] - tenant -> environment
-    # [y] - add MCP Server func.
-    # [y] - verify functionality of checkHost (print when no all commands)
-    # [y] - test checkHost again
-    # [y] - AI Repo, image? appsec issue fix to all
+    # [ ] - 
+    # [ ] - 
+    # [ ] - 
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
 
-
-    #rm .github/workflows/github-test-cs.yaml.back
-    #git pull origin main
-    #git checkout main
-    #git checkout -b $BRANCH
-
-    #code docs/whats-next.md
-    
     # For importing changes we invert
     #DEST="$ROOT_PATH$SYNCH_REPO/"
     #SOURCE="$ROOT_PATH$repo/"
@@ -58,24 +50,21 @@ custom(){
 
 
     #git add -f "$DEST".vscode/mcp.json
-    
-    #git add .
-    #git status
+
     #git checkout main
     #git pull origin main
-    #git status
+
     #git checkout -b $BRANCH
     #git add .
     #git commit -s -m "$BODY"
-    #git status
-    #git checkout main
-    #git pull origin main
-    #git status
-    #git checkout -b $BRANCH
-    #git status
+    git checkout main
+    git pull origin main
+    git checkout -b $BRANCH
+    git status
+
     
     #git add .
-    git commit -s -m "Adding feedback form"
+    #git commit -s -m "Adding feedback form"
     #git push origin $BRANCH 
     
     #doPushandPR
@@ -85,17 +74,14 @@ custom(){
     #L=$(gh release list --limit 1)
     #printInfo "$L"
     #git reset --hard HEAD
-
-    #git restore .
-    #git clean -f
-    #git status 
 }
 
 #doInRepos refactor custom
 
 #doInRepos synch custom
 #doInRepos synch doPushandPR
-doInRepos synch verifyPrMerge
+doInRepos logs tagAndCreateRelease
+#doInRepos logs custom
 
 
 #doInRepos synch listOpenIssues
