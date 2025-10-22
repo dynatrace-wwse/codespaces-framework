@@ -2,20 +2,15 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Dynatrace Enablement Framework synch"
-export BODY="Enhance codespace tracker information.
-Add RUM
-Fix sed -i issue on mounted volumes
-Add ARM automatic deployment of DT OA and AG
-Add shields
-Update RUNME
-Bump Dynakube
-- "
+export TITLE="Dynatrace Enablement Framework"
+export BODY="Setting release to match the framework 1.0.2
+See here: https://dynatrace-wwse.github.io/codespaces-framework/
+"
 
 export CHERRYPICK_ID="47b1d0f"
 
 #export TAG="v1.0.2"
-export TAG="v1.0.1"
+export TAG="v1.0.2"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
@@ -47,8 +42,6 @@ custom(){
     #DEST="$ROOT_PATH$repo/"
     #FILE="docs/snippets/feedback.md"
     #cp "$SOURCE$FILE" "$DEST$FILE"
-
-
     #git add -f "$DEST".vscode/mcp.json
 
     #git checkout main
@@ -61,7 +54,6 @@ custom(){
     git pull origin main
     git checkout -b $BRANCH
     git status
-
     
     #git add .
     #git commit -s -m "Adding feedback form"
@@ -80,7 +72,11 @@ custom(){
 
 #doInRepos synch custom
 #doInRepos synch doPushandPR
-doInRepos logs tagAndCreateRelease
+
+#doInRepos unguard custom
+doInRepos unguard tagAndCreateRelease
+doInRepos unguard protectMainBranch
+
 #doInRepos logs custom
 
 
