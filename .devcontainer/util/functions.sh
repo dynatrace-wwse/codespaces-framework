@@ -309,103 +309,101 @@ setUpTerminal(){
 }
 
 setupMCPServer(){
-
+  # Function that verifies if the .env file exists and if it contains the DT_ENVIRONMENT variable, if yes it sets it up, if not it defaults to playground.
   printInfoSection "Setting up the Dynatrace 🧠 MCP Server for VS Code"
-
   local environment=false
-  local platform=false
-  local grail_budget=false
-  local telemetry=false
   
   # Check if .devcontainer/runlocal/.env file exists, if not then create it
   if [ ! -f "$ENV_FILE" ]; then
     printInfo ".env file not found. Creating it..."
-
     touch "$ENV_FILE"
-    
-    # Add properties
+    # Add default var
     setEnvironmentInEnv
-    setGrailBudget
-    setTelemetry
   else
     printInfo ".env file already exists."
+    
     while IFS= read -r line || [ -n "$line" ]; do
       # Skip empty lines and comments
       if [[ -z "$line" || "$line" =~ ^# ]]; then
         continue
       fi
-
       # Split the line into key and value
       IFS='=' read -r key value <<< "$line"
       # Print or process the key-value pair
-      
       if [ "$key" = "DT_ENVIRONMENT" ]; then
           printInfo "DT_ENVIRONMENT is set to $value"
           environment=true
       fi
-      if [ "$key" = "DT_PLATFORM_TOKEN" ]; then
-          printInfo "DT_PLATFORM_TOKEN set"
-          platform=true
-      fi
-      if [ "$key" = "DT_GRAIL_QUERY_BUDGET_GB" ]; then
-          printInfo "DT_GRAIL_QUERY_BUDGET_GB set to $value"
-          grail_budget=true
-      fi
-      if [ "$key" = "DT_MCP_DISABLE_TELEMETRY" ]; then
-          printInfo "DT_MCP_DISABLE_TELEMETRY set to $value"
-          telemetry=true
-      fi
-
     done < "$ENV_FILE"
 
     if [ $environment = false ]; then
       setEnvironmentInEnv
     fi
-    if [ $platform = false ]; then
-      setPlatformToken
-    fi
-    if [ $grail_budget = false ]; then
-      setGrailBudget
-    fi
-    if [ $telemetry = false ]; then
-      setTelemetry
-    fi
+
   fi
+
   printInfo "Settings location: .vscode/mcp.json"
   printInfo "Environment variables location: $ENV_FILE"
 }
 
-setGrailBudget(){
-  printInfo "Setting DT_GRAIL_QUERY_BUDGET_GB to $DT_GRAIL_QUERY_BUDGET_GB"
-  echo -e "DT_GRAIL_QUERY_BUDGET_GB=$DT_GRAIL_QUERY_BUDGET_GB" >> "$ENV_FILE"
-}
-setTelemetry(){
-  printInfo "Setting DT_MCP_DISABLE_TELEMETRY to $DT_MCP_DISABLE_TELEMETRY"
-  echo -e "DT_MCP_DISABLE_TELEMETRY=$DT_MCP_DISABLE_TELEMETRY" >> "$ENV_FILE"
-}
-
-setPlatformToken(){
-  if [ "$#" -eq 1 ]; then
-    printInfo "Setting DT_PLATFORM_TOKEN"
-    echo -e "DT_PLATFORM_TOKEN=$1" >> "$ENV_FILE"
-  else
-    if [ -z "${DT_PLATFORM_TOKEN}" ]; then
-      printWarn "DT_PLATFORM_TOKEN is missing as environment variable"
-      printInfo "you can set it by typing in the Terminal 'setPlatformToken <token value as argument>'"
-    else
-      printInfo "DT_PLATFORM_TOKEN found as environment variable and writing to file"
-      echo -e "DT_PLATFORM_TOKEN=$DT_PLATFORM_TOKEN" >> "$ENV_FILE"
+selectDemoEnvironment(){
+  # Check if DT_ENVIRONMENT is already set
+  if [ -n "$DT_ENVIRONMENT" ]; then
+    printWarn "DT_ENVIRONMENT is already set to $DT_ENVIRONMENT."
+    printf "Do you want to override it? (y/n): "
+    read override
+    if [ "$override" != "y" ] && [ "$override" != "Y" ]; then
+      printInfo "Keeping existing DT_ENVIRONMENT. Exiting function."
+      return
     fi
   fi
+
+  printInfoSection "🧠 Please select the Environment you want to connect to:"
+  printInfo "1. playground (wkf10640)"
+  printInfo "2. demo.live (guu84124)"
+  printInfo "3. tacocorp (bwm98081)"
+  printf "Enter your choice (1-3): "
+  read choice
+  case $choice in
+    1)
+      DT_ENVIRONMENT="https://wkf10640.apps.dynatrace.com"
+      ;;
+    2)
+      DT_ENVIRONMENT="https://guu84124.apps.dynatrace.com"
+      ;;
+    3)
+      DT_ENVIRONMENT="https://bwm98081.apps.dynatrace.com"
+      ;;
+    *)
+      printWarn "Invalid choice. Defaulting to playground."
+      DT_ENVIRONMENT="https://wkf10640.apps.dynatrace.com"
+      ;;
+  esac
+
+  export DT_ENVIRONMENT=$DT_ENVIRONMENT
+  if [ -f "$ENV_FILE" ]; then
+    # Remove existing DT_ENVIRONMENT line if present (including lines with leading spaces)
+    sed '/^[[:space:]]*DT_ENVIRONMENT=/d' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+  fi
+  echo "DT_ENVIRONMENT=$DT_ENVIRONMENT" >> "$ENV_FILE"
+
+  printInfo "Selected Demo Environment: $DT_ENVIRONMENT"
+
+  printInfoSection "$DT_ENVIRONMENT selected, the VS Code agent should start the MPC server automatically"
+  printInfo "you can alternatively go to 'Extensions > MCP Servers installed > dynatrace-mcp-server' and start it."
+  printInfo "If you want to connect to another MCP server, just type the function 'selectDemoEnvironment'"
+
 }
 
 setEnvironmentInEnv(){
   if [ -z "${DT_ENVIRONMENT}" ]; then
-    printWarn "DT_ENVIRONMENT is missing as environment variable"
+    printWarn "DT_ENVIRONMENT is missing as environment variable defaulting to playground "
+    DT_ENVIRONMENT="https://wkf10640.apps.dynatrace.com"
   else
-    printInfo "DT_ENVIRONMENT found as environment variable and writing to file"
-    echo -e "DT_ENVIRONMENT=$DT_ENVIRONMENT" >> "$ENV_FILE"
+    printInfo "DT_ENVIRONMENT found as environment variable ($DT_ENVIRONMENT) and writing to file"
   fi
+  echo -e "DT_ENVIRONMENT=$DT_ENVIRONMENT" >> "$ENV_FILE"
+  export DT_ENVIRONMENT=$DT_ENVIRONMENT
 }
 
 bindFunctionsInShell() {
