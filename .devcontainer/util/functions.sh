@@ -349,7 +349,7 @@ setupMCPServer(){
 selectDemoEnvironment(){
   # Check if DT_ENVIRONMENT is already set
   if [ -n "$DT_ENVIRONMENT" ]; then
-    printWarn "DT_ENVIRONMENT is already set to $DT_ENVIRONMENT."
+    printWarn "DT_ENVIRONMENT is already set to $DT_ENVIRONMENT. This function will override the DT_ENVIRONMENT environment variable and the entry in the $ENV_FILE file."
     printf "Do you want to override it? (y/n): "
     read override
     if [ "$override" != "y" ] && [ "$override" != "Y" ]; then

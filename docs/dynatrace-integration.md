@@ -1,7 +1,7 @@
 --8<-- "snippets/dynatrace-integration.js"
 
 !!! info "Dynatrace MCP integration & Observability"
-    This section explains how the [Dynatrace MCP Server](#dynatrace-mcp-server-integration) operates within your environment and how [Dynatrace Observability](#dynatrace-observability) is activated to monitor any application running in the enablement repositories.
+    This section explains how the [Dynatrace MCP Server](#mcp-server-integration) operates within your environment and how [Dynatrace Observability](#dynatrace-observability) is activated to monitor any application running in the enablement repositories.
 
 ---
 
@@ -11,15 +11,54 @@ The Dynatrace MCP (Model Context Protocol) Server enables AI Assistants to seaml
 
 ### Prerequisites
 1. The repository is opened in VS Code (Web and Desktop versions).
-- You have defined the `DT_ENVIRONMENT` and `DT_PLATFORM_TOKEN` environment variables. 
+- You have defined the `DT_ENVIRONMENT` 
+- (Optional) `DT_PLATFORM_TOKEN` 
 
-??? info "Authentication scopes for DT_PLATFORM_TOKEN "
-    For a full list of [supported scopes](https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication) and their use cases, refer to the Dynatrace MCP documentation.
-    Once these variables are configured, your repository is ready to leverage Dynatrace’s observability and automation capabilities.
+!!! info "Single Sign-On (SSO) Support"
+    The MCP Server supports **Single Sign-On (SSO)** in Dynatrace, enabling seamless authentication across environments. Any Dynatrace environment the user can connect to is automatically accessible via MCP—no additional authentication required.
 
+??? info "Authentication scopes for DT_PLATFORM_TOKEN (Optional)"
+    DT_PLATFORM_TOKEN is optional since the MCP Server supports Single Sign On. For a full list of [supported scopes](https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication) and their use cases, refer to the Dynatrace MCP documentation.
+    Once these variables are configured, your repository is ready to leverage Dynatrace's observability and automation capabilities.
+
+
+### Environment Configuration
+
+The MCP server needs to know which Dynatrace environment to connect to. If no environment is defined, the Dynatrace framework automatically sets the `DT_ENVIRONMENT` to the playground environment (`https://wkf10640.apps.dynatrace.com`) and writes it to the `.env` file.
+
+### Comfort Functions for Environment Management
+
+To simplify MCP server configuration, two convenience functions are available:
+
+#### 1. SelectDemoEnvironment
+
+``` bash
+selectDemoEnvironment
+```
+Prompts you to select a Dynatrace environment and configures it system-wide:
+
+- **Available environments**: Playground, demo.live, or tacocorp
+- **Actions**: Exports the environment variable and writes it to the `.env` file
+- **Usage**: Use this when you want to change the default environment for all operations
+
+
+#### 2. SelectMCP
+``` bash
+selectMCP
+```
+
+Updates only the MCP server configuration without changing system-wide environment variables:
+
+- **Purpose**: Connects to a running MCP server from the Center of Excellence
+- **Actions**: Prompts for an environment and updates only the `mcp.json` file
+- **Compatibility**: Works on both VS Code Web and Desktop versions
+- **Usage**: Use this when you want connect to a demo environment easily using VSCode web.
 
 #### Verifying Prerequisites
 
+``` bash
+setupMCPServer
+```
 To verify that the Dynatrace MCP Server has the environment variables needed in your codespace, type in the Terminal `setupMCPServer`
 You should be able to see the settings and the variables.
 
@@ -45,6 +84,11 @@ On VS Code, on the left pane, click on the Extensions tab `Shift + ⌘ + X`. You
 
 !!! example ""
     Yay! the AI Agent (by default in VS Code is GPT) should be able now to fetch information from the Dynatrace environment.
+
+
+!!! tipp ""
+    Verify that the connection is active. Ask the agent, "what can I do with my dynatrace mcp server? give me a comprenhensive list"
+
 
 ### Example Prompts 
 
