@@ -5,10 +5,14 @@
 #  needed.                                                             #
 # ======================================================================
 
-
 customFunction(){
   printInfoSection "This is a custom function that calculates 1 + 1"
 
   printInfo "1 + 1 = $(( 1 + 1 ))"
 
 }
+
+
+
+
+

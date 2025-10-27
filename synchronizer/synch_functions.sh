@@ -11,13 +11,18 @@ printInfo "This is synchronization repo: $SYNCH_REPO"
 
 
 this_repos=("codespaces-framework")
-all_repos=("codespaces-framework" "enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "bug-busters" )
-synch_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "bug-busters" )
+all_repos=("codespaces-framework" "enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "demo-bug-busters" "demo-mcp-unguard")
+synch_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "demo-bug-busters" "demo-mcp-unguard")
+
 cs_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dynatrace-log-ingest-101" "enablement-browser-dem-biz-observability")
-fix_repos=("bug-busters")
 migrate_repos=("enablement-dql-301" "enablement-workflow-essentials" "enablement-kubernetes-opentelemetry")
 refactor_repos=("codespaces-framework" "enablement-codespaces-template" "workshop-dynatrace-log-analytics")
+
 import_repos=("workshop-dynatrace-log-analytics")
+logs_repos=("workshop-dynatrace-log-analytics")
+fix_repos=("demo-mcp-unguard")
+unguard_repos=("demo-mcp-unguard")
+
 
 # Function to compare files in arrays,
 # $1[cs or all for iterating in only CS or ALL repos]
@@ -44,7 +49,7 @@ compareFile() {
 copyFramework(){
     repo=$(basename $(pwd))
 
-    printInfoSection "Copying core files to repository $repo into branch $BRANCH"
+    printInfoSection "Copying core files to repository $repo into actual branch"
     printInfoSection "Copying core files from $ROOT_PATH$SYNCH_REPO to $ROOT_PATH$repo"
     
     # Exclude core files from the synchronizer
@@ -65,11 +70,14 @@ copyFramework(){
     fi
 
     # For copying
-    SOURCE="$ROOT_PATH$SYNCH_REPO/"
-    DEST="$ROOT_PATH$repo/"
-    # For importing changes we invert
-    #DEST="$ROOT_PATH$SYNCH_REPO/"
-    #SOURCE="$ROOT_PATH$repo/"
+    if [ "$IMPORT" = true ]; then
+        # For importing changes we invert
+        DEST="$ROOT_PATH$SYNCH_REPO/"
+        SOURCE="$ROOT_PATH$repo/"
+    else
+        SOURCE="$ROOT_PATH$SYNCH_REPO/"
+        DEST="$ROOT_PATH$repo/"
+    fi
 
     rsync -av "${EXCLUDES[@]}" "$SOURCE" "$DEST"
 
@@ -227,16 +235,23 @@ verifyPrMerge(){
     printInfoSection "verifying PR for branch $BRANCH, merging and deleting branch if ok for repo $repo"
 
     PR=$(GH_PAGER=cat gh pr list | grep $BRANCH)
-    printInfo "$PR"
-    
-    PR_ID=$(echo $PR | awk '{print $1}') 
-    CHECKS_PASS=$(gh pr checks $PR_ID --json state | jq 'all(.[]; .state == "SUCCESS")')
-    printInfo "Checks: $CHECKS_PASS"
-    if [[ $CHECKS_PASS == true ]]; then
-        printInfo " ✅ All checks have passed: $CHECKS_PASS"
-        gh pr merge $PR_ID --merge --delete-branch
-    else
-        printError "❌ Checks failed $CHECKS_PASS"
+    if [[ -z "$PR" ]]; then
+        printWarn "No PR found for branch $BRANCH"
+        #PRS=$(GH_PAGER=cat gh pr list)
+        #printInfo "Other PR (if any)... \n$PRS"
+    else 
+        
+        printInfo "$PR"
+
+        PR_ID=$(echo $PR | awk '{print $1}') 
+        CHECKS_PASS=$(gh pr checks $PR_ID --json state | jq 'all(.[]; .state == "SUCCESS")')
+        printInfo "Checks: $CHECKS_PASS"
+        if [[ $CHECKS_PASS == true ]]; then
+            printInfo " ✅ All checks have passed: $CHECKS_PASS"
+            gh pr merge $PR_ID --merge --delete-branch
+        else
+            printError "❌ Checks failed $CHECKS_PASS"
+        fi
     fi
 }
 
@@ -309,5 +324,5 @@ deleteBranches(){
 
 generateMarkdowntable(){
     repo=$(basename $(pwd))
-    echo "[$repo](https://https://github.com/dynatrace-wwse/$repo) |  description $repo | [![Integration tests](https://github.com/dynatrace-wwse/$repo/actions/workflows/integration-tests.yaml/badge.svg)](https://github.com/dynatrace-wwse/$repo/actions) [![Version](https://img.shields.io/github/v/release/dynatrace-wwse/$repo?color=blueviolet)](https://github.com/dynatrace-wwse/$repo/releases)  [![Commits](https://img.shields.io/github/commits-since/dynatrace-wwse/$repo/latest?color=ff69b4&include_prereleases)](https://github.com/dynatrace-wwse/$repo/graphs/commit-activity) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?color=green)](https://github.com/dynatrace-wwse/$repo/blob/main/LICENSE) [![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live-brightgreen)](https://dynatrace-wwse.github.io/$repo/) " 
+    echo "[$repo](https://github.com/dynatrace-wwse/$repo) |  description $repo | [![Integration tests](https://github.com/dynatrace-wwse/$repo/actions/workflows/integration-tests.yaml/badge.svg)](https://github.com/dynatrace-wwse/$repo/actions) [![Version](https://img.shields.io/github/v/release/dynatrace-wwse/$repo?color=blueviolet)](https://github.com/dynatrace-wwse/$repo/releases)  [![Commits](https://img.shields.io/github/commits-since/dynatrace-wwse/$repo/latest?color=ff69b4&include_prereleases)](https://github.com/dynatrace-wwse/$repo/graphs/commit-activity) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?color=green)](https://github.com/dynatrace-wwse/$repo/blob/main/LICENSE) [![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live-brightgreen)](https://dynatrace-wwse.github.io/$repo/) " 
 }

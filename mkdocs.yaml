@@ -5,23 +5,27 @@ nav:
   - '1. Introduction': index.md
   - '2. Container image': container-image.md
   - '3. Instantiation types': instantiation-types.md
-  - '4. Codespaces Template': template.md
-  - '5. The Framework': framework.md
-  - '6. User Experience': user-experience.md
-  - "7. Synchronizer": synchronizer.md
-  - "8. Testing": testing.md
-  - "9. Monitoring": monitoring.md
-  - "10. Resources": resources.md
-  - "11. What's next?": whats-next.md
+  - '4. Dynatrace integration': dynatrace-integration.md
+  - '5. Codespaces Template': template.md
+  - '6. The Framework': framework.md
+  - '7. User Experience': user-experience.md
+  - "8. Synchronizer": synchronizer.md
+  - "9. Testing": testing.md
+  - "10. Monitoring": monitoring.md
+  - "11. Resources": resources.md
+  - "12. Enablements": enablements.md
+  - "13. What's next?": whats-next.md
 theme:
   name: material
   custom_dir: docs/overrides
+  logo: https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg
   features:
     - content.code.copy
     
   palette:
   # Palette toggle for automatic mode
   - media: "(prefers-color-scheme)"
+    primary: deep-purple 
     toggle:
       icon: material/brightness-auto
       name: Switch to light mode
@@ -29,13 +33,14 @@ theme:
   # Palette toggle for light mode
   - media: "(prefers-color-scheme: light)"
     scheme: default 
+    primary: deep-purple 
     toggle:
       icon: material/brightness-7
       name: Switch to dark mode
 
-  # Palette toggle for dark mode
   - media: "(prefers-color-scheme: dark)"
     scheme: slate
+    primary: deep-purple 
     toggle:
       icon: material/brightness-4
       name: Switch to system preference

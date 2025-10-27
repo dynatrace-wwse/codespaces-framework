@@ -12,7 +12,7 @@
 2. Click the **<> Code** button.
 3. Create a new Codespace using the main branch, or click **+ New** to customize how and where to run the Codespace within GitHub Cloud.
 
-_Repository secrets such as `DT_TENANT`, `DT_OPERATOR_TOKEN`, and `DT_INGEST_TOKEN` (among others) are injected automatically using GitHub Codespaces secrets. No manual setup is required—these are available as environment variables inside the container._
+_Repository secrets such as `DT_ENVIRONMENT`, `DT_OPERATOR_TOKEN`, and `DT_INGEST_TOKEN` (among others) are injected automatically using GitHub Codespaces secrets. No manual setup is required—these are available as environment variables inside the container._
 
 ### 2.  📦 Running in VS Code Dev Containers or Local Container
 
@@ -23,17 +23,18 @@ _Repository secrets such as `DT_TENANT`, `DT_OPERATOR_TOKEN`, and `DT_INGEST_TOK
 
 The following steps apply to both scenarios:
 
-1. **Provision Infrastructure**
+1. **Provision the infrastructure**
     
 	??? info "🏗️ Setting up the Infrastructure"
 		You may provision your infrastructure on any major cloud provider or run locally using [Multipass](#using-multipass-for-local-development).
 
 		**Minimum requirements for a cloud or local machine:**
+		
 		1. **Operating System:** Ubuntu LTS (22.04 or 24.04 recommended)
 		2. **CPU & Memory:** Requirements depend on your workloads. As a guideline, refer to the `hostRequirements` section in `.devcontainer.json`. A typical setup with 4 CPU cores and 16 GB RAM is sufficient for most use cases.
 		3. **Network Ports:** Ensure the following ports are open for inbound connections:
-			- `22` (SSH)
-			- `30100`, `30200`, `30300` (for application access; each deployed app is exposed via Kubernetes NodePort)
+			1. `22` (SSH)
+			2. `30100`, `30200`, `30300` (for application access; each deployed app is exposed via Kubernetes NodePort)
 
 2. **SSH into the host**
 
@@ -49,7 +50,7 @@ The following steps apply to both scenarios:
 		```properties title=".devcontainer/runlocal/.env" linenums="1"
 		# Environment variables as defined as secrets in the devcontainer.json file
 		# Dynatrace Tenant
-		DT_TENANT=https://abc123.apps.dynatrace.com
+		DT_ENVIRONMENT=https://abc123.apps.dynatrace.com
 
 		# Dynatrace Operator Token
 		DT_OPERATOR_TOKEN=dt0c01.XXXXXX
@@ -144,6 +145,8 @@ Secrets and environment variables are handled differently depending on the insta
 
 
 
+<!--TODO How to show logs of container  -->
+<!--TODO Add Troubleshooting guide with docker ps -->
 
 ---
 
@@ -165,7 +168,7 @@ Secrets and environment variables are handled differently depending on the insta
   -  **Launch an Ubuntu VM:**
 	```sh
 	multipass launch --name enablement --disk 30G --cpus 8 --memory 32G
-	multipass shell dt-dev
+	multipass shell enablement
 	```
 
 !!! tip "Mounting Volumes on Multipass"
@@ -175,5 +178,5 @@ Secrets and environment variables are handled differently depending on the insta
     ```
 
 <div class="grid cards" markdown>
-- [Let's continue:octicons-arrow-right-24:](template.md)
+- [Let's continue:octicons-arrow-right-24:](dynatrace-integration.md)
 </div>
