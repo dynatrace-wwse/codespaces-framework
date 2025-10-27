@@ -1,8 +1,6 @@
 --8<-- "snippets/resources.js"
 
-# 10. Resources
-
-Below is a curated list of resources to help you get the most out of Dynatrace, Codespaces, and modern development best practices. These links will deepen your understanding, improve your workflow, and keep you up to date with the latest trends.
+Below is a curated list of resources to help you get the most out of Dynatrace, Codespaces, and modern development best practices. These links will deepen your understanding and keep you up to date with the latest trends.
 
 ---
 
@@ -69,5 +67,5 @@ Explore these resources to become more effective with Dynatrace, Codespaces, and
 
 
 <div class="grid cards" markdown>
-- [Continue to What's Next →](whats-next.md)
+- [Continue to Enablements →](enablements.md)
 </div>

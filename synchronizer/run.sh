@@ -2,60 +2,68 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Miscelaneus changes"
-export BODY="Miscelaneus changes, adding functions for ease of use 
-- calculateReadingTime
-- checkHost 
+export TITLE="Dynatrace SSO for MCP"
+export BODY="
+- funtion to selectDemoenvironment
+- if DT_ENVIRONMENT not set, default to playground
+- .env is always created so the MCP server can read from it.
+- .env is always read and exported in all sessions.
 "
 
 export CHERRYPICK_ID="47b1d0f"
 
-export TAG="v1.0.1"
+#export TAG="v1.0.2"
+export TAG="v1.0.2"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
-export BRANCH="rfe/misc"
+export BRANCH="rfe/mcpsso"
 
 # Flags for copyFramework
 export EXCLUDE_MKDOC=true
 export EXCLUDE_CUSTOMFILES=true
+export IMPORT=false
 
 printInfoSection "Running Codepaces-Synchronizer"
 
 custom(){  
     
     #TODO for this PR
-    # [y] - Update to all repos with the file --8<-- "snippets/dt-enablement.md" pointing to framework (synch gives 404)
-    # [y] - change badge to all repos to point to the documentation of synchronizer
-    # [y] - AI Repo, image? appsec issue fix to all
-    # [y] - search for https://dynatrace-wwse.github.io/codespaces-framework)
-    
+    # [ ] - select demo.
+    # [ ] - mcp file
+    # [ ] - 
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
 
-
-    #rm .github/workflows/github-test-cs.yaml.back
-    
     # For importing changes we invert
     #DEST="$ROOT_PATH$SYNCH_REPO/"
     #SOURCE="$ROOT_PATH$repo/"
     
+    # For copying files
     #SOURCE="$ROOT_PATH$SYNCH_REPO/"
     #DEST="$ROOT_PATH$repo/"
-    #FILE="docs/snippets/dt-enablement.md"
+    #FILE=".vscode/mcp.json"
     #cp "$SOURCE$FILE" "$DEST$FILE"
-    #git status
+    #git add -f "$DEST".vscode/mcp.json
+
     #git checkout main
     #git pull origin main
-    #git status
+
     #git checkout -b $BRANCH
     git add .
     git commit -s -m "$BODY"
+    #git checkout main
+    #git pull origin main
+    #git checkout -b $BRANCH
     #git status
+    
+    #git add .
+    #git commit -s -m "Adding feedback form"
+    #git push origin $BRANCH 
+    
     #doPushandPR
     #gh issue list --state open
-    #git push origin $BRANCH 
 
     # Show last release
     #L=$(gh release list --limit 1)
@@ -65,14 +73,21 @@ custom(){
 
 #doInRepos refactor custom
 
-doInRepos all custom
-#doInRepos synch listOpenIssues
-#doInRepos synch verifyPrMerge
+#doInRepos synch custom
+#doInRepos synch doPushandPR
 
+doInRepos unguard doPushandPR
+
+#doInRepos unguard tagAndCreateRelease
+#doInRepos unguard protectMainBranch
+
+#doInRepos logs custom
+
+
+#doInRepos synch listOpenIssues
 #doInRepos fix tagAndCreateRelease
 #doInRepos fix copyFramework
 #doInRepos synch copyFramework 
-
 
 #doInRepos all generateMarkdowntable
 #doInRepos all custom
