@@ -389,8 +389,44 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Prerequisites">
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#environment-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      Environment Configuration
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#comfort-functions-for-environment-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      Comfort Functions for Environment Management
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Comfort Functions for Environment Management">
       <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-selectdemoenvironment" class="md-nav__link">
+    <span class="md-ellipsis">
+      1. SelectDemoEnvironment
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-selectmcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      2. SelectMCP
+    </span>
+  </a>
+  
+</li>
         
           <li class="md-nav__item">
   <a href="#verifying-prerequisites" class="md-nav__link">
@@ -709,8 +745,44 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Prerequisites">
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#environment-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      Environment Configuration
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#comfort-functions-for-environment-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      Comfort Functions for Environment Management
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Comfort Functions for Environment Management">
       <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-selectdemoenvironment" class="md-nav__link">
+    <span class="md-ellipsis">
+      1. SelectDemoEnvironment
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-selectmcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      2. SelectMCP
+    </span>
+  </a>
+  
+</li>
         
           <li class="md-nav__item">
   <a href="#verifying-prerequisites" class="md-nav__link">
@@ -822,7 +894,7 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-  dynatrace.sendBizEvent('page_load', {"page": "4. Dynatrace integration"});
+  dynatrace.sendBizEvent('page_load', {"page": "4. Dynatrace Integration"});
 });
 </script>
 
@@ -836,18 +908,48 @@ document.addEventListener('DOMContentLoaded', function() {
 <h3 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">#</a></h3>
 <ol>
 <li>The repository is opened in VS Code (Web and Desktop versions).</li>
-<li>You have defined the <code>DT_ENVIRONMENT</code> and <code>DT_PLATFORM_TOKEN</code> environment variables. </li>
+<li>You have defined the <code>DT_ENVIRONMENT</code> </li>
+<li>(Optional) <code>DT_PLATFORM_TOKEN</code> </li>
 </ol>
+<div class="admonition info">
+<p class="admonition-title">Single Sign-On (SSO) Support</p>
+<p>The MCP Server supports <strong>Single Sign-On (SSO)</strong> in Dynatrace, enabling seamless authentication across environments. Any Dynatrace environment the user can connect to is automatically accessible via MCP—no additional authentication required.</p>
+</div>
 <details class="info">
-<summary>Authentication scopes for DT_PLATFORM_TOKEN </summary>
-<p>For a full list of <a href="https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication">supported scopes</a> and their use cases, refer to the Dynatrace MCP documentation.
-Once these variables are configured, your repository is ready to leverage Dynatrace’s observability and automation capabilities.</p>
+<summary>Authentication scopes for DT_PLATFORM_TOKEN (Optional)</summary>
+<p>DT_PLATFORM_TOKEN is optional since the MCP Server supports Single Sign On. For a full list of <a href="https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication">supported scopes</a> and their use cases, refer to the Dynatrace MCP documentation.
+Once these variables are configured, your repository is ready to leverage Dynatrace's observability and automation capabilities.</p>
 </details>
+<h3 id="environment-configuration">Environment Configuration<a class="headerlink" href="#environment-configuration" title="Permanent link">#</a></h3>
+<p>The MCP server needs to know which Dynatrace environment to connect to. If no environment is defined, the Dynatrace framework automatically sets the <code>DT_ENVIRONMENT</code> to the playground environment (<code>https://wkf10640.apps.dynatrace.com</code>) and writes it to the <code>.env</code> file.</p>
+<h3 id="comfort-functions-for-environment-management">Comfort Functions for Environment Management<a class="headerlink" href="#comfort-functions-for-environment-management" title="Permanent link">#</a></h3>
+<p>To simplify MCP server configuration, two convenience functions are available:</p>
+<h4 id="1-selectdemoenvironment">1. SelectDemoEnvironment<a class="headerlink" href="#1-selectdemoenvironment" title="Permanent link">#</a></h4>
+<p><div class="highlight"><pre><span></span><code>selectDemoEnvironment
+</code></pre></div>
+Prompts you to select a Dynatrace environment and configures it system-wide:</p>
+<ul>
+<li><strong>Available environments</strong>: Playground, demo.live, or tacocorp</li>
+<li><strong>Actions</strong>: Exports the environment variable and writes it to the <code>.env</code> file</li>
+<li><strong>Usage</strong>: Use this when you want to change the default environment for all operations</li>
+</ul>
+<h4 id="2-selectmcp">2. SelectMCP<a class="headerlink" href="#2-selectmcp" title="Permanent link">#</a></h4>
+<div class="highlight"><pre><span></span><code>selectMCP
+</code></pre></div>
+<p>Updates only the MCP server configuration without changing system-wide environment variables:</p>
+<ul>
+<li><strong>Purpose</strong>: Connects to a running MCP server from the Center of Excellence</li>
+<li><strong>Actions</strong>: Prompts for an environment and updates only the <code>mcp.json</code> file</li>
+<li><strong>Compatibility</strong>: Works on both VS Code Web and Desktop versions</li>
+<li><strong>Usage</strong>: Use this when you want connect to a demo environment easily using VSCode web.</li>
+</ul>
 <h4 id="verifying-prerequisites">Verifying Prerequisites<a class="headerlink" href="#verifying-prerequisites" title="Permanent link">#</a></h4>
-<p>To verify that the Dynatrace MCP Server has the environment variables needed in your codespace, type in the Terminal <code>setupMCPServer</code>
-You should be able to see the settings and the variables.
-<img _=";" alt="mcp server" src="../img/mcpserver_setup.png" width="800" />
-If the <code>DT_PLATFORM_TOKEN</code> is missing, then easily add it by typing:</p>
+<p><div class="highlight"><pre><span></span><code>setupMCPServer
+</code></pre></div>
+To verify that the Dynatrace MCP Server has the environment variables needed in your codespace, type in the Terminal <code>setupMCPServer</code>
+You should be able to see the settings and the variables.</p>
+<p><img _=";" alt="mcp server" src="../img/mcpserver_setup.png" width="800" /></p>
+<p>If the <code>DT_PLATFORM_TOKEN</code> is missing, then easily add it by typing:</p>
 <div class="highlight"><pre><span></span><code>setPlatformToken<span class="w"> </span>&lt;dt0s16.YOURTOKEN.XXXX&gt;
 </code></pre></div>
 <h3 id="starting-the-mcp-server">Starting the MCP Server  <img _=";" align="right" alt="mcp server" src="../img/mcpserver_ext.png" width="200" /><a class="headerlink" href="#starting-the-mcp-server" title="Permanent link">#</a></h3>
@@ -859,6 +961,9 @@ If the <code>DT_PLATFORM_TOKEN</code> is missing, then easily add it by typing:<
 </ol>
 <div class="admonition example">
 <p>Yay! the AI Agent (by default in VS Code is GPT) should be able now to fetch information from the Dynatrace environment.</p>
+</div>
+<div class="admonition tipp">
+<p>Verify that the connection is active. Ask the agent, "what can I do with my dynatrace mcp server? give me a comprenhensive list"</p>
 </div>
 <h3 id="example-prompts">Example Prompts<a class="headerlink" href="#example-prompts" title="Permanent link">#</a></h3>
 <div class="admonition example">
