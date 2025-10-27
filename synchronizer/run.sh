@@ -2,9 +2,12 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Dynatrace Enablement Framework"
-export BODY="Setting release to match the framework 1.0.2
-See here: https://dynatrace-wwse.github.io/codespaces-framework/
+export TITLE="Dynatrace SSO for MCP"
+export BODY="
+- funtion to selectDemoenvironment
+- if DT_ENVIRONMENT not set, default to playground
+- .env is always created so the MCP server can read from it.
+- .env is always read and exported in all sessions.
 "
 
 export CHERRYPICK_ID="47b1d0f"
@@ -14,7 +17,7 @@ export TAG="v1.0.2"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
-export BRANCH="rfe/misc"
+export BRANCH="rfe/mcpsso"
 
 # Flags for copyFramework
 export EXCLUDE_MKDOC=true
@@ -26,8 +29,8 @@ printInfoSection "Running Codepaces-Synchronizer"
 custom(){  
     
     #TODO for this PR
-    # [ ] - 
-    # [ ] - 
+    # [ ] - select demo.
+    # [ ] - mcp file
     # [ ] - 
 
     repo=$(basename $(pwd))
@@ -40,7 +43,7 @@ custom(){
     # For copying files
     #SOURCE="$ROOT_PATH$SYNCH_REPO/"
     #DEST="$ROOT_PATH$repo/"
-    #FILE="docs/snippets/feedback.md"
+    #FILE=".vscode/mcp.json"
     #cp "$SOURCE$FILE" "$DEST$FILE"
     #git add -f "$DEST".vscode/mcp.json
 
@@ -48,12 +51,12 @@ custom(){
     #git pull origin main
 
     #git checkout -b $BRANCH
-    #git add .
-    #git commit -s -m "$BODY"
-    git checkout main
-    git pull origin main
-    git checkout -b $BRANCH
-    git status
+    git add .
+    git commit -s -m "$BODY"
+    #git checkout main
+    #git pull origin main
+    #git checkout -b $BRANCH
+    #git status
     
     #git add .
     #git commit -s -m "Adding feedback form"
@@ -73,9 +76,10 @@ custom(){
 #doInRepos synch custom
 #doInRepos synch doPushandPR
 
-#doInRepos unguard custom
-doInRepos unguard tagAndCreateRelease
-doInRepos unguard protectMainBranch
+doInRepos unguard doPushandPR
+
+#doInRepos unguard tagAndCreateRelease
+#doInRepos unguard protectMainBranch
 
 #doInRepos logs custom
 
