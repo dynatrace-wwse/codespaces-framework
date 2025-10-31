@@ -2,12 +2,10 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Dynatrace SSO for MCP"
+export TITLE="Dev Container image v1.2"
 export BODY="
-- funtion to selectDemoenvironment
-- if DT_ENVIRONMENT not set, default to playground
-- .env is always created so the MCP server can read from it.
-- .env is always read and exported in all sessions.
+- devcontainer.json -> image shinojosa/dt-enablement:v1.2
+    - Node (NPX) built in the image for MCP Server 
 "
 
 export CHERRYPICK_ID="47b1d0f"
@@ -17,7 +15,7 @@ export TAG="v1.0.2"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
-export BRANCH="rfe/mcpsso"
+export BRANCH="rfe/node"
 
 # Flags for copyFramework
 export EXCLUDE_MKDOC=true
@@ -29,12 +27,19 @@ printInfoSection "Running Codepaces-Synchronizer"
 custom(){  
     
     #TODO for this PR
+    # [ ] - rm .devcontainer/runlocal/multipass.sh
+    # [ ] - rm .devcontainer/runlocal/README.md
     # [ ] - select demo.
     # [ ] - mcp file
     # [ ] - 
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
+    
+    # Clean new copy
+    #git checkout main
+    #git pull origin main
+    #git checkout $BRANCH
 
     # For importing changes we invert
     #DEST="$ROOT_PATH$SYNCH_REPO/"
@@ -47,19 +52,21 @@ custom(){
     #cp "$SOURCE$FILE" "$DEST$FILE"
     #git add -f "$DEST".vscode/mcp.json
 
-    #git checkout main
-    #git pull origin main
 
+    #git add .
+    #git commit -s -m "$BODY"
+    git checkout main
+    git pull origin main
     #git checkout -b $BRANCH
-    git add .
-    git commit -s -m "$BODY"
-    #git checkout main
-    #git pull origin main
-    #git checkout -b $BRANCH
+    
+    #rm .devcontainer/runlocal/multipass.sh
+    #rm .devcontainer/runlocal/README.md
+    #rm .DS_Store
     #git status
+    #git checkout main
     
     #git add .
-    #git commit -s -m "Adding feedback form"
+    #git commit -s -m "$BODY"
     #git push origin $BRANCH 
     
     #doPushandPR
@@ -71,12 +78,16 @@ custom(){
     #git reset --hard HEAD
 }
 
-#doInRepos refactor custom
+#doInRepos unguard doPushandPR
+
+#doInRepos this custom
+#doInRepos all custom
 
 #doInRepos synch custom
-#doInRepos synch doPushandPR
+doInRepos synch verifyPrMerge
 
-doInRepos unguard doPushandPR
+#doInRepos unguard doPushandPR
+#doInRepos unguard copyFramework
 
 #doInRepos unguard tagAndCreateRelease
 #doInRepos unguard protectMainBranch
