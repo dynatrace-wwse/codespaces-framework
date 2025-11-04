@@ -36,8 +36,9 @@ custom(){
     # [x] - Update support policy snippets/disclaimer.md
     # [x] - Enablement badge / banner
 
-    # [ ] - 
     # [ ] - Verify how to update obslab-llm and demo-debuger
+    # [ ]   - create a fork (private) and use same logic? 
+
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
@@ -86,7 +87,7 @@ custom(){
 
 #doInRepos unguard doPushandPR
 
-doInRepos all doPushandPR
+doInRepos all verifyPrMerge
 
 #doInRepos all custom
 
