@@ -32,9 +32,9 @@ custom(){
     #TODO for this PR
     # [x] - selectEnvironment function
     # [x] - MCP documentation
-    # [ ] - Update support policy snippets/disclaimer.md
-    # [ ] - Update support policy snippets/disclaimer.md
-    # [ ] - Enablement badge / banner
+    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Enablement badge / banner
 
     # [ ] - 
     # [ ] - Verify how to update obslab-llm and demo-debuger
@@ -86,9 +86,9 @@ custom(){
 
 #doInRepos unguard doPushandPR
 
-#doInRepos all doPushandPR
+doInRepos all doPushandPR
 
-doInRepos all custom
+#doInRepos all custom
 
 #doInRepos all copyFile "docs/snippets/disclaimer.md"
 #doInRepos all copyFile "docs/snippets/dt-enablement.md"
