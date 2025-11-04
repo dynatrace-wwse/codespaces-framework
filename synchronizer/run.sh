@@ -2,10 +2,13 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Dev Container image v1.2"
+export TITLE="Miscellaneus small changes"
 export BODY="
-- devcontainer.json -> image shinojosa/dt-enablement:v1.2
-    - Node (NPX) built in the image for MCP Server 
+- selectDemoEnvironment to selectEnvironment
+    - Posibility to add own environment from any stage.
+    - alignment with SSO for MCP Server
+- Support policy updated
+- Powered by DT Enablement Badge to camelcase.
 "
 
 export CHERRYPICK_ID="47b1d0f"
@@ -15,7 +18,7 @@ export TAG="v1.0.2"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
-export BRANCH="rfe/node"
+export BRANCH="rfe/miscellaneus"
 
 # Flags for copyFramework
 export EXCLUDE_MKDOC=true
@@ -27,11 +30,15 @@ printInfoSection "Running Codepaces-Synchronizer"
 custom(){  
     
     #TODO for this PR
-    # [ ] - rm .devcontainer/runlocal/multipass.sh
-    # [ ] - rm .devcontainer/runlocal/README.md
-    # [ ] - select demo.
-    # [ ] - mcp file
-    # [ ] - 
+    # [x] - selectEnvironment function
+    # [x] - MCP documentation
+    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Enablement badge / banner
+
+    # [ ] - Verify how to update obslab-llm and demo-debuger
+    # [ ]   - create a fork (private) and use same logic? 
+
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
@@ -48,15 +55,15 @@ custom(){
     # For copying files
     #SOURCE="$ROOT_PATH$SYNCH_REPO/"
     #DEST="$ROOT_PATH$repo/"
-    #FILE=".vscode/mcp.json"
+    #FILE="docs/snippets/disclaimer.md"
     #cp "$SOURCE$FILE" "$DEST$FILE"
-    #git add -f "$DEST".vscode/mcp.json
-
+    #git add -f "$DEST$FILE"
 
     #git add .
     #git commit -s -m "$BODY"
-    git checkout main
-    git pull origin main
+    #git status
+    #git checkout main
+    #git pull origin main
     #git checkout -b $BRANCH
     
     #rm .devcontainer/runlocal/multipass.sh
@@ -65,8 +72,8 @@ custom(){
     #git status
     #git checkout main
     
-    #git add .
-    #git commit -s -m "$BODY"
+    git add .
+    git commit -s -m "$BODY"
     #git push origin $BRANCH 
     
     #doPushandPR
@@ -80,8 +87,14 @@ custom(){
 
 #doInRepos unguard doPushandPR
 
-#doInRepos this custom
+doInRepos all verifyPrMerge
+
 #doInRepos all custom
+
+#doInRepos all copyFile "docs/snippets/disclaimer.md"
+#doInRepos all copyFile "docs/snippets/dt-enablement.md"
+#doInRepos all copyFramework
+
 
 #doInRepos synch custom
 doInRepos synch verifyPrMerge

@@ -14,6 +14,9 @@ this_repos=("codespaces-framework")
 all_repos=("codespaces-framework" "enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "demo-bug-busters" "demo-mcp-unguard")
 synch_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "workshop-dynatrace-log-analytics" "demo-bug-busters" "demo-mcp-unguard")
 
+# No "workshop-dynatrace-log-analytics"
+synch2_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dql-301" "enablement-dynatrace-log-ingest-101" "enablement-kubernetes-opentelemetry" "enablement-browser-dem-biz-observability" "enablement-workflow-essentials" "demo-bug-busters" "demo-mcp-unguard")
+
 cs_repos=("enablement-codespaces-template" "enablement-live-debugger-bug-hunting" "enablement-gen-ai-llm-observability" "enablement-business-observability" "enablement-dynatrace-log-ingest-101" "enablement-browser-dem-biz-observability")
 migrate_repos=("enablement-dql-301" "enablement-workflow-essentials" "enablement-kubernetes-opentelemetry")
 refactor_repos=("codespaces-framework" "enablement-codespaces-template" "workshop-dynatrace-log-analytics")
@@ -41,6 +44,32 @@ compareFile() {
             code --diff "$ROOT_PATH$SYNCH_REPO/$2" "$ROOT_PATH$repo/$2" >/dev/null
         fi
     done
+}
+
+
+# Function to compare files in arrays,
+# $1[cs or all for iterating in only CS or ALL repos]
+# $2=filepath
+copyFile() {
+    if [ -z "$1" ]; then
+        printError "No file name provided"
+        return 1
+    fi
+    FILE="$1"
+    repo=$(basename $(pwd))
+
+    printInfoSection "Copying file $FILE to repository $repo into actual branch"
+
+    SOURCE="$ROOT_PATH$SYNCH_REPO/"
+    DEST="$ROOT_PATH$repo/"
+
+    if [ ! -f "$SOURCE$FILE" ]; then
+        printError "File $SOURCE$FILE does not exist"
+        return 1
+    fi
+
+    printInfo "Copying file $SOURCE$FILE to $DEST$FILE"
+    cp "$SOURCE$FILE" "$DEST$FILE"
 }
 
 
@@ -83,18 +112,6 @@ copyFramework(){
 
 }
 
-# Function to compare files in arrays,
-# $1[cs or all for iterating in only CS or ALL repos]
-# $2=filepath
-copyFile() {
-    local array_name="$1_repos"
-    eval "local array=(\"\${$array_name[@]}\")"
-    printInfoSection "Comparing $2 with ${array[@]}"
-    for repo in "${array[@]}"; do
-        printInfo "copy $2 in repo $repo "
-        cp "$ROOT_PATH$SYNCH_REPO/$2" "$ROOT_PATH$repo/$2"
-    done
-}
 
 cherryPick() {
     local array_name="$1_repos"
@@ -236,7 +253,7 @@ verifyPrMerge(){
 
     PR=$(GH_PAGER=cat gh pr list | grep $BRANCH)
     if [[ -z "$PR" ]]; then
-        printWarn "No PR found for branch $BRANCH"
+        printWarn "No PR Open found for branch $BRANCH"
         #PRS=$(GH_PAGER=cat gh pr list)
         #printInfo "Other PR (if any)... \n$PRS"
     else 
