@@ -56,9 +56,8 @@ The Dynatrace Enablement Framework simplifies the delivery of demos and hands-on
 - Increases adoption and consistency
 - Scales across internal, partner, and customer enablement a Kubernetes cluster.
 
-### 📞 Support Policy
+### 📞 Support Policy 
 --8<-- "snippets/disclaimer.md"
-
 
 <div class="grid cards" markdown>
 - [Yes! let's begin :octicons-arrow-right-24:](container-image.md)

@@ -47,6 +47,32 @@ compareFile() {
 }
 
 
+# Function to compare files in arrays,
+# $1[cs or all for iterating in only CS or ALL repos]
+# $2=filepath
+copyFile() {
+    if [ -z "$1" ]; then
+        printError "No file name provided"
+        return 1
+    fi
+    FILE="$1"
+    repo=$(basename $(pwd))
+
+    printInfoSection "Copying file $FILE to repository $repo into actual branch"
+
+    SOURCE="$ROOT_PATH$SYNCH_REPO/"
+    DEST="$ROOT_PATH$repo/"
+
+    if [ ! -f "$SOURCE$FILE" ]; then
+        printError "File $SOURCE$FILE does not exist"
+        return 1
+    fi
+
+    printInfo "Copying file $SOURCE$FILE to $DEST$FILE"
+    cp "$SOURCE$FILE" "$DEST$FILE"
+}
+
+
 # Function to copy all files from one repository to another. A branch will be created and 
 # the diff will show the difference between files so no functionality gets lost.
 copyFramework(){
@@ -86,18 +112,6 @@ copyFramework(){
 
 }
 
-# Function to compare files in arrays,
-# $1[cs or all for iterating in only CS or ALL repos]
-# $2=filepath
-copyFile() {
-    local array_name="$1_repos"
-    eval "local array=(\"\${$array_name[@]}\")"
-    printInfoSection "Comparing $2 with ${array[@]}"
-    for repo in "${array[@]}"; do
-        printInfo "copy $2 in repo $repo "
-        cp "$ROOT_PATH$SYNCH_REPO/$2" "$ROOT_PATH$repo/$2"
-    done
-}
 
 cherryPick() {
     local array_name="$1_repos"
