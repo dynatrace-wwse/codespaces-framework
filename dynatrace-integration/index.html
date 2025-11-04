@@ -399,6 +399,24 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#step-1connecting-the-mcp-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      Step 1:Connecting the MCP Server
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-2-start-chatting-with-the-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      Step 2: Start Chatting with the Agent
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#comfort-functions-for-environment-management" class="md-nav__link">
     <span class="md-ellipsis">
       Comfort Functions for Environment Management
@@ -409,27 +427,9 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#1-selectdemoenvironment" class="md-nav__link">
+  <a href="#1-selectenvironment" class="md-nav__link">
     <span class="md-ellipsis">
-      1. SelectDemoEnvironment
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#2-selectmcp" class="md-nav__link">
-    <span class="md-ellipsis">
-      2. SelectMCP
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#verifying-prerequisites" class="md-nav__link">
-    <span class="md-ellipsis">
-      Verifying Prerequisites
+      1. selectEnvironment
     </span>
   </a>
   
@@ -755,6 +755,24 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#step-1connecting-the-mcp-server" class="md-nav__link">
+    <span class="md-ellipsis">
+      Step 1:Connecting the MCP Server
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#step-2-start-chatting-with-the-agent" class="md-nav__link">
+    <span class="md-ellipsis">
+      Step 2: Start Chatting with the Agent
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#comfort-functions-for-environment-management" class="md-nav__link">
     <span class="md-ellipsis">
       Comfort Functions for Environment Management
@@ -765,27 +783,9 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#1-selectdemoenvironment" class="md-nav__link">
+  <a href="#1-selectenvironment" class="md-nav__link">
     <span class="md-ellipsis">
-      1. SelectDemoEnvironment
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#2-selectmcp" class="md-nav__link">
-    <span class="md-ellipsis">
-      2. SelectMCP
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#verifying-prerequisites" class="md-nav__link">
-    <span class="md-ellipsis">
-      Verifying Prerequisites
+      1. selectEnvironment
     </span>
   </a>
   
@@ -907,23 +907,83 @@ document.addEventListener('DOMContentLoaded', function() {
 <ol>
 <li>The repository is opened in VS Code (Web and Desktop versions).</li>
 <li>You have defined the <code>DT_ENVIRONMENT</code> </li>
-<li>(Optional) <code>DT_PLATFORM_TOKEN</code> </li>
 </ol>
 <div class="admonition info">
 <p class="admonition-title">Single Sign-On (SSO) Support</p>
 <p>The MCP Server supports <strong>Single Sign-On (SSO)</strong> in Dynatrace, enabling seamless authentication across environments. Any Dynatrace environment the user can connect to is automatically accessible via MCP—no additional authentication required.</p>
 </div>
 <details class="info">
-<summary>Authentication scopes for DT_PLATFORM_TOKEN (Optional)</summary>
-<p>DT_PLATFORM_TOKEN is optional since the MCP Server supports Single Sign On. For a full list of <a href="https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication">supported scopes</a> and their use cases, refer to the Dynatrace MCP documentation.
-Once these variables are configured, your repository is ready to leverage Dynatrace's observability and automation capabilities.</p>
+<summary>Optional Control Variables</summary>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DT_PLATFORM_TOKEN</code></td>
+<td>Optional</td>
+<td>Authentication token for Dynatrace MCP Server, supports Single Sign-On. For full list of <a href="https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication">supported scopes</a> and use cases, refer to Dynatrace MCP documentation</td>
+</tr>
+<tr>
+<td><code>DT_GRAIL_QUERY_BUDGET_GB</code></td>
+<td>1000 GB</td>
+<td>Budget limit for Grail queries in GB. Server tracks bytes scanned across all queries in current session. Warnings at 80% usage, alerts when exceeded. Resets on server restart</td>
+</tr>
+<tr>
+<td><code>DT_MCP_DISABLE_TELEMETRY</code></td>
+<td><code>false</code></td>
+<td>Controls telemetry collection, when <code>true</code>, disables telemetry. Only anonymous usage statistics and error information are collected. No sensitive Dynatrace environment data is tracked</td>
+</tr>
+</tbody>
+</table>
 </details>
 <h3 id="environment-configuration">Environment Configuration<a class="headerlink" href="#environment-configuration" title="Permanent link">#</a></h3>
-<p>The MCP server needs to know which Dynatrace environment to connect to. If no environment is defined, the Dynatrace framework automatically sets the <code>DT_ENVIRONMENT</code> to the playground environment (<code>https://wkf10640.apps.dynatrace.com</code>) and writes it to the <code>.env</code> file.</p>
+<p>Before you begin working with the MCP-enabled agent, you'll need to tell the agent to which Dynatrace environment it should connect to. The MCP Server supports SSO via VS Code Desktop and Web 🚀.</p>
+<div class="admonition info">
+<p class="admonition-title">Playground as default environment</p>
+<p>By default if no environment is set, the DT_ENVIRONMENT variable will point to the playground <a href="https://wkf10640.apps.dynatrace.com">https://wkf10640.apps.dynatrace.com</a></p>
+</div>
+<h3 id="step-1connecting-the-mcp-server">Step 1:Connecting the MCP Server<a class="headerlink" href="#step-1connecting-the-mcp-server" title="Permanent link">#</a></h3>
+<div class="admonition info">
+<p class="admonition-title">Steps to establish an MCP Server Connection</p>
+<ol>
+<li>On the IDE go to the left pane &gt; <code>Extensions &gt; MCP Servers Installed  &gt; dynatrace-mcp-server</code></li>
+<li>Open dynatrace-mcp-server click on the configuration wheel &gt; Start server</li>
+<li>The server should start, it'll read the environment file located in .devcontainer/runlocal/.env and will read the variable DT_ENVIRONMENT</li>
+<li>In the Server output (click on Show Output in the configuration wheel )</li>
+<li>A link for the SSO authentication should open automatically (if not then click on it).</li>
+<li>"✅ Successfully retrieved token from SSO!" is what you should see if you have access to the environment. Now let the agents communicate with the environment.</li>
+</ol>
+</div>
+<div class="admonition question">
+<p class="admonition-title">Steps to connect to another Dynatrace environment</p>
+<ol>
+<li>There is a comfort function that helps you set the DT_ENVIRONMENT variable called <code>selectEnvironment</code>.</li>
+<li>Type <code>selectEnvironment</code> in the terminal, select an environment or enter your own environment.</li>
+<li>Restart the MCP Server by going to <code>Extensions &gt; MCP Servers Installed  &gt; dynatrace-mcp-server &gt; restart server</code></li>
+</ol>
+</div>
+<h3 id="step-2-start-chatting-with-the-agent">Step 2: Start Chatting with the Agent<a class="headerlink" href="#step-2-start-chatting-with-the-agent" title="Permanent link">#</a></h3>
+<p>After successfully connecting to the MCP server, you can now interact with the AI agent!</p>
+<p>The agent has access to:</p>
+<ul>
+<li><strong>Code Analysis</strong>: Analyze the application code in this repository</li>
+<li><strong>Dynatrace Insights</strong>: Query logs, metrics, traces, and events from the monitoring tenant</li>
+<li><strong>Davis CoPilot</strong>: Get intelligent recommendations and problem analysis</li>
+<li><strong>Observability Data</strong>: Access real-time monitoring data and application behavior</li>
+</ul>
+<div class="admonition info">
+<p class="admonition-title">Ask the agent what can you do with the MCP Server</p>
+<p>A very useful question is to ask the agent what can you do with Dynatrace's MCP Server. The MCP Server is pulling from <code>latest</code> meaning every week you'll get more features. In order to check the latest stand, just ask the agent and it'll give you a comprenhensive list of what you can do depending on the tools installed at that time. </p>
+</div>
 <h3 id="comfort-functions-for-environment-management">Comfort Functions for Environment Management<a class="headerlink" href="#comfort-functions-for-environment-management" title="Permanent link">#</a></h3>
 <p>To simplify MCP server configuration, two convenience functions are available:</p>
-<h4 id="1-selectdemoenvironment">1. SelectDemoEnvironment<a class="headerlink" href="#1-selectdemoenvironment" title="Permanent link">#</a></h4>
-<p><div class="highlight"><pre><span></span><code>selectDemoEnvironment
+<h4 id="1-selectenvironment">1. selectEnvironment<a class="headerlink" href="#1-selectenvironment" title="Permanent link">#</a></h4>
+<p><div class="highlight"><pre><span></span><code>selectEnvironment
 </code></pre></div>
 Prompts you to select a Dynatrace environment and configures it system-wide:</p>
 <ul>
@@ -931,25 +991,6 @@ Prompts you to select a Dynatrace environment and configures it system-wide:</p>
 <li><strong>Actions</strong>: Exports the environment variable and writes it to the <code>.env</code> file</li>
 <li><strong>Usage</strong>: Use this when you want to change the default environment for all operations</li>
 </ul>
-<h4 id="2-selectmcp">2. SelectMCP<a class="headerlink" href="#2-selectmcp" title="Permanent link">#</a></h4>
-<div class="highlight"><pre><span></span><code>selectMCP
-</code></pre></div>
-<p>Updates only the MCP server configuration without changing system-wide environment variables:</p>
-<ul>
-<li><strong>Purpose</strong>: Connects to a running MCP server from the Center of Excellence</li>
-<li><strong>Actions</strong>: Prompts for an environment and updates only the <code>mcp.json</code> file</li>
-<li><strong>Compatibility</strong>: Works on both VS Code Web and Desktop versions</li>
-<li><strong>Usage</strong>: Use this when you want connect to a demo environment easily using VSCode web.</li>
-</ul>
-<h4 id="verifying-prerequisites">Verifying Prerequisites<a class="headerlink" href="#verifying-prerequisites" title="Permanent link">#</a></h4>
-<p><div class="highlight"><pre><span></span><code>setupMCPServer
-</code></pre></div>
-To verify that the Dynatrace MCP Server has the environment variables needed in your codespace, type in the Terminal <code>setupMCPServer</code>
-You should be able to see the settings and the variables.</p>
-<p><img _=";" alt="mcp server" src="../img/mcpserver_setup.png" width="800" /></p>
-<p>If the <code>DT_PLATFORM_TOKEN</code> is missing, then easily add it by typing:</p>
-<div class="highlight"><pre><span></span><code>setPlatformToken<span class="w"> </span>&lt;dt0s16.YOURTOKEN.XXXX&gt;
-</code></pre></div>
 <h3 id="starting-the-mcp-server">Starting the MCP Server  <img _=";" align="right" alt="mcp server" src="../img/mcpserver_ext.png" width="200" /><a class="headerlink" href="#starting-the-mcp-server" title="Permanent link">#</a></h3>
 <p>On VS Code, on the left pane, click on the Extensions tab <code>Shift + ⌘ + X</code>. You should be able at the bottom to see a <code>dynatrace-mcp-server</code> installed under MCP servers.</p>
 <ol>
