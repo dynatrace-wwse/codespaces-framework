@@ -1,0 +1,3 @@
+[submodule ".devcontainer/apps/opentelemetry-demo-gitops"]
+	path = .devcontainer/apps/opentelemetry-demo-gitops
+	url = https://github.com/Dynatrace/opentelemetry-demo-gitops.git
