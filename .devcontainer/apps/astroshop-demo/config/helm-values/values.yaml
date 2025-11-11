@@ -1,0 +1,19 @@
+components:
+  ingress:
+    enabled: false
+    # host: ingress.host.com
+  dt-credentials:
+    enabled: true
+    #tenantEndpoint: https://abcde.live.dynatrace.com/api/v2/otlp # example endpoint
+    #tenantToken: dt0c01.XXXX
+  deployment:
+    env:
+      - name: DT_ENDPOINT
+        value: "{{ .Values.components.dt-credentials.tenantEndpoint }}"
+      - name: DT_TOKEN
+        value: "{{ .Values.components.dt-credentials.tenantToken }}"
+  #frontend-proxy:
+      # disable frontend proxy since we're using nginx ingress
+  #  enabled: true
+  #load-generator:
+  #    replicas: 1

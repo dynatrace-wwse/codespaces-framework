@@ -46,8 +46,45 @@ git commit -m "Add Dynatrace opentelemetry-demo-gitops submodule at version $VER
 echo "Done! Push your changes with: git push"
 
 
+# Notes
+
+[N] - Submodule is not a good idea due the synch of other repositories.
+
+[ ] - Add code to apps path, exchange it with the past one.
+[ ] - sed HELM values without commiting it (possible to add env vars?)
+
+[ ] - Add DT customization (dashboards, settings, etc...)
 
 
+
+add steps of:
+- helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+- helm repo update
+- Renderer 1st argument can only be "image-provider"
+- by default dt-credentials not set, tenantToken is not specified. This can create confusion since the endpoint is the otel endpoint for the collector with this credentials specified in the dynatrace-otelcol-dt-api-credentials in the collector_tenant_secret.yaml
+
+          endpoint: "${env:DT_ENDPOINT}"
+          headers:
+            Authorization: "Api-Token ${env:DT_API_TOKEN}"
+    
+
+  - even if the credentials are set, they are not taken in consideration.  
+- Load generator, why does it have 2 replicas? when having only 2 users?
+- where is the frontend proxy? how do you expose flagd and load balancer? 
+- If no proxy, how do you add rum?
+- Fraud-detection is sometimes in crashloopback (altough Kafka is there, why?)
+
+
+
+In this docu is not clear 
+  https://github.com/Dynatrace/opentelemetry-demo-gitops/blob/main/config/dt-operator/README.md
+
+You need to set these env vars before deployment
+
+CLUSTER_NAME - the name of the cluster displayed in the tenant
+CLUSTER_API_URL - url of the tenant including the /api, e.g. https://wkf10640.live.dynatrace.com/api
+OPERATOR_TOKEN - access token using the Kubernetes: Dynatrace Operator template
+DATA_INGEST_TOKEN - access token using the Kubernetes: Data Ingest template
 
 
 ## Script for deploying it

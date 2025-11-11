@@ -280,6 +280,12 @@ installK9s() {
   curl -sS https://webinstall.dev/k9s | bash
 }
 
+installKustomize() {
+  printInfoSection "Installing Kustomize"
+  curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+  sudo mv kustomize /usr/local/bin/
+  printInfo "Kustomize installed successfully"
+}
 
 setUpTerminal(){
   printInfoSection "Sourcing the DT-Enablement framework functions to the terminal, adding aliases, a Dynatrace greeting and installing power10k into .zshrc for user $USER "
@@ -1125,6 +1131,67 @@ deployTodoApp(){
 
   printInfoSection "TodoApp is available via NodePort=$PORT"
 }
+
+
+deployAstroshopNew(){
+
+  printInfoSection "Deploying Demo.Live Astroshop"
+  if [[ "$ARCH" != "x86_64" ]]; then
+    printWarn "This version of the Astroshop only supports AMD/x86 architectures and not ARM, exiting deployment..."
+    return 1
+  fi
+
+  getNextFreeAppPort true
+  PORT=$(getNextFreeAppPort)
+  if [[ $? -ne 0 ]]; then
+    printWarn "Application can't be deployed"
+    return 1
+  fi
+
+  NAMESPACE="astroshop"
+
+  helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+
+  helm repo update
+
+  helm dependency build $REPO_PATH/.devcontainer/apps/astroshop-demo/charts/astroshop
+
+  # Check if kustomize is installed, if not install it for the appropriate architecture
+  if ! command -v kustomize >/dev/null; then
+    printWarn "Kustomize is not installed, installing it..."
+    installKustomize
+    if [[ $? -ne 0 ]]; then
+      printError "Failed to install Kustomize, exiting deployment..."
+      return 1
+    fi
+  else
+    printInfo "Kustomize is already installed, continuing deploying Helm chart..."
+  fi
+
+  helm upgrade --install astroshop $REPO_PATH/.devcontainer/apps/astroshop-demo/charts/astroshop \
+    --create-namespace \
+    --namespace "${NAMESPACE}" \
+    -f "$REPO_PATH/.devcontainer/apps/astroshop-demo/config/helm-values/values.yaml" \
+    --post-renderer "$RENDERER"
+
+
+  waitForAllPods astroshop
+
+  printInfo "Change astroshop frontend service from ClusterIP to NodePort"
+  #kubectl patch service frontend --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
+  kubectl patch service frontend-proxy --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
+
+  printInfo "Exposing the astroshop frontend in NodePort $PORT"
+  #kubectl patch service frontend --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+  kubectl patch service frontend-proxy --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+
+
+  waitAppCanHandleRequests $PORT
+
+  printInfo "Astroshop deployed succesfully and handling request in port $PORT"
+
+}
+
 
 deployAstroshop(){
 
