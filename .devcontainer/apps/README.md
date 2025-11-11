@@ -1,30 +1,23 @@
 
 
-Adding a submodule for the demo.live astroshop
-
-
+## Adding a submodule for the demo.live astroshop
 git submodule add https://github.com/Dynatrace/opentelemetry-demo-gitops.git opentelemetry-demo-gitops
 
 git submodule init
 
-
 cd opentelemetry-demo-gitops
 
-
+### Check specific Tag
 git fetch --tags
 
-
+### fetch a specific version
 git checkout <commit-hash>
-
-
 
 cd ..
 git add opentelemetry-demo-gitops
 
-
+### Add to main repo the fetched version
 git commit -m "Add Dynatrace opentelemetry-demo-gitops submodule at version v0.1.0"
-
-
 
 #!/bin/bash
 # Script to add Dynatrace opentelemetry-demo-gitops as a submodule and lock to a specific version
