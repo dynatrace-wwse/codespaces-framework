@@ -1726,5 +1726,17 @@ checkHost(){
 
 }
 
+nukeDocker(){
+  printInfoSection "🌋 Nuking Docker 💣"
+  printInfo "Stopping docker..."
+  sudo systemctl stop docker
+  printInfo "Removing all docker files..."
+  sudo rm -rf /var/lib/docker
+  printInfo "Removing all containerd files..."
+  sudo rm -rf /var/lib/containerd
+  printInfo "Starting docker..."
+  sudo systemctl start docker
+}
+
 # Custom functions for each repo can be added in my_functions.sh
 source $REPO_PATH/.devcontainer/util/my_functions.sh
