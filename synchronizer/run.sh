@@ -2,9 +2,13 @@
 # This file contains the functions synchronizing multiple repos and their files, specially the important function files.
 source synchronizer/synch_functions.sh
 
-export TITLE="Dynatrace Enablement Framework"
-export BODY="Setting release to match the framework 1.0.2
-See here: https://dynatrace-wwse.github.io/codespaces-framework/
+export TITLE="Miscellaneus small changes"
+export BODY="
+- selectDemoEnvironment to selectEnvironment
+    - Posibility to add own environment from any stage.
+    - alignment with SSO for MCP Server
+- Support policy updated
+- Powered by DT Enablement Badge to camelcase.
 "
 
 export CHERRYPICK_ID="47b1d0f"
@@ -14,7 +18,7 @@ export TAG="v1.0.2"
 export RELEASE="$TAG"
 
 #export BRANCH=synch/$CHERRYPICK_ID
-export BRANCH="rfe/misc"
+export BRANCH="rfe/miscellaneus"
 
 # Flags for copyFramework
 export EXCLUDE_MKDOC=true
@@ -26,12 +30,22 @@ printInfoSection "Running Codepaces-Synchronizer"
 custom(){  
     
     #TODO for this PR
+    # [x] - selectEnvironment function
+    # [x] - MCP documentation
+    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Enablement badge / banner
+
     # [ ] - 
-    # [ ] - 
-    # [ ] - 
+    # [ ] - Verify how to update obslab-llm and demo-debuger
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
+    
+    # Clean new copy
+    #git checkout main
+    #git pull origin main
+    #git checkout $BRANCH
 
     # For importing changes we invert
     #DEST="$ROOT_PATH$SYNCH_REPO/"
@@ -40,23 +54,25 @@ custom(){
     # For copying files
     #SOURCE="$ROOT_PATH$SYNCH_REPO/"
     #DEST="$ROOT_PATH$repo/"
-    #FILE="docs/snippets/feedback.md"
+    #FILE="docs/snippets/disclaimer.md"
     #cp "$SOURCE$FILE" "$DEST$FILE"
-    #git add -f "$DEST".vscode/mcp.json
+    #git add -f "$DEST$FILE"
 
-    #git checkout main
-    #git pull origin main
-
-    #git checkout -b $BRANCH
     #git add .
     #git commit -s -m "$BODY"
-    git checkout main
-    git pull origin main
-    git checkout -b $BRANCH
-    git status
+    #git status
+    #git checkout main
+    #git pull origin main
+    #git checkout -b $BRANCH
     
-    #git add .
-    #git commit -s -m "Adding feedback form"
+    #rm .devcontainer/runlocal/multipass.sh
+    #rm .devcontainer/runlocal/README.md
+    #rm .DS_Store
+    #git status
+    #git checkout main
+    
+    git add .
+    git commit -s -m "$BODY"
     #git push origin $BRANCH 
     
     #doPushandPR
@@ -68,14 +84,25 @@ custom(){
     #git reset --hard HEAD
 }
 
-#doInRepos refactor custom
+#doInRepos unguard doPushandPR
+
+doInRepos all doPushandPR
+
+#doInRepos all custom
+
+#doInRepos all copyFile "docs/snippets/disclaimer.md"
+#doInRepos all copyFile "docs/snippets/dt-enablement.md"
+#doInRepos all copyFramework
+
 
 #doInRepos synch custom
 #doInRepos synch doPushandPR
 
-#doInRepos unguard custom
-doInRepos unguard tagAndCreateRelease
-doInRepos unguard protectMainBranch
+#doInRepos unguard doPushandPR
+#doInRepos unguard copyFramework
+
+#doInRepos unguard tagAndCreateRelease
+#doInRepos unguard protectMainBranch
 
 #doInRepos logs custom
 

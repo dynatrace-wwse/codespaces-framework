@@ -1,7 +1,7 @@
 --8<-- "snippets/dynatrace-integration.js"
 
 !!! info "Dynatrace MCP integration & Observability"
-    This section explains how the [Dynatrace MCP Server](#dynatrace-mcp-server-integration) operates within your environment and how [Dynatrace Observability](#dynatrace-observability) is activated to monitor any application running in the enablement repositories.
+    This section explains how the [Dynatrace MCP Server](#mcp-server-integration) operates within your environment and how [Dynatrace Observability](#dynatrace-observability) is activated to monitor any application running in the enablement repositories.
 
 ---
 
@@ -11,26 +11,75 @@ The Dynatrace MCP (Model Context Protocol) Server enables AI Assistants to seaml
 
 ### Prerequisites
 1. The repository is opened in VS Code (Web and Desktop versions).
-- You have defined the `DT_ENVIRONMENT` and `DT_PLATFORM_TOKEN` environment variables. 
+- You have defined the `DT_ENVIRONMENT` 
 
-??? info "Authentication scopes for DT_PLATFORM_TOKEN "
-    For a full list of [supported scopes](https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication) and their use cases, refer to the Dynatrace MCP documentation.
-    Once these variables are configured, your repository is ready to leverage Dynatrace’s observability and automation capabilities.
+!!! info "Single Sign-On (SSO) Support"
+    The MCP Server supports **Single Sign-On (SSO)** in Dynatrace, enabling seamless authentication across environments. Any Dynatrace environment the user can connect to is automatically accessible via MCP—no additional authentication required.
+
+??? info "Optional Control Variables"
+    | Variable | Default Value | Description |
+    |----------|---------------|-------|
+    | `DT_PLATFORM_TOKEN` | Optional | Authentication token for Dynatrace MCP Server, supports Single Sign-On. For full list of [supported scopes](https://github.com/dynatrace-oss/dynatrace-mcp?tab=readme-ov-file#scopes-for-authentication) and use cases, refer to Dynatrace MCP documentation |
+    | `DT_GRAIL_QUERY_BUDGET_GB` | 1000 GB |  Budget limit for Grail queries in GB. Server tracks bytes scanned across all queries in current session. Warnings at 80% usage, alerts when exceeded. Resets on server restart |
+    | `DT_MCP_DISABLE_TELEMETRY`  | `false` | Controls telemetry collection, when `true`, disables telemetry. Only anonymous usage statistics and error information are collected. No sensitive Dynatrace environment data is tracked |
 
 
-#### Verifying Prerequisites
+### Environment Configuration
 
-To verify that the Dynatrace MCP Server has the environment variables needed in your codespace, type in the Terminal `setupMCPServer`
-You should be able to see the settings and the variables.
+Before you begin working with the MCP-enabled agent, you'll need to tell the agent to which Dynatrace environment it should connect to. The MCP Server supports SSO via VS Code Desktop and Web 🚀.
 
-![mcp server](img/mcpserver_setup.png){ width="800";}
 
-If the `DT_PLATFORM_TOKEN` is missing, then easily add it by typing:
+!!! info "Playground as default environment"
+    By default if no environment is set, the DT_ENVIRONMENT variable will point to the playground [https://wkf10640.apps.dynatrace.com](https://wkf10640.apps.dynatrace.com)
 
-```bash
+### Step 1:Connecting the MCP Server 
 
-setPlatformToken <dt0s16.YOURTOKEN.XXXX>
+!!! info "Steps to establish an MCP Server Connection"
+    1. On the IDE go to the left pane > `Extensions > MCP Servers Installed  > dynatrace-mcp-server`
+    - Open dynatrace-mcp-server click on the configuration wheel > Start server
+    - The server should start, it'll read the environment file located in .devcontainer/runlocal/.env and will read the variable DT_ENVIRONMENT
+    - In the Server output (click on Show Output in the configuration wheel )
+    - A link for the SSO authentication should open automatically (if not then click on it).
+    - "✅ Successfully retrieved token from SSO!" is what you should see if you have access to the environment. Now let the agents communicate with the environment.
+         
+
+
+!!! question "Steps to connect to another Dynatrace environment"
+    1. There is a comfort function that helps you set the DT_ENVIRONMENT variable called `selectEnvironment`.
+    - Type `selectEnvironment` in the terminal, select an environment or enter your own environment.
+    - Restart the MCP Server by going to `Extensions > MCP Servers Installed  > dynatrace-mcp-server > restart server`
+
+
+### Step 2: Start Chatting with the Agent
+
+After successfully connecting to the MCP server, you can now interact with the AI agent!
+
+The agent has access to:
+
+- **Code Analysis**: Analyze the application code in this repository
+- **Dynatrace Insights**: Query logs, metrics, traces, and events from the monitoring tenant
+- **Davis CoPilot**: Get intelligent recommendations and problem analysis
+- **Observability Data**: Access real-time monitoring data and application behavior
+
+!!! info "Ask the agent what can you do with the MCP Server"
+    A very useful question is to ask the agent what can you do with Dynatrace's MCP Server. The MCP Server is pulling from `latest` meaning every week you'll get more features. In order to check the latest stand, just ask the agent and it'll give you a comprenhensive list of what you can do depending on the tools installed at that time. 
+
+
+
+### Comfort Functions for Environment Management
+
+To simplify MCP server configuration, two convenience functions are available:
+
+#### 1. selectEnvironment
+
+``` bash
+selectEnvironment
 ```
+Prompts you to select a Dynatrace environment and configures it system-wide:
+
+- **Available environments**: Playground, demo.live, or tacocorp
+- **Actions**: Exports the environment variable and writes it to the `.env` file
+- **Usage**: Use this when you want to change the default environment for all operations
 
 
 ### Starting the MCP Server  ![mcp server](img/mcpserver_ext.png){align="right", width="200";}
@@ -45,6 +94,11 @@ On VS Code, on the left pane, click on the Extensions tab `Shift + ⌘ + X`. You
 
 !!! example ""
     Yay! the AI Agent (by default in VS Code is GPT) should be able now to fetch information from the Dynatrace environment.
+
+
+!!! tipp ""
+    Verify that the connection is active. Ask the agent, "what can I do with my dynatrace mcp server? give me a comprenhensive list"
+
 
 ### Example Prompts 
 
