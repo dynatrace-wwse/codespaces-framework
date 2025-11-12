@@ -25,6 +25,7 @@ import_repos=("workshop-dynatrace-log-analytics")
 logs_repos=("workshop-dynatrace-log-analytics")
 fix_repos=("demo-mcp-unguard")
 unguard_repos=("demo-mcp-unguard")
+bug_repos=("demo-bug-busters")
 
 
 # Function to compare files in arrays,
@@ -238,9 +239,9 @@ doPushandPR(){
     printInfo "Pushing $BRANCH for $repo"
     git push origin $BRANCH
     
-    printInfo "creating PR for dynatrace-wwse/$repo"
+    printInfo "creating PR for $repo"
 
-    gh repo set-default dynatrace-wwse/$repo
+    #gh repo set-default dynatrace-wwse/$repo
     
     gh pr create --base main --head $BRANCH --title "$TITLE" --body "$BODY"
 
