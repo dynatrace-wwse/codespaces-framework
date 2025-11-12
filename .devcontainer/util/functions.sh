@@ -1142,7 +1142,8 @@ deployAstroshopNew(){
   fi
 
   getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
+  #PORT=$(getNextFreeAppPort)
+  PORT=30100
   if [[ $? -ne 0 ]]; then
     printWarn "Application can't be deployed"
     return 1
@@ -1172,7 +1173,8 @@ deployAstroshopNew(){
     --create-namespace \
     --namespace "${NAMESPACE}" \
     -f "$REPO_PATH/.devcontainer/apps/astroshop-demo/config/helm-values/values.yaml" \
-    --post-renderer "$RENDERER"
+    --post-renderer "$RENDERER" \
+    --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN
 
 
   waitForAllPods astroshop

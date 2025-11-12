@@ -61,11 +61,11 @@ add steps of:
 - helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
 - helm repo update
 - Renderer 1st argument can only be "image-provider"
-- by default dt-credentials not set, tenantToken is not specified. This can create confusion since the endpoint is the otel endpoint for the collector with this credentials specified in the dynatrace-otelcol-dt-api-credentials in the collector_tenant_secret.yaml
+- by default dt-credentials not set, collector_tenant_token is not specified. This can create confusion since the endpoint is the otel endpoint for the collector with this credentials specified in the dynatrace-otelcol-dt-api-credentials in the collector_tenant_secret.yaml
 
           endpoint: "${env:DT_ENDPOINT}"
           headers:
-            Authorization: "Api-Token ${env:DT_API_TOKEN}"
+            Authorization: "Api-Token ${env:DT_INGEST_TOKEN}"
     
 
   - even if the credentials are set, they are not taken in consideration.  
