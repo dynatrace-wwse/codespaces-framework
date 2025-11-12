@@ -1,9 +1,9 @@
 
 --8<-- "snippets/enablements.js"
 
-Explore these repositories to deepen your knowledge or use them as a foundation for your own projects.  
-
 ## 📚 Enablement Repositories
+
+Explore these repositories to deepen your knowledge or use them as a foundation for your own projects.
 
 | Repository Name | Description |
 |-----------------|-------------|

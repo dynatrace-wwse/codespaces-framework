@@ -33,11 +33,12 @@ custom(){
     # [x] - selectEnvironment function
     # [x] - MCP documentation
     # [x] - Update support policy snippets/disclaimer.md
-    # [x] - Update support policy snippets/disclaimer.md
+    # [x] - Update snippets/dt-enablement.md
     # [x] - Enablement badge / banner
 
-    # [ ] - 
     # [ ] - Verify how to update obslab-llm and demo-debuger
+    # [ ]   - create a fork (private) and use same logic? 
+
 
     repo=$(basename $(pwd))
     printInfo "Custom function for repository $repo "
@@ -71,8 +72,8 @@ custom(){
     #git status
     #git checkout main
     
-    git add .
-    git commit -s -m "$BODY"
+    #git add .
+    #git commit -s -m "$BODY"
     #git push origin $BRANCH 
     
     #doPushandPR
@@ -86,7 +87,7 @@ custom(){
 
 #doInRepos unguard doPushandPR
 
-doInRepos all doPushandPR
+doInRepos bug protectMainBranch
 
 #doInRepos all custom
 
@@ -96,7 +97,6 @@ doInRepos all doPushandPR
 
 
 #doInRepos synch custom
-#doInRepos synch doPushandPR
 
 #doInRepos unguard doPushandPR
 #doInRepos unguard copyFramework

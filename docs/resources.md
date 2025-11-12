@@ -67,5 +67,5 @@ Explore these resources to become more effective with Dynatrace, Codespaces, and
 
 
 <div class="grid cards" markdown>
-- [Continue to Enablements →](enablements.md)
+- [Continue to Repositories →](enablements.md)
 </div>

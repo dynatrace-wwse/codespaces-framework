@@ -12,9 +12,10 @@ nav:
   - "8. Synchronizer": synchronizer.md
   - "9. Testing": testing.md
   - "10. Monitoring": monitoring.md
-  - "11. Resources": resources.md
-  - "12. Enablements": enablements.md
-  - "13. What's next?": whats-next.md
+  - "12. Versioning Policy": versioning.md
+  - "13. Resources": resources.md
+  - "14. Repositories": enablements.md
+  - "15. What's next?": whats-next.md
 theme:
   name: material
   custom_dir: docs/overrides
