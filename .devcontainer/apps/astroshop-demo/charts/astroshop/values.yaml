@@ -152,10 +152,10 @@ opentelemetry-demo:
       resources:
         requests:
           cpu: 25m #100
-          memory: 300Mi
+          memory: 256Mi
         limits:
           cpu: 250m
-          memory: 300Mi
+          memory: 512Mi
     # ---------------------------------------------------
     frontend:
       podAnnotations:
