@@ -73,5 +73,5 @@ GitHub Pages are monitored using Dynatrace Agentless Real User Monitoring (RUM):
 
 
 <div class="grid cards" markdown>
-- [Continue to Resources →](resources.md)
+- [Continue to Versioning →](versioning.md)
 </div>
