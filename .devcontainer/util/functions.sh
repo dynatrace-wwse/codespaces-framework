@@ -1183,6 +1183,10 @@ deployAstroshopNew(){
   #kubectl patch service frontend --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
   kubectl patch service frontend-proxy --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
 
+  #kubectl patch service flagd --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
+  #kubectl patch service flagd --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":30200}]"
+
+
   printInfo "Exposing the astroshop frontend in NodePort $PORT"
   #kubectl patch service frontend --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
   kubectl patch service frontend-proxy --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
