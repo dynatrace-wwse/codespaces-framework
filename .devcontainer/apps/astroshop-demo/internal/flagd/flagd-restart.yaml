@@ -1,0 +1,61 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flagd-restart
+  namespace: astroshop
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      serviceAccountName: flagd-restart-sa
+      containers:
+        - name: restart
+          image: alpine/kubectl:1.34.1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              sleep 300 && \
+              kubectl delete pod -l app.kubernetes.io/component=flagd          
+      restartPolicy: Never
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flagd-restart-sa
+  namespace: astroshop
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flagd-restart-role
+  namespace: astroshop
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flagd-restart-rb
+  namespace: astroshop
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+subjects:
+  - kind: ServiceAccount
+    name: flagd-restart-sa
+    namespace: astroshop
+roleRef:
+  kind: Role
+  name: flagd-restart-role
+  apiGroup: rbac.authorization.k8s.io

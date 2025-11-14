@@ -1,0 +1,13 @@
+components:
+  ingress:
+    enabled: false
+    # host: ingress.host.com
+  dt-credentials:
+    enabled: true
+    collector_tenant_endpoint: https://abcde.live.dynatrace.com/api/v2/otlp # example endpoint
+    collector_tenant_token: dt0c01.XXXX
+  #frontend-proxy:
+      # disable frontend proxy since we're using nginx ingress
+  #  enabled: true
+  #load-generator:
+  #    replicas: 1

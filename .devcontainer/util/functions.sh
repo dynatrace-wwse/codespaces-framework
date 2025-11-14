@@ -1135,6 +1135,11 @@ deployTodoApp(){
 
 deployAstroshopNew(){
 
+
+
+  #ASTROSHOPDIR="astroshop-git"
+  ASTROSHOPDIR="astroshop-demo"
+
   printInfoSection "Deploying Demo.Live Astroshop"
   if [[ "$ARCH" != "x86_64" ]]; then
     printWarn "This version of the Astroshop only supports AMD/x86 architectures and not ARM, exiting deployment..."
@@ -1155,7 +1160,7 @@ deployAstroshopNew(){
 
   helm repo update
 
-  helm dependency build $REPO_PATH/.devcontainer/apps/astroshop-git/charts/astroshop
+  helm dependency build $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/charts/astroshop
 
   # Check if kustomize is installed, if not install it for the appropriate architecture
   if ! command -v kustomize >/dev/null; then
@@ -1169,10 +1174,10 @@ deployAstroshopNew(){
     printInfo "Kustomize is already installed, continuing deploying Helm chart..."
   fi
 
-  helm upgrade --install astroshop $REPO_PATH/.devcontainer/apps/astroshop-git/charts/astroshop \
+  helm upgrade --install astroshop $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/charts/astroshop \
     --create-namespace \
     --namespace "${NAMESPACE}" \
-    -f "$REPO_PATH/.devcontainer/apps/astroshop-git/config/helm-values/values.yaml" \
+    -f "$REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/config/helm-values/values.yaml" \
     --post-renderer "$RENDERER" \
     --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN
 
@@ -1194,6 +1199,10 @@ deployAstroshopNew(){
   waitAppCanHandleRequests $PORT
 
   printInfo "Astroshop deployed succesfully and handling request in port $PORT"
+  
+  printWarn "FlagD UI issue, workaround adding the service after flagd pod is initialized"
+
+  kubectl apply -f $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/flagd/flagd-ui-service.yaml --namespace=astroshop
 
 }
 
