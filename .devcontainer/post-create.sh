@@ -10,17 +10,12 @@ startKindCluster
 installK9s
 
 # Dynatrace Operator is deployed automatically, secrets are read from the env.
-#dynatraceDeployOperator
+dynatraceDeployOperator
 
-# You can deploy CNFS or AppOnly
-#deployCloudNative
-#deployApplicationMonitoring
+# You can deploy CNFS
+deployCloudNative
 
-# The TODO App will be deployed as a sample
-#deployTodoApp
-
-# If you want to deploy your own App, just create a function in the functions.sh file and call it here.
-# deployMyCustomApp
+deployAstroshopNew
 
 # This step is needed, do not remove it
 # it'll verify if there are error in the logs and will show them in the greeting as well a monitoring 
