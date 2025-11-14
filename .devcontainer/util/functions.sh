@@ -1155,7 +1155,7 @@ deployAstroshopNew(){
 
   helm repo update
 
-  helm dependency build $REPO_PATH/.devcontainer/apps/astroshop-demo/charts/astroshop
+  helm dependency build $REPO_PATH/.devcontainer/apps/astroshop-git/charts/astroshop
 
   # Check if kustomize is installed, if not install it for the appropriate architecture
   if ! command -v kustomize >/dev/null; then
@@ -1169,10 +1169,10 @@ deployAstroshopNew(){
     printInfo "Kustomize is already installed, continuing deploying Helm chart..."
   fi
 
-  helm upgrade --install astroshop $REPO_PATH/.devcontainer/apps/astroshop-demo/charts/astroshop \
+  helm upgrade --install astroshop $REPO_PATH/.devcontainer/apps/astroshop-git/charts/astroshop \
     --create-namespace \
     --namespace "${NAMESPACE}" \
-    -f "$REPO_PATH/.devcontainer/apps/astroshop-demo/config/helm-values/values.yaml" \
+    -f "$REPO_PATH/.devcontainer/apps/astroshop-git/config/helm-values/values.yaml" \
     --post-renderer "$RENDERER" \
     --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN
 
