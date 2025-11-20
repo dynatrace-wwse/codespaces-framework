@@ -221,7 +221,9 @@ waitAppCanHandleRequests(){
 
 installHelm() {
   # https://helm.sh/docs/intro/install/#from-script
-  printInfoSection " Installing Helm"
+  # DESIRED_VERSION="$HELM_VERSION" ##TODO: Helm version control from variables.sh
+  printInfoSection "Installing Helm"
+  # printInfo "Helm Desired Version: ${HELM_VERSION}"
   cd /tmp
   sudo curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
   sudo chmod 700 get_helm.sh
@@ -942,7 +944,7 @@ deployOperatorViaKubectl(){
 
   kubectl create namespace dynatrace
 
-  kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/download/v1.6.1/kubernetes-csi.yaml
+  kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/download/v${DT_OPERATOR_VERSION}/kubernetes-csi.yaml
 
   # Save Dynatrace Secret
   kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
@@ -952,7 +954,7 @@ deployOperatorViaKubectl(){
 }
 
 deployOperatorViaHelm(){
-  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator --create-namespace --namespace dynatrace --atomic
+  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator --version "$DT_OPERATOR_VERSION" --create-namespace --namespace dynatrace --atomic
 
   # Save Dynatrace Secret
   kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
