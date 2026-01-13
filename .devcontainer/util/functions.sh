@@ -1135,10 +1135,8 @@ deployTodoApp(){
 
 deployAstroshopNew(){
 
-
-
   #ASTROSHOPDIR="astroshop-git"
-  ASTROSHOPDIR="astroshop-demo"
+  ASTROSHOPDIR="astroshop"
 
   printInfoSection "Deploying Demo.Live Astroshop"
   if [[ "$ARCH" != "x86_64" ]]; then
@@ -1156,45 +1154,23 @@ deployAstroshopNew(){
 
   NAMESPACE="astroshop"
 
-  helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+  kubectl apply -n $NAMESPACE -f $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/yaml/astroshop-deployment.yaml
 
-  helm repo update
+  printInfo "Recreating secret containing OTEL endpoint and token if exists"
+  
+  kubectl -n $NAMESPACE delete secret dt-credentials
 
-  helm dependency build $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/charts/astroshop
-
-  # Check if kustomize is installed, if not install it for the appropriate architecture
-  if ! command -v kustomize >/dev/null; then
-    printWarn "Kustomize is not installed, installing it..."
-    installKustomize
-    if [[ $? -ne 0 ]]; then
-      printError "Failed to install Kustomize, exiting deployment..."
-      return 1
-    fi
-  else
-    printInfo "Kustomize is already installed, continuing deploying Helm chart..."
-  fi
-
-  helm upgrade --install astroshop $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/charts/astroshop \
-    --create-namespace \
-    --namespace "${NAMESPACE}" \
-    -f "$REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/config/helm-values/values.yaml" \
-    --post-renderer "$RENDERER" \
-    --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN
-
-
+  kubectl -n $NAMESPACE create secret generic dt-credentials --from-literal="DT_API_TOKEN=$DT_INGEST_TOKEN" --from-literal="DT_ENDPOINT=$DT_OTEL_ENDPOINT"
+  
   waitForAllPods astroshop
 
   printInfo "Change astroshop frontend service from ClusterIP to NodePort"
-  #kubectl patch service frontend --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
-  kubectl patch service frontend-proxy --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
-
-  #kubectl patch service flagd --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
-  #kubectl patch service flagd --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/2/nodePort\", \"value\":30200}]"
+  
+  kubectl patch service frontend-proxy --namespace=$NAMESPACE --patch='{"spec": {"type": "NodePort"}}'
 
   printInfo "Exposing the astroshop frontend in NodePort $PORT"
-  #kubectl patch service frontend --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-  kubectl patch service frontend-proxy --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
 
+  kubectl patch service frontend-proxy --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
 
   waitAppCanHandleRequests $PORT
 
@@ -1202,7 +1178,7 @@ deployAstroshopNew(){
   
   printWarn "FlagD UI issue, workaround adding the service after flagd pod is initialized"
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/flagd/flagd-ui-service.yaml --namespace=astroshop
+  kubectl apply -f $REPO_PATH/.devcontainer/apps/$ASTROSHOPDIR/yaml/flagd-ui-service.yaml --namespace=$NAMESPACE
 
 }
 
