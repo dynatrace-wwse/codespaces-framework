@@ -43,9 +43,9 @@ deployOpentelemetryDemo(){
 
   kubectl patch service frontend-proxy --namespace=$NAMESPACE --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
 
-  waitAppCanHandleRequests $PORT
-
-  printInfo "$NAMESPACE deployed succesfully and handling request in port $PORT"
+  printInfo "$NAMESPACE deployed succesfully and should handle request in port $PORT"
+  
+  printWarn "$NAMESPACE is quite heavy and might take a while to schedule all pods $PORT"
 
 }
 
