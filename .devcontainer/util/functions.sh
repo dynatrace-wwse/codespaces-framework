@@ -1162,7 +1162,7 @@ deployAstroshopNew(){
 
   kubectl -n $NAMESPACE create secret generic dt-credentials --from-literal="DT_API_TOKEN=$DT_INGEST_TOKEN" --from-literal="DT_ENDPOINT=$DT_OTEL_ENDPOINT"
   
-  waitForAllPods astroshop
+  waitForAllPods $NAMESPACE
 
   printInfo "Change astroshop frontend service from ClusterIP to NodePort"
   
