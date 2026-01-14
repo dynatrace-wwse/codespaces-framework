@@ -10,12 +10,14 @@ startKindCluster
 installK9s
 
 # Dynatrace Operator is deployed automatically, secrets are read from the env.
-dynatraceDeployOperator
+#dynatraceDeployOperator
 
 # You can deploy CNFS
-deployCloudNative
+#deployCloudNative
 
-deployAstroshopNew
+#deployAstroshopNew
+
+deployOpentelemetryDemo
 
 # This step is needed, do not remove it
 # it'll verify if there are error in the logs and will show them in the greeting as well a monitoring 
