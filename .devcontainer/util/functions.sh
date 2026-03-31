@@ -19,10 +19,18 @@ if [ -z "$REPO_PATH" ]; then
 fi
 
 # VARIABLES DECLARATION
-source "$REPO_PATH/.devcontainer/util/variables.sh"
+if [ -n "$FRAMEWORK_CACHE" ]; then
+  source "${FRAMEWORK_CACHE}/.devcontainer/util/variables.sh"
+else
+  source "$REPO_PATH/.devcontainer/util/variables.sh"
+fi
 
 # LOAD TEST FUNCTIONS
-source "$REPO_PATH/.devcontainer/test/test_functions.sh"
+if [ -n "$FRAMEWORK_CACHE" ]; then
+  source "${FRAMEWORK_CACHE}/.devcontainer/test/test_functions.sh"
+else
+  source "$REPO_PATH/.devcontainer/test/test_functions.sh"
+fi
 
 
 # FUNCTIONS DECLARATIONS
@@ -1044,6 +1052,7 @@ getNextFreeAppPort() {
 
 
 deployAITravelAdvisorApp(){
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
   printInfoSection "Deploying AI Travel Advisor App & it's LLM"
   
   if [[ "$ARCH" != "x86_64" ]]; then
@@ -1058,13 +1067,13 @@ deployAITravelAdvisorApp(){
     return 1
   fi
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/namespace.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/namespace.yaml
 
   kubectl -n ai-travel-advisor create secret generic dynatrace --from-literal="token=$DT_TOKEN" --from-literal="endpoint=$DT_TENANT/api/v2/otlp"
   
   # Start OLLAMA
   printInfo "Deploying our LLM => Ollama"
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/ollama.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/ollama.yaml
   waitForPod ai-travel-advisor ollama
   printInfo "Waiting for Ollama to get ready"
   kubectl -n ai-travel-advisor wait --for=condition=Ready pod --all --timeout=10m
@@ -1072,7 +1081,7 @@ deployAITravelAdvisorApp(){
 
   # Start Weaviate
   printInfo "Deploying our VectorDB => Weaviate"
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/weaviate.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/weaviate.yaml
 
   waitForPod ai-travel-advisor weaviate
   printInfo "Waiting for Weaviate to get ready"
@@ -1081,7 +1090,7 @@ deployAITravelAdvisorApp(){
 
   # Start AI Travel Advisor
   printInfo "Deploying AI App => AI Travel Advisor"
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/ai-travel-advisor.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/ai-travel-advisor.yaml
   
   waitForPod ai-travel-advisor ai-travel-advisor
   printInfo "Waiting for AI Travel Advisor to get ready"
@@ -1127,6 +1136,7 @@ deployTodoApp(){
 }
 
 deployAstroshop(){
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
   printInfoSection "Deploying Astroshop"
   
@@ -1154,7 +1164,7 @@ deployAstroshop(){
 
   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
 
-  helm dependency build $REPO_PATH/.devcontainer/apps/astroshop/helm/dt-otel-demo-helm
+  helm dependency build $FRAMEWORK_APPS_PATH/astroshop/helm/dt-otel-demo-helm
 
   kubectl create namespace astroshop
 
@@ -1162,7 +1172,7 @@ deployAstroshop(){
 
   printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"  
 
-  helm upgrade --install astroshop -f $REPO_PATH/.devcontainer/apps/astroshop/helm/dt-otel-demo-helm-deployments/values.yaml --set default.image.repository=docker.io/shinojosa/astroshop --set default.image.tag=1.12.0 --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN -n astroshop $REPO_PATH/.devcontainer/apps/astroshop/helm/dt-otel-demo-helm
+  helm upgrade --install astroshop -f $FRAMEWORK_APPS_PATH/astroshop/helm/dt-otel-demo-helm-deployments/values.yaml --set default.image.repository=docker.io/shinojosa/astroshop --set default.image.tag=1.12.0 --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN -n astroshop $FRAMEWORK_APPS_PATH/astroshop/helm/dt-otel-demo-helm
 
   printInfo "Change astroshop-frontendproxy service from LoadBalancer to NodePort"
   kubectl patch service astroshop-frontendproxy --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
@@ -1184,6 +1194,7 @@ deployAstroshop(){
 }
 
 deployBugZapperApp(){
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
   printInfoSection "Deploying BugZapper App"
   
@@ -1214,6 +1225,7 @@ deployBugZapperApp(){
 
 # deploy easytrade from manifests
 deployEasyTrade() {
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
   printInfoSection "Deploying EasyTrade"
   
@@ -1237,7 +1249,7 @@ deployEasyTrade() {
   # Deploy easytrade manifests
   printInfo "Deploying easytrade manifests"
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/easytrade/manifests -n easytrade
+  kubectl apply -f $FRAMEWORK_APPS_PATH/easytrade/manifests -n easytrade
 
   # Validate pods are running
   printInfo "Waiting for all pods to start"
@@ -1255,6 +1267,7 @@ deployEasyTrade() {
 
 # deploy hipstershop from manifests
 deployHipsterShop() {
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
   
   printInfoSection "Deploying HipsterShop"
   
@@ -1278,7 +1291,7 @@ deployHipsterShop() {
   # Deploy hipstershop manifests
   printInfo "Deploying hipstershop manifests"
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/hipstershop/manifests -n hipstershop
+  kubectl apply -f $FRAMEWORK_APPS_PATH/hipstershop/manifests -n hipstershop
 
   # Validate pods are running
   printInfo "Waiting for all pods to start"

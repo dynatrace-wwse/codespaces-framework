@@ -1,0 +1,49 @@
+name: deploy mkdocs to github pages (reusable)
+on:
+  workflow_call:
+    inputs:
+      framework_version:
+        description: 'Framework version tag to fetch mkdocs-base.yaml from'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-github-pages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Fetch framework mkdocs-base.yaml
+        run: |
+          curl -fsS "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/refs/tags/${{ inputs.framework_version }}/mkdocs-base.yaml" \
+            -o mkdocs-base.yaml || {
+            echo "❌ Failed to fetch mkdocs-base.yaml @ ${{ inputs.framework_version }}"
+            exit 1
+          }
+
+      - name: Fetch framework overrides/main.html
+        run: |
+          mkdir -p docs/overrides
+          curl -fsS "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/refs/tags/${{ inputs.framework_version }}/docs/overrides/main.html" \
+            -o docs/overrides/main.html || {
+            echo "❌ Failed to fetch overrides/main.html @ ${{ inputs.framework_version }}"
+            exit 1
+          }
+
+      - name: Install MkDocs Material
+        run: pip install --break-system-packages mkdocs-material
+
+      - name: Build and deploy
+        run: |
+          git fetch origin gh-pages:gh-pages
+          mkdocs build --strict
+          mkdocs gh-deploy

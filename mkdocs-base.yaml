@@ -1,0 +1,52 @@
+# Framework-owned MkDocs base configuration
+# Per-repo mkdocs.yaml uses: INHERIT: mkdocs-base.yaml
+# This file is fetched by CI at the repo's FRAMEWORK_VERSION tag.
+# Local preview: run 'make docs' to auto-fetch this file.
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg
+  features:
+    - content.code.copy
+
+  palette:
+  # Palette toggle for automatic mode
+  - media: "(prefers-color-scheme)"
+    primary: deep-purple
+    toggle:
+      icon: material/brightness-auto
+      name: Switch to light mode
+
+  # Palette toggle for light mode
+  - media: "(prefers-color-scheme: light)"
+    scheme: default
+    primary: deep-purple
+    toggle:
+      icon: material/brightness-7
+      name: Switch to dark mode
+
+  # Palette toggle for dark mode
+  - media: "(prefers-color-scheme: dark)"
+    scheme: slate
+    primary: deep-purple
+    toggle:
+      icon: material/brightness-4
+      name: Switch to system preference
+
+markdown_extensions:
+  - toc:
+      permalink: '#'
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["docs"]
+  - attr_list
+
+plugins:
+  - search

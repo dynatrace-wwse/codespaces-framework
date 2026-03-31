@@ -1,0 +1,51 @@
+name: integration-tests (reusable)
+on:
+  workflow_call:
+    secrets:
+      DT_ENVIRONMENT:
+        required: true
+      DT_OPERATOR_TOKEN:
+        required: true
+      DT_INGEST_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  codespaces-integration-test-with-dynatrace-deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      DT_ENVIRONMENT: ${{ secrets.DT_ENVIRONMENT }}
+      DT_OPERATOR_TOKEN: ${{ secrets.DT_OPERATOR_TOKEN }}
+      DT_INGEST_TOKEN: ${{ secrets.DT_INGEST_TOKEN }}
+    steps:
+      - name: Commit info
+        run: |
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Repository ${{ github.repository }}"
+          echo "Event ${{ github.event_name }}"
+
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Add secrets in .env file
+        run: |
+          cd .devcontainer
+          cat <<EOF >> runlocal/.env
+          DT_ENVIRONMENT=$DT_ENVIRONMENT
+          DT_OPERATOR_TOKEN=$DT_OPERATOR_TOKEN
+          DT_INGEST_TOKEN=$DT_INGEST_TOKEN
+          EOF
+          sed -i '/"runArgs": \["--init", "--privileged", "--network=host"\]/c\  "runArgs": ["--init", "--privileged", "--network=host", "--env-file",".devcontainer/runlocal/.env"]' devcontainer.json
+
+      - name: Test Codespace (devcontainer) build and run commands
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: shinojosa/dt-enablement
+          cacheFrom: shinojosa/dt-enablement
+          push: never
+          runCmd: |
+            zsh .devcontainer/test/integration.sh
