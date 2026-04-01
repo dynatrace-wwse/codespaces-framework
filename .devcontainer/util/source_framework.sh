@@ -38,10 +38,9 @@ if ! cp -f "${FRAMEWORK_CACHE}/.devcontainer/p10k/.p10k.zsh" "${HOME}/.p10k.zsh"
   echo "⚠️  Could not copy p10k config — shell prompt may not display correctly"
 fi
 
-# Source framework
+# Source framework (functions only — greeting is called by post-create.sh, not on every source)
 . "${FRAMEWORK_CACHE}/.devcontainer/util/variables.sh"
 . "${FRAMEWORK_CACHE}/.devcontainer/util/functions.sh"
-. "${FRAMEWORK_CACHE}/.devcontainer/util/greeting.sh"
 
 # my_functions.sh: repo override if present, else framework stub
 if [ -f "${REPO_PATH}/.devcontainer/util/my_functions.sh" ]; then
