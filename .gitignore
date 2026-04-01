@@ -202,3 +202,4 @@ dist-ssr
 *.sw?
 .env
 .dt-app
+.gstack/
