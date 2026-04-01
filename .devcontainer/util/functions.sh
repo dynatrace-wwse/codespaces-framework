@@ -90,7 +90,11 @@ postCodespaceTracker(){
 }
 
 printGreeting(){
-  bash $REPO_PATH/.devcontainer/util/greeting.sh
+  if [ -n "$FRAMEWORK_CACHE" ]; then
+    bash "${FRAMEWORK_CACHE}/.devcontainer/util/greeting.sh"
+  else
+    bash "$REPO_PATH/.devcontainer/util/greeting.sh"
+  fi
 }
 
 waitForPod() {
