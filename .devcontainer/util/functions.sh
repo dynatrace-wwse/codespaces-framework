@@ -448,6 +448,9 @@ setEnvironmentInEnv(){
 }
 
 bindFunctionsInShell() {
+  printInfo "REPO_PATH: $REPO_PATH "
+  printInfo "HOME: $HOME "
+  printInfo "USER: $USER "
   printInfo "Binding source_framework.sh and adding a Greeting in the .zshrc"
   cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
 
