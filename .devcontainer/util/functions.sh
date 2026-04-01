@@ -436,8 +436,8 @@ bindFunctionsInShell() {
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
-# Loading all this functions in CLI
-source $REPO_PATH/.devcontainer/util/functions.sh
+# Loading all functions in CLI via source_framework.sh (sets up cache paths + sources functions)
+source $REPO_PATH/.devcontainer/util/source_framework.sh
 
 #print greeting everytime a Terminal is opened
 printGreeting
