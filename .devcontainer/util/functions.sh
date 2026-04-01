@@ -19,10 +19,18 @@ if [ -z "$REPO_PATH" ]; then
 fi
 
 # VARIABLES DECLARATION
-source "$REPO_PATH/.devcontainer/util/variables.sh"
+if [ -n "$FRAMEWORK_CACHE" ]; then
+  source "${FRAMEWORK_CACHE}/.devcontainer/util/variables.sh"
+else
+  source "$REPO_PATH/.devcontainer/util/variables.sh"
+fi
 
 # LOAD TEST FUNCTIONS
-source "$REPO_PATH/.devcontainer/test/test_functions.sh"
+if [ -n "$FRAMEWORK_CACHE" ]; then
+  source "${FRAMEWORK_CACHE}/.devcontainer/test/test_functions.sh"
+else
+  source "$REPO_PATH/.devcontainer/test/test_functions.sh"
+fi
 
 
 # FUNCTIONS DECLARATIONS
@@ -82,7 +90,11 @@ postCodespaceTracker(){
 }
 
 printGreeting(){
-  bash $REPO_PATH/.devcontainer/util/greeting.sh
+  if [ -n "$FRAMEWORK_CACHE" ]; then
+    bash "${FRAMEWORK_CACHE}/.devcontainer/util/greeting.sh"
+  else
+    bash "$REPO_PATH/.devcontainer/util/greeting.sh"
+  fi
 }
 
 waitForPod() {
@@ -180,21 +192,34 @@ waitForAllReadyPods() {
 }
 
 waitAppCanHandleRequests(){
-  # Function to filter by Namespace, default is ALL
-  if [[ $# -eq 1 ]]; then
+  # Function to verify app can handle requests on a given port
+  # First parameter: PORT (default: 30100)
+  # Second parameter: RETRY_MAX (default: 5)
+  # Usage examples:
+  #   waitAppCanHandleRequests          - uses default port 30100 and 5 retries
+  #   waitAppCanHandleRequests 8080     - uses port 8080 and 5 retries
+  #   waitAppCanHandleRequests 8080 10  - uses port 8080 and 10 retries
+  if [[ $# -eq 0 ]]; then
+    PORT="30100"
+    RETRY_MAX=5
+  elif [[ $# -eq 1 ]]; then
     PORT="$1"
+    RETRY_MAX=5
+  elif [[ $# -eq 2 ]]; then
+    PORT="$1"
+    RETRY_MAX="$2"
   else
     PORT="30100"
+    RETRY_MAX=5
   fi
   
   RC="500"
 
   URL=http://localhost:$PORT
   RETRY=0
-  RETRY_MAX=5
   # Get all pods, count and invert the search for not running nor completed. Status is for deleting the last line of the output
   CMD="curl --silent $URL > /dev/null"
-  printInfo "Verifying that the app can handle HTTP requests on $URL"
+  printInfo "Verifying that the app can handle HTTP requests on $URL (max retries: $RETRY_MAX)"
   while [[ $RETRY -lt $RETRY_MAX ]]; do
     RESPONSE=$(eval "$CMD")
     RC=$?
@@ -221,7 +246,9 @@ waitAppCanHandleRequests(){
 
 installHelm() {
   # https://helm.sh/docs/intro/install/#from-script
-  printInfoSection " Installing Helm"
+  # DESIRED_VERSION="$HELM_VERSION" ##TODO: Helm version control from variables.sh
+  printInfoSection "Installing Helm"
+  # printInfo "Helm Desired Version: ${HELM_VERSION}"
   cd /tmp
   sudo curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
   sudo chmod 700 get_helm.sh
@@ -291,15 +318,18 @@ setUpTerminal(){
   # or at least add ohmyzsh, power10k and no greeting
   git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
   
+  P10K_DIR="${FRAMEWORK_CACHE:+${FRAMEWORK_CACHE}/.devcontainer/p10k}"
+  P10K_DIR="${P10K_DIR:-$REPO_PATH/.devcontainer/p10k}"
+
   if [[ $CODESPACES == true ]]; then
     printInfoSection "Power10k configuration is limited on web. If you open the devcontainer on an IDE type 'p10k configure' to reconfigure it."
-    cp $REPO_PATH/.devcontainer/p10k/.p10k.zsh.web $HOME/.p10k.zsh
-  else 
+    cp "$P10K_DIR/.p10k.zsh.web" "$HOME/.p10k.zsh"
+  else
     printInfoSection "Power10k configuration with many icons added."
-    cp $REPO_PATH/.devcontainer/p10k/.p10k.zsh $HOME/.p10k.zsh
+    cp "$P10K_DIR/.p10k.zsh" "$HOME/.p10k.zsh"
   fi
-  
-  cp $REPO_PATH/.devcontainer/p10k/.zshrc $HOME/.zshrc
+
+  cp "$P10K_DIR/.zshrc" "$HOME/.zshrc"
   
   bindFunctionsInShell
 
@@ -418,41 +448,49 @@ setEnvironmentInEnv(){
 }
 
 bindFunctionsInShell() {
-  printInfo "Binding functions.sh and adding a Greeting in the .zshrc for user $USER "
-  echo "
+  printInfo "REPO_PATH: $REPO_PATH "
+  printInfo "HOME: $HOME "
+  printInfo "USER: $USER "
+  printInfo "Binding source_framework.sh and adding a Greeting in the .zshrc"
+  cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
+
 #Making sure the Locale is set properly
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
-# Loading all this functions in CLI
-source $REPO_PATH/.devcontainer/util/functions.sh
+# Loading all functions in CLI via source_framework.sh (sets up cache paths + sources functions)
+ZSHRC_EOF
+  # REPO_PATH must be expanded now (at write time) since it won't exist at shell-open time
+  echo "source $REPO_PATH/.devcontainer/util/source_framework.sh" >> "$HOME/.zshrc"
+  cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
 
 #print greeting everytime a Terminal is opened
 printGreeting
 
 #supress p10k instant prompt
 typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
-" >> /"$HOME"/.zshrc
+ZSHRC_EOF
 
 }
 
 setupAliases() {
-  printInfo "Adding Bash and Kubectl Pro CLI aliases to the end of the .zshrc for user $USER "
-  echo "
+  printInfo "Adding Bash and Kubectl Pro CLI aliases to .zshrc"
+  cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
+
 # Alias for ease of use of the CLI
-alias las='ls -las' 
-alias c='clear' 
-alias hg='history | grep' 
-alias h='history' 
+alias las='ls -las'
+alias c='clear'
+alias hg='history | grep'
+alias h='history'
 alias gita='git add -A'
 alias gitc='git commit -s -m'
 alias gitp='git push'
 alias gits='git status'
-alias gith='git log --graph --pretty=\"%C(yellow)[%h] %C(reset)%s by %C(green)%an - %C(cyan)%ad %C(auto)%d\" --decorate --all --date=human'
-alias vaml='vi -c \"set syntax:yaml\" -' 
-alias vson='vi -c \"set syntax:json\" -' 
-alias pg='ps -aux | grep' 
-" >> /"$HOME"/.zshrc
+alias gith='git log --graph --pretty="%C(yellow)[%h] %C(reset)%s by %C(green)%an - %C(cyan)%ad %C(auto)%d" --decorate --all --date=human'
+alias vaml='vi -c "set syntax:yaml" -'
+alias vson='vi -c "set syntax:json" -'
+alias pg='ps -aux | grep'
+ZSHRC_EOF
 }
 
 installRunme() {
@@ -942,7 +980,7 @@ deployOperatorViaKubectl(){
 
   kubectl create namespace dynatrace
 
-  kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/download/v1.6.1/kubernetes-csi.yaml
+  kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/download/v${DT_OPERATOR_VERSION}/kubernetes-csi.yaml
 
   # Save Dynatrace Secret
   kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
@@ -952,7 +990,7 @@ deployOperatorViaKubectl(){
 }
 
 deployOperatorViaHelm(){
-  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator --create-namespace --namespace dynatrace --atomic
+  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator --version "$DT_OPERATOR_VERSION" --create-namespace --namespace dynatrace --atomic
 
   # Save Dynatrace Secret
   kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
@@ -1044,12 +1082,17 @@ getNextFreeAppPort() {
 
 
 deployAITravelAdvisorApp(){
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
+
   printInfoSection "Deploying AI Travel Advisor App & it's LLM"
   
-  if [[ "$ARCH" != "x86_64" ]]; then
-    printWarn "This version of the AI Travel Advisor only supports AMD/x86 architectures and not ARM, exiting deployment..."
-    return 1
+  if [ -z "$DT_LLM_TOKEN" ]; then
+    printError "DT_LLM_TOKEN token is missing"
   fi
+  
+  printInfo "Evaluating credentials"
+
+  dynatraceEvalReadSaveCredentials
   
   getNextFreeAppPort true
   PORT=$(getNextFreeAppPort)
@@ -1058,13 +1101,13 @@ deployAITravelAdvisorApp(){
     return 1
   fi
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/namespace.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/namespace.yaml
 
-  kubectl -n ai-travel-advisor create secret generic dynatrace --from-literal="token=$DT_TOKEN" --from-literal="endpoint=$DT_TENANT/api/v2/otlp"
+  kubectl -n ai-travel-advisor create secret generic dynatrace --from-literal="token=$DT_LLM_TOKEN" --from-literal="endpoint=$DT_TENANT/api/v2/otlp"
   
   # Start OLLAMA
   printInfo "Deploying our LLM => Ollama"
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/ollama.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/ollama.yaml
   waitForPod ai-travel-advisor ollama
   printInfo "Waiting for Ollama to get ready"
   kubectl -n ai-travel-advisor wait --for=condition=Ready pod --all --timeout=10m
@@ -1072,7 +1115,7 @@ deployAITravelAdvisorApp(){
 
   # Start Weaviate
   printInfo "Deploying our VectorDB => Weaviate"
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/weaviate.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/weaviate.yaml
 
   waitForPod ai-travel-advisor weaviate
   printInfo "Waiting for Weaviate to get ready"
@@ -1081,7 +1124,7 @@ deployAITravelAdvisorApp(){
 
   # Start AI Travel Advisor
   printInfo "Deploying AI App => AI Travel Advisor"
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/ai-travel-advisor.yaml
+  kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/ai-travel-advisor.yaml
   
   waitForPod ai-travel-advisor ai-travel-advisor
   printInfo "Waiting for AI Travel Advisor to get ready"
@@ -1092,7 +1135,7 @@ deployAITravelAdvisorApp(){
   # Define the NodePort to expose the app from the Cluster
   kubectl patch service ai-travel-advisor --namespace=ai-travel-advisor --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
 
-  waitAppCanHandleRequests $PORT
+  waitAppCanHandleRequests $PORT 20
 
   printInfo "AI Travel Advisor is available via NodePort=$PORT"
 }
@@ -1127,9 +1170,11 @@ deployTodoApp(){
 }
 
 deployAstroshop(){
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
-  printInfoSection "Deploying Astroshop"
-  
+  ASTROSHOPDIR="astroshop"
+
+  printInfoSection "Deploying Demo.Live Astroshop"
   if [[ "$ARCH" != "x86_64" ]]; then
     printWarn "This version of the Astroshop only supports AMD/x86 architectures and not ARM, exiting deployment..."
     return 1
@@ -1137,53 +1182,48 @@ deployAstroshop(){
 
   getNextFreeAppPort true
   PORT=$(getNextFreeAppPort)
+
   if [[ $? -ne 0 ]]; then
     printWarn "Application can't be deployed"
     return 1
   fi
 
-  # Verify if cert-manager is installed in subshell to not exit function, if not, then install it
-  (assertRunningPod cert-manager cert-manager >/dev/null 2>&1)
-  certmanager_installed=$?
-  if [[ $certmanager_installed -ne 0 ]]; then
-    printWarn "Certmanager is not installed, this version of Astroshop needs it, installing it..."
-    deployCertmanager
+  NAMESPACE="astroshop"
+
+  dynatraceEvalReadSaveCredentials
+
+  if [[ -z "${DT_INGEST_TOKEN}" || -z "${DT_OTEL_ENDPOINT}" ]]; then  
+    printWarn "DT_INGEST_TOKEN and/or DT_OTEL_ENDPOINT are not setted. DT_OTEL_ENDPOINT is calculated with the function 'dynatraceEvalReadSaveCredentials' and the env var DT_ENVIRONMENT"  
   else
-    printInfo "Certmanager is installed, continuing with deployment"
+    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"  
   fi
 
-  helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+  kubectl apply -n $NAMESPACE -f $FRAMEWORK_APPS_PATH/$ASTROSHOPDIR/yaml/astroshop-deployment.yaml
 
-  helm dependency build $REPO_PATH/.devcontainer/apps/astroshop/helm/dt-otel-demo-helm
+  kubectl -n $NAMESPACE create secret generic dt-credentials --from-literal="DT_API_TOKEN=$DT_INGEST_TOKEN" --from-literal="DT_ENDPOINT=$DT_OTEL_ENDPOINT"
+  
+  printInfo "Waiting for all pods of $NAMESPACE to be scheduled"
+  
+  printWarn "Not waiting for all pods of $NAMESPACE to be scheduled, this can take a while, type 'kubectl get pod -n $NAMESPACE --all' to see the status of them"
+  
+  printInfo "Change astroshop frontend service from ClusterIP to NodePort so it can be exposed"
+  
+  kubectl patch service frontend-proxy --namespace=$NAMESPACE --patch='{"spec": {"type": "NodePort"}}'
 
-  kubectl create namespace astroshop
+  printInfo "Exposing the $NAMESPACE frontend in NodePort $PORT"
 
-  DT_OTEL_ENDPOINT=$DT_TENANT/api/v2/otlp
+  kubectl patch service frontend-proxy --namespace=$NAMESPACE --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
 
-  printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"  
+  waitAppCanHandleRequests $PORT 60
 
-  helm upgrade --install astroshop -f $REPO_PATH/.devcontainer/apps/astroshop/helm/dt-otel-demo-helm-deployments/values.yaml --set default.image.repository=docker.io/shinojosa/astroshop --set default.image.tag=1.12.0 --set collector_tenant_endpoint=$DT_OTEL_ENDPOINT --set collector_tenant_token=$DT_INGEST_TOKEN -n astroshop $REPO_PATH/.devcontainer/apps/astroshop/helm/dt-otel-demo-helm
+  PUBLIC_IP=$(curl ifconfig.me)
 
-  printInfo "Change astroshop-frontendproxy service from LoadBalancer to NodePort"
-  kubectl patch service astroshop-frontendproxy --namespace=astroshop --patch='{"spec": {"type": "NodePort"}}'
+  printInfo "Astroshop deployed succesfully and handling request in http://$PUBLIC_IP:$PORT"
 
-  printInfo "Exposing the astroshop-frontendproxy in NodePort $PORT"
-  kubectl patch service astroshop-frontendproxy --namespace=astroshop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  printInfo "Stopping all cronjobs from Demo Live since they are not needed with this scenario"
-  kubectl get cronjobs -n astroshop -o json | jq -r '.items[] | .metadata.name' | xargs -I {} kubectl patch cronjob {} -n astroshop --patch '{"spec": {"suspend": true}}'
-
-  # Listing all cronjobs
-  kubectl get cronjobs -n astroshop
-
-  waitForAllPods astroshop
-
-  waitAppCanHandleRequests $PORT
-
-  printInfo "Astroshop deployed succesfully and handling request in port $PORT"
 }
 
 deployBugZapperApp(){
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
   printInfoSection "Deploying BugZapper App"
   
@@ -1214,6 +1254,7 @@ deployBugZapperApp(){
 
 # deploy easytrade from manifests
 deployEasyTrade() {
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
   printInfoSection "Deploying EasyTrade"
   
@@ -1237,7 +1278,7 @@ deployEasyTrade() {
   # Deploy easytrade manifests
   printInfo "Deploying easytrade manifests"
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/easytrade/manifests -n easytrade
+  kubectl apply -f $FRAMEWORK_APPS_PATH/easytrade/manifests -n easytrade
 
   # Validate pods are running
   printInfo "Waiting for all pods to start"
@@ -1255,6 +1296,7 @@ deployEasyTrade() {
 
 # deploy hipstershop from manifests
 deployHipsterShop() {
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
   
   printInfoSection "Deploying HipsterShop"
   
@@ -1278,7 +1320,7 @@ deployHipsterShop() {
   # Deploy hipstershop manifests
   printInfo "Deploying hipstershop manifests"
 
-  kubectl apply -f $REPO_PATH/.devcontainer/apps/hipstershop/manifests -n hipstershop
+  kubectl apply -f $FRAMEWORK_APPS_PATH/hipstershop/manifests -n hipstershop
 
   # Validate pods are running
   printInfo "Waiting for all pods to start"
@@ -1379,7 +1421,6 @@ deployApp(){
       if [[ $delete ]]; then
         printInfoSection "Undeploying astroshop..."
         kubectl delete ns astroshop --force
-        certmanagerDelete
       else
         deployAstroshop
       fi
@@ -1449,7 +1490,7 @@ showDeployAppUsage(){
   printInfo "For undeploying an app, type -d as an extra argument                        "
   printInfo "----------------------------------------------------------------------------"
   printInfo "[#]  [c]  [ name ]             AMD     ARM                                  "
-  printInfo "[1]   a   ai-travel-advisor     +       -                                   "
+  printInfo "[1]   a   ai-travel-advisor     +       +                                   "
   printInfo "[2]   b   astroshop             +       -                                   "
   printInfo "[3]   c   bugzapper             +       +                                   "
   printInfo "[4]   d   easytrade             +       -                                   "
@@ -1459,8 +1500,29 @@ showDeployAppUsage(){
   printInfo "----------------------------------------------------------------------------"
 }
 
+deleteCache(){
+  local container_cache="${REPO_PATH}/.devcontainer/.cache"
+  local host_cache="${HOME}/.cache/dt-framework"
+
+  if [ -d "$container_cache" ]; then
+    rm -rf "$container_cache"
+    printInfo "Container cache deleted: $container_cache"
+  else
+    printInfo "No container cache found"
+  fi
+
+  if [ -d "$host_cache" ]; then
+    rm -rf "$host_cache"
+    printInfo "Host cache deleted: $host_cache"
+  else
+    printInfo "No host cache found"
+  fi
+
+  printInfoSection "Cache cleared. Run 'source .devcontainer/util/source_framework.sh' to re-pull."
+}
+
 deleteCodespace(){
-  printWarn "Warning! Codespace $CODESPACE_NAME will be deleted, the connection will be lost in a sec... " 
+  printWarn "Warning! Codespace $CODESPACE_NAME will be deleted, the connection will be lost in a sec... "
   gh codespace delete --codespace "$CODESPACE_NAME" --force
 }
 
@@ -1733,6 +1795,85 @@ checkHost(){
     printInfo "✅ All requirements are met for running the enablement-framework. Navigate to the .devcontainer/ folder then 'make start' to start your enablement jouney 🚀"
   fi
 
+}
+
+
+freeUpSpace(){
+
+  printInfoSection "Freeing up disk space"
+  printInfo "Disk usage before cleanup:"
+  df -h / | tail -1 | awk '{printInfo "  Used: "$3" / "$2" ("$5" full) — Free: "$4}'
+  df -h /
+
+  # APT cache cleanup
+  if command -v apt-get >/dev/null 2>&1; then
+    printInfo "Cleaning APT cache and removing unused packages..."
+    sudo apt-get autoremove -y 2>/dev/null
+    sudo apt-get autoclean -y 2>/dev/null
+    sudo apt-get clean 2>/dev/null
+  else
+    printWarn "apt-get not found, skipping APT cleanup"
+  fi
+
+  # Systemd journal logs
+  if command -v journalctl >/dev/null 2>&1; then
+    printInfo "Vacuuming journal logs (keeping last 7 days, max 200M)..."
+    sudo journalctl --vacuum-time=7d 2>/dev/null || true
+    sudo journalctl --vacuum-size=200M 2>/dev/null || true
+  else
+    printWarn "journalctl not found, skipping journal cleanup"
+  fi
+
+  # Python pip cache
+  if command -v pip >/dev/null 2>&1; then
+    printInfo "Purging pip cache..."
+    pip cache purge 2>/dev/null || true
+  elif command -v pip3 >/dev/null 2>&1; then
+    printInfo "Purging pip3 cache..."
+    pip3 cache purge 2>/dev/null || true
+  else
+    printWarn "pip not found, skipping Python cache cleanup"
+  fi
+
+  # Node package manager caches
+  if command -v npm >/dev/null 2>&1; then
+    printInfo "Cleaning npm cache..."
+    npm cache clean --force 2>/dev/null || true
+  fi
+  if command -v yarn >/dev/null 2>&1; then
+    printInfo "Cleaning yarn cache..."
+    yarn cache clean 2>/dev/null || true
+  fi
+  if command -v pnpm >/dev/null 2>&1; then
+    printInfo "Pruning pnpm store..."
+    pnpm store prune 2>/dev/null || true
+  fi
+
+  # Docker cleanup
+  if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+      printInfo "Pruning unused Docker resources (images, containers, volumes, build cache)..."
+      docker system prune -af --volumes 2>/dev/null || true
+      docker builder prune -af 2>/dev/null || true
+    else
+      printWarn "Docker is installed but not accessible, skipping Docker cleanup"
+    fi
+  else
+    printWarn "Docker not found, skipping Docker cleanup"
+  fi
+
+  # Temp files older than 7 days
+  printInfo "Removing temp files older than 7 days..."
+  sudo find /tmp -mindepth 1 -mtime +7 -delete 2>/dev/null || true
+
+  # User cache directories older than 30 days
+  printInfo "Cleaning stale user cache directories (older than 30 days)..."
+  find ~/.cache -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true
+
+  printInfo "Disk usage after cleanup:"
+  df -h /
+
+  printInfo "✅ Disk space cleanup complete"
 }
 
 # Custom functions for each repo can be added in my_functions.sh

@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astroshop-ingress
+  namespace: astroshop
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: astroshop.onboarding.nip.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-proxy
+            port:
+              number: 8080
+      - path: /v1/traces
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /v1/metrics
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /v1/logs
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318

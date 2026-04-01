@@ -81,6 +81,13 @@ plugins=(git)
 
 source $ZSH/oh-my-zsh.sh
 
+# Trim tab completion — show a compact menu instead of flooding the terminal
+zstyle ':completion:*' menu select
+zstyle ':completion:*' list-rows-first true
+zstyle ':completion:*' group-name ''
+zstyle ':completion:*:descriptions' format '%F{yellow}── %d ──%f'
+setopt NO_LIST_AMBIGUOUS
+
 # User configuration
 
 # export MANPATH="/usr/local/man:$MANPATH"

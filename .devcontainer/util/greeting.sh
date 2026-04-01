@@ -1,7 +1,11 @@
 #!/bin/bash
 
 # VARIABLES DECLARATION
-source $REPO_PATH/.devcontainer/util/variables.sh
+if [ -n "$FRAMEWORK_CACHE" ]; then
+  source "${FRAMEWORK_CACHE}/.devcontainer/util/variables.sh"
+else
+  source "$REPO_PATH/.devcontainer/util/variables.sh"
+fi
 
 printDynatraceLogo(){
 
