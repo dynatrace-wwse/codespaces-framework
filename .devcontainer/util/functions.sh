@@ -1500,8 +1500,29 @@ showDeployAppUsage(){
   printInfo "----------------------------------------------------------------------------"
 }
 
+deleteCache(){
+  local container_cache="${REPO_PATH}/.devcontainer/.cache"
+  local host_cache="${HOME}/.cache/dt-framework"
+
+  if [ -d "$container_cache" ]; then
+    rm -rf "$container_cache"
+    printInfo "Container cache deleted: $container_cache"
+  else
+    printInfo "No container cache found"
+  fi
+
+  if [ -d "$host_cache" ]; then
+    rm -rf "$host_cache"
+    printInfo "Host cache deleted: $host_cache"
+  else
+    printInfo "No host cache found"
+  fi
+
+  printInfoSection "Cache cleared. Run 'source .devcontainer/util/source_framework.sh' to re-pull."
+}
+
 deleteCodespace(){
-  printWarn "Warning! Codespace $CODESPACE_NAME will be deleted, the connection will be lost in a sec... " 
+  printWarn "Warning! Codespace $CODESPACE_NAME will be deleted, the connection will be lost in a sec... "
   gh codespace delete --codespace "$CODESPACE_NAME" --force
 }
 
