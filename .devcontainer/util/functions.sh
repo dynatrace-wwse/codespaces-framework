@@ -318,15 +318,18 @@ setUpTerminal(){
   # or at least add ohmyzsh, power10k and no greeting
   git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
   
+  P10K_DIR="${FRAMEWORK_CACHE:+${FRAMEWORK_CACHE}/.devcontainer/p10k}"
+  P10K_DIR="${P10K_DIR:-$REPO_PATH/.devcontainer/p10k}"
+
   if [[ $CODESPACES == true ]]; then
     printInfoSection "Power10k configuration is limited on web. If you open the devcontainer on an IDE type 'p10k configure' to reconfigure it."
-    cp $REPO_PATH/.devcontainer/p10k/.p10k.zsh.web $HOME/.p10k.zsh
-  else 
+    cp "$P10K_DIR/.p10k.zsh.web" "$HOME/.p10k.zsh"
+  else
     printInfoSection "Power10k configuration with many icons added."
-    cp $REPO_PATH/.devcontainer/p10k/.p10k.zsh $HOME/.p10k.zsh
+    cp "$P10K_DIR/.p10k.zsh" "$HOME/.p10k.zsh"
   fi
-  
-  cp $REPO_PATH/.devcontainer/p10k/.zshrc $HOME/.zshrc
+
+  cp "$P10K_DIR/.zshrc" "$HOME/.zshrc"
   
   bindFunctionsInShell
 
