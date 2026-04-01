@@ -23,7 +23,7 @@ if [ ! -f "${FRAMEWORK_CACHE}/.complete" ]; then
     git sparse-checkout set \
       .devcontainer/util \
       .devcontainer/p10k \
-      .devcontainer/test/test_functions.sh \
+      .devcontainer/test \
       .devcontainer/apps && \
     touch "${FRAMEWORK_CACHE}/.complete"
   ); then
