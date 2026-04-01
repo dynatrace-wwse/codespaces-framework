@@ -1,12 +1,26 @@
 name: deploy mkdocs to github pages
-run-name: ${{ github.event.head_commit.message }} - deploy github pages
+run-name: ${{ github.event.head_commit.message }}  - deploy github pages
+permissions:
+  contents: write
 on:
   push:
     branches:
       - main
       - docs/*
 jobs:
-  deploy:
-    uses: dynatrace-wwse/codespaces-framework/.github/workflows/deploy-ghpages-reusable.yaml@main
-    with:
-      framework_version: "1.2.0"
+  deploy-github-pages:
+    runs-on: ubuntu-24.04
+    # No CI Test should run longer than 10 minutes.
+    timeout-minutes: 10
+    steps:
+    - name: Checkout repository code
+      uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+    - name: MKDocs - install requirements, build, gh-deploy
+      run: |
+        pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
+        git fetch origin gh-pages:gh-pages
+        mkdocs build
+        mkdocs gh-deploy
