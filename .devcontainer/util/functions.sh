@@ -1044,12 +1044,16 @@ getNextFreeAppPort() {
 
 
 deployAITravelAdvisorApp(){
+
   printInfoSection "Deploying AI Travel Advisor App & it's LLM"
   
-  if [[ "$ARCH" != "x86_64" ]]; then
-    printWarn "This version of the AI Travel Advisor only supports AMD/x86 architectures and not ARM, exiting deployment..."
-    return 1
+  if [ -z "$DT_LLM_TOKEN" ]; then
+    printError "DT_LLM_TOKEN token is missing"
   fi
+  
+  printInfo "Evaluating credentials"
+
+  dynatraceEvalReadSaveCredentials
   
   getNextFreeAppPort true
   PORT=$(getNextFreeAppPort)
@@ -1060,7 +1064,7 @@ deployAITravelAdvisorApp(){
 
   kubectl apply -f $REPO_PATH/.devcontainer/apps/ai-travel-advisor/k8s/namespace.yaml
 
-  kubectl -n ai-travel-advisor create secret generic dynatrace --from-literal="token=$DT_TOKEN" --from-literal="endpoint=$DT_TENANT/api/v2/otlp"
+  kubectl -n ai-travel-advisor create secret generic dynatrace --from-literal="token=$DT_LLM_TOKEN" --from-literal="endpoint=$DT_TENANT/api/v2/otlp"
   
   # Start OLLAMA
   printInfo "Deploying our LLM => Ollama"
@@ -1092,7 +1096,7 @@ deployAITravelAdvisorApp(){
   # Define the NodePort to expose the app from the Cluster
   kubectl patch service ai-travel-advisor --namespace=ai-travel-advisor --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
 
-  waitAppCanHandleRequests $PORT
+  waitAppCanHandleRequests $PORT 20
 
   printInfo "AI Travel Advisor is available via NodePort=$PORT"
 }
