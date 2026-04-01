@@ -448,41 +448,46 @@ setEnvironmentInEnv(){
 }
 
 bindFunctionsInShell() {
-  printInfo "Binding functions.sh and adding a Greeting in the .zshrc for user $USER "
-  echo "
+  printInfo "Binding source_framework.sh and adding a Greeting in the .zshrc"
+  cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
+
 #Making sure the Locale is set properly
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
 # Loading all functions in CLI via source_framework.sh (sets up cache paths + sources functions)
-source $REPO_PATH/.devcontainer/util/source_framework.sh
+ZSHRC_EOF
+  # REPO_PATH must be expanded now (at write time) since it won't exist at shell-open time
+  echo "source $REPO_PATH/.devcontainer/util/source_framework.sh" >> "$HOME/.zshrc"
+  cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
 
 #print greeting everytime a Terminal is opened
 printGreeting
 
 #supress p10k instant prompt
 typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
-" >> /"$HOME"/.zshrc
+ZSHRC_EOF
 
 }
 
 setupAliases() {
-  printInfo "Adding Bash and Kubectl Pro CLI aliases to the end of the .zshrc for user $USER "
-  echo "
+  printInfo "Adding Bash and Kubectl Pro CLI aliases to .zshrc"
+  cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
+
 # Alias for ease of use of the CLI
-alias las='ls -las' 
-alias c='clear' 
-alias hg='history | grep' 
-alias h='history' 
+alias las='ls -las'
+alias c='clear'
+alias hg='history | grep'
+alias h='history'
 alias gita='git add -A'
 alias gitc='git commit -s -m'
 alias gitp='git push'
 alias gits='git status'
-alias gith='git log --graph --pretty=\"%C(yellow)[%h] %C(reset)%s by %C(green)%an - %C(cyan)%ad %C(auto)%d\" --decorate --all --date=human'
-alias vaml='vi -c \"set syntax:yaml\" -' 
-alias vson='vi -c \"set syntax:json\" -' 
-alias pg='ps -aux | grep' 
-" >> /"$HOME"/.zshrc
+alias gith='git log --graph --pretty="%C(yellow)[%h] %C(reset)%s by %C(green)%an - %C(cyan)%ad %C(auto)%d" --decorate --all --date=human'
+alias vaml='vi -c "set syntax:yaml" -'
+alias vson='vi -c "set syntax:json" -'
+alias pg='ps -aux | grep'
+ZSHRC_EOF
 }
 
 installRunme() {
