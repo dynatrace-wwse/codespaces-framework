@@ -48,7 +48,7 @@ COUNT_FILE="$REPO_PATH/.devcontainer/util/.count"
 export COUNT_FILE=$COUNT_FILE
 
 # Env file (needed for MCP and local runs)
-ENV_FILE="$REPO_PATH/.devcontainer/runlocal/.env"
+ENV_FILE="$REPO_PATH/.devcontainer/.env"
 export ENV_FILE=$ENV_FILE
 
 if [ -e "$ENV_FILE" ]; then

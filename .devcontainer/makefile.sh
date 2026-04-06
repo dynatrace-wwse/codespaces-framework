@@ -5,7 +5,7 @@
 # Resolve paths relative to this script (works from cache or local)
 _MAKEFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_MAKEFILE_DIR}/runlocal/helper.sh"
-ENV_FILE="${_MAKEFILE_DIR}/runlocal/.env"
+ENV_FILE="${ENV_FILE:-${_MAKEFILE_DIR}/.env}"
 
 NAMESPACE="shinojosa"
 IMAGENAME="dt-enablement"

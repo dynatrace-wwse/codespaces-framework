@@ -313,19 +313,19 @@ $(CACHE)/.complete:
 	@echo "Framework v$(FRAMEWORK_VERSION) cached."
 
 start: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; start'
+	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; start'
 
 build: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; build'
+	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; build'
 
 build-nocache: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; buildNoCache'
+	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; buildNoCache'
 
 buildx: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; buildx'
+	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; buildx'
 
 integration: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; integration'
+	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; integration'
 
 clean-cache:
 	@rm -rf .cache/dt-framework
@@ -555,7 +555,89 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
                 f.write("\n" + "\n".join(additions) + "\n")
             print(f"    updated .gitignore")
 
+    # ── Phase 9: Migrate .env location ──
+    _migrate_env_location(repo_path)
+
     return "migrated"
+
+
+def _migrate_env_location(repo_path: Path):
+    """Move .env from runlocal/ to .devcontainer/ and update all references."""
+    devcontainer = repo_path / ".devcontainer"
+
+    # Move .env files if they exist at the old location
+    runlocal = devcontainer / "runlocal"
+    if runlocal.is_dir():
+        for env_file in runlocal.glob(".env*"):
+            dest = devcontainer / env_file.name
+            if not dest.exists():
+                env_file.rename(dest)
+                print(f"    moved runlocal/{env_file.name} → .devcontainer/{env_file.name}")
+
+    # Update .vscode/mcp.json
+    mcp_path = repo_path / ".vscode/mcp.json"
+    if mcp_path.exists():
+        content = mcp_path.read_text()
+        if "runlocal/.env" in content:
+            content = content.replace(
+                ".devcontainer/runlocal/.env",
+                ".devcontainer/.env",
+            )
+            mcp_path.write_text(content)
+            print(f"    updated .vscode/mcp.json")
+
+    # Update .gitignore
+    gitignore_path = repo_path / ".gitignore"
+    if gitignore_path.exists():
+        content = gitignore_path.read_text()
+        if ".devcontainer/runlocal/.env" in content:
+            content = content.replace(
+                ".devcontainer/runlocal/.env",
+                ".devcontainer/.env",
+            )
+            gitignore_path.write_text(content)
+            print(f"    updated .gitignore (.env path)")
+
+    # Update devcontainer.json comment
+    dc_path = devcontainer / "devcontainer.json"
+    if dc_path.exists():
+        content = dc_path.read_text()
+        if "runlocal/.env" in content:
+            content = content.replace("runlocal/.env", ".env")
+            dc_path.write_text(content)
+            print(f"    updated devcontainer.json (.env comment)")
+
+    # Update CI workflow
+    for wf_name in ["integration-tests.yaml", "integration-tests-reusable.yaml"]:
+        wf_path = repo_path / ".github/workflows" / wf_name
+        if wf_path.exists():
+            content = wf_path.read_text()
+            if "runlocal/.env" in content:
+                content = content.replace(
+                    "runlocal/.env",
+                    ".env",
+                ).replace(
+                    ".devcontainer/runlocal/.env",
+                    ".devcontainer/.env",
+                )
+                wf_path.write_text(content)
+                print(f"    updated {wf_name}")
+
+    # Update docs referencing old .env path
+    docs_dir = repo_path / "docs"
+    if docs_dir.is_dir():
+        for md_file in docs_dir.rglob("*.md"):
+            content = md_file.read_text()
+            if "runlocal/.env" in content:
+                content = content.replace(
+                    ".devcontainer/runlocal/.env",
+                    ".devcontainer/.env",
+                ).replace(
+                    "runlocal/.env",
+                    ".devcontainer/.env",
+                )
+                md_file.write_text(content)
+                print(f"    updated {md_file.relative_to(repo_path)}")
 
 
 def run(args):
