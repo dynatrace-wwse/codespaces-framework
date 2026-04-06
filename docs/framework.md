@@ -158,7 +158,7 @@ These assertions check that the required pods (operator, activegate, oneagent, a
 
 ## 🟫 Kubernetes Cluster
 
-The Kubernetes cluster for the enablement is defined in the `kind-cluster.yaml` file. This configuration is used by [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker) to spin up a local Kubernetes cluster as a Docker container, using the Docker-in-socket strategy. The enablement container attaches to the Kind cluster, allowing you to deploy and test applications in a real Kubernetes environment.
+The Kubernetes cluster for the enablement is defined in the `yaml/kind/kind-cluster.yml` file. This configuration is used by [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker) to spin up a local Kubernetes cluster as a Docker container, using the Docker-in-socket strategy. The enablement container attaches to the Kind cluster, allowing you to deploy and test applications in a real Kubernetes environment.
 
 ### Managing the Kind Cluster
 
@@ -166,7 +166,7 @@ The following functions are provided to manage the lifecycle of the Kind cluster
 
 - **startKindCluster**: Starts the Kind cluster. If a cluster is already running, it attaches to it; if stopped, it starts it; if none exists, it creates a new one.
 - **attachKindCluster**: Attaches your environment to a running Kind cluster by configuring your kubeconfig for access.
-- **createKindCluster**: Creates a new Kind cluster using the configuration in `kind-cluster.yaml`.
+- **createKindCluster**: Creates a new Kind cluster using the configuration in `yaml/kind/kind-cluster.yml`.
 - **stopKindCluster**: Stops the Kind cluster Docker container.
 - **deleteKindCluster**: Deletes the Kind cluster and removes all associated resources.
 

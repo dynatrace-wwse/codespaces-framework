@@ -1,34 +1,200 @@
 """sync migrate — Migrate a framework-based repo to the versioned pull model.
 
-Operates locally on a cloned repo. Run from the repo root or pass --repo-path.
-Handles repos already using the framework (have functions.sh, variables.sh, etc.).
+Operates locally on a cloned repo. Always targets repos listed in repos.yaml,
+never the current directory. The --repo flag is required.
+
+Image tiers control which framework files are relevant to each repo:
+  minimal — No K8s, no Kind cluster. Just the core framework (util, p10k, runlocal).
+  k8s     — Full K8s stack: Kind cluster, entrypoint, Dynakube yaml templates.
+  ai      — Everything in k8s + AI-specific files (future).
 """
 
+import json
+import re
 import shutil
 import sys
 from pathlib import Path
 
-# Category A files — framework-owned, pulled from cache at runtime.
-# These should be REMOVED from individual repos after migration.
+from sync.core.repos import VALID_IMAGE_TIERS, load_repos
+
+# ── Tier-aware Category A files ──
+# Framework-owned, pulled from cache at runtime. REMOVED from repos during migration.
+
+# Universal — every tier gets these removed
 CATEGORY_A_FILES = [
     ".devcontainer/util/functions.sh",
     ".devcontainer/util/variables.sh",
     ".devcontainer/util/greeting.sh",
     ".devcontainer/util/test_functions.sh",
+    ".devcontainer/util/.count",
     ".devcontainer/makefile.sh",
     ".devcontainer/runlocal/helper.sh",
+    ".devcontainer/Dockerfile",
+    ".devcontainer/entrypoint.sh",
+    # Legacy location — kind-cluster.yml moved to yaml/kind/ in framework
+    ".devcontainer/kind-cluster.yml",
 ]
 
 CATEGORY_A_DIRS = [
     ".devcontainer/apps",
     ".devcontainer/p10k",
+    ".devcontainer/test",
+    ".devcontainer/yaml",
 ]
 
-# Category B files — framework-owned, but stay in each repo as thin wrappers.
+# Category B files — framework-owned, stay in each repo as thin wrappers.
 # These are REPLACED with framework templates during migration.
 CATEGORY_B_FILES = [
     ".devcontainer/Makefile",
 ]
+
+# Files that MUST remain in each repo (custom per repo, never removed)
+REPO_CUSTOM_FILES = [
+    ".devcontainer/devcontainer.json",
+    ".devcontainer/post-create.sh",
+    ".devcontainer/post-start.sh",
+    ".devcontainer/util/source_framework.sh",
+    ".devcontainer/util/my_functions.sh",
+]
+
+
+def _get_category_a(image_tier: str) -> tuple[list[str], list[str]]:
+    """Return (files, dirs) for Category A based on image tier.
+
+    Currently all tiers share the same Category A set. The tier parameter
+    is kept for future extensibility (e.g. AI-specific files).
+    """
+    return list(CATEGORY_A_FILES), list(CATEGORY_A_DIRS)
+
+
+# ── devcontainer.json validation ──
+# Reference values that every repo must match for all 3 instantiation modes
+# (Codespaces, VS Code DevContainer, local Docker).
+
+DEVCONTAINER_CHECKS = {
+    "image": {
+        "expected": "shinojosa/dt-enablement:v1.2",
+        "why": "Must reference the pre-built framework image (Docker Hub, multi-arch)",
+    },
+    "overrideCommand": {
+        "expected": False,
+        "why": "Must be false so the entrypoint.sh baked into the image runs",
+    },
+    "remoteUser": {
+        "expected": "vscode",
+        "why": "Base image user — required for file permissions across all instantiation modes",
+    },
+    "postCreateCommand": {
+        "expected": "./.devcontainer/post-create.sh",
+        "why": "Lifecycle hook for repo-specific setup",
+    },
+    "postStartCommand": {
+        "expected": "./.devcontainer/post-start.sh",
+        "why": "Lifecycle hook for repo-specific post-start actions",
+    },
+}
+
+DEVCONTAINER_REQUIRED_RUNARGS = ["--init", "--privileged", "--network=host"]
+
+DEVCONTAINER_REQUIRED_MOUNTS = [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+]
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip // and /* */ comments from JSONC text (devcontainer.json uses JSONC)."""
+    # Remove block comments
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    # Remove line comments (but not inside strings)
+    lines = []
+    for line in text.split("\n"):
+        in_string = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == '"' and (i == 0 or line[i - 1] != "\\"):
+                in_string = not in_string
+            elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/" and not in_string:
+                line = line[:i]
+                break
+            i += 1
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _parse_devcontainer(path: Path) -> dict | None:
+    """Parse a devcontainer.json (JSONC) file. Returns None on failure."""
+    try:
+        raw = path.read_text()
+        cleaned = _strip_jsonc_comments(raw)
+        # Handle trailing commas (common in devcontainer.json)
+        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  WARNING: could not parse devcontainer.json: {e}", file=sys.stderr)
+        return None
+
+
+def _validate_devcontainer(repo_path: Path) -> list[str]:
+    """Validate devcontainer.json against framework reference. Returns list of issues."""
+    dc_path = repo_path / ".devcontainer/devcontainer.json"
+    if not dc_path.exists():
+        return ["MISSING: .devcontainer/devcontainer.json does not exist"]
+
+    data = _parse_devcontainer(dc_path)
+    if data is None:
+        return ["PARSE ERROR: could not parse devcontainer.json"]
+
+    issues = []
+
+    # Check key fields
+    for field, check in DEVCONTAINER_CHECKS.items():
+        actual = data.get(field)
+        expected = check["expected"]
+        if actual != expected:
+            issues.append(
+                f"  {field}: got {actual!r}, expected {expected!r}\n"
+                f"    → {check['why']}"
+            )
+
+    # Check runArgs
+    run_args = data.get("runArgs", [])
+    for arg in DEVCONTAINER_REQUIRED_RUNARGS:
+        if arg not in run_args:
+            issues.append(f"  runArgs: missing {arg!r} — needed for local Docker instantiation")
+
+    # Check mounts
+    mounts = data.get("mounts", [])
+    for mount in DEVCONTAINER_REQUIRED_MOUNTS:
+        if mount not in mounts:
+            issues.append(f"  mounts: missing {mount!r} — needed for Docker-in-Docker")
+
+    # Check features is empty
+    features = data.get("features", {})
+    if features:
+        issues.append(
+            f"  features: should be empty {{}}, got {features!r}\n"
+            f"    → Extensions/features break portability across instantiation modes"
+        )
+
+    # Check extensions is empty
+    customizations = data.get("customizations", {})
+    vscode = customizations.get("vscode", {})
+    extensions = vscode.get("extensions", [])
+    if extensions:
+        issues.append(
+            f"  extensions: should be empty [], got {extensions!r}\n"
+            f"    → Extensions must be empty for portability"
+        )
+
+    return issues
+
+
+def _resolve_repo_path(repo_name: str) -> Path:
+    """Resolve a repo name to its local path (sibling to codespaces-framework)."""
+    framework_dir = Path(__file__).parent.parent.parent  # sync/commands/ -> codespaces-framework
+    return (framework_dir.parent / repo_name).resolve()
+
 
 # ── Templates ──
 
@@ -93,14 +259,17 @@ if ! (
     https://github.com/dynatrace-wwse/codespaces-framework.git \
     "${HOST_CACHE}" 2>/dev/null && \
   cd "${HOST_CACHE}" && \
-  git sparse-checkout set \
-    .devcontainer/util \
-    .devcontainer/p10k \
-    .devcontainer/test \
-    .devcontainer/apps \
-    .devcontainer/Makefile \
-    .devcontainer/makefile.sh \
-    .devcontainer/runlocal && \
+  git sparse-checkout set --no-cone \
+    '.devcontainer/util/*' \
+    '.devcontainer/p10k/*' \
+    '.devcontainer/test/*' \
+    '.devcontainer/apps/*' \
+    '/.devcontainer/Makefile' \
+    '/.devcontainer/makefile.sh' \
+    '.devcontainer/runlocal/*' \
+    '/.devcontainer/Dockerfile' \
+    '/.devcontainer/entrypoint.sh' \
+    '.devcontainer/yaml/*' && \
   touch "${HOST_CACHE}/.complete"
 ); then
   echo "Failed to pull framework v${FRAMEWORK_VERSION} -- check network and retry"
@@ -129,31 +298,34 @@ $(CACHE)/.complete:
 		-b $(FRAMEWORK_VERSION) \
 		https://github.com/dynatrace-wwse/codespaces-framework.git \
 		$(CACHE) 2>/dev/null
-	@cd $(CACHE) && git sparse-checkout set \
-		.devcontainer/util \
-		.devcontainer/p10k \
-		.devcontainer/test \
-		.devcontainer/apps \
-		.devcontainer/Makefile \
-		.devcontainer/makefile.sh \
-		.devcontainer/runlocal
+	@cd $(CACHE) && git sparse-checkout set --no-cone \
+		'.devcontainer/util/*' \
+		'.devcontainer/p10k/*' \
+		'.devcontainer/test/*' \
+		'.devcontainer/apps/*' \
+		'/.devcontainer/Makefile' \
+		'/.devcontainer/makefile.sh' \
+		'.devcontainer/runlocal/*' \
+		'/.devcontainer/Dockerfile' \
+		'/.devcontainer/entrypoint.sh' \
+		'.devcontainer/yaml/*'
 	@touch $(CACHE)/.complete
 	@echo "Framework v$(FRAMEWORK_VERSION) cached."
 
 start: $(CACHE)/.complete
-	@bash -c 'source $(CACHE)/.devcontainer/makefile.sh; start'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; start'
 
 build: $(CACHE)/.complete
-	@bash -c 'source $(CACHE)/.devcontainer/makefile.sh; build'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; build'
 
 build-nocache: $(CACHE)/.complete
-	@bash -c 'source $(CACHE)/.devcontainer/makefile.sh; buildNoCache'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; buildNoCache'
 
 buildx: $(CACHE)/.complete
-	@bash -c 'source $(CACHE)/.devcontainer/makefile.sh; buildx'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; buildx'
 
 integration: $(CACHE)/.complete
-	@bash -c 'source $(CACHE)/.devcontainer/makefile.sh; integration'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; integration'
 
 clean-cache:
 	@rm -rf .cache/dt-framework
@@ -207,108 +379,149 @@ jobs:
 """
 
 
-def run(args):
-    repo_path = Path(args.repo_path).resolve()
-    version = args.framework_version
-    dry_run = args.dry_run
-
-    if not repo_path.is_dir():
-        print(f"x {repo_path} is not a directory", file=sys.stderr)
-        sys.exit(1)
-
-    if not (repo_path / ".devcontainer").is_dir():
-        print(f"x {repo_path} has no .devcontainer/ directory", file=sys.stderr)
-        sys.exit(1)
+def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
+    """Migrate a single repo. Returns status: 'migrated', 'up-to-date', 'skipped', or 'error'."""
+    image_tier = entry.image_tier
+    cat_a_files, cat_a_dirs = _get_category_a(image_tier)
 
     # ── Phase 1: Audit ──
-    print(f"Auditing {repo_path.name}...\n")
-
     found_files = []
     found_dirs = []
 
-    for f in CATEGORY_A_FILES:
+    for f in cat_a_files:
         p = repo_path / f
         if p.exists():
             found_files.append(f)
-            print(f"  found  {f}")
+            print(f"    found  {f}")
 
-    for d in CATEGORY_A_DIRS:
+    for d in cat_a_dirs:
         p = repo_path / d
         if p.is_dir():
             count = sum(1 for _ in p.rglob("*") if _.is_file())
             found_dirs.append((d, count))
-            print(f"  found  {d}/ ({count} files)")
+            print(f"    found  {d}/ ({count} files)")
 
     for f in CATEGORY_B_FILES:
         p = repo_path / f
         if p.exists():
-            print(f"  found  {f} (will be replaced with thin wrapper)")
+            print(f"    found  {f} (will be replaced with thin wrapper)")
 
     has_source_fw = (repo_path / ".devcontainer/util/source_framework.sh").exists()
+
+    # ── Phase 1b: Validate devcontainer.json ──
+    dc_issues = _validate_devcontainer(repo_path)
+    if dc_issues:
+        print(f"    devcontainer.json: {len(dc_issues)} issue(s)")
+        for issue in dc_issues:
+            print(f"      ✗ {issue}")
+    else:
+        print(f"    devcontainer.json: ✓ valid")
+
+    # Check if templates need updating
+    sf_path = repo_path / ".devcontainer/util/source_framework.sh"
+    makefile_path = repo_path / ".devcontainer/Makefile"
+    templates_current = True
     if has_source_fw:
-        print(f"  exists .devcontainer/util/source_framework.sh")
+        content = sf_path.read_text()
+        m = re.search(r'FRAMEWORK_VERSION="\$\{FRAMEWORK_VERSION:-([^}]+)\}"', content)
+        pinned = m.group(1) if m else None
+        if pinned:
+            if content != SOURCE_FRAMEWORK_TEMPLATE % pinned:
+                templates_current = False
+        else:
+            templates_current = False
+    else:
+        templates_current = False
 
-    if not found_files and not found_dirs:
-        print("\n  No Category A files found. Repo may already be migrated.")
-        if not has_source_fw:
-            print("  WARNING: source_framework.sh is also missing — not a framework repo?")
-        return
+    if makefile_path.exists() and makefile_path.read_text() != THIN_MAKEFILE:
+        templates_current = False
 
-    print(f"\n  {len(found_files)} files + {len(found_dirs)} directories to remove")
-    print(f"  {len(CATEGORY_B_FILES)} files to replace with thin wrappers")
+    needs_work = bool(found_files) or bool(found_dirs) or not templates_current
+
+    if not needs_work:
+        print(f"    ✓ already migrated and up to date")
+        return "up-to-date"
+
+    if found_files or found_dirs:
+        print(f"    {len(found_files)} files + {len(found_dirs)} directories to remove")
+    if not templates_current:
+        print(f"    templates need updating (Makefile, source_framework.sh)")
 
     if dry_run:
-        print("\n  --dry-run: no changes made")
-        return
+        return "needs-migration"
 
     # ── Phase 2: Clean Category A files ──
-    print(f"\nCleaning Category A files...")
-
-    for f in found_files:
-        p = repo_path / f
-        p.unlink()
-        print(f"  deleted {f}")
-
-    for d, count in found_dirs:
-        p = repo_path / d
-        shutil.rmtree(p)
-        print(f"  deleted {d}/ ({count} files)")
-
-    # Clean empty parent dirs left behind
-    for d in [".devcontainer/runlocal"]:
-        p = repo_path / d
-        if p.is_dir() and not any(p.iterdir()):
-            p.rmdir()
-            print(f"  removed empty {d}/")
+    if found_files or found_dirs:
+        print(f"    Cleaning Category A files...")
+        for f in found_files:
+            (repo_path / f).unlink()
+            print(f"      deleted {f}")
+        for d, count in found_dirs:
+            shutil.rmtree(repo_path / d)
+            print(f"      deleted {d}/ ({count} files)")
+        for d in [".devcontainer/runlocal", ".devcontainer/test"]:
+            p = repo_path / d
+            if p.is_dir() and not any(p.iterdir()):
+                p.rmdir()
+                print(f"      removed empty {d}/")
 
     # ── Phase 3: Replace Category B files with thin wrappers ──
-    print(f"\nInstalling thin Makefile...")
-    makefile_path = repo_path / ".devcontainer/Makefile"
+    makefile_path.parent.mkdir(parents=True, exist_ok=True)
     makefile_path.write_text(THIN_MAKEFILE)
-    print(f"  replaced .devcontainer/Makefile (bootstrap + delegate to cache)")
+    print(f"    updated Makefile")
 
-    # ── Phase 4: Install source_framework.sh ──
-    sf_path = repo_path / ".devcontainer/util/source_framework.sh"
-    if not has_source_fw:
-        print(f"\nInstalling source_framework.sh (v{version})...")
-        sf_path.parent.mkdir(parents=True, exist_ok=True)
-        sf_path.write_text(SOURCE_FRAMEWORK_TEMPLATE % version)
-        print(f"  created .devcontainer/util/source_framework.sh")
+    # ── Phase 4: Install/update source_framework.sh ──
+    sf_path.parent.mkdir(parents=True, exist_ok=True)
+    if has_source_fw:
+        existing = sf_path.read_text()
+        m = re.search(r'FRAMEWORK_VERSION="\$\{FRAMEWORK_VERSION:-([^}]+)\}"', existing)
+        pinned_version = m.group(1) if m else version
+        sf_path.write_text(SOURCE_FRAMEWORK_TEMPLATE % pinned_version)
+        print(f"    updated source_framework.sh (version pin {pinned_version})")
     else:
-        print(f"\n  source_framework.sh already exists, skipping install")
+        sf_path.write_text(SOURCE_FRAMEWORK_TEMPLATE % version)
+        print(f"    created source_framework.sh (v{version})")
 
     # ── Phase 5: Migrate mkdocs ──
     mkdocs_path = repo_path / "mkdocs.yaml"
     if mkdocs_path.exists():
         content = mkdocs_path.read_text()
         if "INHERIT:" not in content:
-            print(f"\n  MkDocs needs INHERIT migration — run:")
-            print(
-                f"  PYTHONPATH=. python3 -m sync.cli migrate-mkdocs "
-                f"--repo dynatrace-wwse/{repo_path.name} --dry-run"
-            )
-        else:
-            print(f"\n  mkdocs.yaml already uses INHERIT")
+            try:
+                import yaml as _yaml
+
+                # Material theme uses !!python/name: tags — handle gracefully
+                class _SafeLoader(_yaml.SafeLoader):
+                    pass
+                _SafeLoader.add_multi_constructor(
+                    "tag:yaml.org,2002:python/",
+                    lambda loader, suffix, node: f"!!python/{suffix}{loader.construct_scalar(node)}",
+                )
+                config = _yaml.load(content, Loader=_SafeLoader)
+                lines = ["INHERIT: mkdocs-base.yaml", ""]
+                for field in ("site_name", "repo_name", "repo_url"):
+                    val = config.get(field, "")
+                    if val:
+                        lines.append(f'{field}: "{val}"')
+                nav = config.get("nav", [])
+                if nav:
+                    lines.append("nav:")
+                    for item in nav:
+                        if isinstance(item, dict):
+                            for k, v in item.items():
+                                lines.append(f"  - '{k}': {v}")
+                        else:
+                            lines.append(f"  - {item}")
+                extra = config.get("extra", {})
+                rum_snippet = extra.get("rum_snippet", "")
+                if rum_snippet:
+                    lines.append("")
+                    lines.append("extra:")
+                    lines.append(f'  rum_snippet: "{rum_snippet}"')
+                mkdocs_path.write_text("\n".join(lines) + "\n")
+                print(f"    migrated mkdocs.yaml to INHERIT pattern")
+            except Exception as e:
+                print(f"    ✗ mkdocs migration failed: {e}")
 
     # ── Phase 6: Update overrides/main.html ──
     overrides_path = repo_path / "docs/overrides/main.html"
@@ -316,7 +529,7 @@ def run(args):
         content = overrides_path.read_text()
         if "config.extra.rum_snippet" not in content:
             overrides_path.write_text(OVERRIDES_MAIN_HTML)
-            print(f"  updated docs/overrides/main.html (parameterized RUM)")
+            print(f"    updated docs/overrides/main.html")
 
     # ── Phase 7: Update deploy-ghpages.yaml ──
     ghpages_path = repo_path / ".github/workflows/deploy-ghpages.yaml"
@@ -324,7 +537,7 @@ def run(args):
         content = ghpages_path.read_text()
         if "Fetch framework mkdocs-base.yaml" not in content:
             ghpages_path.write_text(DEPLOY_GHPAGES_TEMPLATE)
-            print(f"  updated .github/workflows/deploy-ghpages.yaml")
+            print(f"    updated deploy-ghpages.yaml")
 
     # ── Phase 8: Update .gitignore ──
     gitignore_path = repo_path / ".gitignore"
@@ -334,12 +547,72 @@ def run(args):
         if ".devcontainer/.cache/" not in content:
             additions.append("\n# Framework cache\n.devcontainer/.cache/")
         if "mkdocs-base.yaml" not in content:
-            additions.append(
-                "\n# Framework base config fetched at runtime\nmkdocs-base.yaml"
-            )
+            additions.append("\n# Framework base config fetched at runtime\nmkdocs-base.yaml")
+        if "Dockerfile.framework" not in content:
+            additions.append("\n# Temporary Dockerfile from cache for local builds\nDockerfile.framework")
         if additions:
             with open(gitignore_path, "a") as f:
                 f.write("\n" + "\n".join(additions) + "\n")
-            print(f"  updated .gitignore")
+            print(f"    updated .gitignore")
 
-    print(f"\nMigration complete. Review changes with 'git diff' then commit.")
+    return "migrated"
+
+
+def run(args):
+    version = args.framework_version
+    dry_run = args.dry_run
+    target_repo = getattr(args, "repo", None)
+
+    from sync.core.repos import filter_sync_targets
+    repos = load_repos()
+
+    # Filter to specific repo or all sync-managed
+    if target_repo:
+        repos = [r for r in repos if r.repo_name == target_repo or r.name == target_repo
+                 or r.repo == target_repo]
+        if not repos:
+            print(f"x '{target_repo}' not found in repos.yaml", file=sys.stderr)
+            sys.exit(1)
+    else:
+        repos = filter_sync_targets(repos)
+
+    print(f"{'[DRY RUN] ' if dry_run else ''}Migrating {len(repos)} repos\n")
+
+    counts = {"migrated": 0, "up-to-date": 0, "needs-migration": 0, "skipped": 0, "error": 0}
+
+    for entry in repos:
+        repo_path = _resolve_repo_path(entry.repo_name)
+
+        print(f"── {entry.repo} ──")
+        print(f"  path: {repo_path}")
+        print(f"  image_tier: {entry.image_tier}")
+
+        if not repo_path.is_dir():
+            print(f"  ⊘ local clone not found")
+            counts["skipped"] += 1
+            print()
+            continue
+
+        if not (repo_path / ".devcontainer").is_dir():
+            print(f"  ⊘ no .devcontainer/ directory")
+            counts["skipped"] += 1
+            print()
+            continue
+
+        try:
+            status = _migrate_repo(entry, repo_path, version, dry_run)
+            counts[status] += 1
+        except Exception as e:
+            print(f"  ✗ error: {e}")
+            counts["error"] += 1
+
+        print()
+
+    # Summary
+    if dry_run:
+        print(f"Summary: {counts['needs-migration']} need migration, "
+              f"{counts['up-to-date']} up to date, {counts['skipped']} skipped")
+    else:
+        print(f"Summary: {counts['migrated']} migrated, "
+              f"{counts['up-to-date']} up to date, {counts['skipped']} skipped, "
+              f"{counts['error']} errors")

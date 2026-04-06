@@ -33,7 +33,7 @@ def main():
     di.add_argument("--json", action="store_true", dest="json_output", help="JSON output")
 
     # validate
-    va = subparsers.add_parser("validate", help="Validate repos.yaml")
+    va = subparsers.add_parser("validate", help="Validate repos.yaml and local repo state")
     va.add_argument("--repo", help="Validate a specific repo entry")
 
     # tag
@@ -69,12 +69,11 @@ def main():
     # migrate
     mi = subparsers.add_parser(
         "migrate",
-        help="Migrate a framework-based repo to versioned pull model (local)",
+        help="Migrate repos from repos.yaml to versioned pull model",
     )
     mi.add_argument(
-        "--repo-path",
-        default=".",
-        help="Path to the cloned repo (default: current directory)",
+        "--repo",
+        help="Migrate a specific repo (default: all sync-managed repos)",
     )
     mi.add_argument(
         "--framework-version",
@@ -82,6 +81,13 @@ def main():
         help="Framework version to pin (default: 1.2.1)",
     )
     mi.add_argument("--dry-run", action="store_true", help="Audit only, no changes")
+
+    # revert
+    rv = subparsers.add_parser(
+        "revert",
+        help="Revert uncommitted changes in repos (undo migrate, etc.)",
+    )
+    rv.add_argument("--repo", help="Revert a specific repo (default: all sync-managed repos)")
 
     # generate-registry
     gr = subparsers.add_parser(
@@ -110,6 +116,8 @@ def main():
         from sync.commands.list_cmd import run
     elif args.command == "migrate":
         from sync.commands.migrate import run
+    elif args.command == "revert":
+        from sync.commands.revert import run
     elif args.command == "generate-registry":
         from sync.commands.generate_registry import run
     else:

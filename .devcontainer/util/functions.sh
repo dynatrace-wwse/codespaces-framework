@@ -560,7 +560,7 @@ createKindCluster() {
   printInfoSection "Creating Kubernetes Cluster (kind-control-plane)"
   # Create k8s cluster
   printInfo "Creating Kind cluster"
-  kind create cluster --config "$REPO_PATH/.devcontainer/kind-cluster.yml" --wait 5m &&\
+  kind create cluster --config "${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml/kind/kind-cluster.yml" --wait 5m &&\
     printInfo "Kind cluster created successfully, reachabe under:" ||\
     printWarn "Kind cluster could not be created"
   kubectl cluster-info --context kind-kind
