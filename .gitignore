@@ -204,3 +204,4 @@ dist-ssr
 .dt-app
 .gstack/
 .devcontainer/.cache/
+__pycache__/
