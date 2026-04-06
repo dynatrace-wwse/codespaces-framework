@@ -31,6 +31,8 @@ CATEGORY_A_FILES = [
     ".devcontainer/runlocal/helper.sh",
     ".devcontainer/Dockerfile",
     ".devcontainer/entrypoint.sh",
+    # test_functions.sh is framework-owned; integration.sh is repo-specific (stays)
+    ".devcontainer/test/test_functions.sh",
     # Legacy location — kind-cluster.yml moved to yaml/kind/ in framework
     ".devcontainer/kind-cluster.yml",
 ]
@@ -38,7 +40,6 @@ CATEGORY_A_FILES = [
 CATEGORY_A_DIRS = [
     ".devcontainer/apps",
     ".devcontainer/p10k",
-    ".devcontainer/test",
     ".devcontainer/yaml",
 ]
 
@@ -55,6 +56,7 @@ REPO_CUSTOM_FILES = [
     ".devcontainer/post-start.sh",
     ".devcontainer/util/source_framework.sh",
     ".devcontainer/util/my_functions.sh",
+    ".devcontainer/test/integration.sh",
 ]
 
 
