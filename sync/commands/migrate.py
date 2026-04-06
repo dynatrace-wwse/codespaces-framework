@@ -350,6 +350,11 @@ integration: $(CACHE)/.complete
 clean-cache:
 	@rm -rf .cache/dt-framework
 	@echo "Framework cache cleared."
+
+clean-start: clean-cache
+	@docker kill $$(docker ps -q) 2>/dev/null; docker rm $$(docker ps -aq) 2>/dev/null; true
+	@echo "Containers removed."
+	@$(MAKE) start
 '''
 
 OVERRIDES_MAIN_HTML = """\
