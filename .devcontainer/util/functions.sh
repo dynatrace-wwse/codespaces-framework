@@ -1005,13 +1005,21 @@ undeployOperatorViaHelm(){
 
 
 installMkdocs(){
-  
+
   installRunme
   printInfo "Installing MKdocs"
   pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
+  fetchMkdocsBase
   exposeMkdocs
 }
 
+fetchMkdocsBase(){
+  # If mkdocs.yaml uses INHERIT and mkdocs-base.yaml is missing, fetch it from the framework
+  if grep -q '^INHERIT:' "${REPO_PATH}/mkdocs.yaml" 2>/dev/null && [ ! -f "${REPO_PATH}/mkdocs-base.yaml" ]; then
+    printInfo "Fetching mkdocs-base.yaml from framework v${FRAMEWORK_VERSION}..."
+    curl -fsSL "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o "${REPO_PATH}/mkdocs-base.yaml"
+  fi
+}
 
 exposeMkdocs(){
   printInfo "Exposing Mkdocs in your dev.container in port 8000 & running in the background, type 'jobs' to show the process."
