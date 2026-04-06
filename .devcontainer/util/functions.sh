@@ -1654,7 +1654,7 @@ finalizePostCreation(){
 
 runIntegrationTests(){
   #this function will trigger the integration Tests for this repo.
-  bash "$REPO_PATH/.devcontainer/test/integration.sh"
+  bash "${FRAMEWORK_CACHE:-${REPO_PATH}}.devcontainer/test/integration.sh"
 }
 
 calculateReadingTime(){
