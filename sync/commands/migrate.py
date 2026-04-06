@@ -529,7 +529,7 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
                     for item in nav:
                         if isinstance(item, dict):
                             for k, v in item.items():
-                                lines.append(f"  - '{k}': {v}")
+                                lines.append(f'  - "{k}": {v}')
                         else:
                             lines.append(f"  - {item}")
                 extra = config.get("extra", {})
@@ -543,13 +543,36 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
             except Exception as e:
                 print(f"    ✗ mkdocs migration failed: {e}")
 
-    # ── Phase 6: Update overrides/main.html ──
+    # ── Phase 6: Update overrides/main.html + extract RUM snippet ──
     overrides_path = repo_path / "docs/overrides/main.html"
     if overrides_path.exists():
         content = overrides_path.read_text()
         if "config.extra.rum_snippet" not in content:
+            # Extract existing RUM snippet URL before replacing (last match = the real one, not commented placeholder)
+            rum_url = ""
+            rum_matches = re.findall(
+                r'src="(https://js-cdn\.dynatrace\.com/jstag/[^"]+)"',
+                content,
+            )
+            if rum_matches:
+                rum_url = rum_matches[-1]  # last match is the active one
+
             overrides_path.write_text(OVERRIDES_MAIN_HTML)
             print(f"    updated docs/overrides/main.html")
+
+            # Add rum_snippet to mkdocs.yaml if extracted
+            if rum_url and mkdocs_path.exists():
+                mk_content = mkdocs_path.read_text()
+                if "rum_snippet" not in mk_content:
+                    if "extra:" not in mk_content:
+                        mk_content += f'\nextra:\n  rum_snippet: "{rum_url}"\n'
+                    else:
+                        mk_content = mk_content.replace(
+                            "extra:",
+                            f'extra:\n  rum_snippet: "{rum_url}"',
+                        )
+                    mkdocs_path.write_text(mk_content)
+                    print(f"    extracted RUM snippet to mkdocs.yaml")
 
     # ── Phase 7: Update deploy-ghpages.yaml ──
     ghpages_path = repo_path / ".github/workflows/deploy-ghpages.yaml"
