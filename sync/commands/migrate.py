@@ -290,6 +290,13 @@ THIN_MAKEFILE = r'''# Thin Makefile — bootstraps the framework cache and deleg
 FRAMEWORK_VERSION := $(shell grep -oP ':-\K[^}"]+' util/source_framework.sh | head -1)
 CACHE := .cache/dt-framework/$(FRAMEWORK_VERSION)
 
+# Repo name derived from parent of .devcontainer/ (where this Makefile lives)
+REPO_NAME := $(notdir $(patsubst %/,%,$(dir $(CURDIR))))
+
+# ENV and RepositoryName must be set AFTER sourcing makefile.sh to override
+# any stale paths from older cached framework versions.
+SETUP_OVERRIDES := export ENV_FILE=$(CURDIR)/.env; export RepositoryName=$(REPO_NAME);
+
 # Bootstrap: populate host cache if missing
 $(CACHE)/.complete:
 	@echo "Bootstrapping framework v$(FRAMEWORK_VERSION)..."
@@ -313,19 +320,19 @@ $(CACHE)/.complete:
 	@echo "Framework v$(FRAMEWORK_VERSION) cached."
 
 start: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; start'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) start'
 
 build: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; build'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) build'
 
 build-nocache: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; buildNoCache'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) buildNoCache'
 
 buildx: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; buildx'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) buildx'
 
 integration: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && ENV_FILE=$(CURDIR)/.env bash -c 'source makefile.sh; integration'
+	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) integration'
 
 clean-cache:
 	@rm -rf .cache/dt-framework

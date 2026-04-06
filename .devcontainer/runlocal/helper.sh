@@ -3,7 +3,10 @@
 
 getRepositoryName() {
     # Sets RepositoryName from the 'current' working directory.
-    RepositoryName=$(basename "$(dirname "$PWD")")
+    # If already set (e.g. by thin Makefile in cache mode), keep it.
+    if [ -z "$RepositoryName" ]; then
+        RepositoryName=$(basename "$(dirname "$PWD")")
+    fi
     export RepositoryName=$RepositoryName
     echo "RepositoryName is set to: $RepositoryName"
 }
