@@ -448,9 +448,6 @@ setEnvironmentInEnv(){
 }
 
 bindFunctionsInShell() {
-  printInfo "REPO_PATH: $REPO_PATH "
-  printInfo "HOME: $HOME "
-  printInfo "USER: $USER "
   printInfo "Binding source_framework.sh and adding a Greeting in the .zshrc"
   cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
 
@@ -1654,7 +1651,7 @@ finalizePostCreation(){
 
 runIntegrationTests(){
   #this function will trigger the integration Tests for this repo.
-  bash "${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/test/integration.sh"
+  bash "${REPO_PATH}/.devcontainer/test/integration.sh"
 }
 
 calculateReadingTime(){
