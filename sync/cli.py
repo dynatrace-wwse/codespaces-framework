@@ -66,6 +66,23 @@ def main():
     ls.add_argument("--sync-managed", action="store_true", help="Only sync-managed repos")
     ls.add_argument("--json", action="store_true", dest="json_output", help="JSON output")
 
+    # migrate
+    mi = subparsers.add_parser(
+        "migrate",
+        help="Migrate a framework-based repo to versioned pull model (local)",
+    )
+    mi.add_argument(
+        "--repo-path",
+        default=".",
+        help="Path to the cloned repo (default: current directory)",
+    )
+    mi.add_argument(
+        "--framework-version",
+        default="1.2.1",
+        help="Framework version to pin (default: 1.2.1)",
+    )
+    mi.add_argument("--dry-run", action="store_true", help="Audit only, no changes")
+
     # generate-registry
     gr = subparsers.add_parser(
         "generate-registry", help="Generate HTML registry page"
@@ -91,6 +108,8 @@ def main():
         from sync.commands.migrate_mkdocs import run
     elif args.command == "list":
         from sync.commands.list_cmd import run
+    elif args.command == "migrate":
+        from sync.commands.migrate import run
     elif args.command == "generate-registry":
         from sync.commands.generate_registry import run
     else:

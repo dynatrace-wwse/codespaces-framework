@@ -2,8 +2,10 @@
 # Build script for building locally and launching the training environment in a Docker container without Visual Studio Code.
 # Tested on Ubuntu 22.04 and 24.04 LTS with Docker installed.
 
-source runlocal/helper.sh
-ENV_FILE=runlocal/.env
+# Resolve paths relative to this script (works from cache or local)
+_MAKEFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${_MAKEFILE_DIR}/runlocal/helper.sh"
+ENV_FILE="${_MAKEFILE_DIR}/runlocal/.env"
 
 NAMESPACE="shinojosa"
 IMAGENAME="dt-enablement"

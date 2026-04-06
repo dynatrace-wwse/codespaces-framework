@@ -63,7 +63,10 @@ if ! (
     .devcontainer/util \
     .devcontainer/p10k \
     .devcontainer/test \
-    .devcontainer/apps && \
+    .devcontainer/apps \
+    .devcontainer/Makefile \
+    .devcontainer/makefile.sh \
+    .devcontainer/runlocal && \
   touch "${HOST_CACHE}/.complete"
 ); then
   echo "❌ Failed to pull framework v${FRAMEWORK_VERSION} — check network and retry"
