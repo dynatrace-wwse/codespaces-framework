@@ -290,12 +290,8 @@ THIN_MAKEFILE = r'''# Thin Makefile — bootstraps the framework cache and deleg
 FRAMEWORK_VERSION := $(shell grep -oP ':-\K[^}"]+' util/source_framework.sh | head -1)
 CACHE := .cache/dt-framework/$(FRAMEWORK_VERSION)
 
-# Repo name derived from parent of .devcontainer/ (where this Makefile lives)
+# Repo name = parent directory of .devcontainer/ (the git repo name)
 REPO_NAME := $(notdir $(patsubst %/,%,$(dir $(CURDIR))))
-
-# ENV and RepositoryName must be set AFTER sourcing makefile.sh to override
-# any stale paths from older cached framework versions.
-SETUP_OVERRIDES := export ENV_FILE=$(CURDIR)/.env; export RepositoryName=$(REPO_NAME);
 
 # Bootstrap: populate host cache if missing
 $(CACHE)/.complete:
@@ -317,22 +313,35 @@ $(CACHE)/.complete:
 		'/.devcontainer/entrypoint.sh' \
 		'.devcontainer/yaml/*'
 	@touch $(CACHE)/.complete
+	@# Write a wrapper that sources makefile.sh safely in cache mode:
+	@# - strips top-level calls to getRepositoryName/getDockerEnvsFromEnvFile
+	@# - sets ENV_FILE and RepositoryName to the repo's paths
+	@# - re-sources helper.sh and calls getDockerEnvsFromEnvFile
+	@printf '#!/bin/bash\n\
+export ENV_FILE="$(CURDIR)/.env"\n\
+export RepositoryName="$(REPO_NAME)"\n\
+_MAKEFILE_DIR="$$(cd "$$(dirname "$${BASH_SOURCE[0]}")" && pwd)"\n\
+eval "$$(sed "/^getRepositoryName$$/d; /^getDockerEnvsFromEnvFile$$/d" "$${_MAKEFILE_DIR}/makefile.sh")"\n\
+export ENV_FILE="$(CURDIR)/.env"\n\
+export RepositoryName="$(REPO_NAME)"\n\
+source "$${_MAKEFILE_DIR}/runlocal/helper.sh"\n\
+getDockerEnvsFromEnvFile\n' > $(CACHE)/.devcontainer/cached_makefile.sh
 	@echo "Framework v$(FRAMEWORK_VERSION) cached."
 
 start: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) start'
+	@cd $(CACHE)/.devcontainer && bash -c 'source cached_makefile.sh; start'
 
 build: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) build'
+	@cd $(CACHE)/.devcontainer && bash -c 'source cached_makefile.sh; build'
 
 build-nocache: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) buildNoCache'
+	@cd $(CACHE)/.devcontainer && bash -c 'source cached_makefile.sh; buildNoCache'
 
 buildx: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) buildx'
+	@cd $(CACHE)/.devcontainer && bash -c 'source cached_makefile.sh; buildx'
 
 integration: $(CACHE)/.complete
-	@cd $(CACHE)/.devcontainer && bash -c 'source makefile.sh; $(SETUP_OVERRIDES) integration'
+	@cd $(CACHE)/.devcontainer && bash -c 'source cached_makefile.sh; integration'
 
 clean-cache:
 	@rm -rf .cache/dt-framework
