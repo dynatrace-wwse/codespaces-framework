@@ -290,8 +290,9 @@ THIN_MAKEFILE = r'''# Thin Makefile — bootstraps the framework cache and deleg
 FRAMEWORK_VERSION := $(shell grep -oP ':-\K[^}"]+' util/source_framework.sh | head -1)
 CACHE := .cache/dt-framework/$(FRAMEWORK_VERSION)
 
-# Repo name = parent directory of .devcontainer/ (the git repo name)
+# Repo name and root path (CURDIR = repo/.devcontainer where this Makefile lives)
 REPO_NAME := $(notdir $(patsubst %/,%,$(dir $(CURDIR))))
+REPO_ROOT := $(patsubst %/,%,$(dir $(CURDIR)))
 
 # Bootstrap: populate host cache if missing
 $(CACHE)/.complete:
@@ -324,6 +325,8 @@ _MAKEFILE_DIR="$$(cd "$$(dirname "$${BASH_SOURCE[0]}")" && pwd)"\n\
 eval "$$(sed "/^getRepositoryName$$/d; /^getDockerEnvsFromEnvFile$$/d" "$${_MAKEFILE_DIR}/makefile.sh")"\n\
 export ENV_FILE="$(CURDIR)/.env"\n\
 export RepositoryName="$(REPO_NAME)"\n\
+VOLUMEMOUNTS="-v /var/run/docker.sock:/var/run/docker.sock -v /lib/modules:/lib/modules -v $(REPO_ROOT):/workspaces/$(REPO_NAME)"\n\
+WORKINGDIR="-w /workspaces/$(REPO_NAME)"\n\
 source "$${_MAKEFILE_DIR}/runlocal/helper.sh"\n\
 getDockerEnvsFromEnvFile\n' > $(CACHE)/.devcontainer/cached_makefile.sh
 	@echo "Framework v$(FRAMEWORK_VERSION) cached."
