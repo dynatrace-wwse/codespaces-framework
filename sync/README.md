@@ -91,27 +91,44 @@ make start
 make clean-start
 ```
 
-### 7. Push updates across repos
+### 7. Push updates across repos (the full workflow)
 
-After tagging a new framework version:
+After tagging a new framework version, `push-update` is the one command that does everything:
+pull main → create branch → run full migration → commit → push → create PR.
 
 ```bash
 # Preview which repos need updating
 PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5 --dry-run
 
-# Create PRs (clones if needed, pulls main, branches, commits, pushes, creates PR)
+# Create PRs for all sync-managed repos
 PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5
+
+# Target a specific repo
+PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5 --repo enablement-codespaces-template
+
+# Enable auto-merge on the PRs
+PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5 --auto-merge
 ```
 
+On failure at any step, the branch is left in place for manual intervention.
+
 ---
+
+## `migrate` vs `push-update`
+
+| | `migrate` | `push-update` |
+|---|---|---|
+| Purpose | Local audit and preview | Full end-to-end workflow |
+| Git operations | None (works on working tree) | Pull main, branch, commit, push, create PR |
+| When to use | Testing migration locally, dry-runs | Deploying a new framework version to repos |
 
 ## All commands
 
 | Command | Description |
 |---------|-------------|
-| `migrate` | Migrate repos to versioned pull model. Iterates `repos.yaml`, removes framework files, installs templates. |
+| `push-update` | Full workflow: pull main, branch, migrate, commit, push, create PR. Use `--auto-merge` to enable auto-merge. |
+| `migrate` | Local migration preview/audit. Removes framework files, installs templates. No git operations. |
 | `validate` | Validate `repos.yaml` schema, GitHub accessibility, and local clone state (devcontainer.json, templates, migration status). |
-| `push-update` | Bump `FRAMEWORK_VERSION` across repos. Local-first: clone, pull main, branch, update templates, push, create PR. |
 | `revert` | Revert uncommitted changes in repos (`git checkout -- . && git clean -fd`). |
 | `status` | Show version drift across repos (which repos are behind the latest framework version). |
 | `diff` | Preview what `push-update` would change. |

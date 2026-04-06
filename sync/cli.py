@@ -14,13 +14,15 @@ def main():
 
     # push-update
     pu = subparsers.add_parser(
-        "push-update", help="Open PRs to bump framework version across repos"
+        "push-update", help="Pull main, branch, migrate, commit, push, create PR"
     )
     pu.add_argument(
         "--framework-version", required=True, help="Target framework version (X.Y.Z)"
     )
+    pu.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     pu.add_argument("--dry-run", action="store_true", help="Preview changes without creating PRs")
-    pu.add_argument("--force", action="store_true", help="Overwrite locally-modified files")
+    pu.add_argument("--force", action="store_true", help="Update even if already at target version")
+    pu.add_argument("--auto-merge", action="store_true", help="Enable auto-merge on created PRs")
     pu.add_argument("--json", action="store_true", dest="json_output", help="JSON output")
 
     # status

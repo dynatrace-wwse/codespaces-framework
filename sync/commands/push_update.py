@@ -1,28 +1,30 @@
-"""sync push-update — Bump framework version across repos using local-first workflow.
+"""sync push-update — Full sync workflow: pull, branch, migrate, push, PR.
 
 Flow per repo:
   1. Ensure cloned locally (clone if missing)
   2. git checkout main && git pull
   3. Create branch sync/framework-<version>
-  4. Update source_framework.sh version pin
-  5. Run migrate to update templates (Makefile, source_framework.sh structure)
-  6. Commit, push, create PR with auto-merge
-  7. On failure at any step, leave branch in place for manual intervention
+  4. Run full migration (Category A cleanup, templates, mkdocs, .env, etc.)
+  5. Commit all changes
+  6. Push branch
+  7. Create PR (optionally with auto-merge)
+  8. On failure at any step, leave branch in place for manual intervention
 """
 
 import json
 import sys
+from pathlib import Path
 
 from sync.core.repos import load_repos, filter_sync_targets
 from sync.core.version import extract_framework_version
 from sync.core import local_git
-from sync.commands.migrate import SOURCE_FRAMEWORK_TEMPLATE, THIN_MAKEFILE
+from sync.commands.migrate import _migrate_repo, _resolve_repo_path
 
 SYNC_BRANCH_PREFIX = "sync/framework-"
 SOURCE_FW_PATH = ".devcontainer/util/source_framework.sh"
 
 
-def _update_repo(repo_entry, target: str, dry_run: bool, force: bool) -> dict:
+def _update_repo(repo_entry, target: str, dry_run: bool, force: bool, auto_merge: bool) -> dict:
     """Process a single repo. Returns a result dict."""
     owner, name = repo_entry.owner, repo_entry.repo_name
     result = {"repo": repo_entry.repo, "status": "skipped", "message": ""}
@@ -36,6 +38,7 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool) -> dict:
         return result
 
     # 2. Pull latest main
+    print(f"  pulling main...")
     pull = local_git.pull_main(path)
     if not pull.success:
         result["status"] = "error"
@@ -43,26 +46,32 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool) -> dict:
         result["needs_manual"] = True
         return result
 
-    # 3. Check current version
+    # 3. Check current version (if source_framework.sh exists)
     sf_path = path / SOURCE_FW_PATH
-    if not sf_path.exists():
-        result["message"] = "not migrated (no source_framework.sh)"
-        return result
-
-    content = sf_path.read_text()
-    try:
-        current = extract_framework_version(content)
-    except ValueError:
-        result["message"] = "not migrated (no FRAMEWORK_VERSION pin)"
-        return result
+    current = None
+    if sf_path.exists():
+        content = sf_path.read_text()
+        try:
+            current = extract_framework_version(content)
+        except ValueError:
+            pass
 
     if current == target and not force:
-        result["message"] = f"already at {target}"
-        return result
+        # Check if templates are up to date too
+        from sync.commands.migrate import SOURCE_FRAMEWORK_TEMPLATE, THIN_MAKEFILE
+        sf_ok = sf_path.exists() and sf_path.read_text() == SOURCE_FRAMEWORK_TEMPLATE % target
+        mf_ok = (path / ".devcontainer/Makefile").exists() and (path / ".devcontainer/Makefile").read_text() == THIN_MAKEFILE
+        if sf_ok and mf_ok:
+            result["message"] = f"already at {target}"
+            return result
 
     if dry_run:
-        result["status"] = "would-update"
-        result["message"] = f"{current} → {target}"
+        if current:
+            result["status"] = "would-update"
+            result["message"] = f"{current} → {target}"
+        else:
+            result["status"] = "would-update"
+            result["message"] = f"not yet migrated → {target}"
         return result
 
     # 4. Create branch
@@ -73,22 +82,34 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool) -> dict:
         result["message"] = branch.message
         return result
 
-    # 5. Update source_framework.sh — new version pin + latest template
-    sf_path.write_text(SOURCE_FRAMEWORK_TEMPLATE % target)
-
-    # 6. Update thin Makefile to latest template
-    makefile_path = path / ".devcontainer/Makefile"
-    if makefile_path.exists():
-        makefile_path.write_text(THIN_MAKEFILE)
-
-    # 7. Commit
-    commit_msg = f"chore: sync framework @ {target}"
-    commit = local_git.commit(path, commit_msg)
-    if "no changes" in commit.message:
-        result["message"] = f"already at {target} (templates up to date)"
+    # 5. Run full migration
+    print(f"  migrating...")
+    try:
+        status = _migrate_repo(repo_entry, path, target, dry_run=False)
+    except Exception as e:
+        result["status"] = "error"
+        result["message"] = f"migration failed: {e}"
+        result["needs_manual"] = True
         return result
 
-    # 8. Push
+    # Force version pin to target (migrate preserves existing pin, we want to bump it)
+    from sync.commands.migrate import SOURCE_FRAMEWORK_TEMPLATE
+    sf_path.write_text(SOURCE_FRAMEWORK_TEMPLATE % target)
+
+    # 6. Commit
+    if not local_git.has_changes(path):
+        # No changes — checkout back to main
+        default_branch = local_git.get_default_branch(path)
+        local_git._run_git(["checkout", default_branch], path)
+        local_git._run_git(["branch", "-D", branch_name], path, check=False)
+        result["message"] = f"already at {target} (no changes)"
+        return result
+
+    commit_msg = f"chore: sync framework @ {target}"
+    local_git.commit(path, commit_msg)
+
+    # 7. Push
+    print(f"  pushing...")
     push = local_git.push(path, branch_name)
     if not push.success:
         result["status"] = "error"
@@ -96,13 +117,20 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool) -> dict:
         result["needs_manual"] = True
         return result
 
-    # 9. Create PR
+    # 8. Create PR
     default_branch = local_git.get_default_branch(path)
+    changes = []
+    if current and current != target:
+        changes.append(f"Bumps `FRAMEWORK_VERSION` from `{current}` to `{target}`.")
+    elif not current:
+        changes.append(f"Initial migration to versioned pull model at `{target}`.")
+    changes.append("Updates templates (`source_framework.sh`, `Makefile`).")
+    changes.append("Removes framework-owned files (Category A) — now pulled from cache.")
+
     pr_body = (
         f"## Sync update\n\n"
-        f"Bumps `FRAMEWORK_VERSION` from `{current}` to `{target}`.\n"
-        f"Updates `source_framework.sh` and `Makefile` templates.\n\n"
-        f"Auto-generated by `sync push-update`."
+        + "\n".join(f"- {c}" for c in changes)
+        + f"\n\nAuto-generated by `sync push-update`."
     )
     pr = local_git.create_pr(owner, name, path, commit_msg, pr_body, base=default_branch)
     if not pr.success:
@@ -111,12 +139,13 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool) -> dict:
         result["needs_manual"] = True
         return result
 
-    # 10. Enable auto-merge (best-effort)
-    local_git.enable_auto_merge(owner, name, pr.message)
+    # 9. Enable auto-merge (only if requested)
+    if auto_merge:
+        local_git.enable_auto_merge(owner, name, pr.message)
 
     result["status"] = "created"
     result["url"] = pr.message
-    result["message"] = f"{current} → {target}"
+    result["message"] = f"{current or 'new'} → {target}"
     return result
 
 
@@ -124,9 +153,20 @@ def run(args):
     target = args.framework_version
     dry_run = args.dry_run
     force = args.force
+    auto_merge = args.auto_merge
     json_out = args.json_output
+    target_repo = getattr(args, "repo", None)
 
-    repos = filter_sync_targets(load_repos())
+    repos = load_repos()
+    if target_repo:
+        repos = [r for r in repos if r.repo_name == target_repo or r.name == target_repo
+                 or r.repo == target_repo]
+        if not repos:
+            print(f"x '{target_repo}' not found in repos.yaml", file=sys.stderr)
+            sys.exit(1)
+    else:
+        repos = filter_sync_targets(repos)
+
     if not repos:
         print("No sync-managed active repos found.")
         return
@@ -138,7 +178,7 @@ def run(args):
 
     for repo_entry in repos:
         print(f"── {repo_entry.repo} ──")
-        result = _update_repo(repo_entry, target, dry_run, force)
+        result = _update_repo(repo_entry, target, dry_run, force, auto_merge)
         results.append(result)
 
         status = result["status"]
@@ -172,7 +212,7 @@ def run(args):
             print(f"Created {created} PRs, {skipped} skipped, {errors} errors")
 
         if manual_needed:
-            print(f"\n⚠ Manual intervention needed for:")
+            print(f"\nManual intervention needed for:")
             for repo in manual_needed:
                 path = local_git.get_repo_path(repo.split("/")[-1])
                 print(f"  cd {path}")
