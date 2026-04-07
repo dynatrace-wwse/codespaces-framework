@@ -39,11 +39,19 @@ def main():
     va.add_argument("--repo", help="Validate a specific repo entry")
 
     # tag
-    tg = subparsers.add_parser("tag", help="Create combined version tags after PRs merge")
+    tg = subparsers.add_parser(
+        "tag", help="Create combined version tags (vFramework_RepoVersion) on consumer repos"
+    )
     tg.add_argument(
-        "--framework-version", required=True, help="Framework version for tags"
+        "--framework-version", required=True, help="Framework version (e.g. 1.2.5)"
+    )
+    tg.add_argument(
+        "--bump",
+        choices=["patch", "minor", "major"],
+        help="Bump the repo version part before tagging",
     )
     tg.add_argument("--force", action="store_true", help="Skip pre-flight checks")
+    tg.add_argument("--dry-run", action="store_true", help="Preview without creating tags")
 
     # bump-repo-version
     br = subparsers.add_parser("bump-repo-version", help="Bump repo version component")
