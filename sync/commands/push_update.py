@@ -76,7 +76,7 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool, auto_merge
 
     # 4. Create branch
     branch_name = f"{SYNC_BRANCH_PREFIX}{target}"
-    branch = local_git.create_branch(path, branch_name)
+    branch = local_git.create_branch(path, branch_name, force=force)
     if not branch.success:
         result["status"] = "skipped"
         result["message"] = branch.message

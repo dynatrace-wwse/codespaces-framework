@@ -98,28 +98,36 @@ def pull_main(path: Path) -> GitResult:
     return GitResult(success=True, message=f"up to date on {default_branch}", path=path)
 
 
-def create_branch(path: Path, branch_name: str) -> GitResult:
+def create_branch(path: Path, branch_name: str, force: bool = False) -> GitResult:
     """Create and checkout a new branch from current HEAD."""
-    # Check if branch already exists locally or remotely
+    # Check if branch already exists locally
     local = _run_git(["rev-parse", "--verify", branch_name], path, check=False)
     if local.returncode == 0:
-        # Branch exists locally — check it out
-        _run_git(["checkout", branch_name], path)
-        return GitResult(
-            success=True,
-            message=f"checked out existing branch {branch_name}",
-            path=path,
-            branch=branch_name,
-        )
+        if force:
+            # Delete and recreate from current HEAD
+            _run_git(["branch", "-D", branch_name], path, check=False)
+        else:
+            _run_git(["checkout", branch_name], path)
+            return GitResult(
+                success=True,
+                message=f"checked out existing branch {branch_name}",
+                path=path,
+                branch=branch_name,
+            )
 
+    # Check if branch exists on remote
     remote = _run_git(["ls-remote", "--heads", "origin", branch_name], path, check=False)
     if remote.stdout.strip():
-        return GitResult(
-            success=False,
-            message=f"branch {branch_name} already exists on remote (PR may be open)",
-            path=path,
-            branch=branch_name,
-        )
+        if force:
+            # Delete remote branch so we can push fresh
+            _run_git(["push", "origin", "--delete", branch_name], path, check=False)
+        else:
+            return GitResult(
+                success=False,
+                message=f"branch {branch_name} already exists on remote (PR may be open)",
+                path=path,
+                branch=branch_name,
+            )
 
     _run_git(["checkout", "-b", branch_name], path)
     return GitResult(success=True, message=f"created {branch_name}", path=path, branch=branch_name)
