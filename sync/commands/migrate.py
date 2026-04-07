@@ -616,7 +616,7 @@ README_BADGES_TEMPLATE = """\
 <!-- markdownlint-disable-next-line -->
 # <img src="https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg" alt="DT logo" width="30"> {title}
 
-[![Dynatrace](https://img.shields.io/badge/Dynatrace-Intelligence-purple?logo=dynatrace&logoColor=white)](https://dynatrace-wwse.github.io)
+[![Dynatrace](https://img.shields.io/badge/Dynatrace-Intelligence-purple?logo=dynatrace&logoColor=white)](https://dynatrace-wwse.github.io/codespaces-framework/dynatrace-integration/#mcp-server-integration)
 [![Mastering](https://img.shields.io/badge/Mastering-Complexity-8A2BE2?logo=dynatrace)](https://dynatrace-wwse.github.io)
 [![Downloads](https://img.shields.io/docker/pulls/shinojosa/dt-enablement?logo=docker)](https://hub.docker.com/r/shinojosa/dt-enablement)
 ![Integration tests](https://github.com/{repo}/actions/workflows/integration-tests.yaml/badge.svg)
@@ -634,10 +634,11 @@ README_FOOTER_TEMPLATE = """\
 OLD_BADGES = {
     "Davis%20CoPilot-AI%20Powered": "Dynatrace-Intelligence",
     "Powered_by-DT_Enablement": "Mastering-Complexity",
-    "dynatrace-wwse.github.io/codespaces-framework/dynatrace-integration/#mcp-server-integration": "dynatrace-wwse.github.io",
-    "dynatrace-wwse.github.io/codespaces-framework/": "dynatrace-wwse.github.io",
     "[Davis CoPilot]": "[Dynatrace]",
     "[dt-badge]": "[Mastering]",
+    # Fix Mastering badge link (was pointing to framework, now points to org page)
+    "badge/Mastering-Complexity-8A2BE2?logo=dynatrace)](https://dynatrace-wwse.github.io/codespaces-framework/)":
+        "badge/Mastering-Complexity-8A2BE2?logo=dynatrace)](https://dynatrace-wwse.github.io)",
 }
 
 
