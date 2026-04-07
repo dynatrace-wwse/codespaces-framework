@@ -84,6 +84,17 @@ def main():
     )
     mi.add_argument("--dry-run", action="store_true", help="Audit only, no changes")
 
+    # approve
+    ap = subparsers.add_parser(
+        "approve",
+        help="Check sync PRs and approve those with passing CI",
+    )
+    ap.add_argument(
+        "--framework-version", required=True, help="Framework version to check PRs for"
+    )
+    ap.add_argument("--repo", help="Check a specific repo (default: all sync-managed)")
+    ap.add_argument("--merge", action="store_true", help="Also merge approved PRs")
+
     # revert
     rv = subparsers.add_parser(
         "revert",
@@ -118,6 +129,8 @@ def main():
         from sync.commands.list_cmd import run
     elif args.command == "migrate":
         from sync.commands.migrate import run
+    elif args.command == "approve":
+        from sync.commands.approve import run
     elif args.command == "revert":
         from sync.commands.revert import run
     elif args.command == "generate-registry":
