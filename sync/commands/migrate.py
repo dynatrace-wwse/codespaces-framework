@@ -464,17 +464,16 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
 
     needs_work = bool(found_files) or bool(found_dirs) or not templates_current
 
-    if not needs_work:
-        print(f"    ✅ already migrated and up to date")
-        return "up-to-date"
-
     if found_files or found_dirs:
         print(f"    {len(found_files)} files + {len(found_dirs)} directories to remove")
     if not templates_current:
         print(f"    templates need updating (Makefile, source_framework.sh)")
 
     if dry_run:
-        return "needs-migration"
+        if needs_work:
+            return "needs-migration"
+        print(f"    ✅ core migration up to date")
+        return "up-to-date"
 
     # ── Phase 2: Clean Category A files ──
     if found_files or found_dirs:
@@ -491,7 +490,7 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
                 p.rmdir()
                 print(f"      removed empty {d}/")
 
-    # ── Phase 3: Replace Category B files with thin wrappers ──
+    # ── Phase 3: Replace Category B files with thin wrappers (only if outdated) ──
     makefile_path.parent.mkdir(parents=True, exist_ok=True)
     makefile_path.write_text(THIN_MAKEFILE)
     print(f"    updated Makefile")
@@ -606,6 +605,9 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
 
     # ── Phase 9: Migrate .env location ──
     _migrate_env_location(repo_path)
+
+    # ── Phase 10: Validate and fix README badges ──
+    _validate_readme(entry, repo_path)
 
     return "migrated"
 
@@ -759,9 +761,6 @@ def _migrate_env_location(repo_path: Path):
                 )
                 wf_path.write_text(content)
                 print(f"    updated {wf_name}")
-
-    # ── Phase 10: Validate and fix README badges ──
-    _validate_readme(entry, repo_path)
 
     # Update docs referencing old .env path
     docs_dir = repo_path / "docs"
