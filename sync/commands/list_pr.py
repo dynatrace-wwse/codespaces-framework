@@ -1,9 +1,12 @@
-"""sync approve — Check sync PRs and approve those with passing CI.
+"""sync list-pr — List open PRs across repos, optionally approve/merge.
 
-Finds open PRs on the sync/framework-<version> branch across all repos,
-checks their CI status, and approves + optionally merges those that pass.
+By default lists all open PRs for sync-managed repos.
+Use --framework-version to filter to sync branch PRs only.
+Use --approve to approve PRs with passing CI.
+Use --merge to also merge approved PRs.
 """
 
+import json
 import subprocess
 import sys
 
@@ -21,28 +24,25 @@ def _gh(args: list[str], repo: str) -> subprocess.CompletedProcess:
     )
 
 
-def _get_pr(repo: str, branch: str) -> dict | None:
-    """Find an open PR for the given branch. Returns {number, url, title} or None."""
-    import json
-    result = _gh(
-        ["pr", "list", "--head", branch, "--state", "open", "--json", "number,url,title,statusCheckRollup"],
-        repo,
-    )
+def _get_prs(repo: str, head: str = None) -> list[dict]:
+    """List open PRs. Optionally filter by head branch."""
+    cmd = ["pr", "list", "--state", "open", "--json", "number,url,title,headRefName,statusCheckRollup"]
+    if head:
+        cmd.extend(["--head", head])
+    result = _gh(cmd, repo)
     if result.returncode != 0 or not result.stdout.strip():
-        return None
-    prs = json.loads(result.stdout)
-    return prs[0] if prs else None
+        return []
+    return json.loads(result.stdout)
 
 
 def _get_ci_status(pr: dict) -> str:
-    """Determine CI status from PR check rollup. Returns 'passing', 'failing', 'pending', or 'none'."""
+    """Determine CI status from PR check rollup."""
     checks = pr.get("statusCheckRollup", [])
     if not checks:
         return "none"
 
     states = set()
     for check in checks:
-        # Handle both CheckRun and StatusContext
         conclusion = check.get("conclusion", "")
         status = check.get("status", "")
 
@@ -67,20 +67,27 @@ def _get_ci_status(pr: dict) -> str:
 
 
 def _approve_pr(repo: str, pr_number: int) -> bool:
-    """Approve a PR. Returns True on success."""
     result = _gh(["pr", "review", str(pr_number), "--approve"], repo)
     return result.returncode == 0
 
 
 def _merge_pr(repo: str, pr_number: int) -> bool:
-    """Merge a PR. Returns True on success."""
     result = _gh(["pr", "merge", str(pr_number), "--merge"], repo)
     return result.returncode == 0
 
 
+CI_ICONS = {
+    "passing": "✓",
+    "failing": "✗",
+    "pending": "~",
+    "none": "?",
+}
+
+
 def run(args):
-    target = args.framework_version
+    version = getattr(args, "framework_version", None)
     target_repo = getattr(args, "repo", None)
+    do_approve = args.approve
     do_merge = args.merge
 
     repos = load_repos()
@@ -93,56 +100,55 @@ def run(args):
     else:
         repos = filter_sync_targets(repos)
 
-    branch_name = f"{SYNC_BRANCH_PREFIX}{target}"
-    print(f"Checking PRs for branch {branch_name} across {len(repos)} repos\n")
+    head_filter = f"{SYNC_BRANCH_PREFIX}{version}" if version else None
+    print(f"Listing open PRs{f' for branch {head_filter}' if head_filter else ''} across {len(repos)} repos\n")
 
     counts = {"passing": 0, "failing": 0, "pending": 0, "no_pr": 0, "approved": 0, "merged": 0}
 
     for entry in repos:
         print(f"── {entry.repo} ──")
 
-        pr = _get_pr(entry.repo, branch_name)
-        if not pr:
-            print(f"  - no open PR")
+        prs = _get_prs(entry.repo, head=head_filter)
+        if not prs:
+            print(f"  no open PRs")
             counts["no_pr"] += 1
             print()
             continue
 
-        pr_number = pr["number"]
-        pr_url = pr["url"]
-        ci_status = _get_ci_status(pr)
+        for pr in prs:
+            pr_number = pr["number"]
+            pr_url = pr["url"]
+            title = pr["title"]
+            branch = pr["headRefName"]
+            ci = _get_ci_status(pr)
+            icon = CI_ICONS.get(ci, "?")
 
-        if ci_status == "passing":
-            print(f"  ✓ PR #{pr_number} — CI passing")
-            counts["passing"] += 1
-
-            ok = _approve_pr(entry.repo, pr_number)
-            if ok:
-                print(f"    approved")
-                counts["approved"] += 1
-            else:
-                print(f"    ✗ approve failed")
-
-            if do_merge and ok:
-                merged = _merge_pr(entry.repo, pr_number)
-                if merged:
-                    print(f"    merged")
-                    counts["merged"] += 1
-                else:
-                    print(f"    ✗ merge failed")
-
-        elif ci_status == "failing":
-            print(f"  ✗ PR #{pr_number} — CI failing")
+            print(f"  {icon} #{pr_number} [{ci}] {branch}")
+            print(f"    {title}")
             print(f"    {pr_url}")
-            counts["failing"] += 1
 
-        elif ci_status == "pending":
-            print(f"  ~ PR #{pr_number} — CI pending")
-            counts["pending"] += 1
+            if ci == "passing":
+                counts["passing"] += 1
+            elif ci == "failing":
+                counts["failing"] += 1
+            elif ci == "pending":
+                counts["pending"] += 1
 
-        else:
-            print(f"  ? PR #{pr_number} — no CI checks")
-            counts["no_pr"] += 1
+            if do_approve and ci == "passing":
+                ok = _approve_pr(entry.repo, pr_number)
+                if ok:
+                    print(f"    → approved")
+                    counts["approved"] += 1
+                else:
+                    print(f"    → approve failed (can't approve own PR?)")
+
+                if do_merge and ok:
+                    merged = _merge_pr(entry.repo, pr_number)
+                    if merged:
+                        print(f"    → merged")
+                        counts["merged"] += 1
+                    else:
+                        print(f"    → merge failed")
 
         print()
 
@@ -159,5 +165,5 @@ def run(args):
     if counts["failing"]:
         parts.append(f"{counts['failing']} failing")
     if counts["no_pr"]:
-        parts.append(f"{counts['no_pr']} no PR")
+        parts.append(f"{counts['no_pr']} no open PRs")
     print(f"Summary: {', '.join(parts)}")
