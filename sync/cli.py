@@ -117,6 +117,7 @@ def main():
     lp.add_argument("--merge", action="store_true", help="Merge passing PRs")
     lp.add_argument("--close", action="store_true", help="Close matching PRs")
     lp.add_argument("-c", "--comment", help="Comment to add when closing PRs")
+    lp.add_argument("--failed", action="store_true", help="Show only failing PRs with error details from CI logs")
 
     # list-issues
     li = subparsers.add_parser(

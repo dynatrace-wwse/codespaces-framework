@@ -85,3 +85,51 @@ assertDynakube(){
     printInfoSection "Verifying Dynakube is deployed and running"
 
 }
+
+assertRunningContainer(){
+  # Assert a Docker container is running by name (or partial name)
+  # Usage: assertRunningContainer <container-name>
+  if [ -z "$1" ]; then
+    printError "❌ assertRunningContainer: no container name provided"
+    exit 1
+  fi
+  CONTAINER_NAME="$1"
+  printInfoSection "Asserting Docker container '$CONTAINER_NAME' is running"
+
+  running=$(docker ps --filter "name=$CONTAINER_NAME" --format '{{.Names}}' | grep -c "$CONTAINER_NAME")
+
+  if [[ "$running" -gt 0 ]]; then
+    printInfo "✅ Container '$CONTAINER_NAME' is running"
+  else
+    printError "❌ Container '$CONTAINER_NAME' is NOT running"
+    docker ps -a --filter "name=$CONTAINER_NAME"
+    exit 1
+  fi
+}
+
+assertRunningHttp(){
+  # Assert an HTTP endpoint is responding (200 OK)
+  # Usage: assertRunningHttp <port> [path]
+  if [ -z "$1" ]; then
+    printError "❌ assertRunningHttp: no port provided"
+    exit 1
+  fi
+  PORT="$1"
+  PATH_SUFFIX="${2:-/}"
+  URL="http://127.0.0.1:${PORT}${PATH_SUFFIX}"
+
+  printInfoSection "Asserting HTTP endpoint $URL is responding"
+
+  # Retry up to 5 times with 3s delay
+  for i in $(seq 1 5); do
+    if curl --silent --fail --max-time 5 "$URL" > /dev/null 2>&1; then
+      printInfo "✅ HTTP $URL is responding"
+      return 0
+    fi
+    printInfo "Attempt $i/5 — waiting 3s..."
+    sleep 3
+  done
+
+  printError "❌ HTTP $URL is NOT responding after 5 attempts"
+  exit 1
+}

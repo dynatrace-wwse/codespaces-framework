@@ -83,6 +83,74 @@ def _close_pr(repo: str, pr_number: int, comment: str = None) -> bool:
     return result.returncode == 0
 
 
+# Patterns that indicate the root cause of a CI failure
+ERROR_PATTERNS = [
+    "No such file or directory",
+    "command not found",
+    "does not exist",
+    "ERROR",
+    "FAILED",
+    "error:",
+    "fatal:",
+    "Permission denied",
+    "timeout",
+    "TIMED OUT",
+]
+
+
+def _get_failed_check_logs(repo: str, pr_number: int) -> list[str]:
+    """Fetch CI logs for a failing PR and extract error lines."""
+    # Get the failed check run IDs
+    result = _gh(
+        ["pr", "checks", str(pr_number), "--json", "name,state,link"],
+        repo,
+    )
+    if result.returncode != 0:
+        return []
+
+    checks = json.loads(result.stdout) if result.stdout.strip() else []
+    failed_links = [c.get("link", "") for c in checks if c.get("state") == "FAILURE"]
+
+    if not failed_links:
+        return []
+
+    # Extract run ID from the link (e.g. .../runs/12345/job/67890)
+    import re
+    errors = []
+    for link in failed_links:
+        m = re.search(r"/runs/(\d+)", link)
+        if not m:
+            continue
+        run_id = m.group(1)
+
+        # Fetch the log via gh run view
+        log_result = subprocess.run(
+            ["gh", "run", "view", run_id, "--log-failed", "-R", repo],
+            capture_output=True, text=True, timeout=30,
+        )
+        if log_result.returncode != 0:
+            continue
+
+        # Extract error lines
+        for line in log_result.stdout.split("\n"):
+            for pattern in ERROR_PATTERNS:
+                if pattern in line:
+                    # Clean up the line: strip timestamp prefix
+                    clean = re.sub(r"^\S+\s+\S+\s+\d{4}-\d{2}-\d{2}T[\d:.Z]+\s*", "", line).strip()
+                    if clean and len(clean) > 5:
+                        errors.append(clean)
+                    break
+
+    # Deduplicate and limit
+    seen = set()
+    unique = []
+    for e in errors:
+        if e not in seen:
+            seen.add(e)
+            unique.append(e)
+    return unique[:10]
+
+
 CI_ICONS = {
     "passing": "✅",
     "failing": "❌",
@@ -98,6 +166,7 @@ def run(args):
     do_merge = args.merge
     do_close = getattr(args, "close", False)
     comment = getattr(args, "comment", None)
+    show_failed = getattr(args, "failed", False)
 
     repos = load_repos()
     if target_repo:
@@ -132,6 +201,14 @@ def run(args):
             ci = _get_ci_status(pr)
             icon = CI_ICONS.get(ci, "?")
 
+            # --failed: skip non-failing PRs
+            if show_failed and ci != "failing":
+                if ci == "passing":
+                    counts["passing"] += 1
+                elif ci == "pending":
+                    counts["pending"] += 1
+                continue
+
             print(f"  {icon} #{pr_number} [{ci}] {branch}")
             print(f"    {title}")
             print(f"    {pr_url}")
@@ -140,6 +217,15 @@ def run(args):
                 counts["passing"] += 1
             elif ci == "failing":
                 counts["failing"] += 1
+                # Fetch and show error details
+                if show_failed:
+                    print(f"    📋 Fetching CI logs...")
+                    errors = _get_failed_check_logs(entry.repo, pr_number)
+                    if errors:
+                        for err in errors:
+                            print(f"    💥 {err}")
+                    else:
+                        print(f"    ⚠️  Could not extract error details")
             elif ci == "pending":
                 counts["pending"] += 1
 
