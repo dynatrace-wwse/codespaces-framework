@@ -6,7 +6,7 @@ import sys
 from sync.core.repos import load_repos, validate_repos
 from sync.core.github_api import check_repo_exists, GHAPIError
 from sync.commands.migrate import (
-    _validate_devcontainer, _resolve_repo_path, _get_category_a,
+    _validate_devcontainer, _validate_readme, _resolve_repo_path, _get_category_a,
     SOURCE_FRAMEWORK_TEMPLATE, THIN_MAKEFILE,
 )
 
@@ -74,6 +74,9 @@ def _validate_local(repo_entry, repo_path):
             print(f"  ✅ Makefile matches template")
         else:
             print(f"  ⚠️  Makefile outdated — run sync migrate to update")
+
+    # Verify README badges and footer
+    _validate_readme(repo_entry, path)
 
 
 def run(args):

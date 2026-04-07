@@ -610,6 +610,74 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     return "migrated"
 
 
+README_BADGES_TEMPLATE = """\
+<!-- markdownlint-disable-next-line -->
+# <img src="https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg" alt="DT logo" width="30"> {title}
+
+[![Davis CoPilot](https://img.shields.io/badge/Davis%20CoPilot-AI%20Powered-purple?logo=dynatrace&logoColor=white)](https://dynatrace-wwse.github.io/codespaces-framework/dynatrace-integration/#mcp-server-integration)
+[![dt-badge](https://img.shields.io/badge/Powered_by-DT_Enablement-8A2BE2?logo=dynatrace)](https://dynatrace-wwse.github.io/codespaces-framework/)
+[![Downloads](https://img.shields.io/docker/pulls/shinojosa/dt-enablement?logo=docker)](https://hub.docker.com/r/shinojosa/dt-enablement)
+![Integration tests](https://github.com/{repo}/actions/workflows/integration-tests.yaml/badge.svg)
+[![Version](https://img.shields.io/github/v/release/{repo}?color=blueviolet)](https://github.com/{repo}/releases)
+[![Commits](https://img.shields.io/github/commits-since/{repo}/latest?color=ff69b4&include_prereleases)](https://github.com/{repo}/graphs/commit-activity)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?color=green)](https://github.com/{repo}/blob/main/LICENSE)
+[![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live-green)](https://{owner}.github.io/{name}/)
+"""
+
+README_FOOTER_TEMPLATE = """\
+## [📖 View the Lab Guide](https://{owner}.github.io/{name}/)
+"""
+
+
+def _validate_readme(entry, repo_path: Path):
+    """Validate README.md badges and footer link reference the correct repo."""
+    readme_path = repo_path / "README.md"
+    if not readme_path.exists():
+        print(f"    ⚠️  README.md missing")
+        return
+
+    content = readme_path.read_text()
+    owner = entry.owner
+    name = entry.repo_name
+    repo = entry.repo
+    issues = []
+
+    # Check badges reference the correct repo
+    expected_badges = [
+        f"github.com/{repo}/actions",
+        f"github.com/{repo}/releases",
+        f"github.com/{repo}/graphs",
+        f"github.com/{repo}/blob/main/LICENSE",
+        f"{owner}.github.io/{name}",
+    ]
+    for badge_url in expected_badges:
+        if badge_url not in content:
+            issues.append(f"missing badge: {badge_url}")
+
+    # Check for wrong repo references in badges (common when copying from template)
+    badge_repos = re.findall(r"github\.com/dynatrace-wwse/([\w-]+)/(?:actions|releases|graphs|blob)", content)
+    for found_repo in badge_repos:
+        if found_repo != name:
+            issues.append(f"badge references wrong repo: {found_repo} (should be {name})")
+
+    # Check footer link
+    pages_url = f"{owner}.github.io/{name}"
+    footer_links = re.findall(r"\[.*?\]\(https://[\w.-]+\.github\.io/([\w-]+)/?\)", content)
+    if not footer_links:
+        issues.append(f"missing footer link to GitHub Pages")
+    else:
+        for link_name in footer_links:
+            if link_name != name and "codespaces-framework" not in link_name:
+                issues.append(f"footer links to wrong repo: {link_name} (should be {name})")
+
+    if issues:
+        print(f"    ⚠️  README.md: {len(issues)} issue(s)")
+        for issue in issues:
+            print(f"      ⚠️  {issue}")
+    else:
+        print(f"    ✅ README.md badges and links valid")
+
+
 def _migrate_env_location(repo_path: Path):
     """Move .env from runlocal/ to .devcontainer/ and update all references."""
     devcontainer = repo_path / ".devcontainer"
@@ -671,6 +739,9 @@ def _migrate_env_location(repo_path: Path):
                 )
                 wf_path.write_text(content)
                 print(f"    updated {wf_name}")
+
+    # ── Phase 10: Validate and fix README badges ──
+    _validate_readme(entry, repo_path)
 
     # Update docs referencing old .env path
     docs_dir = repo_path / "docs"
