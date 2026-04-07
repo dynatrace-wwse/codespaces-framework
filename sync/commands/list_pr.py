@@ -98,7 +98,7 @@ def run(args):
             print(f"x '{target_repo}' not found in repos.yaml", file=sys.stderr)
             sys.exit(1)
     else:
-        repos = filter_sync_targets(repos)
+        repos = [r for r in repos if r.status == "active"]
 
     head_filter = f"{SYNC_BRANCH_PREFIX}{version}" if version else None
     print(f"Listing open PRs{f' for branch {head_filter}' if head_filter else ''} across {len(repos)} repos\n")

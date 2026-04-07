@@ -183,6 +183,15 @@ repos:
     description: "Remote dev environment setup for Dynatrace enablement"
     tags: [infrastructure]
 
+  # ── Framework (source of truth, not synced but managed) ──
+  - name: codespaces-framework
+    repo: dynatrace-wwse/codespaces-framework
+    status: active
+    maintainer: "@shinojosa"
+    description: "Enablement framework — container image, sync CLI, core functions"
+    sync_managed: false
+    tags: [framework]
+
   # ── Non-framework repos (registered for registry, not synced) ──
   - name: dynatrace-wwse.github.io
     repo: dynatrace-wwse/dynatrace-wwse.github.io

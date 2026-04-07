@@ -66,7 +66,7 @@ def run(args):
             print(f"❌ '{target_repo}' not found in repos.yaml", file=sys.stderr)
             sys.exit(1)
     else:
-        repos = filter_sync_targets(repos)
+        repos = [r for r in repos if r.status == "active"]
 
     print(f"{'[DRY RUN] ' if dry_run else ''}Protecting main branch across {len(repos)} repos\n")
 
