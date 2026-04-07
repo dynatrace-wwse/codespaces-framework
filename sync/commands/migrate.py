@@ -619,7 +619,7 @@ README_BADGES_TEMPLATE = """\
 [![Dynatrace](https://img.shields.io/badge/Dynatrace-Intelligence-purple?logo=dynatrace&logoColor=white)](https://dynatrace-wwse.github.io/codespaces-framework/dynatrace-integration/#mcp-server-integration)
 [![Mastering](https://img.shields.io/badge/Mastering-Complexity-8A2BE2?logo=dynatrace)](https://dynatrace-wwse.github.io)
 [![Downloads](https://img.shields.io/docker/pulls/shinojosa/dt-enablement?logo=docker)](https://hub.docker.com/r/shinojosa/dt-enablement)
-![Integration tests](https://github.com/{repo}/actions/workflows/integration-tests.yaml/badge.svg)
+[![Integration tests](https://github.com/{repo}/actions/workflows/integration-tests.yaml/badge.svg)](https://github.com/{repo}/actions)
 [![Version](https://img.shields.io/github/v/release/{repo}?color=blueviolet)](https://github.com/{repo}/releases)
 [![Commits](https://img.shields.io/github/commits-since/{repo}/latest?color=ff69b4&include_prereleases)](https://github.com/{repo}/graphs/commit-activity)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?color=green)](https://github.com/{repo}/blob/main/LICENSE)
@@ -662,9 +662,24 @@ def _validate_readme(entry, repo_path: Path):
             content = content.replace(old, new)
             changed = True
 
+    # Fix integration tests badge: plain image → linked to /actions
+    # ![Integration tests](badge.svg) → [![Integration tests](badge.svg)](repo/actions)
+    unlinked_badge = re.search(
+        r'(?<!\[)!\[Integration tests\]\((https://github\.com/[^)]+/badge\.svg)\)',
+        content,
+    )
+    if unlinked_badge:
+        old_badge = unlinked_badge.group(0)
+        badge_svg = unlinked_badge.group(1)
+        # Extract repo URL from badge SVG path
+        actions_url = re.sub(r'/actions/workflows/.*', '/actions', badge_svg)
+        new_badge = f"[![Integration tests]({badge_svg})]({actions_url})"
+        content = content.replace(old_badge, new_badge)
+        changed = True
+
     if changed:
         readme_path.write_text(content)
-        print(f"    🔄 README.md badges updated (Dynatrace Intelligence + Mastering Complexity)")
+        print(f"    🔄 README.md badges updated")
 
     # Check badges reference the correct repo
     expected_badges = [
