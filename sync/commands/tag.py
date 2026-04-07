@@ -9,6 +9,7 @@ Repo version is auto-detected from the latest combined tag, or starts at 1.0.0.
 Use --bump to increment the repo version part (patch/minor/major).
 """
 
+import re
 import subprocess
 import sys
 
@@ -155,10 +156,11 @@ def run(args):
 
                 body_parts = [
                     f"## 📋 Release {release_name}\n",
-                    f"| Component | Version |",
-                    f"|-----------|---------|",
-                    f"| Framework | `{target}` |",
-                    f"| Repository | `{repo_version}` |",
+                    f"| | |",
+                    f"|---|---|",
+                    f"| **Framework version** | `{target}` |",
+                    f"| **Repository version** | `{repo_version}` |",
+                    f"| **Previous release** | `{previous_tag or 'initial'}` |",
                     f"",
                     f"### 🔄 What's Changed\n",
                 ]
@@ -167,11 +169,21 @@ def run(args):
                     body_parts.append(f"- **Repo version bump**: `{bump_part}` ({previous_tag or '1.0.0'} → {new_tag})")
 
                 body_parts.extend([
-                    f"- Synced to framework **{target}** (versioned pull model)",
+                    f"- Synced to framework **{target}** ([versioned pull model](https://dynatrace-wwse.github.io/codespaces-framework/framework/#versioned-pull-model))",
                     f"- Templates updated (`source_framework.sh`, `Makefile`)",
                     f"- README badges refreshed",
                     f"",
                 ])
+
+                # Categorize commits
+                if commits:
+                    from sync.commands.release import _categorize_commits
+                    categories = _categorize_commits(commits)
+                    for label, items in categories.items():
+                        body_parts.append(f"### {label}\n")
+                        for item in items:
+                            body_parts.append(f"- {item}")
+                        body_parts.append("")
 
                 if prs:
                     body_parts.append("### 📝 Merged Pull Requests\n")

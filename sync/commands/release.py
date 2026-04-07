@@ -76,20 +76,64 @@ def _get_changelog(previous_tag: str) -> tuple[list[str], list[str]]:
     return commits, prs
 
 
+COMMIT_CATEGORIES = {
+    "feat": "✨ Features",
+    "fix": "🐛 Bug Fixes",
+    "docs": "📝 Documentation",
+    "chore": "🔧 Maintenance",
+    "refactor": "♻️ Refactoring",
+    "test": "🧪 Tests",
+    "perf": "⚡ Performance",
+    "ci": "🏗️ CI/CD",
+}
+
+
+def _categorize_commits(commits: list[str]) -> dict[str, list[str]]:
+    """Group commits by conventional commit prefix."""
+    categories = {}
+    other = []
+    for commit in commits:
+        # Strip hash prefix (abc1234 feat: message → feat: message)
+        msg = commit.split(" ", 1)[-1] if " " in commit else commit
+        matched = False
+        for prefix, label in COMMIT_CATEGORIES.items():
+            if msg.lower().startswith(f"{prefix}:") or msg.lower().startswith(f"{prefix}("):
+                # Clean up the message: remove prefix
+                clean = re.sub(rf"^{prefix}[:(][^)]*\)?:\s*", "", msg, flags=re.IGNORECASE)
+                categories.setdefault(label, []).append(clean)
+                matched = True
+                break
+        if not matched:
+            other.append(msg)
+    if other:
+        categories["📋 Other Changes"] = other
+    return categories
+
+
 def _create_github_release(tag: str, previous_tag: str) -> str | None:
-    """Create a GitHub Release with changelog. Returns release URL or None."""
+    """Create a GitHub Release with categorized changelog. Returns release URL or None."""
     commits, prs = _get_changelog(previous_tag)
 
     body_parts = [
         f"## 📋 Framework Release {tag}\n",
+        f"| | |",
+        f"|---|---|",
+        f"| **Framework version** | `{tag}` |",
+        f"| **Previous version** | `{previous_tag}` |",
+        f"| **Commits** | {len(commits)} |",
+        f"",
     ]
 
+    # Categorized commits
     if commits:
-        body_parts.append("### 🔄 Changes\n")
-        for commit in commits[:30]:
-            body_parts.append(f"- {commit}")
-        body_parts.append("")
+        categories = _categorize_commits(commits)
+        for label, items in categories.items():
+            body_parts.append(f"### {label}\n")
+            for item in items:
+                body_parts.append(f"- {item}")
+            body_parts.append("")
 
+    # Merged PRs
     if prs:
         body_parts.append("### 📝 Merged Pull Requests\n")
         body_parts.extend(prs)
