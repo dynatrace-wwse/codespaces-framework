@@ -9,54 +9,118 @@ cd codespaces-framework
 PYTHONPATH=. python3 -m sync.cli <command> [options]
 ```
 
-## Workflow: Migrating repos to the versioned pull model
+## Workflow: Full release cycle
 
-### 1. Validate current state
+```mermaid
+graph LR
+    A[Release] --> B[Push Update]
+    B --> C[Monitor PRs]
+    C --> D[Merge]
+    D --> E[Tag + Release]
+    E --> F[Cleanup]
+```
+
+### 1. Release a new framework version
 
 ```bash
-# Check repos.yaml schema, GitHub accessibility, and local clone state
-PYTHONPATH=. python3 -m sync.cli validate
+# Create GitHub Release for the current tag (no bump)
+sync release
+
+# Bump patch (1.2.5 → 1.2.6), tag, push, create GitHub Release
+sync release --part patch
+
+# Preview
+sync release --part patch --dry-run
+```
+
+### 2. Push updates to all repos
+
+```bash
+# Preview
+sync push-update --framework-version 1.2.6 --dry-run
+
+# Execute: pull main → branch → full migrate → commit → push → PR
+sync push-update --framework-version 1.2.6
+
+# Re-push changes at the same version (e.g. badge updates, template fixes)
+sync push-update --framework-version 1.2.6 --force
+
+# Target a specific repo
+sync push-update --framework-version 1.2.6 --repo enablement-codespaces-template
+```
+
+### 3. Monitor PRs and merge
+
+```bash
+# List all open PRs with CI status
+sync list-pr
+
+# Filter to sync PRs for a specific version
+sync list-pr --framework-version 1.2.6
+
+# Merge passing PRs
+sync list-pr --merge
+
+# Close old PRs (e.g. superseded by a new version)
+sync list-pr --framework-version 1.2.5 --close -c "Superseded by 1.2.6"
+
+# Approve + merge (approve skips own PRs, merge still works)
+sync list-pr --approve --merge
+```
+
+### 4. Tag and release consumer repos
+
+```bash
+# Create combined version tags (v1.2.6_1.0.0)
+sync tag --framework-version 1.2.6
+
+# Bump repo version and create GitHub Releases
+sync tag --framework-version 1.2.6 --bump patch --release
+
+# Preview
+sync tag --framework-version 1.2.6 --bump patch --release --dry-run
+```
+
+### 5. Cleanup
+
+```bash
+# Delete merged branches (local + remote)
+sync cleanup-branches
+
+# Preview first
+sync cleanup-branches --dry-run
+```
+
+---
+
+## Local development workflow
+
+### Validate current state
+
+```bash
+# Full validation: schema + GitHub + devcontainer.json + templates + README badges
+sync validate
 
 # Validate a specific repo
-PYTHONPATH=. python3 -m sync.cli validate --repo enablement-dynatrace-log-ingest-101
+sync validate --repo enablement-codespaces-template
 ```
 
-Shows: devcontainer.json validation, Category A leftovers (framework files that should be removed), template freshness (source_framework.sh, Makefile).
-
-### 2. Dry-run migration
+### Migrate repos locally (preview/audit)
 
 ```bash
-# Preview what migrate would do across all sync-managed repos
-PYTHONPATH=. python3 -m sync.cli migrate --dry-run
+# Preview what migration would do
+sync migrate --dry-run
 
-# Preview for a specific repo
-PYTHONPATH=. python3 -m sync.cli migrate --repo enablement-codespaces-template --dry-run
-```
-
-### 3. Run migration
-
-```bash
-# Migrate all sync-managed repos in repos.yaml
-PYTHONPATH=. python3 -m sync.cli migrate
+# Run migration on all sync-managed repos (no git operations)
+sync migrate
 
 # Migrate a specific repo
-PYTHONPATH=. python3 -m sync.cli migrate --repo enablement-codespaces-template
+sync migrate --repo enablement-codespaces-template
 ```
 
-What migrate does per repo:
-- Removes **Category A files** (framework-owned): `functions.sh`, `variables.sh`, `greeting.sh`, `test_functions.sh`, `makefile.sh`, `helper.sh`, `Dockerfile`, `entrypoint.sh`, `kind-cluster.yml`, `apps/`, `p10k/`, `yaml/`
-- Installs/updates **thin Makefile** (delegates to cached `makefile.sh`)
-- Installs/updates **source_framework.sh** (versioned pull + two-tier cache)
-- Migrates **mkdocs.yaml** to `INHERIT: mkdocs-base.yaml` pattern
-- Extracts **RUM snippet** from `main.html` into `mkdocs.yaml`
-- Updates **deploy-ghpages.yaml** to fetch `mkdocs-base.yaml` at framework version
-- Relocates **.env** from `runlocal/.env` to `.devcontainer/.env`
-- Updates **.vscode/mcp.json**, **.gitignore**, **devcontainer.json** comment, **CI workflows**, and **docs** to the new `.env` path
-
-### 4. Review changes
+### Review changes
 
 ```bash
-# Check diffs per repo
 for repo in enablement-dynatrace-log-ingest-101 remote-environment enablement-codespaces-template; do
   echo "── $repo ──"
   git -C ../$repo diff --stat
@@ -64,19 +128,17 @@ for repo in enablement-dynatrace-log-ingest-101 remote-environment enablement-co
 done
 ```
 
-### 5. Revert if needed
+### Revert if needed
 
 ```bash
-# Revert all repos to last committed state
-PYTHONPATH=. python3 -m sync.cli revert
+# Revert all repos
+sync revert
 
 # Revert a specific repo
-PYTHONPATH=. python3 -m sync.cli revert --repo enablement-codespaces-template
+sync revert --repo enablement-codespaces-template
 ```
 
-### 6. Test locally
-
-From a migrated repo:
+### Test locally
 
 ```bash
 cd ../enablement-codespaces-template/.devcontainer
@@ -84,33 +146,62 @@ cd ../enablement-codespaces-template/.devcontainer
 # Create .env with your secrets (or empty file)
 touch .env
 
-# Start container (bootstraps cache + runs docker)
+# Start container
 make start
 
-# Full clean restart (kill containers, clear cache, re-bootstrap)
+# Full clean restart (kill containers, clear cache, fresh start)
 make clean-start
 ```
 
-### 7. Push updates across repos (the full workflow)
+---
 
-After tagging a new framework version, `push-update` is the one command that does everything:
-pull main → create branch → run full migration → commit → push → create PR.
+## Repository management
+
+### Clone repos
 
 ```bash
-# Preview which repos need updating
-PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5 --dry-run
+# Clone all sync-managed repos
+sync clone
 
-# Create PRs for all sync-managed repos
-PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5
+# Include non-sync-managed repos (website, tracker, framework)
+sync clone --all
 
-# Target a specific repo
-PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5 --repo enablement-codespaces-template
-
-# Enable auto-merge on the PRs
-PYTHONPATH=. python3 -m sync.cli push-update --framework-version 1.2.5 --auto-merge
+# Clone a specific repo
+sync clone --repo demo-opentelemetry
 ```
 
-On failure at any step, the branch is left in place for manual intervention.
+### Protect main branch
+
+```bash
+# Preview
+sync protect-main --dry-run
+
+# Apply branch protection (require CI, enforce admins)
+sync protect-main
+
+# Specific repo
+sync protect-main --repo remote-environment
+```
+
+### Check issues
+
+```bash
+# List all open issues
+sync list-issues
+
+# Filter by label
+sync list-issues --label bug
+
+# Specific repo
+sync list-issues --repo enablement-codespaces-template
+```
+
+### Check version drift
+
+```bash
+# Show which repos are behind
+sync status
+```
 
 ---
 
@@ -118,25 +209,56 @@ On failure at any step, the branch is left in place for manual intervention.
 
 | | `migrate` | `push-update` |
 |---|---|---|
-| Purpose | Local audit and preview | Full end-to-end workflow |
+| Purpose | Local preview/audit | Full end-to-end workflow |
 | Git operations | None (works on working tree) | Pull main, branch, commit, push, create PR |
-| When to use | Testing migration locally, dry-runs | Deploying a new framework version to repos |
+| When to use | Testing migration locally | Deploying a new framework version |
+
+---
 
 ## All commands
 
+### Migration & Updates
+
 | Command | Description |
 |---------|-------------|
-| `push-update` | Full workflow: pull main, branch, migrate, commit, push, create PR. Use `--auto-merge` to enable auto-merge. |
-| `migrate` | Local migration preview/audit. Removes framework files, installs templates. No git operations. |
-| `validate` | Validate `repos.yaml` schema, GitHub accessibility, and local clone state (devcontainer.json, templates, migration status). |
-| `revert` | Revert uncommitted changes in repos (`git checkout -- . && git clean -fd`). |
-| `status` | Show version drift across repos (which repos are behind the latest framework version). |
-| `diff` | Preview what `push-update` would change. |
-| `list` | List registered repos from `repos.yaml`. Supports `--sync-managed`, `--ci-enabled`, `--json`. |
-| `tag` | Create combined version tags (`vX.Y.Z_A.B.C`) after sync PRs merge. |
-| `bump-repo-version` | Increment a repo's version component (patch/minor/major). |
-| `migrate-mkdocs` | Standalone mkdocs.yaml migration to INHERIT pattern (also runs as part of `migrate`). |
-| `generate-registry` | Generate HTML registry page from `repos.yaml`. |
+| `push-update` | Pull main → branch → migrate → push → PR. `--force` to re-push, `--auto-merge` for auto-merge. |
+| `migrate` | Local migration audit. No git operations. |
+| `revert` | Revert uncommitted changes in repos. |
+| `validate` | Check schema, GitHub, devcontainer.json, templates, README badges. |
+
+### Versioning & Releases
+
+| Command | Description |
+|---------|-------------|
+| `release` | Create GitHub Release for current tag, or `--part patch/minor/major` to bump first. |
+| `tag` | Create combined tags (`v1.2.6_1.0.1`) on consumer repos. `--bump`, `--release`. |
+
+### Repository Management
+
+| Command | Description |
+|---------|-------------|
+| `clone` | Clone repos from repos.yaml. `--all` for non-sync-managed too. |
+| `protect-main` | Apply branch protection (CI required, enforce admins). |
+| `cleanup-branches` | Delete merged branches (local + remote). |
+
+### Monitoring
+
+| Command | Description |
+|---------|-------------|
+| `list-pr` | List open PRs with CI status. `--approve`, `--merge`, `--close -c "reason"`. |
+| `list-issues` | List open issues. `--label` filter. |
+| `status` | Show framework version drift. |
+| `list` | List repos from repos.yaml. `--sync-managed`, `--json`. |
+
+### Other
+
+| Command | Description |
+|---------|-------------|
+| `bump-repo-version` | Bump a repo's version component. |
+| `migrate-mkdocs` | Standalone mkdocs migration (also runs inside `migrate`). |
+| `generate-registry` | Generate HTML registry page from repos.yaml. |
+
+---
 
 ## Key files
 
@@ -147,11 +269,18 @@ On failure at any step, the branch is left in place for manual intervention.
 | `sync/core/version.py` | Version parsing, bumping, `FRAMEWORK_VERSION` extraction |
 | `sync/core/github_api.py` | GitHub API wrapper via `gh` CLI |
 | `sync/core/local_git.py` | Local git operations (clone, pull, branch, commit, push) |
-| `sync/commands/migrate.py` | Migration logic, Category A/B file lists, templates (source_framework.sh, Makefile) |
+| `sync/commands/migrate.py` | Migration logic, file classification, all templates |
 | `sync/commands/push_update.py` | Local-first push-update workflow |
 | `sync/commands/validate.py` | Schema + GitHub + local clone validation |
+| `sync/commands/release.py` | Framework release with categorized changelog |
+| `sync/commands/tag.py` | Consumer repo tagging with GitHub Releases |
+| `sync/commands/list_pr.py` | PR listing, approve, merge, close |
+| `sync/commands/list_issues.py` | Issue listing across repos |
+| `sync/commands/protect_main.py` | Branch protection rules |
+| `sync/commands/cleanup_branches.py` | Merged branch cleanup |
+| `sync/commands/clone.py` | Repo cloning |
 | `sync/commands/revert.py` | Revert uncommitted changes |
-| `repos.yaml` | Registry of all repos with metadata (status, maintainer, image_tier, tags) |
+| `repos.yaml` | Registry of all repos with metadata |
 
 ## Image tiers
 
