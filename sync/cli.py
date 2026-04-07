@@ -124,6 +124,15 @@ def main():
     li.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     li.add_argument("--label", help="Filter by label")
 
+    # clone
+    cl = subparsers.add_parser(
+        "clone",
+        help="Clone all repos from repos.yaml that aren't local yet",
+    )
+    cl.add_argument("--repo", help="Clone a specific repo")
+    cl.add_argument("--all", action="store_true", dest="clone_all",
+                    help="Include non-sync-managed repos (website, tracker, etc.)")
+
     # protect-main
     pm = subparsers.add_parser(
         "protect-main",
@@ -180,6 +189,8 @@ def main():
         from sync.commands.list_pr import run
     elif args.command == "list-issues":
         from sync.commands.list_issues import run
+    elif args.command == "clone":
+        from sync.commands.clone import run
     elif args.command == "protect-main":
         from sync.commands.protect_main import run
     elif args.command == "cleanup-branches":
