@@ -124,6 +124,22 @@ def main():
     li.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     li.add_argument("--label", help="Filter by label")
 
+    # protect-main
+    pm = subparsers.add_parser(
+        "protect-main",
+        help="Enable branch protection on main (require CI, enforce admins)",
+    )
+    pm.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
+    pm.add_argument("--dry-run", action="store_true", help="Preview without applying")
+
+    # cleanup-branches
+    cb = subparsers.add_parser(
+        "cleanup-branches",
+        help="Delete merged branches (local + remote) across repos",
+    )
+    cb.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
+    cb.add_argument("--dry-run", action="store_true", help="List branches without deleting")
+
     # revert
     rv = subparsers.add_parser(
         "revert",
@@ -164,6 +180,10 @@ def main():
         from sync.commands.list_pr import run
     elif args.command == "list-issues":
         from sync.commands.list_issues import run
+    elif args.command == "protect-main":
+        from sync.commands.protect_main import run
+    elif args.command == "cleanup-branches":
+        from sync.commands.cleanup_branches import run
     elif args.command == "revert":
         from sync.commands.revert import run
     elif args.command == "generate-registry":
