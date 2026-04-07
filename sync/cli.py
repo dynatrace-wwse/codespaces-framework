@@ -114,7 +114,9 @@ def main():
     lp.add_argument("--framework-version", help="Filter PRs by sync branch version")
     lp.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     lp.add_argument("--approve", action="store_true", help="Approve PRs with passing CI")
-    lp.add_argument("--merge", action="store_true", help="Merge approved PRs")
+    lp.add_argument("--merge", action="store_true", help="Merge passing PRs")
+    lp.add_argument("--close", action="store_true", help="Close matching PRs")
+    lp.add_argument("-c", "--comment", help="Comment to add when closing PRs")
 
     # list-issues
     li = subparsers.add_parser(

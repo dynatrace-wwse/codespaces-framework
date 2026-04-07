@@ -76,6 +76,13 @@ def _merge_pr(repo: str, pr_number: int) -> bool:
     return result.returncode == 0
 
 
+def _close_pr(repo: str, pr_number: int, comment: str = None) -> bool:
+    if comment:
+        _gh(["pr", "comment", str(pr_number), "--body", comment], repo)
+    result = _gh(["pr", "close", str(pr_number), "--delete-branch"], repo)
+    return result.returncode == 0
+
+
 CI_ICONS = {
     "passing": "✅",
     "failing": "❌",
@@ -89,6 +96,8 @@ def run(args):
     target_repo = getattr(args, "repo", None)
     do_approve = args.approve
     do_merge = args.merge
+    do_close = getattr(args, "close", False)
+    comment = getattr(args, "comment", None)
 
     repos = load_repos()
     if target_repo:
@@ -150,10 +159,21 @@ def run(args):
                 else:
                     print(f"    ❌ merge failed")
 
+            if do_close:
+                closed = _close_pr(entry.repo, pr_number, comment)
+                if closed:
+                    print(f"    🗑️  closed" + (f" — {comment}" if comment else ""))
+                    counts.setdefault("closed", 0)
+                    counts["closed"] += 1
+                else:
+                    print(f"    ❌ close failed")
+
         print()
 
     # Summary
     parts = []
+    if counts.get("closed"):
+        parts.append(f"{counts['closed']} closed")
     if counts["approved"]:
         parts.append(f"{counts['approved']} approved")
     if counts["merged"]:
