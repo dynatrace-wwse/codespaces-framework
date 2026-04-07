@@ -140,15 +140,15 @@ def run(args):
                     print(f"    → approved")
                     counts["approved"] += 1
                 else:
-                    print(f"    → approve failed (can't approve own PR?)")
+                    print(f"    → approve skipped (can't approve own PR)")
 
-                if do_merge and ok:
-                    merged = _merge_pr(entry.repo, pr_number)
-                    if merged:
-                        print(f"    → merged")
-                        counts["merged"] += 1
-                    else:
-                        print(f"    → merge failed")
+            if do_merge and ci == "passing":
+                merged = _merge_pr(entry.repo, pr_number)
+                if merged:
+                    print(f"    → merged")
+                    counts["merged"] += 1
+                else:
+                    print(f"    → merge failed")
 
         print()
 
