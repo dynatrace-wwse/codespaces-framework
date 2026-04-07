@@ -84,6 +84,19 @@ def main():
     )
     mi.add_argument("--dry-run", action="store_true", help="Audit only, no changes")
 
+    # release
+    rl = subparsers.add_parser(
+        "release",
+        help="Bump framework version, tag, push, and update default version",
+    )
+    rl.add_argument(
+        "--part",
+        choices=["patch", "minor", "major"],
+        default="patch",
+        help="Version part to bump (default: patch)",
+    )
+    rl.add_argument("--dry-run", action="store_true", help="Preview without tagging/pushing")
+
     # list-pr
     lp = subparsers.add_parser(
         "list-pr",
@@ -136,6 +149,8 @@ def main():
         from sync.commands.list_cmd import run
     elif args.command == "migrate":
         from sync.commands.migrate import run
+    elif args.command == "release":
+        from sync.commands.release import run
     elif args.command == "list-pr":
         from sync.commands.list_pr import run
     elif args.command == "list-issues":
