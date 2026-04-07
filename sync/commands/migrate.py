@@ -434,7 +434,20 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
 
     has_source_fw = (repo_path / ".devcontainer/util/source_framework.sh").exists()
 
-    # ── Phase 1b: Validate devcontainer.json ──
+    # ── Phase 1b: Fix devcontainer.json image version + validate ──
+    dc_path = repo_path / ".devcontainer/devcontainer.json"
+    if dc_path.exists():
+        dc_raw = dc_path.read_text()
+        # Auto-fix old image versions (v1.0, v1.1 → v1.2)
+        if '"shinojosa/dt-enablement:v1.1"' in dc_raw or '"shinojosa/dt-enablement:v1.0"' in dc_raw:
+            dc_raw = dc_raw.replace(
+                '"shinojosa/dt-enablement:v1.1"', '"shinojosa/dt-enablement:v1.2"'
+            ).replace(
+                '"shinojosa/dt-enablement:v1.0"', '"shinojosa/dt-enablement:v1.2"'
+            )
+            dc_path.write_text(dc_raw)
+            print(f"    🔄 devcontainer.json image bumped to v1.2")
+
     dc_issues = _validate_devcontainer(repo_path)
     if dc_issues:
         print(f"    devcontainer.json: {len(dc_issues)} issue(s)")
@@ -645,6 +658,13 @@ OLD_BADGES = {
 def _validate_readme(entry, repo_path: Path):
     """Validate README.md badges and footer link reference the correct repo."""
     readme_path = repo_path / "README.md"
+
+    # Rename readme.md to README.md if needed
+    readme_lower = repo_path / "readme.md"
+    if not readme_path.exists() and readme_lower.exists():
+        readme_lower.rename(readme_path)
+        print(f"    🔄 renamed readme.md → README.md")
+
     if not readme_path.exists():
         print(f"    ⚠️  README.md missing")
         return
@@ -681,17 +701,40 @@ def _validate_readme(entry, repo_path: Path):
         readme_path.write_text(content)
         print(f"    🔄 README.md badges updated")
 
-    # Check badges reference the correct repo
+    # Check and add missing badges
     expected_badges = [
-        f"github.com/{repo}/actions",
-        f"github.com/{repo}/releases",
-        f"github.com/{repo}/graphs",
-        f"github.com/{repo}/blob/main/LICENSE",
-        f"{owner}.github.io/{name}",
+        (f"github.com/{repo}/actions", f"[![Integration tests](https://github.com/{repo}/actions/workflows/integration-tests.yaml/badge.svg)](https://github.com/{repo}/actions)"),
+        (f"github.com/{repo}/releases", f"[![Version](https://img.shields.io/github/v/release/{repo}?color=blueviolet)](https://github.com/{repo}/releases)"),
+        (f"github.com/{repo}/graphs", f"[![Commits](https://img.shields.io/github/commits-since/{repo}/latest?color=ff69b4&include_prereleases)](https://github.com/{repo}/graphs/commit-activity)"),
+        (f"github.com/{repo}/blob/main/LICENSE", f"[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?color=green)](https://github.com/{repo}/blob/main/LICENSE)"),
+        (f"{owner}.github.io/{name}", f"[![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live-green)](https://{owner}.github.io/{name}/)"),
     ]
-    for badge_url in expected_badges:
+    missing_badges = []
+    for badge_url, badge_md in expected_badges:
         if badge_url not in content:
+            missing_badges.append(badge_md)
             issues.append(f"missing badge: {badge_url}")
+
+    # Insert missing badges after the first heading line
+    if missing_badges:
+        lines = content.split("\n")
+        insert_idx = None
+        for i, line in enumerate(lines):
+            if line.startswith("#"):
+                # Find the last consecutive badge line after heading
+                j = i + 1
+                while j < len(lines) and (lines[j].startswith("[![") or lines[j].startswith("![") or lines[j].strip() == ""):
+                    j += 1
+                insert_idx = j
+                break
+        if insert_idx is not None:
+            for badge in missing_badges:
+                lines.insert(insert_idx, badge)
+                insert_idx += 1
+            content = "\n".join(lines)
+            readme_path.write_text(content)
+            changed = True
+            print(f"    📝 added {len(missing_badges)} missing badge(s)")
 
     # Check for wrong repo references in badges (common when copying from template)
     badge_repos = re.findall(r"github\.com/dynatrace-wwse/([\w-]+)/(?:actions|releases|graphs|blob)", content)
