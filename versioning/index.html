@@ -536,6 +536,24 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#version-pin" class="md-nav__link">
+    <span class="md-ellipsis">
+      Version Pin
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tagging-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      Tagging Workflow
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#benefits" class="md-nav__link">
     <span class="md-ellipsis">
       Benefits
@@ -670,6 +688,24 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#version-pin" class="md-nav__link">
+    <span class="md-ellipsis">
+      Version Pin
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tagging-workflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      Tagging Workflow
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#benefits" class="md-nav__link">
     <span class="md-ellipsis">
       Benefits
@@ -712,7 +748,7 @@ document.addEventListener('DOMContentLoaded', function() {
 <h2 id="versioning-policy">📋 Versioning Policy<a class="headerlink" href="#versioning-policy" title="Permanent link">#</a></h2>
 <p>This framework and its repositories follow a consistent versioning scheme to ensure clarity and compatibility.</p>
 <h3 id="format">Format<a class="headerlink" href="#format" title="Permanent link">#</a></h3>
-<p>Versions use the format: <strong><code>&lt;framework_version&gt;+&lt;repository_version&gt;</code></strong></p>
+<p>Versions use the format: <strong><code>v&lt;framework_version&gt;_&lt;repository_version&gt;</code></strong></p>
 <p>Both components follow <a href="https://semver.org/">Semantic Versioning</a> (<code>MAJOR.MINOR.PATCH</code>):</p>
 <ul>
 <li><strong>Framework version</strong>: Infrastructure and technical components</li>
@@ -738,28 +774,42 @@ document.addEventListener('DOMContentLoaded', function() {
 </thead>
 <tbody>
 <tr>
-<td><code>1.0.0+1.0.0</code></td>
-<td>Initial release (framework v1.0.0, repository v1.0.0)</td>
+<td><code>v1.0.0_1.0.0</code></td>
+<td>Initial release</td>
 </tr>
 <tr>
-<td><code>1.1.0+1.0.0</code></td>
-<td>Framework upgraded to v1.1.0, repository unchanged</td>
+<td><code>v1.2.0_1.0.0</code></td>
+<td>Framework upgraded, repository unchanged</td>
 </tr>
 <tr>
-<td><code>1.1.0+1.1.0</code></td>
-<td>Repository upgraded to v1.1.0, framework remains v1.1.0</td>
+<td><code>v1.2.0_1.1.0</code></td>
+<td>Repository upgraded, framework unchanged</td>
 </tr>
 <tr>
-<td><code>1.1.2+1.1.1</code></td>
-<td>Framework patch (v1.1.2) and repository patch (v1.1.1)</td>
+<td><code>v1.2.5_1.0.3</code></td>
+<td>Framework at 1.2.5, repository at patch 1.0.3</td>
 </tr>
 </tbody>
 </table>
+<h3 id="version-pin">Version Pin<a class="headerlink" href="#version-pin" title="Permanent link">#</a></h3>
+<p>Each repo pins its framework version in <code>.devcontainer/util/source_framework.sh</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">FRAMEWORK_VERSION</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">FRAMEWORK_VERSION</span><span class="k">:-</span><span class="nv">1</span><span class="p">.2.5</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>The Sync CLI manages this pin across all repos via <code>push-update</code>.</p>
+<h3 id="tagging-workflow">Tagging Workflow<a class="headerlink" href="#tagging-workflow" title="Permanent link">#</a></h3>
+<p>After syncing all repos to a framework version and merging PRs:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Create combined tags on all repos</span>
+sync<span class="w"> </span>tag<span class="w"> </span>--framework-version<span class="w"> </span><span class="m">1</span>.2.5
+
+<span class="c1"># Bump repo version and create GitHub Releases</span>
+sync<span class="w"> </span>tag<span class="w"> </span>--framework-version<span class="w"> </span><span class="m">1</span>.2.5<span class="w"> </span>--bump<span class="w"> </span>patch<span class="w"> </span>--release
+</code></pre></div>
 <h3 id="benefits">Benefits<a class="headerlink" href="#benefits" title="Permanent link">#</a></h3>
 <ul>
 <li><strong>Clarity</strong>: Immediate visibility of framework and repository versions</li>
 <li><strong>Compatibility</strong>: Aligns with SemVer and tooling expectations</li>
 <li><strong>Flexibility</strong>: Independent evolution of framework and repositories</li>
+<li><strong>Automation</strong>: Sync CLI manages version bumps, tags, and releases across all repos</li>
 </ul>
 <div class="grid cards">
 <ul>
