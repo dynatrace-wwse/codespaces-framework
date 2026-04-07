@@ -21,7 +21,7 @@ def _revert_repo(repo_path: Path) -> tuple[bool, str]:
     )
     changes = result.stdout.strip()
     if not changes:
-        return True, "clean — nothing to revert"
+        return True, "✅ clean — nothing to revert"
 
     change_count = len(changes.splitlines())
 
@@ -37,7 +37,7 @@ def _revert_repo(repo_path: Path) -> tuple[bool, str]:
         cwd=repo_path, capture_output=True, text=True,
     )
 
-    return True, f"reverted {change_count} changes"
+    return True, f"🔄 reverted {change_count} changes"
 
 
 def run(args):
@@ -60,7 +60,7 @@ def run(args):
         print(f"── {entry.repo} ──")
 
         if not repo_path.is_dir():
-            print(f"  ⊘ local clone not found")
+            print(f"  📭 local clone not found")
             print()
             continue
 

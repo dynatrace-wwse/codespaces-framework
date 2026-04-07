@@ -94,6 +94,14 @@ def main():
     lp.add_argument("--approve", action="store_true", help="Approve PRs with passing CI")
     lp.add_argument("--merge", action="store_true", help="Merge approved PRs")
 
+    # list-issues
+    li = subparsers.add_parser(
+        "list-issues",
+        help="List open issues across repos",
+    )
+    li.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
+    li.add_argument("--label", help="Filter by label")
+
     # revert
     rv = subparsers.add_parser(
         "revert",
@@ -130,6 +138,8 @@ def main():
         from sync.commands.migrate import run
     elif args.command == "list-pr":
         from sync.commands.list_pr import run
+    elif args.command == "list-issues":
+        from sync.commands.list_issues import run
     elif args.command == "revert":
         from sync.commands.revert import run
     elif args.command == "generate-registry":

@@ -185,16 +185,16 @@ def run(args):
         msg = result["message"]
 
         if status == "created":
-            print(f"  ✓ PR created: {result.get('url', '')}")
+            print(f"  🚀 PR created: {result.get('url', '')}")
             print(f"    {msg}")
         elif status == "would-update":
-            print(f"  ~ {msg}")
+            print(f"  ⏳ {msg}")
         elif status == "error":
-            print(f"  ✗ {msg}")
+            print(f"  ❌ {msg}")
             if result.get("needs_manual"):
                 manual_needed.append(repo_entry.repo)
         else:
-            print(f"  - {msg}")
+            print(f"  ⏭️  {msg}")
         print()
 
     # Summary

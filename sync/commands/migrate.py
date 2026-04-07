@@ -439,9 +439,9 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     if dc_issues:
         print(f"    devcontainer.json: {len(dc_issues)} issue(s)")
         for issue in dc_issues:
-            print(f"      ✗ {issue}")
+            print(f"      ❌ {issue}")
     else:
-        print(f"    devcontainer.json: ✓ valid")
+        print(f"    ✅ devcontainer.json valid")
 
     # Check if templates need updating
     sf_path = repo_path / ".devcontainer/util/source_framework.sh"
@@ -465,7 +465,7 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     needs_work = bool(found_files) or bool(found_dirs) or not templates_current
 
     if not needs_work:
-        print(f"    ✓ already migrated and up to date")
+        print(f"    ✅ already migrated and up to date")
         return "up-to-date"
 
     if found_files or found_dirs:
@@ -547,7 +547,7 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
                 mkdocs_path.write_text("\n".join(lines) + "\n")
                 print(f"    migrated mkdocs.yaml to INHERIT pattern")
             except Exception as e:
-                print(f"    ✗ mkdocs migration failed: {e}")
+                print(f"    ❌ mkdocs migration failed: {e}")
 
     # ── Phase 6: Update overrides/main.html + extract RUM snippet ──
     overrides_path = repo_path / "docs/overrides/main.html"
@@ -719,13 +719,13 @@ def run(args):
         print(f"  image_tier: {entry.image_tier}")
 
         if not repo_path.is_dir():
-            print(f"  ⊘ local clone not found")
+            print(f"  📭 local clone not found")
             counts["skipped"] += 1
             print()
             continue
 
         if not (repo_path / ".devcontainer").is_dir():
-            print(f"  ⊘ no .devcontainer/ directory")
+            print(f"  📭 no .devcontainer/ directory")
             counts["skipped"] += 1
             print()
             continue
@@ -734,7 +734,7 @@ def run(args):
             status = _migrate_repo(entry, repo_path, version, dry_run)
             counts[status] += 1
         except Exception as e:
-            print(f"  ✗ error: {e}")
+            print(f"  ❌ error: {e}")
             counts["error"] += 1
 
         print()

@@ -17,7 +17,7 @@ def _validate_local(repo_entry, repo_path):
 
     path = Path(repo_path)
     if not path.is_dir() or not (path / ".devcontainer").is_dir():
-        print(f"  ⊘ {repo_entry.name}: local clone not found at {path}")
+        print(f"  📭 {repo_entry.name}: local clone not found at {path}")
         return
 
     print(f"\n── {repo_entry.repo} ({path}) ──")
@@ -25,11 +25,11 @@ def _validate_local(repo_entry, repo_path):
     # devcontainer.json validation
     dc_issues = _validate_devcontainer(path)
     if dc_issues:
-        print(f"  devcontainer.json: {len(dc_issues)} issue(s)")
+        print(f"  ❌ devcontainer.json: {len(dc_issues)} issue(s)")
         for issue in dc_issues:
-            print(f"    ✗ {issue}")
+            print(f"    ❌ {issue}")
     else:
-        print(f"  devcontainer.json: ✓ valid")
+        print(f"  ✅ devcontainer.json valid")
 
     # Category A files that should NOT be present (migration leftovers)
     cat_a_files, cat_a_dirs = _get_category_a(repo_entry.image_tier)
@@ -42,38 +42,38 @@ def _validate_local(repo_entry, repo_path):
             leftovers.append(f"{d}/")
 
     if leftovers:
-        print(f"  migration: {len(leftovers)} Category A leftover(s) — run sync migrate")
+        print(f"  ⚠️  migration: {len(leftovers)} Category A leftover(s) — run sync migrate")
         for f in leftovers:
-            print(f"    ✗ {f}")
+            print(f"    ❌ {f}")
     else:
-        print(f"  migration: ✓ clean (no Category A files)")
+        print(f"  ✅ migration clean (no Category A files)")
 
     # Verify source_framework.sh matches the framework template
     sf = path / ".devcontainer/util/source_framework.sh"
     if not sf.exists():
-        print(f"  source_framework.sh: ✗ missing")
+        print(f"  ❌ source_framework.sh missing")
     else:
         content = sf.read_text()
         m = re.search(r'FRAMEWORK_VERSION="\$\{FRAMEWORK_VERSION:-([^}]+)\}"', content)
         if not m:
-            print(f"  source_framework.sh: ✗ no FRAMEWORK_VERSION pin found")
+            print(f"  ❌ source_framework.sh — no FRAMEWORK_VERSION pin found")
         else:
             pinned = m.group(1)
             expected = SOURCE_FRAMEWORK_TEMPLATE % pinned
             if content == expected:
-                print(f"  source_framework.sh: ✓ matches template (v{pinned})")
+                print(f"  ✅ source_framework.sh matches template (v{pinned})")
             else:
-                print(f"  source_framework.sh: ✗ outdated — run sync migrate to update")
+                print(f"  ⚠️  source_framework.sh outdated — run sync migrate to update")
 
     # Verify Makefile matches the framework template
     mf = path / ".devcontainer/Makefile"
     if not mf.exists():
-        print(f"  Makefile: ✗ missing")
+        print(f"  ❌ Makefile missing")
     else:
         if mf.read_text() == THIN_MAKEFILE:
-            print(f"  Makefile: ✓ matches template")
+            print(f"  ✅ Makefile matches template")
         else:
-            print(f"  Makefile: ✗ outdated — run sync migrate to update")
+            print(f"  ⚠️  Makefile outdated — run sync migrate to update")
 
 
 def run(args):

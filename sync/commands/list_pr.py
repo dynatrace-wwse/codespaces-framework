@@ -77,10 +77,10 @@ def _merge_pr(repo: str, pr_number: int) -> bool:
 
 
 CI_ICONS = {
-    "passing": "✓",
-    "failing": "✗",
-    "pending": "~",
-    "none": "?",
+    "passing": "✅",
+    "failing": "❌",
+    "pending": "⏳",
+    "none": "❓",
 }
 
 
@@ -110,7 +110,7 @@ def run(args):
 
         prs = _get_prs(entry.repo, head=head_filter)
         if not prs:
-            print(f"  no open PRs")
+            print(f"  📭 no open PRs")
             counts["no_pr"] += 1
             print()
             continue
@@ -137,18 +137,18 @@ def run(args):
             if do_approve and ci == "passing":
                 ok = _approve_pr(entry.repo, pr_number)
                 if ok:
-                    print(f"    → approved")
+                    print(f"    🟢 approved")
                     counts["approved"] += 1
                 else:
-                    print(f"    → approve skipped (can't approve own PR)")
+                    print(f"    ⚠️  approve skipped (can't approve own PR)")
 
             if do_merge and ci == "passing":
                 merged = _merge_pr(entry.repo, pr_number)
                 if merged:
-                    print(f"    → merged")
+                    print(f"    🚀 merged")
                     counts["merged"] += 1
                 else:
-                    print(f"    → merge failed")
+                    print(f"    ❌ merge failed")
 
         print()
 
