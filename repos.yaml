@@ -75,7 +75,6 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "Digital Experience Management 101 hands-on lab"
-    sync_managed: false
     tags: [dem, beginner]
 
   - name: enablement-openpipeline-segments-iam
@@ -83,7 +82,6 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "OpenPipeline segments and IAM configuration"
-    sync_managed: false
     tags: [openpipeline, iam]
 
   - name: enablement-kubernetes-opentelemetry-openpipeline
@@ -91,7 +89,6 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "Kubernetes OpenTelemetry with OpenPipeline processing"
-    sync_managed: false
     tags: [kubernetes, opentelemetry, openpipeline]
 
   - name: enablement-dql-fundamentals
@@ -99,7 +96,6 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "DQL fundamentals and getting started"
-    sync_managed: false
     tags: [dql, beginner]
 
   # ── Workshops ──
