@@ -96,13 +96,13 @@ def main():
     # release
     rl = subparsers.add_parser(
         "release",
-        help="Bump framework version, tag, push, and update default version",
+        help="Create GitHub Release for current or bumped framework version",
     )
     rl.add_argument(
         "--part",
         choices=["patch", "minor", "major"],
-        default="patch",
-        help="Version part to bump (default: patch)",
+        default=None,
+        help="Bump version (patch/minor/major) before releasing. Omit to release the current tag.",
     )
     rl.add_argument("--dry-run", action="store_true", help="Preview without tagging/pushing")
 

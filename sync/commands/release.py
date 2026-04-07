@@ -113,6 +113,24 @@ def _create_github_release(tag: str, previous_tag: str) -> str | None:
     return None
 
 
+def _get_previous_tag(current_tag: str) -> str | None:
+    """Get the tag before the current one."""
+    result = _git(["tag", "--sort=-v:refname"])
+    if result.returncode != 0:
+        return None
+    found_current = False
+    for line in result.stdout.strip().split("\n"):
+        tag = line.strip()
+        if not re.match(r"^\d+\.\d+\.\d+$", tag):
+            continue
+        if tag == current_tag:
+            found_current = True
+            continue
+        if found_current:
+            return tag
+    return None
+
+
 def run(args):
     part = args.part
     dry_run = args.dry_run
@@ -123,89 +141,93 @@ def run(args):
         print("❌ No semver tags found (expected X.Y.Z format)")
         sys.exit(1)
 
-    current = parse_version(current_tag)
-    new = current.bump(part)
-    new_tag = str(new)
-
-    print(f"📦 Current version: {current_tag}")
-    print(f"🆕 New version:     {new_tag} ({part} bump)")
+    # No --part means release the current tag as-is
+    if part is None:
+        new_tag = current_tag
+        previous_tag = _get_previous_tag(current_tag)
+        print(f"📦 Creating release for current version: {current_tag}")
+    else:
+        current = parse_version(current_tag)
+        new = current.bump(part)
+        new_tag = str(new)
+        previous_tag = current_tag
+        print(f"📦 Current version: {current_tag}")
+        print(f"🆕 New version:     {new_tag} ({part} bump)")
     print()
 
-    # 2. Check for uncommitted changes
-    status = _git(["status", "--porcelain"], check=False)
-    uncommitted = [l for l in status.stdout.strip().split("\n") if l.strip()]
-    if uncommitted:
-        print(f"📋 Uncommitted changes ({len(uncommitted)} files):")
-        for line in uncommitted[:10]:
-            print(f"    {line}")
-        if len(uncommitted) > 10:
-            print(f"    ... and {len(uncommitted) - 10} more")
-        print()
-
-    # 3. Preview changelog
-    commits, prs = _get_changelog(current_tag)
+    # 2. Preview changelog
+    changelog_base = previous_tag or current_tag
+    commits, prs = _get_changelog(changelog_base)
     if commits:
-        print(f"📝 Changes since {current_tag} ({len(commits)} commits):")
+        print(f"📝 Changes since {changelog_base} ({len(commits)} commits):")
         for c in commits[:10]:
             print(f"    {c}")
         if len(commits) > 10:
             print(f"    ... and {len(commits) - 10} more")
         print()
 
-    # 4. Update cli.py default version
-    cli_path = Path(__file__).parent.parent / "cli.py"
-    cli_content = cli_path.read_text()
-    old_default = f'default="{current_tag}"'
-    new_default = f'default="{new_tag}"'
-    if old_default in cli_content:
-        cli_content = cli_content.replace(old_default, new_default)
-        cli_content = cli_content.replace(
-            f'help="Framework version to pin (default: {current_tag})"',
-            f'help="Framework version to pin (default: {new_tag})"',
-        )
-        if not dry_run:
-            cli_path.write_text(cli_content)
-            print(f"✅ Updated cli.py default version to {new_tag}")
-        else:
-            print(f"⏳ Would update cli.py default version to {new_tag}")
-    else:
-        print(f"⚠️  cli.py default version not found as {current_tag} — skipping update")
-
     if dry_run:
-        print(f"\n⏳ Would commit, tag {new_tag}, push, and create GitHub Release")
+        if part:
+            print(f"⏳ Would commit, tag {new_tag}, push, and create GitHub Release")
+        else:
+            print(f"⏳ Would create GitHub Release for {new_tag}")
         return
 
-    # 5. Commit
-    _git(["add", str(cli_path)])
-    result = _git(["diff", "--cached", "--quiet"], check=False)
-    if result.returncode != 0:
-        _git(["commit", "-m", f"chore: bump framework version to {new_tag}"])
-        print(f"✅ Committed version bump")
-    else:
-        print(f"⏭️  No cli.py changes to commit")
+    # 3. If bumping, update cli.py, commit, and tag
+    if part:
+        # Check for uncommitted changes
+        status = _git(["status", "--porcelain"], check=False)
+        uncommitted = [l for l in status.stdout.strip().split("\n") if l.strip()]
+        if uncommitted:
+            print(f"📋 Uncommitted changes ({len(uncommitted)} files):")
+            for line in uncommitted[:10]:
+                print(f"    {line}")
+            print()
 
-    # 6. Tag
-    tag_result = _git(["tag", new_tag])
-    if tag_result.returncode != 0:
-        print(f"❌ Failed to create tag {new_tag}")
-        sys.exit(1)
-    print(f"🏷️  Tagged {new_tag}")
+        # Update cli.py default version
+        cli_path = Path(__file__).parent.parent / "cli.py"
+        cli_content = cli_path.read_text()
+        old_default = f'default="{current_tag}"'
+        new_default = f'default="{new_tag}"'
+        if old_default in cli_content:
+            cli_content = cli_content.replace(old_default, new_default)
+            cli_content = cli_content.replace(
+                f'help="Framework version to pin (default: {current_tag})"',
+                f'help="Framework version to pin (default: {new_tag})"',
+            )
+            cli_path.write_text(cli_content)
+            print(f"✅ Updated cli.py default version to {new_tag}")
 
-    # 7. Push
-    branch = _git(["branch", "--show-current"]).stdout.strip()
-    push_result = _git(["push", "origin", branch, "--tags"])
-    if push_result.returncode != 0:
-        print(f"❌ Push failed")
-        sys.exit(1)
-    print(f"🚀 Pushed {branch} + tag {new_tag}")
+        # Commit
+        _git(["add", str(cli_path)])
+        result = _git(["diff", "--cached", "--quiet"], check=False)
+        if result.returncode != 0:
+            _git(["commit", "-m", f"chore: bump framework version to {new_tag}"])
+            print(f"✅ Committed version bump")
 
-    # 8. Create GitHub Release
-    print(f"\n📦 Creating GitHub Release...")
-    release_url = _create_github_release(new_tag, current_tag)
+        # Tag
+        tag_result = _git(["tag", new_tag])
+        if tag_result.returncode != 0:
+            print(f"❌ Failed to create tag {new_tag}")
+            sys.exit(1)
+        print(f"🏷️  Tagged {new_tag}")
+
+        # Push
+        branch = _git(["branch", "--show-current"]).stdout.strip()
+        push_result = _git(["push", "origin", branch, "--tags"])
+        if push_result.returncode != 0:
+            print(f"❌ Push failed")
+            sys.exit(1)
+        print(f"🚀 Pushed {branch} + tag {new_tag}")
+
+    # 4. Create GitHub Release
+    print(f"\n📦 Creating GitHub Release for {new_tag}...")
+    release_url = _create_github_release(new_tag, changelog_base)
     if release_url:
-        print(f"📦 Release created: {release_url}")
+        print(f"📦 {release_url}")
     else:
         print(f"⚠️  Release creation failed — create manually on GitHub")
 
     print(f"\n✅ Framework {new_tag} released!")
-    print(f"   Next: sync push-update --framework-version {new_tag}")
+    if part:
+        print(f"   Next: sync push-update --framework-version {new_tag}")
