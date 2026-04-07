@@ -38,8 +38,6 @@ def _gh_api(method: str, endpoint: str, data: Optional[dict] = None) -> dict:
     """Call GitHub API via gh cli."""
     cmd = ["gh", "api", "-X", method, endpoint]
     if data:
-        cmd.extend(["-f" if isinstance(v, str) else "--input" for _ in [None]])
-        # Use --input with stdin for complex payloads
         result = subprocess.run(
             ["gh", "api", "-X", method, endpoint, "--input", "-"],
             input=json.dumps(data),
