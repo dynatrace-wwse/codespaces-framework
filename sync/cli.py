@@ -88,8 +88,8 @@ def main():
     )
     mi.add_argument(
         "--framework-version",
-        default="1.2.6",
-        help="Framework version to pin (default: 1.2.6)",
+        default="1.2.7",
+        help="Framework version to pin (default: 1.2.7)",
     )
     mi.add_argument("--dry-run", action="store_true", help="Audit only, no changes")
 
