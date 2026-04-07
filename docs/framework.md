@@ -7,13 +7,106 @@ This section outlines the structure and purpose of each component in the Codespa
 
 ---
 
+## 🏗️ Versioned Pull Model
 
-## 🟦 Container Configuration for VS Code
+The framework uses a **versioned cache model** where consumer repos pull framework files at runtime instead of storing them locally. Each repo pins a `FRAMEWORK_VERSION` and only keeps custom files.
 
-Defines the development container for VS Code and Codespaces. Extensions are kept minimal to ensure portability across platforms (ARM and AMD), allowing the environment to run in plain Docker or on different architectures.
+### How the Cache Works
 
-- **Dockerfile**: Specifies the base image and all required tools/libraries.
-- **devcontainer.json**: Main configuration file for the development container. It defines settings, installed extensions, mounted volumes, arguments, environment variables, and how VS Code should start and connect to the container.
+When a container starts, `source_framework.sh` resolves framework files through a three-tier cache:
+
+1. **Container cache** (`$HOME/.cache/dt-framework/<version>/`) — fastest, lost on rebuild
+2. **Host cache** (`.devcontainer/.cache/dt-framework/<version>/`) — persists across rebuilds
+3. **Git clone** — fallback, clones from `codespaces-framework` at the pinned tag via sparse-checkout
+
+```
+source_framework.sh
+  ├── DEV MODE (functions.sh exists locally) → source directly
+  └── CACHE MODE (consumer repos)
+       ├── Tier 1: Container cache hit → source from cache
+       ├── Tier 2: Host cache hit → copy to container, source
+       └── Tier 3: git clone --sparse → populate both caches, source
+```
+
+### File Classification
+
+Files in `.devcontainer/` are classified into categories that determine how the framework manages them:
+
+#### Category A — Framework-owned (removed from repos, pulled from cache)
+
+| File | Purpose |
+|------|---------|
+| `util/functions.sh` | Core framework functions (1800+ lines) |
+| `util/variables.sh` | Global variables, colors, port ranges |
+| `util/greeting.sh` | Terminal welcome message |
+| `util/test_functions.sh` | Test assertion functions |
+| `makefile.sh` | Docker build/run logic for local development |
+| `runlocal/helper.sh` | ENV file loader, repo name resolver |
+| `Dockerfile` | Base image build (consumers pull pre-built image) |
+| `entrypoint.sh` | Docker socket GID mapping |
+| `kind-cluster.yml` | Legacy location (moved to `yaml/kind/`) |
+| `apps/` | Demo applications (astroshop, todo-app, etc.) |
+| `p10k/` | PowerLevel10k zsh theme config |
+| `yaml/` | Dynakube manifests, Kind cluster config |
+
+#### Category B — Thin wrappers (replaced during migration)
+
+| File | Purpose |
+|------|---------|
+| `Makefile` | Bootstraps cache, delegates to cached `makefile.sh` |
+
+#### Custom files — Repo-specific (never removed)
+
+| File | Purpose |
+|------|---------|
+| `devcontainer.json` | Container config (image, runArgs, secrets) |
+| `post-create.sh` | Repo-specific setup automation |
+| `post-start.sh` | Repo-specific post-start actions |
+| `util/source_framework.sh` | Version pin + cache logic |
+| `util/my_functions.sh` | Repo-specific custom functions |
+| `test/integration.sh` | Repo-specific integration tests |
+| `.env` | Secrets for local runs and MCP (gitignored) |
+| `manifests/` | Repo-specific K8s manifests |
+
+### Image Tiers
+
+Defined per repo in `repos.yaml` via the `image_tier` field:
+
+| Tier | Description | Default |
+|------|-------------|---------|
+| `minimal` | Core framework only | — |
+| `k8s` | Core + Kind cluster, entrypoint, Dynakube yaml | ✅ |
+| `ai` | Same as k8s (extensible for future AI-specific files) | — |
+
+### After Migration — Clean Repo Structure
+
+```
+.devcontainer/
+  devcontainer.json      # Container config
+  .env                   # Secrets (gitignored)
+  post-create.sh         # Repo-specific setup
+  post-start.sh          # Repo-specific post-start
+  Makefile               # Thin wrapper → delegates to cache
+  .cache/                # Framework cache (gitignored)
+  util/
+    source_framework.sh  # Version pin + cache mechanism
+    my_functions.sh      # Custom functions
+  test/
+    integration.sh       # Repo-specific integration tests
+  manifests/             # Repo-specific K8s manifests (if any)
+```
+
+Everything else comes from the framework cache at the pinned `FRAMEWORK_VERSION`.
+
+---
+
+
+## 🟦 Container Configuration
+
+Defines the development container for VS Code and Codespaces.
+
+- **devcontainer.json**: Main configuration file. Defines the pre-built image (`shinojosa/dt-enablement`), runtime arguments, volume mounts, lifecycle hooks, and secrets. Extensions are kept empty to ensure portability across platforms (ARM and AMD).
+- **`.env`**: Secrets and environment variables for local runs and MCP server. Located at `.devcontainer/.env` (gitignored). Used by all instantiation types: Codespaces reads from GitHub secrets, VS Code/Docker reads from this file.
 
 ---
 
@@ -21,99 +114,78 @@ Defines the development container for VS Code and Codespaces. Extensions are kep
 ## 🟩 Documentation Workflow (`docs/`)
 
 - **docs/**: Contains all documentation and site configuration.
-- **mkdocs.yaml**: Defines navigation and site structure for MkDocs.
+- **mkdocs.yaml**: Per-repo config using `INHERIT: mkdocs-base.yaml` to inherit the framework's base theme, extensions, and plugins. Only repo-specific fields (site_name, nav, RUM snippet) are defined here.
+- **mkdocs-base.yaml**: Framework-owned base configuration (Material theme, deep-purple palette, markdown extensions). Fetched at runtime by CI workflows at the repo's `FRAMEWORK_VERSION` tag.
 - **.github/workflows/deploy-ghpages.yaml**: GitHub Actions workflow to deploy documentation to GitHub Pages when a PR is merged into main.
 
 ### Live Documentation
 
-- **installMkdocs**: Installs all requirements for MkDocs (including Python dependencies from `docs/requirements/requirements-mkdocs.txt`) and exposes the documentation locally. This is the recommended way to set up the documentation server in your dev container.
-- **exposeMkdocs**: Launches the MkDocs development server on port 8000 inside your dev container, making the documentation available for live preview with live reload. This function is called by **installMkdocs**.
+- **installMkdocs**: Installs all requirements for MkDocs (including Python dependencies from `docs/requirements/requirements-mkdocs.txt`) and exposes the documentation locally.
+- **exposeMkdocs**: Launches the MkDocs development server on port 8000 inside your dev container.
 
 ### Deploying to GitHub Pages
 
-- **deployGhdocs**: Builds and deploys the documentation to GitHub Pages using `mkdocs gh-deploy`, publishing your latest docs to the configured GitHub Pages site.
+- **deployGhdocs**: Builds and deploys the documentation to GitHub Pages using `mkdocs gh-deploy`.
 
 ---
 
 
 ## 🟨 App Repository (`apps/`)
 
-This directory contains the application code and sample apps to be included in the enablement. Each app should have its own subfolder inside `apps/`.
+This directory contains the application code and sample apps. Each app has its own subfolder inside `apps/` in the framework cache.
 
 ### Port Allocation and NodePort Strategy
 
-
-
-When deploying applications, the framework automatically allocates the ports exposed by the Kind Kubernetes cluster using the NodePort strategy. The `getNextFreeAppPort` function is called before deploying each app to select an available port from the defined range. By default, three ports are used, as defined in the `PORTS` variable in `.devcontainer/util/variables.sh`:
+When deploying applications, the framework automatically allocates ports using the NodePort strategy. The `getNextFreeAppPort` function selects an available port from the defined range:
 
 ```bash
 PORTS=("30100" "30200" "30300")
 ```
 
-
-These ports are mapped to your applications, making them accessible from your host machine. The NodePort strategy ensures each app can be reached via a unique port on the cluster node.
-
 ### Managing Apps with `deployApps`
 
-
-The framework provides a `deployApps` function to help you deploy and undeploy the applications listed in the `apps/` directory to your Kubernetes cluster.
-
-Running `deployApps` without parameters displays an interactive help menu listing all available apps, their aliases, and their compatibility (AMD/ARM). Example output:
+The `deployApps` function deploys and undeploys applications to your Kubernetes cluster:
 
 ![deployApps](img/deployApps.png){ align=center ; } 
 
 #### To deploy an app
-- Use any of the listed numbers, characters, or names. For example, to deploy `astroshop`, you can run:
-	```sh
-	deployApps 2
-	# or
-	deployApps b
-	# or
-	deployApps astroshop
-	```
+```sh
+deployApps 2        # by number
+deployApps b        # by character
+deployApps astroshop # by name
+```
 
 #### To undeploy an app
-- Add `-d` as an extra argument:
-	```sh
-	deployApps 2 -d
-	# or
-	deployApps astroshop -d 
-	```
-
-
-Each app folder should contain its own deployment and cleanup scripts or instructions. The `deployApps` function will call these as needed.
+```sh
+deployApps 2 -d
+deployApps astroshop -d 
+```
 
 ---
 
 
 ## 🟧 Running Locally
 
-To quickly start a local development container, run:
+To quickly start a local development container:
 
 ```sh
 cd .devcontainer
 make start
 ```
 
+The thin **Makefile** bootstraps the framework cache (if missing) and delegates to the cached `makefile.sh`. Available targets:
 
+| Target | Description |
+|--------|-------------|
+| `make start` | Build if needed, run or attach to container |
+| `make build` | Build Docker image |
+| `make build-nocache` | Full rebuild without cache |
+| `make buildx` | Multi-arch build (amd64/arm64) with push |
+| `make integration` | Run integration tests in container |
+| `make clean-cache` | Clear the framework cache |
+| `make clean-start` | Kill containers, clear cache, fresh start |
 
-Scripts and configuration for building and running the environment outside Codespaces include:
-
-- **Makefile**: Main entrypoint for local development (`make start`). It defines targets for starting, stopping, and managing the local container environment.
-- **makefile.sh**: Contains the core Bash logic for building, running, and managing the container. The Makefile sources this script to execute its targets. Key responsibilities include:
-
-	- Building the Docker image if it does not exist
-	- Starting the container with the correct environment, ports, and volumes
-	- Attaching to a running container or recreating it if stopped
-	- Handling cleanup and removal of containers/images
-	- Providing utility functions for logs, shell access, and status checks
-
-	This separation allows you to keep complex logic in Bash, while the Makefile provides a simple interface for users.
-
-- **runlocal/**: Local environment configuration, including:
-
-	- `.env`: Secrets and environment variables for local runs.
-	- `helper.sh`: Helper scripts for local setup.
+The Makefile generates a `cached_makefile.sh` wrapper during bootstrap that correctly sets `ENV_FILE`, `RepositoryName`, and `VOLUMEMOUNTS` to point to the repo (not the cache), ensuring backward compatibility with any cached framework version.
 
 ---
 
@@ -121,15 +193,13 @@ Scripts and configuration for building and running the environment outside Codes
 ## 🟪 GitHub Actions & Integration Tests
 
 Automation for CI/CD and integration testing:
-- **.github/workflows/integration-tests.yaml**: Workflow for running integration tests on every Pull Request (PR) and push. The `main` branch is protected: integration tests must pass for any PR before it can be merged into `main`.
-- **test/**: Contains test scripts:
-	- `integration.sh`: Main integration test runner.
-	- `test_functions.sh`: Test utilities and functions.
 
+- **.github/workflows/integration-tests.yaml**: Runs integration tests on every PR. The `main` branch is protected — tests must pass before merging.
+- **test/integration.sh**: Repo-specific test runner. Loads the framework, then runs assertions.
 
 ### Integration Test Function
 
-- **runIntegrationTests**: This function triggers the integration tests for the repository by running the `integration.sh` script. It is used both locally and by the CI pipeline to ensure the environment and applications work as expected before merging changes.
+- **runIntegrationTests**: Triggers integration tests by running the repo's `test/integration.sh` script.
 
 ```bash title="integration.sh" linenums="1"
 #!/bin/bash
@@ -139,41 +209,31 @@ source .devcontainer/util/source_framework.sh
 printInfoSection "Running integration Tests for $RepositoryName"
 
 assertRunningPod dynatrace operator
-
 assertRunningPod dynatrace activegate
-
 assertRunningPod dynatrace oneagent
-
-assertRunningPod todoapp todoapp
-
 assertRunningApp 30100
 ```
 
-
-
-These assertions check that the required pods (operator, activegate, oneagent, and todoapp) are running in their respective namespaces, and that the application is accessible on the expected port (30100). If any assertion fails, the integration test will fail and block the PR from being merged.
+These assertions check that required pods are running and the application is accessible. If any assertion fails, the PR is blocked from merging.
 
 ---
 
 
 ## 🟫 Kubernetes Cluster
 
-The Kubernetes cluster for the enablement is defined in the `kind-cluster.yaml` file. This configuration is used by [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker) to spin up a local Kubernetes cluster as a Docker container, using the Docker-in-socket strategy. The enablement container attaches to the Kind cluster, allowing you to deploy and test applications in a real Kubernetes environment.
+The Kubernetes cluster is defined in `yaml/kind/kind-cluster.yml`. [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker) spins up a local cluster using the Docker-in-socket strategy.
 
 ### Managing the Kind Cluster
 
-The following functions are provided to manage the lifecycle of the Kind cluster:
+| Function | Description |
+|----------|-------------|
+| `startKindCluster` | Start, attach, or create the Kind cluster |
+| `attachKindCluster` | Attach to a running cluster (configure kubeconfig) |
+| `createKindCluster` | Create a new cluster from `yaml/kind/kind-cluster.yml` |
+| `stopKindCluster` | Stop the Kind cluster container |
+| `deleteKindCluster` | Delete the cluster and all resources |
 
-- **startKindCluster**: Starts the Kind cluster. If a cluster is already running, it attaches to it; if stopped, it starts it; if none exists, it creates a new one.
-- **attachKindCluster**: Attaches your environment to a running Kind cluster by configuring your kubeconfig for access.
-- **createKindCluster**: Creates a new Kind cluster using the configuration in `kind-cluster.yaml`.
-- **stopKindCluster**: Stops the Kind cluster Docker container.
-- **deleteKindCluster**: Deletes the Kind cluster and removes all associated resources.
-
-These functions allow you to easily start, stop, attach, create, or delete your local Kubernetes cluster for development and testing.
-
-
-The `kubectl` client, `helm`, and `k9s` are automatically configured to work with the Kind cluster, so you can manage and observe your Kubernetes resources out of the box.
+The `kubectl` client, `helm`, and `k9s` are automatically configured to work with the Kind cluster.
 
 
 ---
@@ -181,49 +241,42 @@ The `kubectl` client, `helm`, and `k9s` are automatically configured to work wit
 
 ## 🐳 Docker Socket Mapping (`entrypoint.sh`)
 
-This section enables the container to access the host's Docker daemon by mounting the Docker socket (`/var/run/docker.sock`). This allows the container to start and manage sibling containers, which is essential for running Kind and other Docker-based tools inside the dev environment.
+The container accesses the host's Docker daemon via the mounted Docker socket (`/var/run/docker.sock`). The `entrypoint.sh` script (baked into the Docker image) handles:
 
-**entrypoint.sh**: This script is executed when the container starts. It sets up the environment, ensures the Docker socket is available, and configures any required permissions or environment variables so that Docker commands work seamlessly inside the container.
+- Host-to-container Docker GID mapping
+- Hostname resolution in `/etc/hosts`
+- User permission setup
+
+This enables Kind and other Docker-based tools to work inside the dev environment.
 
 
 ---
 
 
-## 🟦 Container Post-Creation & Start (`post-create.sh`, `post-start.sh`)
+## 🟦 Container Post-Creation & Start
 
 !!! tip "Repository-Specific Logic"
 	Use these files to define logic for automating the creation and setup of your enablement.
 
-These scripts automate the setup and initialization of your development container:
+- **post-create.sh**: Runs after the container is created. Loads the framework, then executes setup steps:
 
-- **post-create.sh**: Runs after the Codespace or dev container is created. It loads all framework and custom functions into the shell, then executes a series of setup steps in order:
-
-	Example `post-create.sh`:
 	```bash title=".devcontainer/post-create.sh" linenums="1"
 	#!/bin/bash
-	# Load functions
 	export SECONDS=0
 	source .devcontainer/util/source_framework.sh
 
 	setUpTerminal
-
 	startKindCluster
-	
 	installK9s
-	
 	dynatraceDeployOperator
-	
 	deployCloudNative
-	
 	deployTodoApp
-	
 	finalizePostCreation
-	
+
 	printInfoSection "Your dev container finished creating"
 	```
 
-- **post-start.sh**: Runs every time the container starts (e.g., refresh tokens, check dependencies, interact with the user).
-
+- **post-start.sh**: Runs every time the container starts (e.g., refresh tokens, expose services).
 
 
 ---
@@ -231,24 +284,19 @@ These scripts automate the setup and initialization of your development containe
 
 ## 🟥 Core Functions (`util/`)
 
-This directory contains reusable shell functions, variables, and logic that power the framework. These scripts are loaded into every shell session, making their utilities available for all automation and interactive tasks.
+Reusable shell functions loaded into every shell session:
 
-- **functions.sh**: Main library of core functions for the framework. Includes:
-	- Logging and info utilities (`printInfo`, `printWarn`, `printError`, `printInfoSection`)
-	- Kubernetes helpers (e.g., `waitForPod`, `waitForAllPods`, `waitForAllReadyPods`)
-	- Application deployment, integration, and environment management functions
-	- Functions for tracking codespace creation, printing greetings, and more
-	- All functions are loaded dynamically for use in the shell or scripts
-- **source_framework.sh**: Loads the framework and all utility scripts into the shell, ensuring both core and custom functions are available in every environment (Codespaces, VS Code, or plain Docker).
-- **greeting.sh**: Displays a welcome message and branding when a new shell session starts, including useful environment info and quickstart tips. Print the greeting at any time by calling the `printGreeting` function or by opening a new zsh terminal.
-- **variables.sh**: Central place for defining and exporting all default variables, such as image versions, port ranges, and environment-specific settings. This ensures consistency and easy configuration across the framework.
+- **functions.sh**: Main library (1800+ lines). Includes logging, Kubernetes helpers, deployment functions, environment management, and tracking.
+- **source_framework.sh**: Version-aware loader. Handles DEV MODE (local files) and CACHE MODE (two-tier cache with git clone fallback).
+- **greeting.sh**: Welcome message with environment info. Call `printGreeting` or open a new terminal.
+- **variables.sh**: Central variables (image versions, port ranges, ENV_FILE path).
 
 ---
 
 
 ## 🟫 Custom Functions
 
-- **my_functions.sh**: Define repository-specific or custom functions here. This file is loaded after the core framework, allowing you to override or extend any behavior. For example, add a function to deploy your own app and call it from `post-create.sh`.
+- **my_functions.sh**: Define repository-specific functions here. Loaded after the core framework, allowing you to override or extend any behavior. Call custom functions from `post-create.sh`.
 
 ---
 

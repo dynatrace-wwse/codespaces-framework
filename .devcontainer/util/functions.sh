@@ -448,9 +448,6 @@ setEnvironmentInEnv(){
 }
 
 bindFunctionsInShell() {
-  printInfo "REPO_PATH: $REPO_PATH "
-  printInfo "HOME: $HOME "
-  printInfo "USER: $USER "
   printInfo "Binding source_framework.sh and adding a Greeting in the .zshrc"
   cat >> "$HOME/.zshrc" << 'ZSHRC_EOF'
 
@@ -560,7 +557,7 @@ createKindCluster() {
   printInfoSection "Creating Kubernetes Cluster (kind-control-plane)"
   # Create k8s cluster
   printInfo "Creating Kind cluster"
-  kind create cluster --config "$REPO_PATH/.devcontainer/kind-cluster.yml" --wait 5m &&\
+  kind create cluster --config "${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml/kind/kind-cluster.yml" --wait 5m &&\
     printInfo "Kind cluster created successfully, reachabe under:" ||\
     printWarn "Kind cluster could not be created"
   kubectl cluster-info --context kind-kind
@@ -606,9 +603,12 @@ certmanagerEnable() {
   fi
 
   printInfo "EmailAccount for ClusterIssuer $EMAIL, creating ClusterIssuer"
-  cat $REPO_PATH/.devcontainer/yaml/clusterissuer.yaml | sed 's~email.placeholder~'"$EMAIL"'~' >$REPO_PATH/.devcontainer/yaml/gen/clusterissuer.yaml
+  YAML_SRC="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml"
+  YAML_GEN="$REPO_PATH/.devcontainer/yaml/gen"
+  mkdir -p "$YAML_GEN"
+  cat "$YAML_SRC/clusterissuer.yaml" | sed 's~email.placeholder~'"$EMAIL"'~' > "$YAML_GEN/clusterissuer.yaml"
 
-  kubectl apply -f $REPO_PATH/.devcontainer/yaml/gen/clusterissuer.yaml
+  kubectl apply -f "$YAML_GEN/clusterissuer.yaml"
 
   printInfo "Let's Encrypt Process in kubectl for CertManager"
   printInfo " For observing the creation of the certificates: \n
@@ -908,11 +908,17 @@ dynatraceDeployOperator() {
 
 
 generateDynakube(){
-    #FIXME: This code needs to be refactored. Generate a cleaner Dynakube for both architectures. 
+    #FIXME: This code needs to be refactored. Generate a cleaner Dynakube for both architectures.
+    # Skeleton YAMLs are in the framework cache (or local in DEV mode)
+    # Generated output goes to the repo's yaml/gen/ directory
+    YAML_SRC="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml"
+    YAML_GEN="$REPO_PATH/.devcontainer/yaml/gen"
+    mkdir -p "$YAML_GEN"
+
     # SET API URL
     API="/api"
     DT_API_URL=$DT_TENANT$API
-    
+
     # Read the actual hostname in case changed during instalation
     CLUSTERNAME=$(hostname)
     export CLUSTERNAME
@@ -934,43 +940,43 @@ generateDynakube(){
     fi
 
     # Generate DynaKubeSkel with API URL
-    sed -e 's~apiUrl: https://ENVIRONMENTID.live.dynatrace.com/api~apiUrl: '"$DT_API_URL"'~' $REPO_PATH/.devcontainer/yaml/dynakube-skel-head.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml
+    sed -e 's~apiUrl: https://ENVIRONMENTID.live.dynatrace.com/api~apiUrl: '"$DT_API_URL"'~' "$YAML_SRC/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml"
 
     # ClusterName for API
-    sed 's~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "CLUSTERNAME"~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "'"$CLUSTERNAME"'"~g' $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp 
+    sed 's~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "CLUSTERNAME"~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "'"$CLUSTERNAME"'"~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
 
-    mv $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml 
-    
+    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
+
     # Replace Networkzone
-    sed 's~networkZone: CLUSTERNAME~networkZone: '$CLUSTERNAME'~g' $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp 
-    
-    mv $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml 
-    
+    sed 's~networkZone: CLUSTERNAME~networkZone: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
+
+    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
+
     # Add ActiveGate config (added first so its applied to both CNFS and AppOnly)
-    cat $REPO_PATH/.devcontainer/yaml/dynakube-body-activegate.yaml >> $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml
-    
-    # Set ActiveGate Group 
-    sed 's~group: CLUSTERNAME~group: '$CLUSTERNAME'~g' $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp
-    mv $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml 
+    cat "$YAML_SRC/dynakube-body-activegate.yaml" >> "$YAML_GEN/dynakube-skel-head.yaml"
+
+    # Set ActiveGate Group
+    sed 's~group: CLUSTERNAME~group: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
+    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
 
     if [[ $ARM == true  ]]; then
-      sed 's~# image: ""~image: "'$AG_IMAGE'"~g' $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp
-      mv $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml.tmp $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml 
+      sed 's~# image: ""~image: "'$AG_IMAGE'"~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
+      mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
     fi
 
     # Generate CloudNative Body (head + CNFS)
-    cat $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml $REPO_PATH/.devcontainer/yaml/dynakube-body-cloudnative.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml
-    
+    cat "$YAML_GEN/dynakube-skel-head.yaml" "$YAML_SRC/dynakube-body-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml"
+
     # Set CloudNative HostGroup
-    sed 's~hostGroup: CLUSTERNAME~hostGroup: '$CLUSTERNAME'~g' $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml >  $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml.tmp
-    mv  $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml.tmp $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml
+    sed 's~hostGroup: CLUSTERNAME~hostGroup: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml.tmp"
+    mv "$YAML_GEN/dynakube-cloudnative.yaml.tmp" "$YAML_GEN/dynakube-cloudnative.yaml"
 
     if [[ $ARM == true  ]]; then
-      sed 's~# image: ""~image: "'$OA_IMAGE'"~g'  $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml >  $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml.tmp
-      mv  $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml.tmp $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml
+      sed 's~# image: ""~image: "'$OA_IMAGE'"~g' "$YAML_GEN/dynakube-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml.tmp"
+      mv "$YAML_GEN/dynakube-cloudnative.yaml.tmp" "$YAML_GEN/dynakube-cloudnative.yaml"
     fi
     # Generate AppOnly Body
-    cat $REPO_PATH/.devcontainer/yaml/gen/dynakube-skel-head.yaml $REPO_PATH/.devcontainer/yaml/dynakube-body-apponly.yaml > $REPO_PATH/.devcontainer/yaml/gen/dynakube-apponly.yaml
+    cat "$YAML_GEN/dynakube-skel-head.yaml" "$YAML_SRC/dynakube-body-apponly.yaml" > "$YAML_GEN/dynakube-apponly.yaml"
 
 }
 
@@ -1654,7 +1660,7 @@ finalizePostCreation(){
 
 runIntegrationTests(){
   #this function will trigger the integration Tests for this repo.
-  bash "$REPO_PATH/.devcontainer/test/integration.sh"
+  bash "${REPO_PATH}/.devcontainer/test/integration.sh"
 }
 
 calculateReadingTime(){

@@ -13,7 +13,7 @@
 #                    Local to the container → fast access, lost on container rebuild
 
 # Framework version pin — sync push-update updates this line
-FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-1.2.0}"
+FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-1.2.5}"
 
 REPO_PATH="$(pwd)"
 RepositoryName="$(basename "$REPO_PATH")"
@@ -63,7 +63,10 @@ if ! (
     .devcontainer/util \
     .devcontainer/p10k \
     .devcontainer/test \
-    .devcontainer/apps && \
+    .devcontainer/apps \
+    .devcontainer/Makefile \
+    .devcontainer/makefile.sh \
+    .devcontainer/runlocal && \
   touch "${HOST_CACHE}/.complete"
 ); then
   echo "❌ Failed to pull framework v${FRAMEWORK_VERSION} — check network and retry"
