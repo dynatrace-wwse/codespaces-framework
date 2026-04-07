@@ -18,6 +18,7 @@ from sync.core.github_api import (
     get_default_branch,
     get_branch_sha,
     create_tag,
+    create_release,
     GHAPIError,
 )
 from sync.core.version import extract_framework_version, parse_version, parse_combined_tag
@@ -30,6 +31,7 @@ def run(args):
     force = args.force
     bump_part = getattr(args, "bump", None)
     dry_run = getattr(args, "dry_run", False)
+    do_release = getattr(args, "release", False)
 
     repos = filter_sync_targets(load_repos())
 
@@ -86,21 +88,40 @@ def run(args):
             new_tag = f"v{target}_{repo_version}"
 
             # Check if tag already exists
-            if new_tag in tags:
+            already_exists = new_tag in tags
+            if already_exists and not do_release:
                 print(f"  ⏭️  {repo_entry.repo}: {new_tag} already exists")
                 continue
 
             if dry_run:
-                print(f"  ⏳ {repo_entry.repo}: would tag {new_tag}")
+                action = "would tag + release" if do_release else "would tag"
+                print(f"  ⏳ {repo_entry.repo}: {action} {new_tag}")
                 tagged.append(f"{repo_entry.repo}: {new_tag}")
                 continue
 
-            default_branch = get_default_branch(owner, name)
-            sha = get_branch_sha(owner, name, default_branch)
-            create_tag(owner, name, new_tag, sha)
+            # Create tag if it doesn't exist yet
+            if not already_exists:
+                default_branch = get_default_branch(owner, name)
+                sha = get_branch_sha(owner, name, default_branch)
+                create_tag(owner, name, new_tag, sha)
+                print(f"  🏷️  {repo_entry.repo}: {new_tag}")
+
+            # Create GitHub Release
+            if do_release:
+                release_name = f"{name} {new_tag}"
+                release_body = (
+                    f"## {release_name}\n\n"
+                    f"Framework version: `{target}`\n"
+                    f"Repo version: `{repo_version}`\n"
+                )
+                try:
+                    rel = create_release(owner, name, new_tag, release_name, release_body)
+                    rel_url = rel.get("html_url", "")
+                    print(f"  📦 {repo_entry.repo}: release created {rel_url}")
+                except GHAPIError as e:
+                    print(f"  ⚠️  {repo_entry.repo}: release failed — {e.message}")
 
             tagged.append(f"{repo_entry.repo}: {new_tag}")
-            print(f"  🏷️  {repo_entry.repo}: {new_tag}")
 
         except GHAPIError as e:
             errors.append(f"{repo_entry.repo}: {e.message}")

@@ -195,6 +195,20 @@ def create_tag(owner: str, repo: str, tag: str, sha: str) -> None:
     )
 
 
+def create_release(owner: str, repo: str, tag: str, name: str, body: str) -> dict:
+    """Create a GitHub Release for a tag. Returns release data."""
+    return _gh_api(
+        "POST",
+        f"repos/{owner}/{repo}/releases",
+        {
+            "tag_name": tag,
+            "name": name,
+            "body": body,
+            "generate_release_notes": True,
+        },
+    )
+
+
 def branch_exists(owner: str, repo: str, branch: str) -> bool:
     """Check if a branch exists."""
     try:

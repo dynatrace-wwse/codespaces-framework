@@ -50,6 +50,7 @@ def main():
         choices=["patch", "minor", "major"],
         help="Bump the repo version part before tagging",
     )
+    tg.add_argument("--release", action="store_true", help="Create GitHub Releases with auto-generated notes")
     tg.add_argument("--force", action="store_true", help="Skip pre-flight checks")
     tg.add_argument("--dry-run", action="store_true", help="Preview without creating tags")
 
