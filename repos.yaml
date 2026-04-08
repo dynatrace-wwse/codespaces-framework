@@ -5,7 +5,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @popecruzdt, @Tyler-Ouellette"
     description: "Full-stack Kubernetes observability with OpenTelemetry. Instrument cloud-native workloads, collect distributed traces, metrics, and logs, and correlate with Dynatrace topology."
-    tags: [kubernetes, opentelemetry]
+    tags: [kubernetes, opentelemetry, legacy]
     title: "Kubernetes & OpenTelemetry"
     primary_tag: kubernetes
     duration: "3h"
@@ -86,7 +86,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "Deploy and observe Azure Web Apps with OpenTelemetry and Dynatrace. End-to-end instrumentation of cloud-hosted applications on Microsoft Azure."
-    tags: [opentelemetry, kubernetes]
+    tags: [opentelemetry, azure, legacy]
     title: "Azure Web App & OpenTelemetry"
     primary_tag: opentelemetry
     duration: "2h"
@@ -107,7 +107,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @popecruzdt"
     description: "Configure OpenPipeline segments and IAM policies. Learn data routing, retention management, and access control for observability data in Dynatrace."
-    tags: [logs, kubernetes]
+    tags: [logs, kubernetes, legacy]
     title: "OpenPipeline Segments & IAM"
     primary_tag: logs
     duration: "2h"
@@ -117,7 +117,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @popecruzdt"
     description: "Combine Kubernetes OpenTelemetry collection with OpenPipeline processing. Route, transform, and enrich telemetry data before it reaches Dynatrace."
-    tags: [kubernetes, opentelemetry, logs]
+    tags: [kubernetes, opentelemetry, logs, legacy]
     title: "Kubernetes OTel & OpenPipeline"
     primary_tag: kubernetes
     duration: "3h"
@@ -150,7 +150,7 @@ repos:
     maintainer: "@shinojosa, @popecruzdt"
     description: "Workshop on destination automation with Dynatrace Workflows. Build end-to-end automated pipelines for alerting, ticketing, and remediation."
     sync_managed: false
-    tags: [workflows]
+    tags: [workflows, ansible]
     title: "Destination Automation Workshop"
     primary_tag: workflows
     duration: "2h"
@@ -161,7 +161,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "Hands-on demo showcasing agentic AI workflows powered by NVIDIA with full Dynatrace observability. Trace AI agents end-to-end, monitor model performance, and detect issues in real-time."
-    tags: [gen-ai, application-security]
+    tags: [gen-ai]
     title: "Agentic AI with NVIDIA"
     primary_tag: gen-ai
     duration: "1.5h"
@@ -181,7 +181,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "OpenTelemetry instrumentation demo with Dynatrace. See how traces, metrics, and logs flow from instrumented applications into the Dynatrace platform."
-    tags: [opentelemetry]
+    tags: [opentelemetry, sandbox]
     title: "OpenTelemetry Demo"
     primary_tag: opentelemetry
     duration: "1h"
@@ -191,7 +191,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "Optimize Astroshop runtime performance with Dynatrace. Identify bottlenecks, tune resource allocation, and measure improvements in a realistic microservices environment."
-    tags: [kubernetes, devops]
+    tags: [kubernetes, devops, sandbox]
     title: "Astroshop Runtime Optimization"
     primary_tag: kubernetes
     duration: "1.5h"
@@ -201,7 +201,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "Troubleshoot Astroshop problem scenarios with Dynatrace. Practice root-cause analysis on realistic failure modes across a distributed microservices stack."
-    tags: [kubernetes, live-debugger]
+    tags: [kubernetes, live-debugger, sanbox]
     title: "Astroshop Problem Scenarios"
     primary_tag: kubernetes
     duration: "1.5h"
@@ -212,7 +212,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "ACE integration patterns with Dynatrace. Connect Autonomous Cloud Enablement tools and workflows into the Dynatrace platform."
-    tags: [workflows, devops]
+    tags: [sandbox, demo]
     title: "ACE Integration"
     primary_tag: workflows
     duration: "2h"
@@ -222,7 +222,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @lawrobar90"
     description: "Simulate realistic user journeys for business observability. Generate BizEvents, session replays, and funnel data to practice Dynatrace analytics."
-    tags: [business-observability, rum]
+    tags: [business-observability, rum, demo]
     title: "BizObs Journey Simulator"
     primary_tag: business-observability
     duration: "1h"
@@ -255,7 +255,7 @@ repos:
     description: "Enablement framework — container image, sync CLI, core functions"
     sync_managed: false
     tags: [framework]
-    listed: false
+    listed: true
 
   # ── Non-framework repos (registered for registry, not synced) ──
   - name: dynatrace-wwse.github.io
