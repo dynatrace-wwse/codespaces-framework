@@ -44,6 +44,6 @@ jobs:
 
       - name: Build and deploy
         run: |
-          git fetch origin gh-pages:gh-pages
+          git fetch origin gh-pages:gh-pages 2>/dev/null || true
           mkdocs build --strict
-          mkdocs gh-deploy
+          mkdocs gh-deploy --force

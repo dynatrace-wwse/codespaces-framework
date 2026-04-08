@@ -160,6 +160,15 @@ def main():
     co.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     co.add_argument("--pull", action="store_true", help="Pull latest from origin after checkout")
 
+    # ci-status
+    cs = subparsers.add_parser(
+        "ci-status",
+        help="Show latest CI run status across repos",
+    )
+    cs.add_argument("--repo", help="Target a specific repo (default: all with ci: true)")
+    cs.add_argument("--all", action="store_true", dest="all_workflows",
+                    help="Show all workflows (default: latest per workflow)")
+
     # revert
     rv = subparsers.add_parser(
         "revert",
@@ -214,6 +223,8 @@ def main():
         from sync.commands.cleanup_branches import run
     elif args.command == "checkout":
         from sync.commands.checkout import run
+    elif args.command == "ci-status":
+        from sync.commands.ci_status import run
     elif args.command == "revert":
         from sync.commands.revert import run
     elif args.command == "generate-registry":

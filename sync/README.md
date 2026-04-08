@@ -249,16 +249,17 @@ sync status
 | 11 | `list-pr` | List open PRs with CI status. `--approve`, `--merge`, `--close -c "reason"`. |
 | 12 | `list-issues` | List open issues. `--label` filter. |
 | 13 | `status` | Show framework version drift. |
-| 14 | `list` | List repos from repos.yaml. `--sync-managed`, `--json`. |
+| 14 | `ci-status` | Show latest CI run status across repos. |
+| 15 | `list` | List repos from repos.yaml. `--sync-managed`, `--json`. |
 
 ### Other
 
 | # | Command | Description |
 |---|---------|-------------|
-| 15 | `bump-repo-version` | Bump a repo's version component. |
-| 16 | `migrate-mkdocs` | Standalone mkdocs migration (also runs inside `migrate`). |
-| 17 | `generate-registry` | Generate HTML registry page from repos.yaml. |
-| 18 | `generate-json` | Generate `repos.json` for the org GitHub Pages registry. |
+| 16 | `bump-repo-version` | Bump a repo's version component. |
+| 17 | `migrate-mkdocs` | Standalone mkdocs migration (also runs inside `migrate`). |
+| 18 | `generate-registry` | Generate HTML registry page from repos.yaml. |
+| 19 | `generate-json` | Generate `repos.json` for the org GitHub Pages registry. |
 
 ---
 
