@@ -1,5 +1,5 @@
 repos:
-  # ── Enablement labs ──
+  # ── Enablement labs (source of truth for dynatrace-wwse.github.io registry) ──
   - name: enablement-kubernetes-opentelemetry
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry
     status: active
