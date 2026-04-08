@@ -405,8 +405,373 @@ jobs:
 """
 
 
+DEVCONTAINER_JSON_TEMPLATE = r"""{
+  "name": "Dynatrace Enablement Container",
+  // Pulling the image from the Dockerhub, runs on AMD64 and ARM64. Pulling is normally faster.
+  "image":"shinojosa/dt-enablement:v1.2",
+  /*
+  // Building the image from the Dockerfile
+  "build": {
+    "dockerfile": "Dockerfile"
+    },
+  */
+  // When running locally we pass the 'secrets' as env variables via runArgs "--env-file",".devcontainer/.env"
+  "runArgs": ["--init", "--privileged", "--network=host"],
+  "mounts": ["source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"],
+  // Entrypoint and CMD are overwritten by VSCode
+  "overrideCommand": false,
+
+  // some base images require a specific user name.
+  "remoteUser": "vscode",
+
+  "postCreateCommand": "./.devcontainer/post-create.sh",
+
+  "postStartCommand": "./.devcontainer/post-start.sh",
+
+  "features": {},
+  "customizations": {
+    "vscode": {
+      // Set container specific settings
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
+      "extensions": [ ]
+    }
+  },
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  "forwardPorts": [
+    30100
+  ],
+  // add labels
+  "portsAttributes": {
+    "30100": { "label": "Application Web UI" }
+  },
+  // minimal CPU when running DT components and apps.
+  "hostRequirements": {
+    "cpus": 4
+  },
+  "secrets": {
+    "DT_ENVIRONMENT": {
+      "description": "URL to your Dynatrace Platform eg. https://abc123.apps.dynatrace.com or for sprint -> https://abc123.sprint.apps.dynatracelabs.com"
+    },
+    "DT_OPERATOR_TOKEN": {
+      "description": "Dynatrace Operator Token"
+    },
+    "DT_INGEST_TOKEN": {
+      "description": "Dynatrace Ingest Token"
+    }
+  }
+}
+"""
+
+INTEGRATION_TESTS_TEMPLATE = """\
+name: integration-tests
+run-name: ${{ github.event.head_commit.message }} - PR integration test
+permissions:
+  contents: write
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  codespaces-integration-test-with-dynatrace-deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      DT_ENVIRONMENT: ${{ secrets.DT_ENVIRONMENT }}
+      DT_OPERATOR_TOKEN: ${{ secrets.DT_OPERATOR_TOKEN }}
+      DT_INGEST_TOKEN: ${{ secrets.DT_INGEST_TOKEN }}
+    steps:
+      - name: Commit info
+        run: |
+          echo "Commit SHA: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Repository ${{ github.repository }}"
+          echo "Commit message ${{ github.event.head_commit.message }}"
+          echo "Event ${{ github.event_name }}"
+      - name: Check out repository code
+        uses: actions/checkout@v4
+      - name: Add secrets in .env file
+        run: |
+            cd .devcontainer
+            cat <<EOF >> .env
+            DT_ENVIRONMENT=$DT_ENVIRONMENT
+            DT_OPERATOR_TOKEN=$DT_OPERATOR_TOKEN
+            DT_INGEST_TOKEN=$DT_INGEST_TOKEN
+            EOF
+            sed -i '/"runArgs": \\["--init", "--privileged", "--network=host"\\]/c\\  "runArgs": ["--init", "--privileged", "--network=host", "--env-file",".devcontainer/.env"]' devcontainer.json
+      - name: Test Codespace (devcontainer) build and run commands
+        uses: devcontainers/ci@v0.3
+        with:
+          imageName: shinojosa/dt-enablement
+          cacheFrom: shinojosa/dt-enablement
+          push: never
+          runCmd: |
+            zsh .devcontainer/test/integration.sh
+"""
+
+INTEGRATION_SH_TEMPLATE = """\
+#!/bin/bash
+# Load framework
+source .devcontainer/util/source_framework.sh
+
+printInfoSection "Running integration Tests for $RepositoryName"
+
+assertRunningPod dynatrace operator
+
+assertRunningPod dynatrace activegate
+
+assertRunningApp 30100
+"""
+
+MY_FUNCTIONS_TEMPLATE = """\
+#!/bin/bash
+# Custom functions for this repository
+# Define your own functions here and call them from post-create.sh
+"""
+
+POST_CREATE_TEMPLATE = """\
+#!/bin/bash
+#loading functions to script
+export SECONDS=0
+source .devcontainer/util/source_framework.sh
+
+setUpTerminal
+
+startKindCluster
+
+installK9s
+
+# Dynatrace Operator is deployed automatically, secrets are read from the env.
+dynatraceDeployOperator
+
+# You can deploy CNFS or AppOnly
+deployCloudNative
+#deployApplicationMonitoring
+
+# If you want to deploy your own App, just create a function in my_functions.sh and call it here.
+
+# This step is needed, do not remove it
+finalizePostCreation
+
+printInfoSection "Your dev container finished creating"
+"""
+
+POST_START_TEMPLATE = """\
+#!/bin/bash
+##############################################################
+##  In here you add whatever action should happen after the container has been started
+##############################################################
+#Load the functions into the shell
+source .devcontainer/util/source_framework.sh
+
+printInfoSection "Your dev.container finished starting up"
+"""
+
+MCP_JSON_TEMPLATE = """\
+{
+	"servers": {
+		"dynatrace-mcp-server": {
+			"type": "stdio",
+			"command": "npx",
+			"cwd": "${workspaceFolder}",
+			"args": ["-y","@dynatrace-oss/dynatrace-mcp-server@latest"],
+			"envFile": "${workspaceFolder}/.devcontainer/.env"
+		}
+	}
+}
+"""
+
+GITIGNORE_TEMPLATE = """\
+# Framework cache
+.devcontainer/.cache/
+
+# Framework runtime files (generated at container start)
+.devcontainer/util/.count*
+
+# Framework base config fetched at runtime
+mkdocs-base.yaml
+
+# no env files
+.devcontainer/.env*
+
+# mkdocs renders static files in site
+site/*
+
+# No generated file
+**/gen/*/*.yaml
+**/gen/**.yaml
+**-gen.yaml
+
+# no logs
+*.log
+
+# Node
+node_modules
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/*
+!.vscode/mcp.json
+.idea
+
+# Python
+__pycache__/
+"""
+
+
+def _scaffold_repo(entry, repo_path: Path, version: str):
+    """Add missing framework files to a repo. Creates files that don't exist."""
+    owner = entry.owner
+    name = entry.repo_name
+    repo = entry.repo
+    created = []
+
+    # devcontainer.json
+    dc_path = repo_path / ".devcontainer/devcontainer.json"
+    if not dc_path.exists():
+        dc_path.parent.mkdir(parents=True, exist_ok=True)
+        dc_path.write_text(DEVCONTAINER_JSON_TEMPLATE)
+        created.append("devcontainer.json")
+    else:
+        # Fix old-style devcontainer.json: dockerFile → image, wrong mount target
+        content = dc_path.read_text()
+        changed = False
+        if '"dockerFile"' in content or '"dockerfile"' in content:
+            # Replace build with image pull
+            content = re.sub(
+                r'"dockerFile"\s*:\s*"Dockerfile"',
+                '"image": "shinojosa/dt-enablement:v1.2"',
+                content, flags=re.IGNORECASE,
+            )
+            changed = True
+        if "docker-host.sock" in content:
+            content = content.replace("docker-host.sock", "docker.sock")
+            changed = True
+        if 'chmod +x .devcontainer/post-create.sh && .devcontainer/post-create.sh' in content:
+            content = content.replace(
+                'chmod +x .devcontainer/post-create.sh && .devcontainer/post-create.sh',
+                './.devcontainer/post-create.sh',
+            )
+            changed = True
+        if 'chmod +x .devcontainer/post-start.sh && .devcontainer/post-start.sh' in content:
+            content = content.replace(
+                'chmod +x .devcontainer/post-start.sh && .devcontainer/post-start.sh',
+                './.devcontainer/post-start.sh',
+            )
+            changed = True
+        if changed:
+            dc_path.write_text(content)
+            created.append("devcontainer.json (fixed)")
+
+    # post-create.sh
+    pc_path = repo_path / ".devcontainer/post-create.sh"
+    if not pc_path.exists():
+        pc_path.write_text(POST_CREATE_TEMPLATE)
+        created.append("post-create.sh")
+
+    # post-start.sh
+    ps_path = repo_path / ".devcontainer/post-start.sh"
+    if not ps_path.exists():
+        ps_path.write_text(POST_START_TEMPLATE)
+        created.append("post-start.sh")
+
+    # my_functions.sh
+    mf_path = repo_path / ".devcontainer/util/my_functions.sh"
+    if not mf_path.exists():
+        mf_path.parent.mkdir(parents=True, exist_ok=True)
+        mf_path.write_text(MY_FUNCTIONS_TEMPLATE)
+        created.append("util/my_functions.sh")
+
+    # test/integration.sh
+    ti_path = repo_path / ".devcontainer/test/integration.sh"
+    if not ti_path.exists():
+        ti_path.parent.mkdir(parents=True, exist_ok=True)
+        ti_path.write_text(INTEGRATION_SH_TEMPLATE)
+        created.append("test/integration.sh")
+
+    # .github/workflows/integration-tests.yaml
+    it_path = repo_path / ".github/workflows/integration-tests.yaml"
+    if not it_path.exists():
+        it_path.parent.mkdir(parents=True, exist_ok=True)
+        it_path.write_text(INTEGRATION_TESTS_TEMPLATE)
+        created.append(".github/workflows/integration-tests.yaml")
+
+    # .github/workflows/deploy-ghpages.yaml
+    dg_path = repo_path / ".github/workflows/deploy-ghpages.yaml"
+    if not dg_path.exists():
+        dg_path.parent.mkdir(parents=True, exist_ok=True)
+        dg_path.write_text(DEPLOY_GHPAGES_TEMPLATE)
+        created.append(".github/workflows/deploy-ghpages.yaml")
+
+    # .vscode/mcp.json
+    mcp_path = repo_path / ".vscode/mcp.json"
+    if not mcp_path.exists():
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        mcp_path.write_text(MCP_JSON_TEMPLATE)
+        created.append(".vscode/mcp.json")
+
+    # .gitignore
+    gi_path = repo_path / ".gitignore"
+    if not gi_path.exists():
+        gi_path.write_text(GITIGNORE_TEMPLATE)
+        created.append(".gitignore")
+
+    # docs/ directory with minimal structure
+    docs_path = repo_path / "docs"
+    if not docs_path.exists():
+        docs_path.mkdir(parents=True, exist_ok=True)
+        (docs_path / "index.md").write_text(f"# {name}\n\nWelcome to the {name} lab.\n")
+        # Also need requirements for mkdocs
+        req_path = docs_path / "requirements"
+        req_path.mkdir(parents=True, exist_ok=True)
+        (req_path / "requirements-mkdocs.txt").write_text(
+            "mkdocs-material\npymdown-extensions\n"
+        )
+        # overrides for RUM
+        overrides_path = docs_path / "overrides"
+        overrides_path.mkdir(parents=True, exist_ok=True)
+        (overrides_path / "main.html").write_text(OVERRIDES_MAIN_HTML)
+        created.append("docs/ (index.md, requirements, overrides)")
+
+    # mkdocs.yaml
+    mk_path = repo_path / "mkdocs.yaml"
+    if not mk_path.exists():
+        title = name.replace("-", " ").replace("enablement ", "").title()
+        mk_path.write_text(
+            f'INHERIT: mkdocs-base.yaml\n\n'
+            f'site_name: "Dynatrace Enablement Lab: {title}"\n'
+            f'repo_name: "View Code on GitHub"\n'
+            f'repo_url: "https://github.com/{repo}"\n'
+            f'nav:\n'
+            f"  - \"1. About\": index.md\n"
+        )
+        created.append("mkdocs.yaml")
+
+    # LICENSE
+    license_path = repo_path / "LICENSE"
+    if not license_path.exists():
+        # Copy from framework
+        fw_license = Path(__file__).parent.parent.parent / "LICENSE"
+        if fw_license.exists():
+            shutil.copy2(fw_license, license_path)
+            created.append("LICENSE")
+
+    if created:
+        print(f"    📦 scaffolded: {', '.join(created)}")
+    else:
+        print(f"    ✅ all framework files present")
+
+
 def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     """Migrate a single repo. Returns status: 'migrated', 'up-to-date', 'skipped', or 'error'."""
+
+    # ── Phase 0: Scaffold missing framework files ──
+    if not dry_run:
+        _scaffold_repo(entry, repo_path, version)
+
     image_tier = entry.image_tier
     cat_a_files, cat_a_dirs = _get_category_a(image_tier)
 
@@ -607,6 +972,8 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
         additions = []
         if ".devcontainer/.cache/" not in content:
             additions.append("\n# Framework cache\n.devcontainer/.cache/")
+        if ".count" not in content:
+            additions.append("\n# Framework runtime files\n.devcontainer/util/.count*")
         if "mkdocs-base.yaml" not in content:
             additions.append("\n# Framework base config fetched at runtime\nmkdocs-base.yaml")
         if "Dockerfile.framework" not in content:
@@ -615,6 +982,21 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
             with open(gitignore_path, "a") as f:
                 f.write("\n" + "\n".join(additions) + "\n")
             print(f"    updated .gitignore")
+
+    # Untrack .count if it's tracked by git
+    count_file = repo_path / ".devcontainer/util/.count"
+    if count_file.exists():
+        import subprocess
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", ".devcontainer/util/.count"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            subprocess.run(
+                ["git", "rm", "--cached", ".devcontainer/util/.count"],
+                cwd=repo_path, capture_output=True, text=True,
+            )
+            print(f"    untracked .devcontainer/util/.count")
 
     # ── Phase 9: Migrate .env location ──
     _migrate_env_location(repo_path)
@@ -863,7 +1245,7 @@ def run(args):
     for entry in repos:
         repo_path = _resolve_repo_path(entry.repo_name)
 
-        print(f"── {entry.repo} ──")
+        print(f"── {entry.url} ──")
         print(f"  path: {repo_path}")
         print(f"  image_tier: {entry.image_tier}")
 

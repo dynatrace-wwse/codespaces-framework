@@ -32,6 +32,10 @@ class RepoEntry:
     def repo_name(self) -> str:
         return self.repo.split("/")[1]
 
+    @property
+    def url(self) -> str:
+        return f"github.com/{self.repo}"
+
 
 def load_repos(path: Optional[Path] = None) -> list[RepoEntry]:
     """Load and parse repos.yaml from the given path or default location."""

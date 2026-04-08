@@ -3,21 +3,21 @@ repos:
   - name: enablement-dynatrace-log-ingest-101
     repo: dynatrace-wwse/enablement-dynatrace-log-ingest-101
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt, @agardnerIT"
     description: "Hands-on lab: Dynatrace log ingest fundamentals with Astroshop on Kind"
     tags: [logs, ingest, beginner]
 
   - name: enablement-kubernetes-opentelemetry
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt, @Tyler-Ouellette"
     description: "Hands-on lab: Kubernetes observability with OpenTelemetry and Dynatrace"
     tags: [kubernetes, opentelemetry]
 
   - name: enablement-dql-301
     repo: dynatrace-wwse/enablement-dql-301
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt, @jwood1985, @RyB24"
     description: "Advanced DQL queries and data exploration"
     tags: [dql, advanced]
 
@@ -31,28 +31,28 @@ repos:
   - name: enablement-live-debugger-bug-hunting
     repo: dynatrace-wwse/enablement-live-debugger-bug-hunting
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @joshDynatrace, @ericyyuu, @popecruzdt"
     description: "Live debugger hands-on: find and fix bugs in running applications"
     tags: [debugger, troubleshooting]
 
   - name: enablement-workflow-essentials
     repo: dynatrace-wwse/enablement-workflow-essentials
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt, @sabielawold"
     description: "Dynatrace Workflow automation essentials"
     tags: [workflows, automation]
 
   - name: enablement-browser-dem-biz-observability
     repo: dynatrace-wwse/enablement-browser-dem-biz-observability
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt"
     description: "Browser DEM and business observability hands-on"
     tags: [dem, rum, business]
 
   - name: enablement-business-observability
     repo: dynatrace-wwse/enablement-business-observability
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt, @mikeferg99, @RyB24"
     description: "Business observability with Dynatrace"
     tags: [business, observability]
 
@@ -70,31 +70,24 @@ repos:
     description: "Template repo for creating new enablement labs"
     tags: [template]
 
-  - name: enablement-dynatrace-dem-101
-    repo: dynatrace-wwse/enablement-dynatrace-dem-101
-    status: active
-    maintainer: "@shinojosa"
-    description: "Digital Experience Management 101 hands-on lab"
-    tags: [dem, beginner]
-
   - name: enablement-openpipeline-segments-iam
     repo: dynatrace-wwse/enablement-openpipeline-segments-iam
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt"
     description: "OpenPipeline segments and IAM configuration"
     tags: [openpipeline, iam]
 
   - name: enablement-kubernetes-opentelemetry-openpipeline
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry-openpipeline
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt"
     description: "Kubernetes OpenTelemetry with OpenPipeline processing"
     tags: [kubernetes, opentelemetry, openpipeline]
 
   - name: enablement-dql-fundamentals
     repo: dynatrace-wwse/enablement-dql-fundamentals
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt"
     description: "DQL fundamentals and getting started"
     tags: [dql, beginner]
 
@@ -102,14 +95,14 @@ repos:
   - name: workshop-dynatrace-log-analytics
     repo: dynatrace-wwse/workshop-dynatrace-log-analytics
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt"
     description: "Workshop: Dynatrace log analytics deep dive"
     tags: [workshop, logs]
 
   - name: workshop-destination-automation
     repo: dynatrace-wwse/workshop-destination-automation
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @popecruzdt"
     description: "Workshop: Destination automation with Dynatrace"
     sync_managed: false
     tags: [workshop, automation]
@@ -161,14 +154,14 @@ repos:
   - name: bizobs-journey-simulator
     repo: dynatrace-wwse/bizobs-journey-simulator
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @lawrobar90"
     description: "Business observability journey simulator"
     tags: [business, simulator]
 
   - name: bug-busters
     repo: dynatrace-wwse/bug-busters
     status: active
-    maintainer: "@shinojosa"
+    maintainer: "@shinojosa, @joshDynatrace"
     description: "Bug Busters game: find and fix bugs with Dynatrace"
     tags: [game, debugging]
 

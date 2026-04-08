@@ -86,11 +86,11 @@ def run(args):
                 except ValueError:
                     current = "not-migrated"
                 if current != target:
-                    behind.append(f"{repo_entry.repo} @ {current}")
+                    behind.append(f"{repo_entry.url} @ {current}")
                 else:
-                    print(f"  ✅ {repo_entry.repo} @ {current}")
+                    print(f"  ✅ {repo_entry.url} @ {current}")
             except GHAPIError as e:
-                behind.append(f"{repo_entry.repo}: {e.message}")
+                behind.append(f"{repo_entry.url}: {e.message}")
 
         if behind:
             print(f"\n  ❌ Repos not at {target}:")
@@ -130,13 +130,13 @@ def run(args):
             # Check if tag already exists
             already_exists = new_tag in tags
             if already_exists and not do_release:
-                print(f"  ⏭️  {repo_entry.repo}: {new_tag} already exists")
+                print(f"  ⏭️  {repo_entry.url}: {new_tag} already exists")
                 continue
 
             if dry_run:
                 action = "would tag + release" if do_release else "would tag"
-                print(f"  ⏳ {repo_entry.repo}: {action} {new_tag}")
-                tagged.append(f"{repo_entry.repo}: {new_tag}")
+                print(f"  ⏳ {repo_entry.url}: {action} {new_tag}")
+                tagged.append(f"{repo_entry.url}: {new_tag}")
                 continue
 
             # Create tag if it doesn't exist yet
@@ -144,7 +144,7 @@ def run(args):
                 default_branch = get_default_branch(owner, name)
                 sha = get_branch_sha(owner, name, default_branch)
                 create_tag(owner, name, new_tag, sha)
-                print(f"  🏷️  {repo_entry.repo}: {new_tag}")
+                print(f"  🏷️  {repo_entry.url}: {new_tag}")
 
             # Create GitHub Release
             if do_release:
@@ -200,14 +200,14 @@ def run(args):
                 try:
                     rel = create_release(owner, name, new_tag, release_name, release_body)
                     rel_url = rel.get("html_url", "")
-                    print(f"  📦 {repo_entry.repo}: release {release_name} → {rel_url}")
+                    print(f"  📦 {repo_entry.url}: release {release_name} → {rel_url}")
                 except GHAPIError as e:
-                    print(f"  ⚠️  {repo_entry.repo}: release failed — {e.message}")
+                    print(f"  ⚠️  {repo_entry.url}: release failed — {e.message}")
 
-            tagged.append(f"{repo_entry.repo}: {new_tag}")
+            tagged.append(f"{repo_entry.url}: {new_tag}")
 
         except GHAPIError as e:
-            errors.append(f"{repo_entry.repo}: {e.message}")
-            print(f"  ❌ {repo_entry.repo}: {e.message}", file=sys.stderr)
+            errors.append(f"{repo_entry.url}: {e.message}")
+            print(f"  ❌ {repo_entry.url}: {e.message}", file=sys.stderr)
 
     print(f"\n📊 {'Would tag' if dry_run else 'Tagged'} {len(tagged)} repos, {len(errors)} errors")

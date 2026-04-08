@@ -219,44 +219,45 @@ sync status
 
 ### Migration & Updates
 
-| Command | Description |
-|---------|-------------|
-| `push-update` | Pull main → branch → migrate → push → PR. `--force` to re-push, `--auto-merge` for auto-merge. |
-| `migrate` | Local migration audit. No git operations. |
-| `revert` | Revert uncommitted changes in repos. |
-| `validate` | Check schema, GitHub, devcontainer.json, templates, README badges. |
+| # | Command | Description |
+|---|---------|-------------|
+| 1 | `push-update` | Pull main → branch → migrate → push → PR. `--force` to re-push, `--auto-merge` for auto-merge. |
+| 2 | `migrate` | Local migration audit. No git operations. |
+| 3 | `revert` | Revert uncommitted changes in repos. |
+| 4 | `validate` | Check schema, GitHub, devcontainer.json, templates, README badges. |
 
 ### Versioning & Releases
 
-| Command | Description |
-|---------|-------------|
-| `release` | Create GitHub Release for current tag, or `--part patch/minor/major` to bump first. |
-| `tag` | Create combined tags (`v1.2.6_1.0.1`) on consumer repos. `--bump`, `--release`. |
+| # | Command | Description |
+|---|---------|-------------|
+| 5 | `release` | Create GitHub Release for current tag, or `--part patch/minor/major` to bump first. |
+| 6 | `tag` | Create combined tags (`v1.2.6_1.0.1`) on consumer repos. `--bump`, `--release`. |
 
 ### Repository Management
 
-| Command | Description |
-|---------|-------------|
-| `clone` | Clone repos from repos.yaml. `--all` for non-sync-managed too. |
-| `protect-main` | Apply branch protection (CI required, enforce admins). |
-| `cleanup-branches` | Delete merged branches (local + remote). |
+| # | Command | Description |
+|---|---------|-------------|
+| 7 | `clone` | Clone repos from repos.yaml. `--all` for non-sync-managed too. |
+| 8 | `checkout` | Checkout main and show status. `--pull` to also pull latest. |
+| 9 | `protect-main` | Apply branch protection (CI required, enforce admins). |
+| 10 | `cleanup-branches` | Delete merged branches (local + remote). |
 
 ### Monitoring
 
-| Command | Description |
-|---------|-------------|
-| `list-pr` | List open PRs with CI status. `--approve`, `--merge`, `--close -c "reason"`. |
-| `list-issues` | List open issues. `--label` filter. |
-| `status` | Show framework version drift. |
-| `list` | List repos from repos.yaml. `--sync-managed`, `--json`. |
+| # | Command | Description |
+|---|---------|-------------|
+| 11 | `list-pr` | List open PRs with CI status. `--approve`, `--merge`, `--close -c "reason"`. |
+| 12 | `list-issues` | List open issues. `--label` filter. |
+| 13 | `status` | Show framework version drift. |
+| 14 | `list` | List repos from repos.yaml. `--sync-managed`, `--json`. |
 
 ### Other
 
-| Command | Description |
-|---------|-------------|
-| `bump-repo-version` | Bump a repo's version component. |
-| `migrate-mkdocs` | Standalone mkdocs migration (also runs inside `migrate`). |
-| `generate-registry` | Generate HTML registry page from repos.yaml. |
+| # | Command | Description |
+|---|---------|-------------|
+| 15 | `bump-repo-version` | Bump a repo's version component. |
+| 16 | `migrate-mkdocs` | Standalone mkdocs migration (also runs inside `migrate`). |
+| 17 | `generate-registry` | Generate HTML registry page from repos.yaml. |
 
 ---
 

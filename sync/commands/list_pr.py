@@ -184,7 +184,7 @@ def run(args):
     counts = {"passing": 0, "failing": 0, "pending": 0, "no_pr": 0, "approved": 0, "merged": 0}
 
     for entry in repos:
-        print(f"── {entry.repo} ──")
+        print(f"── {entry.url} ──")
 
         prs = _get_prs(entry.repo, head=head_filter)
         if not prs:

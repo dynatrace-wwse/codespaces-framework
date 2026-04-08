@@ -30,16 +30,16 @@ def run(args):
         path = get_repo_path(entry.repo_name)
 
         if path.is_dir() and (path / ".git").is_dir():
-            print(f"  ✅ {entry.repo} — already cloned")
+            print(f"  ✅ {entry.url} — already cloned")
             skipped += 1
             continue
 
         try:
             ensure_cloned(entry.owner, entry.repo_name)
-            print(f"  📥 {entry.repo} — cloned")
+            print(f"  📥 {entry.url} — cloned")
             cloned += 1
         except GitError as e:
-            print(f"  ❌ {entry.repo} — {e.message}")
+            print(f"  ❌ {entry.url} — {e.message}")
             errors += 1
 
     print(f"\n📊 {cloned} cloned, {skipped} already local, {errors} errors")

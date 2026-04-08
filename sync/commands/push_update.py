@@ -177,7 +177,7 @@ def run(args):
     manual_needed = []
 
     for repo_entry in repos:
-        print(f"── {repo_entry.repo} ──")
+        print(f"── {repo_entry.url} ──")
         result = _update_repo(repo_entry, target, dry_run, force, auto_merge)
         results.append(result)
 

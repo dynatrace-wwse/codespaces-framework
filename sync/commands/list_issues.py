@@ -59,7 +59,7 @@ def run(args):
         if not issues:
             continue
 
-        print(f"── {entry.repo} ({len(issues)} issues) ──")
+        print(f"── {entry.url} ({len(issues)} issues) ──")
         total_issues += len(issues)
 
         for issue in issues:

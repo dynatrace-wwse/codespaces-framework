@@ -152,6 +152,14 @@ def main():
     cb.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     cb.add_argument("--dry-run", action="store_true", help="List branches without deleting")
 
+    # checkout
+    co = subparsers.add_parser(
+        "checkout",
+        help="Checkout main across repos and show status",
+    )
+    co.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
+    co.add_argument("--pull", action="store_true", help="Pull latest from origin after checkout")
+
     # revert
     rv = subparsers.add_parser(
         "revert",
@@ -198,6 +206,8 @@ def main():
         from sync.commands.protect_main import run
     elif args.command == "cleanup-branches":
         from sync.commands.cleanup_branches import run
+    elif args.command == "checkout":
+        from sync.commands.checkout import run
     elif args.command == "revert":
         from sync.commands.revert import run
     elif args.command == "generate-registry":

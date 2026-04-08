@@ -72,7 +72,7 @@ def run(args):
 
     for entry in repos:
         owner, name = entry.owner, entry.repo_name
-        print(f"── {entry.repo} ──")
+        print(f"── {entry.url} ──")
 
         # Check current status
         protection = _get_protection(owner, name)

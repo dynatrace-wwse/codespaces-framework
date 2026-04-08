@@ -57,7 +57,7 @@ def run(args):
 
     for entry in repos:
         repo_path = _resolve_repo_path(entry.repo_name)
-        print(f"── {entry.repo} ──")
+        print(f"── {entry.url} ──")
 
         if not repo_path.is_dir():
             print(f"  📭 local clone not found")

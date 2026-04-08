@@ -95,20 +95,20 @@ def run(args):
         print("Synced (up to date):")
         for e in up_to_date:
             tag = f" ({e['latest_tag']})" if e["latest_tag"] else ""
-            print(f"  + {e['repo']}{tag} @ {e['framework_version']}")
+            print(f"  + github.com/{e['repo']}{tag} @ {e['framework_version']}")
         print()
 
     if behind:
         print("Behind:")
         for e in behind:
             tag = f" ({e['latest_tag']})" if e["latest_tag"] else ""
-            print(f"  ! {e['repo']}{tag} @ {e['framework_version']}")
+            print(f"  ! github.com/{e['repo']}{tag} @ {e['framework_version']}")
         print()
 
     if errors:
         print("Errors:")
         for e in errors:
-            print(f"  x {e['repo']}: {e.get('message', 'unknown error')}")
+            print(f"  x github.com/{e['repo']}: {e.get('message', 'unknown error')}")
         print()
 
     total = len(up_to_date) + len(behind) + len(errors)

@@ -17,10 +17,10 @@ def _validate_local(repo_entry, repo_path):
 
     path = Path(repo_path)
     if not path.is_dir() or not (path / ".devcontainer").is_dir():
-        print(f"  📭 {repo_entry.name}: local clone not found at {path}")
+        print(f"  📭 {repo_entry.url}: local clone not found at {path}")
         return
 
-    print(f"\n── {repo_entry.repo} ({path}) ──")
+    print(f"\n── {repo_entry.url} ({path}) ──")
 
     # devcontainer.json validation
     dc_issues = _validate_devcontainer(path)
@@ -78,6 +78,82 @@ def _validate_local(repo_entry, repo_path):
     # Verify README badges and footer
     _validate_readme(repo_entry, path)
 
+    # Verify docs structure
+    _validate_docs(repo_entry, path)
+
+
+def _validate_docs(repo_entry, path):
+    """Validate documentation structure for MkDocs GitHub Pages."""
+    from pathlib import Path
+    path = Path(path)
+    issues = []
+
+    # mkdocs.yaml
+    mk = path / "mkdocs.yaml"
+    if not mk.exists():
+        issues.append("mkdocs.yaml missing")
+    else:
+        content = mk.read_text()
+        if "INHERIT:" not in content:
+            issues.append("mkdocs.yaml not using INHERIT pattern")
+        if "rum_snippet" not in content:
+            issues.append("mkdocs.yaml missing rum_snippet in extra (RUM tracking disabled)")
+
+    # docs/ directory
+    docs = path / "docs"
+    if not docs.is_dir():
+        issues.append("docs/ directory missing")
+    else:
+        # index.md
+        if not (docs / "index.md").exists():
+            issues.append("docs/index.md missing")
+
+        # overrides/main.html (for RUM)
+        overrides = docs / "overrides"
+        if not overrides.is_dir():
+            issues.append("docs/overrides/ missing")
+        elif not (overrides / "main.html").exists():
+            issues.append("docs/overrides/main.html missing")
+
+        # requirements
+        reqs = docs / "requirements"
+        if not reqs.is_dir():
+            issues.append("docs/requirements/ missing")
+        elif not (reqs / "requirements-mkdocs.txt").exists():
+            issues.append("docs/requirements/requirements-mkdocs.txt missing")
+
+    # GitHub Actions workflow for docs deployment
+    ghpages = path / ".github/workflows/deploy-ghpages.yaml"
+    if not ghpages.exists():
+        issues.append(".github/workflows/deploy-ghpages.yaml missing")
+
+    # Integration tests workflow
+    ci = path / ".github/workflows/integration-tests.yaml"
+    if not ci.exists():
+        issues.append(".github/workflows/integration-tests.yaml missing")
+
+    # .vscode/mcp.json
+    mcp = path / ".vscode/mcp.json"
+    if not mcp.exists():
+        issues.append(".vscode/mcp.json missing")
+
+    # test/integration.sh
+    ti = path / ".devcontainer/test/integration.sh"
+    if not ti.exists():
+        issues.append(".devcontainer/test/integration.sh missing")
+
+    # my_functions.sh
+    mf = path / ".devcontainer/util/my_functions.sh"
+    if not mf.exists():
+        issues.append(".devcontainer/util/my_functions.sh missing")
+
+    if issues:
+        print(f"  ⚠️  repo structure: {len(issues)} issue(s)")
+        for issue in issues:
+            print(f"    ❌ {issue}")
+    else:
+        print(f"  ✅ repo structure complete")
+
 
 def run(args):
     target_repo = args.repo
@@ -98,6 +174,9 @@ def run(args):
 
     print("+ Schema validation passed")
 
+    # Always skip codespaces-framework (it's the source of truth, not a consumer)
+    repos = [r for r in repos if r.name != "codespaces-framework"]
+
     # Filter to specific repo if requested
     if target_repo:
         repos = [r for r in repos if r.repo == target_repo or r.name == target_repo]
@@ -113,14 +192,14 @@ def run(args):
             exists, archived = check_repo_exists(owner, name)
             if not exists:
                 gh_errors.append(
-                    f"{repo_entry.name}: repo '{repo_entry.repo}' not found (404)"
+                    f"{repo_entry.url}: not found (404)"
                 )
             elif archived and repo_entry.status != "archived":
                 gh_errors.append(
-                    f"{repo_entry.name}: repo is archived on GitHub but status is '{repo_entry.status}'"
+                    f"{repo_entry.url}: repo is archived on GitHub but status is '{repo_entry.status}'"
                 )
         except GHAPIError as e:
-            gh_errors.append(f"{repo_entry.name}: API error: {e.message}")
+            gh_errors.append(f"{repo_entry.url}: API error: {e.message}")
 
     if gh_errors:
         print("x GitHub accessibility check failed:")
