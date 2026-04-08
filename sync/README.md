@@ -258,6 +258,7 @@ sync status
 | 15 | `bump-repo-version` | Bump a repo's version component. |
 | 16 | `migrate-mkdocs` | Standalone mkdocs migration (also runs inside `migrate`). |
 | 17 | `generate-registry` | Generate HTML registry page from repos.yaml. |
+| 18 | `generate-json` | Generate `repos.json` for the org GitHub Pages registry. |
 
 ---
 

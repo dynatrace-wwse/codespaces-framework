@@ -23,6 +23,13 @@ class RepoEntry:
     prebuilds: bool = False
     image_tier: str = "k8s"
     tags: list[str] = field(default_factory=list)
+    # Registry fields (used by the org GitHub Pages site)
+    title: str = ""
+    primary_tag: str = ""
+    icon_key: str = ""
+    duration: str = ""
+    is_template: bool = False
+    listed: bool = True
 
     @property
     def owner(self) -> str:

@@ -173,6 +173,12 @@ def main():
     )
     gr.add_argument("--output", required=True, help="Output HTML file path")
 
+    # generate-json
+    gj = subparsers.add_parser(
+        "generate-json", help="Generate repos.json for the org GitHub Pages registry"
+    )
+    gj.add_argument("--output", help="Output file path (default: stdout)")
+
     args = parser.parse_args()
 
     # Import and dispatch to command handlers
@@ -212,6 +218,8 @@ def main():
         from sync.commands.revert import run
     elif args.command == "generate-registry":
         from sync.commands.generate_registry import run
+    elif args.command == "generate-json":
+        from sync.commands.generate_json import run
     else:
         parser.print_help()
         sys.exit(1)

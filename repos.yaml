@@ -1,176 +1,251 @@
 repos:
   # ── Enablement labs ──
-  - name: enablement-dynatrace-log-ingest-101
-    repo: dynatrace-wwse/enablement-dynatrace-log-ingest-101
-    status: active
-    maintainer: "@shinojosa, @popecruzdt, @agardnerIT"
-    description: "Hands-on lab: Dynatrace log ingest fundamentals with Astroshop on Kind"
-    tags: [logs, ingest, beginner]
-
   - name: enablement-kubernetes-opentelemetry
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry
     status: active
     maintainer: "@shinojosa, @popecruzdt, @Tyler-Ouellette"
-    description: "Hands-on lab: Kubernetes observability with OpenTelemetry and Dynatrace"
+    description: "Full-stack Kubernetes observability with OpenTelemetry. Instrument cloud-native workloads, collect distributed traces, metrics, and logs, and correlate with Dynatrace topology."
     tags: [kubernetes, opentelemetry]
-
-  - name: enablement-dql-301
-    repo: dynatrace-wwse/enablement-dql-301
-    status: active
-    maintainer: "@shinojosa, @popecruzdt, @jwood1985, @RyB24"
-    description: "Advanced DQL queries and data exploration"
-    tags: [dql, advanced]
+    title: "Kubernetes & OpenTelemetry"
+    primary_tag: kubernetes
+    duration: "3h"
 
   - name: enablement-gen-ai-llm-observability
     repo: dynatrace-wwse/enablement-gen-ai-llm-observability
     status: active
     maintainer: "@shinojosa"
-    description: "LLM observability with Dynatrace and OpenTelemetry"
-    tags: [ai, llm, opentelemetry]
-
-  - name: enablement-live-debugger-bug-hunting
-    repo: dynatrace-wwse/enablement-live-debugger-bug-hunting
-    status: active
-    maintainer: "@shinojosa, @joshDynatrace, @ericyyuu, @popecruzdt"
-    description: "Live debugger hands-on: find and fix bugs in running applications"
-    tags: [debugger, troubleshooting]
-
-  - name: enablement-workflow-essentials
-    repo: dynatrace-wwse/enablement-workflow-essentials
-    status: active
-    maintainer: "@shinojosa, @popecruzdt, @sabielawold"
-    description: "Dynatrace Workflow automation essentials"
-    tags: [workflows, automation]
-
-  - name: enablement-browser-dem-biz-observability
-    repo: dynatrace-wwse/enablement-browser-dem-biz-observability
-    status: active
-    maintainer: "@shinojosa, @popecruzdt"
-    description: "Browser DEM and business observability hands-on"
-    tags: [dem, rum, business]
+    description: "Observe GenAI and LLM workloads end-to-end. Trace AI pipelines, monitor token usage and latency, and detect anomalies in AI-driven applications with Dynatrace."
+    tags: [gen-ai, opentelemetry]
+    title: "GenAI & LLM Observability"
+    primary_tag: gen-ai
+    duration: "2h"
 
   - name: enablement-business-observability
     repo: dynatrace-wwse/enablement-business-observability
     status: active
     maintainer: "@shinojosa, @popecruzdt, @mikeferg99, @RyB24"
-    description: "Business observability with Dynatrace"
-    tags: [business, observability]
+    description: "Leverage Dynatrace BizEvents and dashboards to connect technical performance with real business outcomes. KPI tracking, funnel analysis, and custom business metrics."
+    tags: [business-observability]
+    title: "Business Observability"
+    primary_tag: business-observability
+    duration: "3h"
+
+  - name: enablement-dql-301
+    repo: dynatrace-wwse/enablement-dql-301
+    status: active
+    maintainer: "@shinojosa, @popecruzdt, @jwood1985, @RyB24"
+    description: "Master the Dynatrace Query Language at an advanced level. Build powerful cross-signal queries spanning logs, traces, metrics and business events."
+    tags: [logs, business-observability, kubernetes]
+    title: "Advanced DQL 301"
+    primary_tag: logs
+    icon_key: dql
+    duration: "1h"
+
+  - name: enablement-dynatrace-log-ingest-101
+    repo: dynatrace-wwse/enablement-dynatrace-log-ingest-101
+    status: active
+    maintainer: "@shinojosa, @popecruzdt, @agardnerIT"
+    description: "Introduction to log ingestion and analytics. Learn how to ingest, parse, and analyse logs at scale using OpenPipeline and Dynatrace DQL."
+    tags: [logs, kubernetes]
+    title: "Log Ingestion 101"
+    primary_tag: logs
+    duration: "2h"
+
+  - name: enablement-browser-dem-biz-observability
+    repo: dynatrace-wwse/enablement-browser-dem-biz-observability
+    status: active
+    maintainer: "@shinojosa, @popecruzdt"
+    description: "Browser Digital Experience Monitoring combined with business observability. Correlate real-user sessions with business KPIs in a single unified view."
+    tags: [rum, business-observability]
+    title: "Browser DEM & Business Observability"
+    primary_tag: rum
+    duration: "2h"
+
+  - name: enablement-live-debugger-bug-hunting
+    repo: dynatrace-wwse/enablement-live-debugger-bug-hunting
+    status: active
+    maintainer: "@shinojosa, @joshDynatrace, @ericyyuu, @popecruzdt"
+    description: "Diagnose production issues in real-world scenarios using Dynatrace Live Debugger — no redeploys, no restarts. Step through running code with full observability context."
+    tags: [live-debugger, devops]
+    title: "Live Debugger & Bug Hunting"
+    primary_tag: live-debugger
+    duration: "2h"
+
+  - name: enablement-workflow-essentials
+    repo: dynatrace-wwse/enablement-workflow-essentials
+    status: active
+    maintainer: "@shinojosa, @popecruzdt, @sabielawold"
+    description: "Build automated remediation, alerting, and integration workflows using the Dynatrace Workflow engine. From simple notifications to complex multi-step automations."
+    tags: [workflows]
+    title: "Workflow Essentials"
+    primary_tag: workflows
+    duration: "2.5h"
 
   - name: enablement-azure-webapp-otel
     repo: dynatrace-wwse/enablement-azure-webapp-otel
     status: active
     maintainer: "@shinojosa"
-    description: "Azure Web App observability with OpenTelemetry and Dynatrace"
-    tags: [azure, opentelemetry]
+    description: "Deploy and observe Azure Web Apps with OpenTelemetry and Dynatrace. End-to-end instrumentation of cloud-hosted applications on Microsoft Azure."
+    tags: [opentelemetry, kubernetes]
+    title: "Azure Web App & OpenTelemetry"
+    primary_tag: opentelemetry
+    duration: "2h"
 
   - name: enablement-codespaces-template
     repo: dynatrace-wwse/enablement-codespaces-template
     status: active
     maintainer: "@shinojosa"
-    description: "Template repo for creating new enablement labs"
-    tags: [template]
+    description: "The canonical template to kickstart your own enablement. All Codespaces Framework features pre-configured: docs, monitoring, devcontainer, and CI/CD out of the box."
+    tags: [devops]
+    title: "Codespaces Enablement Template"
+    primary_tag: devops
+    is_template: true
+    duration: "1h"
 
   - name: enablement-openpipeline-segments-iam
     repo: dynatrace-wwse/enablement-openpipeline-segments-iam
     status: active
     maintainer: "@shinojosa, @popecruzdt"
-    description: "OpenPipeline segments and IAM configuration"
-    tags: [openpipeline, iam]
+    description: "Configure OpenPipeline segments and IAM policies. Learn data routing, retention management, and access control for observability data in Dynatrace."
+    tags: [logs, kubernetes]
+    title: "OpenPipeline Segments & IAM"
+    primary_tag: logs
+    duration: "2h"
 
   - name: enablement-kubernetes-opentelemetry-openpipeline
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry-openpipeline
     status: active
     maintainer: "@shinojosa, @popecruzdt"
-    description: "Kubernetes OpenTelemetry with OpenPipeline processing"
-    tags: [kubernetes, opentelemetry, openpipeline]
+    description: "Combine Kubernetes OpenTelemetry collection with OpenPipeline processing. Route, transform, and enrich telemetry data before it reaches Dynatrace."
+    tags: [kubernetes, opentelemetry, logs]
+    title: "Kubernetes OTel & OpenPipeline"
+    primary_tag: kubernetes
+    duration: "3h"
 
   - name: enablement-dql-fundamentals
     repo: dynatrace-wwse/enablement-dql-fundamentals
     status: active
     maintainer: "@shinojosa, @popecruzdt"
-    description: "DQL fundamentals and getting started"
-    tags: [dql, beginner]
+    description: "Get started with the Dynatrace Query Language. Learn the fundamentals of querying logs, metrics, and events with hands-on exercises."
+    tags: [logs, business-observability]
+    title: "DQL Fundamentals"
+    primary_tag: logs
+    icon_key: dql
+    duration: "1.5h"
 
   # ── Workshops ──
   - name: workshop-dynatrace-log-analytics
     repo: dynatrace-wwse/workshop-dynatrace-log-analytics
     status: active
     maintainer: "@shinojosa, @popecruzdt"
-    description: "Workshop: Dynatrace log analytics deep dive"
-    tags: [workshop, logs]
+    description: "Workshop-format hands-on lab for log analytics. From ingestion to root-cause analysis — master the full log management lifecycle with Dynatrace."
+    tags: [logs, kubernetes]
+    title: "Log Analytics Workshop"
+    primary_tag: logs
+    duration: "3h"
 
   - name: workshop-destination-automation
     repo: dynatrace-wwse/workshop-destination-automation
     status: active
     maintainer: "@shinojosa, @popecruzdt"
-    description: "Workshop: Destination automation with Dynatrace"
+    description: "Workshop on destination automation with Dynatrace Workflows. Build end-to-end automated pipelines for alerting, ticketing, and remediation."
     sync_managed: false
-    tags: [workshop, automation]
+    tags: [workflows]
+    title: "Destination Automation Workshop"
+    primary_tag: workflows
+    duration: "2h"
 
   # ── Demos ──
   - name: demo-agentic-ai-with-nvidia
     repo: dynatrace-wwse/demo-agentic-ai-with-nvidia
     status: active
     maintainer: "@shinojosa"
-    description: "Demo: Agentic AI observability with NVIDIA and Dynatrace"
-    tags: [demo, ai, nvidia]
+    description: "Hands-on demo showcasing agentic AI workflows powered by NVIDIA with full Dynatrace observability. Trace AI agents end-to-end, monitor model performance, and detect issues in real-time."
+    tags: [gen-ai, application-security]
+    title: "Agentic AI with NVIDIA"
+    primary_tag: gen-ai
+    duration: "1.5h"
 
   - name: demo-mcp-unguard
     repo: dynatrace-wwse/demo-mcp-unguard
     status: active
     maintainer: "@shinojosa"
-    description: "Demo: MCP server with Unguard vulnerable app"
-    tags: [demo, mcp, security]
+    description: "Security-focused demo using Model Context Protocol with the Unguard intentionally vulnerable application. Explore threat detection, attack surface analysis, and application security with Dynatrace."
+    tags: [application-security, gen-ai]
+    title: "MCP Unguard"
+    primary_tag: application-security
+    duration: "1h"
 
   - name: demo-opentelemetry
     repo: dynatrace-wwse/demo-opentelemetry
     status: active
     maintainer: "@shinojosa"
-    description: "Demo: OpenTelemetry instrumentation with Dynatrace"
-    tags: [demo, opentelemetry]
+    description: "OpenTelemetry instrumentation demo with Dynatrace. See how traces, metrics, and logs flow from instrumented applications into the Dynatrace platform."
+    tags: [opentelemetry]
+    title: "OpenTelemetry Demo"
+    primary_tag: opentelemetry
+    duration: "1h"
 
   - name: demo-astroshop-runtime-optimization
     repo: dynatrace-wwse/demo-astroshop-runtime-optimization
     status: active
     maintainer: "@shinojosa"
-    description: "Demo: Astroshop runtime optimization and performance tuning"
-    tags: [demo, astroshop, performance]
+    description: "Optimize Astroshop runtime performance with Dynatrace. Identify bottlenecks, tune resource allocation, and measure improvements in a realistic microservices environment."
+    tags: [kubernetes, devops]
+    title: "Astroshop Runtime Optimization"
+    primary_tag: kubernetes
+    duration: "1.5h"
 
   - name: demo-astroshop-problems
     repo: dynatrace-wwse/demo-astroshop-problems
     status: active
     maintainer: "@shinojosa"
-    description: "Demo: Astroshop problem scenarios for troubleshooting"
-    tags: [demo, astroshop, troubleshooting]
+    description: "Troubleshoot Astroshop problem scenarios with Dynatrace. Practice root-cause analysis on realistic failure modes across a distributed microservices stack."
+    tags: [kubernetes, live-debugger]
+    title: "Astroshop Problem Scenarios"
+    primary_tag: kubernetes
+    duration: "1.5h"
 
   # ── Other framework-managed ──
   - name: ace-integration
     repo: dynatrace-wwse/ace-integration
     status: active
     maintainer: "@shinojosa"
-    description: "ACE integration patterns with Dynatrace"
-    tags: [ace, integration]
+    description: "ACE integration patterns with Dynatrace. Connect Autonomous Cloud Enablement tools and workflows into the Dynatrace platform."
+    tags: [workflows, devops]
+    title: "ACE Integration"
+    primary_tag: workflows
+    duration: "2h"
 
   - name: bizobs-journey-simulator
     repo: dynatrace-wwse/bizobs-journey-simulator
     status: active
     maintainer: "@shinojosa, @lawrobar90"
-    description: "Business observability journey simulator"
-    tags: [business, simulator]
+    description: "Simulate realistic user journeys for business observability. Generate BizEvents, session replays, and funnel data to practice Dynatrace analytics."
+    tags: [business-observability, rum]
+    title: "BizObs Journey Simulator"
+    primary_tag: business-observability
+    duration: "1h"
 
   - name: bug-busters
     repo: dynatrace-wwse/bug-busters
     status: active
     maintainer: "@shinojosa, @joshDynatrace"
-    description: "Bug Busters game: find and fix bugs with Dynatrace"
-    tags: [game, debugging]
+    description: "Gamified bug hunting and troubleshooting challenges. Race against the clock to find and fix production issues across a realistic microservices environment."
+    tags: [live-debugger, devops]
+    title: "Bug Busters"
+    primary_tag: live-debugger
+    duration: "1.5h"
 
   - name: remote-environment
     repo: dynatrace-wwse/remote-environment
     status: active
     maintainer: "@shinojosa"
-    description: "Remote dev environment setup for Dynatrace enablement"
-    tags: [infrastructure]
+    description: "Provision and manage remote Dynatrace environments for distributed enablement scenarios. Streamline setup, configuration, and teardown of fully instrumented remote workspaces."
+    tags: [devops, kubernetes]
+    title: "Remote Environment"
+    primary_tag: devops
+    duration: "2h"
 
   # ── Framework (source of truth, not synced but managed) ──
   - name: codespaces-framework
@@ -180,6 +255,7 @@ repos:
     description: "Enablement framework — container image, sync CLI, core functions"
     sync_managed: false
     tags: [framework]
+    listed: false
 
   # ── Non-framework repos (registered for registry, not synced) ──
   - name: dynatrace-wwse.github.io
@@ -190,6 +266,7 @@ repos:
     sync_managed: false
     ci: false
     tags: [website]
+    listed: false
 
   - name: codespaces-tracker
     repo: dynatrace-wwse/codespaces-tracker
@@ -199,3 +276,4 @@ repos:
     sync_managed: false
     ci: false
     tags: [analytics]
+    listed: false

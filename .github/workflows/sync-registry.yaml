@@ -1,0 +1,45 @@
+name: Sync registry to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: [repos.yaml]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout codespaces-framework
+        uses: actions/checkout@v4
+
+      - name: Checkout dynatrace-wwse.github.io
+        uses: actions/checkout@v4
+        with:
+          repository: dynatrace-wwse/dynatrace-wwse.github.io
+          path: _site
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Generate repos.json
+        run: PYTHONPATH=. python3 -m sync.cli generate-json --output _site/repos.json
+
+      - name: Commit and push
+        working-directory: _site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add repos.json
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: update repos.json from repos.yaml"
+          git push
