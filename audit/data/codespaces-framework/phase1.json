@@ -1,0 +1,22 @@
+{
+  "doc_count": 21,
+  "screenshot_count": 19,
+  "gen2_count": 3,
+  "gen3_count": 14,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "RUM (classic menu)"
+  ],
+  "gen3_keywords_found": [
+    "Automations",
+    "DQL",
+    "Davis CoPilot",
+    "Grail",
+    "fetchLogs"
+  ],
+  "red_files": [
+    "monitoring.md",
+    "resources.md"
+  ],
+  "yellow_files": []
+}

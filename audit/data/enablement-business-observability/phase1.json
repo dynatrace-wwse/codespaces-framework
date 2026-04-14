@@ -1,0 +1,27 @@
+{
+  "doc_count": 17,
+  "screenshot_count": 154,
+  "gen2_count": 2,
+  "gen3_count": 103,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "Process group",
+    "Smartscape (classic)"
+  ],
+  "gen3_keywords_found": [
+    "Apps >",
+    "Automations",
+    "DQL",
+    "Davis CoPilot",
+    "Notebooks",
+    "OpenPipeline",
+    "Workflows",
+    "fetch events",
+    "fetchLogs"
+  ],
+  "red_files": [],
+  "yellow_files": [
+    "04_bizevents_oneagent.md",
+    "11_wrapup.md"
+  ]
+}

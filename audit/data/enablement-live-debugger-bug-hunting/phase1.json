@@ -1,0 +1,24 @@
+{
+  "doc_count": 23,
+  "screenshot_count": 56,
+  "gen2_count": 7,
+  "gen3_count": 8,
+  "risk": "RED",
+  "gen2_keywords_found": [
+    "RUM (classic menu)",
+    "Settings >",
+    "v1 API"
+  ],
+  "gen3_keywords_found": [
+    "Apps >",
+    "Grail"
+  ],
+  "red_files": [
+    "mask-data.md",
+    "scratch.md",
+    "whats-next.md"
+  ],
+  "yellow_files": [
+    "getting-started.md"
+  ]
+}

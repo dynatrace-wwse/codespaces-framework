@@ -1,0 +1,30 @@
+{
+  "doc_count": 14,
+  "screenshot_count": 89,
+  "gen2_count": 15,
+  "gen3_count": 42,
+  "risk": "RED",
+  "gen2_keywords_found": [
+    "RUM (classic menu)",
+    "Smartscape (classic)",
+    "Web application"
+  ],
+  "gen3_keywords_found": [
+    "Automations",
+    "DQL",
+    "Davis CoPilot",
+    "Notebooks",
+    "Segments",
+    "Workflows",
+    "fetch events"
+  ],
+  "red_files": [
+    "3-customer-business-journey.md",
+    "4-real-user-monitoring.md"
+  ],
+  "yellow_files": [
+    "5-business-observability-rum.md",
+    "6-business-observability-automation.md",
+    "index.md"
+  ]
+}

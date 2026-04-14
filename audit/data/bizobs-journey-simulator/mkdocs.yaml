@@ -1,0 +1,13 @@
+INHERIT: mkdocs-base.yaml
+
+site_name: "Dynatrace Enablement Lab: Business Observability Journey Simulator"
+repo_name: "View Code on GitHub"
+repo_url: "https://github.com/dynatrace-wwse/bizobs-journey-simulator"
+nav:
+  - "Home": index.md
+  - "Getting Started": 2-getting-started.md
+  - "Concepts": 3-concepts.md
+  - "Advanced Features": 4-advanced-features.md
+
+extra:
+  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/7c50bce5c0cc890f_complete.js"

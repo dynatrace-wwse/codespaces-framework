@@ -1,0 +1,16 @@
+{
+  "doc_count": 12,
+  "screenshot_count": 15,
+  "gen2_count": 0,
+  "gen3_count": 107,
+  "risk": "GREEN",
+  "gen2_keywords_found": [],
+  "gen3_keywords_found": [
+    "Apps >",
+    "Automations",
+    "OpenPipeline",
+    "Workflows"
+  ],
+  "red_files": [],
+  "yellow_files": []
+}

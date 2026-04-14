@@ -1,0 +1,18 @@
+{
+  "doc_count": 12,
+  "screenshot_count": 16,
+  "gen2_count": 1,
+  "gen3_count": 3,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "Settings >"
+  ],
+  "gen3_keywords_found": [
+    "Apps >",
+    "Grail"
+  ],
+  "red_files": [],
+  "yellow_files": [
+    "getting-started.md"
+  ]
+}

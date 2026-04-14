@@ -1,0 +1,16 @@
+INHERIT: mkdocs-base.yaml
+
+site_name: "Dynatrace Enablement Lab: Remote Environment"
+repo_name: "View Code on GitHub"
+repo_url: "https://github.com/dynatrace-wwse/remote-environment"
+nav:
+  - "1. Overview": index.md
+  - "2. Prerequisites": environment.md
+  - "3. SSH & Host setup": configure.md
+  - "4. Launch & Monitor": launch.md
+  - "5. Day-to-Day Operations": day2day.md
+  - "6. Cleanup": cleanup.md
+  - "7. What's next?": whats-next.md
+
+extra:
+  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/e1da735db6894c6c_complete.js"

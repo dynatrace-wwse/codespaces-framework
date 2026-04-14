@@ -1,0 +1,20 @@
+{
+  "doc_count": 10,
+  "screenshot_count": 147,
+  "gen2_count": 0,
+  "gen3_count": 116,
+  "risk": "GREEN",
+  "gen2_keywords_found": [],
+  "gen3_keywords_found": [
+    "Buckets",
+    "DQL",
+    "Grail",
+    "Notebooks",
+    "OpenPipeline",
+    "fetch events",
+    "fetchLogs",
+    "v2 API"
+  ],
+  "red_files": [],
+  "yellow_files": []
+}

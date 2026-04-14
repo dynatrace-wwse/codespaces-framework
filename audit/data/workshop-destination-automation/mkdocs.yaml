@@ -1,0 +1,72 @@
+site_name: Destination Automation Lab Guide
+site_description: Dynatrace and Red Hat Ansible Automation Platform workshop documentation
+site_url: https://dynatrace-wwse.github.io/workshop-destination-automation/
+repo_url: https://github.com/dynatrace-wwse/workshop-destination-automation
+repo_name: dynatrace-wwse/workshop-destination-automation
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+strict: true
+
+nav:
+  - Overview: lab-guide/overview.md
+  - Prerequisites: lab-guide/prerequisites.md
+  - Provision: lab-guide/provision.md
+  - Deploy: lab-guide/deploy.md
+  - Observe and Automate: lab-guide/observe-and-automate.md
+  - Remediate: lab-guide/remediate.md
+  - Summarize: lab-guide/summarize.md
+  - Clean: lab-guide/clean.md
+
+theme:
+  name: material
+  language: en
+  font:
+    text: Space Grotesk
+    code: IBM Plex Mono
+  features:
+    - content.code.copy
+    - content.tabs.link
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: dynatrace-light
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to Red Hat dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: redhat-dark
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to Dynatrace light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - fenced_code
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - assets/stylesheets/brand.css
+
+copyright: Copyright 2026 Dynatrace and Red Hat workshop contributors

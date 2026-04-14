@@ -1,0 +1,21 @@
+{
+  "doc_count": 10,
+  "screenshot_count": 21,
+  "gen2_count": 5,
+  "gen3_count": 34,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "Host group",
+    "Process group"
+  ],
+  "gen3_keywords_found": [
+    "DQL",
+    "Notebooks",
+    "fetch spans",
+    "fetchLogs"
+  ],
+  "red_files": [],
+  "yellow_files": [
+    "3-data-transformation.md"
+  ]
+}

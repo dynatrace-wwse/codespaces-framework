@@ -1,0 +1,13 @@
+{
+  "doc_count": 1,
+  "screenshot_count": 0,
+  "gen2_count": 0,
+  "gen3_count": 2,
+  "risk": "GREEN",
+  "gen2_keywords_found": [],
+  "gen3_keywords_found": [
+    "OpenPipeline"
+  ],
+  "red_files": [],
+  "yellow_files": []
+}

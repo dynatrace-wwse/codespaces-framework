@@ -1,0 +1,21 @@
+{
+  "doc_count": 16,
+  "screenshot_count": 1,
+  "gen2_count": 1,
+  "gen3_count": 54,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "Process group"
+  ],
+  "gen3_keywords_found": [
+    "DQL",
+    "Davis CoPilot",
+    "Grail",
+    "Notebooks",
+    "fetch events"
+  ],
+  "red_files": [],
+  "yellow_files": [
+    "metrics.md"
+  ]
+}

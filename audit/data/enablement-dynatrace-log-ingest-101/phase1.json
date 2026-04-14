@@ -1,0 +1,20 @@
+{
+  "doc_count": 14,
+  "screenshot_count": 72,
+  "gen2_count": 3,
+  "gen3_count": 30,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "Host group",
+    "Process group"
+  ],
+  "gen3_keywords_found": [
+    "DQL",
+    "Davis CoPilot",
+    "OpenPipeline"
+  ],
+  "red_files": [],
+  "yellow_files": [
+    "5-configure-dynatrace.md"
+  ]
+}

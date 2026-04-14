@@ -1,0 +1,19 @@
+INHERIT: mkdocs-base.yaml
+
+site_name: "Dynatrace Enablement Lab: Live Debugger Tutorial"
+repo_name: "View Code on GitHub"
+repo_url: "https://github.com/dynatrace-wwse/enablement-live-debugger-bug-hunting"
+nav:
+  - "1. About": index.md
+  - "2. Getting Started": getting-started.md
+  - "3. Launch codespaces": codespaces.md
+  - "4. Bug 1: Clear Completed": [{'🪲 Bug - Clear Complete': '1-bug-clear-completed.md'}, {'💡 Hunt via Kubernetes App': '1-bug-hunt-via-k8s.md'}]
+  - "5. Bug 2: Special Characters": [{'🪲  Bug - Special Characters': '2-bug-special-characters.md'}, {'💡 Hunt via Distributed Traces': '2-bug-hunt-via-tracing.md'}]
+  - "6. Bug 3: Duplicate Task": [{'🪲 Bug - Duplicate Task': '3-bug-duplicate-task.md'}, {'💡 Hunt via Logs': '3-bug-hunt-via-logs.md'}]
+  - "7. Other Settings": [{'Version Control': 'version-control.md'}, {'IDE Integration': 'ide-integration.md'}, {'Mask Sensitive Data': 'mask-data.md'}]
+  - "8. Cleanup": cleanup.md
+  - "9. Resources": resources.md
+  - "10. What's Next?": whats-next.md
+
+extra:
+  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/6c332b985a9890d6_complete.js"

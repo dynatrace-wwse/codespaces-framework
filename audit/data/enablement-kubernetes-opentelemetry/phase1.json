@@ -1,0 +1,19 @@
+{
+  "doc_count": 14,
+  "screenshot_count": 55,
+  "gen2_count": 0,
+  "gen3_count": 61,
+  "risk": "GREEN",
+  "gen2_keywords_found": [],
+  "gen3_keywords_found": [
+    "DQL",
+    "Grail",
+    "Notebooks",
+    "OpenPipeline",
+    "fetch spans",
+    "fetchLogs",
+    "v2 API"
+  ],
+  "red_files": [],
+  "yellow_files": []
+}

@@ -1,0 +1,30 @@
+{
+  "doc_count": 24,
+  "screenshot_count": 13,
+  "gen2_count": 8,
+  "gen3_count": 42,
+  "risk": "RED",
+  "gen2_keywords_found": [
+    "Process group",
+    "Settings >",
+    "Synthetic (menu)",
+    "v1 API"
+  ],
+  "gen3_keywords_found": [
+    "Automations",
+    "DQL",
+    "Grail",
+    "Notebooks",
+    "OpenPipeline",
+    "fetch events",
+    "v2 API"
+  ],
+  "red_files": [
+    "codespaces.md"
+  ],
+  "yellow_files": [
+    "2-getting-started.md",
+    "5-troubleshooting.md",
+    "getting-started.md"
+  ]
+}

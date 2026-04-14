@@ -1,0 +1,22 @@
+{
+  "doc_count": 13,
+  "screenshot_count": 54,
+  "gen2_count": 0,
+  "gen3_count": 55,
+  "risk": "GREEN",
+  "gen2_keywords_found": [],
+  "gen3_keywords_found": [
+    "Apps >",
+    "Automations",
+    "DQL",
+    "Grail",
+    "Hub",
+    "Launcher",
+    "Notebooks",
+    "Workflows",
+    "fetch events",
+    "v2 API"
+  ],
+  "red_files": [],
+  "yellow_files": []
+}

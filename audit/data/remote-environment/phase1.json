@@ -1,0 +1,18 @@
+{
+  "doc_count": 13,
+  "screenshot_count": 32,
+  "gen2_count": 4,
+  "gen3_count": 2,
+  "risk": "YELLOW",
+  "gen2_keywords_found": [
+    "Process group",
+    "Settings >"
+  ],
+  "gen3_keywords_found": [
+    "Grail"
+  ],
+  "red_files": [],
+  "yellow_files": [
+    "environment.md"
+  ]
+}

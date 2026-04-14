@@ -1,0 +1,173 @@
+# Codespaces
+--8<-- "snippets/send-bizevent/3-codespaces.js"
+
+--8<-- "snippets/dt-enablement.md"
+
+## Create Codespace
+
+Click to open Codespaces for this workshop repository:
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/dynatrace-wwse/workshop-dynatrace-log-analytics){target="_blank"}
+
+!!! tip "Codespace Configuration"
+    - Branch
+        - select the **main** branch
+    - Dev container configuration
+        - select **Dynatrace Enablement Container**
+    - Machine type
+        - select **4-core**
+    - Region
+        - select any region, preferably one closest to your Dynatrace tenant
+
+??? example "GitHub Codespaces Alternatives"
+    The simplest approach is using GitHub Codespaces.  However, you can alternatively run this workshop on the following:
+
+    - Local container on your workstation
+    - Local container on your cloud virtual machine (AWS EC2, Azure VM, Google GCE)
+    - Visual Studio Code Dev Container
+
+    To learn more, review the [quick step-by-step guide of the Dynatrace Enablement Framework](https://dynatrace-wwse.github.io/codespaces-framework/instantiation-types/#2-running-in-vs-code-dev-containers-or-local-container){target="_blank"}.
+
+    Make sure your container has sufficient resources (4 CPU Core & 16 GB Memory minimum).
+
+### Wait for Codespace
+
+We know your time is very valuable. This codespace takes around 7-10 minutes to be fully operational. A local Kubernetes ([kind](https://kind.sigs.k8s.io/){target="_blank"}) cluster will be configured and in it a sample application, AstroShop, will be deployed. To make your experience better, we are also installing and configuring tools like:
+
+**k9s kubectl helm node jq python3 gh**
+
+## Deploy Demo Applications
+
+There is an application repository for you to deploy applications easily to your Kubernetes cluster. 
+Running `deployApp` without parameters displays an interactive help menu listing all available apps, their aliases, and their compatibility (AMD/ARM). Example output:
+
+![deployApp](img/deployApp.png){ align=center ; } 
+
+#### To deploy an app
+- Use any of the listed numbers, characters, or names. For example, to deploy `astroshop`, you can run:
+	```sh
+	deployApp 2
+	# or
+	deployApp b
+	# or
+	deployApp astroshop
+	```
+
+#### To undeploy an app
+- Add `-d` as an extra argument:
+	```sh
+	deployApp 2 -d
+	# or
+	deployApp astroshop -d 
+	```
+
+
+Each app folder should contain its own deployment and cleanup scripts or instructions. The `deployApp` function will call these as needed.
+
+
+
+### AstroShop (OpenTelemetry Demo App)
+
+The base configuration of the Codespaces instance will automatically deploy AstroShop using the function below.
+
+```sh
+deployApp astroshop
+```
+
+AstroShop is required to complete the workshop.
+
+### EasyTrade
+
+EasyTrade is not required to complete the workshop.  It is available should you choose to add additional environment complexity and use cases.  The hands-on exercises do not reference EasyTrade, however it can be leveraged to "freestyle" additional exercises.
+
+!!! tip "Additional Resources"
+    Deploying additional demo applications will consume significant resources.  In order to deploy EasyTrade, make sure you have **8 CPU** and **32GB Memory** allocated to your Codespaces container.
+
+Deploy EasyTrade using the function below.
+
+```sh
+deployApp easytrade
+```
+
+### HipsterShop
+
+HipsterShop is not required to complete the workshop.  It is available should you choose to add additional environment complexity and use cases.  The hands-on exercises do not reference HipsterShop, however it can be leveraged to "freestyle" additional exercises.
+
+!!! tip "Additional Resources"
+    Deploying additional demo applications will consume significant resources.  In order to deploy HipsterShop, make sure you have **8 CPU** and **32GB Memory** allocated to your Codespaces container.
+
+Deploy HipsterShop using the function below.
+
+```sh
+deployApp hipstershop
+```
+
+## Troubleshooting
+<!--TODO: Update Troubleshooting -->
+
+### AstroShop
+
+If you encounter problems with the AstroShop app deployed in the `astroshop` namespace, you can easily recycle the pods.
+
+Recycle pods:
+```sh
+kubectl delete pods --all -n astroshop
+```
+
+But before doing so, if you want to see what is happening we recommend the following: 
+
+Verify all astroshop pods
+```sh
+kubectl get pods -n astroshop
+```
+
+Check for events in the astroshop namespace
+```sh
+kubectl get events -n astroshop
+```
+
+Check for system and cluster events 
+```sh
+kubectl get events -n kube-system
+kubectl get events -n default
+```
+
+The Astroshop application is exposed via NodePort and it's mapping port 8080 to Cluster port 30100.
+
+Verify service:
+```sh
+kubectl get svc astroshop-frontendproxy -n astroshop
+```
+
+## Deploy Dynatrace Configurations with Monaco
+
+This workshop includes multiple Dynatrace configurations, such as Launchpads, Dashboards, and Notebooks.  These can be deployed to your Dynatrace tenant automatically, using Monaco.
+
+Start by setting your environment variables for Monaco, these will allow Monaco to authenticate with the Dynatrace Platform Services API.
+
+```sh
+export DT_PLATFORM_URL=https://{your-environment-id}.apps.dynatrace.com
+export DT_PLATFORM_TOKEN=dt0sXX.ABC123XYZ
+```
+
+Deploy the Dynatrace configurations with Monaco using the provided helper function.
+
+```sh
+deployDynatraceConfig
+```
+
+Review the Monaco logs output in the console and check for any error messages.  If the configurations were deployed successfully, you should see **Successfully deployed Dynatrace Configurations with Monaco**.
+
+![Monaco Successful](./img/prereq-dt_monaco_deployment_success.png){target=_blank}
+
+In your Dynatrace tenant, open the **Notebooks** App.  Locate the newly uploaded Notebook titled `Workshop - Workshop Exercises`.
+
+![Workshop Notebooks](./img/prereq-dt_monaco_workshop_notebooks.png)
+
+## Continue
+
+In the next section, we'll deploy Dynatrace on Kubernetes for full-stack observability with log analytics.
+
+<div class="grid cards" markdown>
+- [Continue to Deploy Dynatrace:octicons-arrow-right-24:](4-deploy-dynatrace.md)
+</div>
