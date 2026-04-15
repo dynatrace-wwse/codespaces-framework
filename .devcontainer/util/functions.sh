@@ -1199,12 +1199,12 @@ deployCertmanager(){
 
 # ======================================================================
 #          ------- Ingress & App Exposure -------                       #
-#  Functions for nginx ingress, nip.io routing, and app registration.   #
+#  Functions for nginx ingress, magic DNS routing, and app registration.#
 #  Replaces the legacy NodePort (30100-30300) approach.                 #
 # ======================================================================
 
 detectIP() {
-  # Returns the IP address used for nip.io subdomains.
+  # Returns the IP address used for magic DNS subdomains (sslip.io/nip.io).
   # Priority: $EXTERNAL_IP > auto-detect based on instantiation type.
   if [[ -n "$EXTERNAL_IP" ]]; then
     echo "$EXTERNAL_IP"
@@ -1262,7 +1262,7 @@ getAppURL() {
     fi
   else
     detected_ip=$(detectIP)
-    echo "http://${app_name}.${detected_ip}.nip.io"
+    echo "http://${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
   fi
 }
 
@@ -1285,7 +1285,7 @@ registerApp() {
   detected_ip=$(detectIP)
 
   # Create the Ingress resource
-  local ingress_host="${app_name}.${detected_ip}.nip.io"
+  local ingress_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
 
   printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
 
@@ -1347,7 +1347,7 @@ registerAstroshopIngress() {
   local namespace="${1:-astroshop}"
   local detected_ip
   detected_ip=$(detectIP)
-  local ingress_host="astroshop.${detected_ip}.nip.io"
+  local ingress_host="astroshop.${detected_ip}.${MAGIC_DOMAIN}"
 
   printInfo "Creating Astroshop Ingress with otel-collector routes (host: $ingress_host)"
 
@@ -1474,7 +1474,7 @@ registerMkdocs() {
   # Creates a K8s Service + Endpoints pointing to the host, then an Ingress resource.
   local detected_ip
   detected_ip=$(detectIP)
-  local mkdocs_host="docs.${detected_ip}.nip.io"
+  local mkdocs_host="docs.${detected_ip}.${MAGIC_DOMAIN}"
 
   printInfo "Registering mkdocs via ingress (host: $mkdocs_host)"
 

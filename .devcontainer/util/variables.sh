@@ -47,6 +47,9 @@ export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"
 export INGRESS_CS_PORT_START=8080
 # nginx ingress controller version
 export INGRESS_NGINX_VERSION="1.12.1"
+# Magic DNS domain — resolves subdomains to embedded IP (e.g. app.1.2.3.4.sslip.io → 1.2.3.4)
+# Alternatives: nip.io, sslip.io, or your own wildcard domain
+export MAGIC_DOMAIN="${MAGIC_DOMAIN:-sslip.io}"
 
 # Setting up the variable since its not set when instantiating the vscode folder.
 #CODESPACE_VSCODE_FOLDER="$REPO_PATH"

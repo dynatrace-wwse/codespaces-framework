@@ -42,7 +42,7 @@ if kubectl get ns todoapp &>/dev/null; then
     # Verify app is accessible via ingress (from inside Kind node)
     local detected_ip
     detected_ip=$(detectIP)
-    local ingress_host="todoapp.${detected_ip}.nip.io"
+    local ingress_host="todoapp.${detected_ip}.${MAGIC_DOMAIN}"
     printInfo "Testing TodoApp via ingress host: $ingress_host"
     assertRunningHttp 80
   fi

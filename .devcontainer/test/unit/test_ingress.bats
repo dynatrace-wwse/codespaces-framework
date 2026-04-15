@@ -18,6 +18,7 @@ setup() {
   export APP_REGISTRY="$TEST_DIR/app-registry"
   export INGRESS_CS_PORT_START=8080
   export USE_LEGACY_PORTS="false"
+  export MAGIC_DOMAIN="sslip.io"
 
   # Create minimal stubs
   cat > "$FAKE_REPO/.devcontainer/util/variables.sh" <<'VARSEOF'
@@ -42,7 +43,8 @@ INSTANTIATION_TYPE="local-docker-container"
 export USE_LEGACY_PORTS="${USE_LEGACY_PORTS:-false}"
 export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"
 export INGRESS_CS_PORT_START="${INGRESS_CS_PORT_START:-8080}"
-export INGRESS_NGINX_VERSION="4.12.1"
+export INGRESS_NGINX_VERSION="1.12.1"
+export MAGIC_DOMAIN="${MAGIC_DOMAIN:-sslip.io}"
 VARSEOF
 
   echo '# stub' > "$FAKE_REPO/.devcontainer/test/test_functions.sh"
@@ -120,13 +122,13 @@ source_functions() {
 # getAppURL tests
 # ============================================================
 
-@test "getAppURL: returns nip.io URL for local environments" {
+@test "getAppURL: returns sslip.io URL for local environments" {
   source_functions
   unset CODESPACES
   export EXTERNAL_IP="10.0.0.1"
 
   result=$(getAppURL "todoapp")
-  [ "$result" = "http://todoapp.10.0.0.1.nip.io" ]
+  [ "$result" = "http://todoapp.10.0.0.1.sslip.io" ]
 }
 
 @test "getAppURL: returns Codespaces URL with port" {
@@ -184,7 +186,7 @@ source_functions() {
 
   [ -f "$APP_REGISTRY" ]
   run cat "$APP_REGISTRY"
-  [[ "$output" == *"todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.nip.io|"* ]]
+  [[ "$output" == *"todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io|"* ]]
 }
 
 @test "registerApp: fails with missing arguments" {
@@ -197,8 +199,8 @@ source_functions() {
 @test "unregisterApp: removes entry from registry" {
   source_functions
   mkdir -p "$(dirname "$APP_REGISTRY")"
-  echo "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.nip.io|" > "$APP_REGISTRY"
-  echo "astroshop|astroshop|frontend-proxy|8080|astroshop.10.0.0.1.nip.io|" >> "$APP_REGISTRY"
+  echo "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io|" > "$APP_REGISTRY"
+  echo "astroshop|astroshop|frontend-proxy|8080|astroshop.10.0.0.1.sslip.io|" >> "$APP_REGISTRY"
 
   # Mock kubectl
   kubectl() { return 0; }
@@ -215,7 +217,7 @@ source_functions() {
   source_functions
   mkdir -p "$(dirname "$APP_REGISTRY")"
   export EXTERNAL_IP="10.0.0.1"
-  echo "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.nip.io|" > "$APP_REGISTRY"
+  echo "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io|" > "$APP_REGISTRY"
 
   run listApps
   [ "$status" -eq 0 ]
@@ -264,7 +266,7 @@ source_functions() {
 
   [ -f "$APP_REGISTRY" ]
   run cat "$APP_REGISTRY"
-  [[ "$output" == *"todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.nip.io"* ]]
+  [[ "$output" == *"todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io"* ]]
 }
 
 @test "deployTodoApp: legacy mode uses getNextFreeAppPort (not registerApp)" {
