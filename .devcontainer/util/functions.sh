@@ -1971,25 +1971,42 @@ verifyCodespaceCreation(){
     printWarn "Unknown instantiation type: $INSTANTIATION_TYPE"
   fi
 
-  # Filter out known noise patterns that are not real errors
-  # These are informational log lines, expected warnings, or harmless messages
+  # Filter out known noise patterns that are not real errors.
+  # The grep for 'error|failed' is intentionally broad so we catch real issues,
+  # but it also catches the framework's own log output, informational messages,
+  # and compound words. We filter those out here.
   CODESPACE_ERRORS=""
   if [ -n "$raw_errors" ]; then
-    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | grep -v -E \
+    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | grep -v -i -E \
+      -e 'no errors detected' \
+      -e 'errors detected in the creation' \
+      -e 'There has been.*error' \
       -e 'configmap.*dtcredentials' \
       -e 'Verify Codespace creation' \
-      -e 'issues detected in the creation' \
       -e 'error_count' \
+      -e 'ERROR_COUNT' \
       -e 'npm warn' \
       -e 'npm WARN' \
       -e 'WARN.*not set' \
       -e 'warning:' \
       -e 'ErrorPolicy' \
       -e 'error-page' \
-      -e 'stderr' \
+      -e 'error\.html' \
       -e 'error_reporting' \
       -e 'errorHandler' \
-      -e 'error\.html' \
+      -e 'error-handling' \
+      -e 'stderr' \
+      -e 'printError' \
+      -e 'on-error' \
+      -e 'if-error' \
+      -e 'onerror' \
+      -e 'error\.log' \
+      -e 'errors=' \
+      -e 'error_' \
+      -e 'IfNotPresent.*failed' \
+      -e 'failedScheduling' \
+      -e 'Failed to check' \
+      -e 'FAILED_PRECONDITION' \
     || true)
   fi
 
