@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate master audit HTML table from fetched repo data."""
 
+import argparse
 import json
 import json5
 import os
@@ -10,9 +11,12 @@ import yaml
 from html import escape
 from datetime import datetime
 
-DATA_DIR = "/home/ubuntu/enablement-framework/codespaces-framework/audit/data"
-REPOS_YAML = "/home/ubuntu/enablement-framework/codespaces-framework/repos.yaml"
-OUTPUT = "/home/ubuntu/enablement-framework/codespaces-framework/audit/master-table.html"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FRAMEWORK_DIR = os.path.dirname(SCRIPT_DIR)
+
+DATA_DIR = os.environ.get("AUDIT_DATA_DIR", os.path.join(SCRIPT_DIR, "data"))
+REPOS_YAML = os.environ.get("REPOS_YAML", os.path.join(FRAMEWORK_DIR, "repos.yaml"))
+OUTPUT = os.environ.get("AUDIT_OUTPUT", os.path.join(SCRIPT_DIR, "master-table.html"))
 
 # Load repos.yaml for extra metadata
 with open(REPOS_YAML) as f:
@@ -1010,10 +1014,16 @@ function filterTable() {
 </html>
 """)
 
-with open(OUTPUT, "w") as f:
+# Allow --output CLI override
+parser = argparse.ArgumentParser(description="Generate master audit HTML table")
+parser.add_argument("--output", "-o", default=OUTPUT, help="Output HTML file path")
+args, _ = parser.parse_known_args()
+output_path = args.output
+
+with open(output_path, "w") as f:
     f.write("\n".join(html_parts))
 
-print(f"Generated: {OUTPUT}")
+print(f"Generated: {output_path}")
 print(f"Total repos: {total}")
 print(f"With devcontainer: {with_dc}")
 print(f"With custom functions: {with_func}")

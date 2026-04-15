@@ -3,7 +3,7 @@ name: Sync registry to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: [repos.yaml]
+    paths: [repos.yaml, audit/**, sync/**]
   workflow_dispatch:
 
 jobs:
@@ -29,17 +29,20 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install pyyaml
+        run: pip install pyyaml json5
 
       - name: Generate repos.json
         run: PYTHONPATH=. python3 -m sync.cli generate-json --output _site/repos.json
+
+      - name: Generate audit HTML
+        run: python3 audit/generate-html.py --output _site/audit.html
 
       - name: Commit and push
         working-directory: _site
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add repos.json
+          git add repos.json audit.html
           git diff --cached --quiet && echo "No changes" && exit 0
-          git commit -m "chore: update repos.json from repos.yaml"
+          git commit -m "chore: update repos.json and audit.html from codespaces-framework"
           git push
