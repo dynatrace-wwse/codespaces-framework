@@ -1340,6 +1340,82 @@ INGRESSEOF
   printInfo "$app_name registered and accessible at: $app_url"
 }
 
+registerAstroshopIngress() {
+  # Creates a custom Ingress for the Astroshop with multi-path routing:
+  # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
+  # - / (everything else) → frontend-proxy:8080
+  local namespace="${1:-astroshop}"
+  local detected_ip
+  detected_ip=$(detectIP)
+  local ingress_host="astroshop.${detected_ip}.nip.io"
+
+  printInfo "Creating Astroshop Ingress with otel-collector routes (host: $ingress_host)"
+
+  kubectl apply -f - <<ASTROINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astroshop-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+      - path: /v1/traces
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /v1/metrics
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /v1/logs
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-proxy
+            port:
+              number: 8080
+ASTROINGRESSEOF
+
+  # Register in app registry for greeting/listApps
+  local cs_port=""
+  if [[ "$CODESPACES" == true ]]; then
+    cs_port=$(getNextCodespacesPort)
+    kubectl port-forward -n "$namespace" "svc/frontend-proxy" "${cs_port}:8080" &>/dev/null &
+  fi
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  # Remove old entry if exists
+  grep -v "^astroshop|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+  mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  echo "astroshop|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+
+  local app_url
+  app_url=$(getAppURL "astroshop" "$cs_port")
+  printInfo "Astroshop registered and accessible at: $app_url"
+}
+
 unregisterApp() {
   # Removes an app from the registry and deletes its Ingress resource.
   # Usage: unregisterApp <app-name> <namespace>
@@ -1645,11 +1721,8 @@ deployAstroshop(){
     waitAppCanHandleRequests $PORT 60
     printInfo "Astroshop deployed and available via NodePort=$PORT"
   else
-    # frontend-proxy is an envoy proxy that routes internally based on Host header.
-    # We must tell nginx to set the upstream Host to the service name so envoy routes correctly.
-    registerApp "astroshop" "$NAMESPACE" "frontend-proxy" 8080 \
-      "    nginx.ingress.kubernetes.io/upstream-vhost: \"frontend-proxy.${NAMESPACE}.svc.cluster.local\"
-    nginx.ingress.kubernetes.io/proxy-body-size: \"10m\""
+    # Astroshop needs custom ingress: otel-collector paths + frontend-proxy catch-all
+    registerAstroshopIngress "$NAMESPACE"
   fi
 }
 
