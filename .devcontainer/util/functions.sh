@@ -770,8 +770,13 @@ variablesNeeded() {
     local var_name="${var_spec%%:*}"
     local required="${var_spec##*:}"
 
-    # Get the value via indirect expansion
-    local var_value="${!var_name}"
+    # Get the value via indirect expansion (bash: ${!var}, zsh: ${(P)var})
+    local var_value
+    if [[ "$(ps -p $$ -o comm=)" == "zsh" ]]; then
+      var_value="${(P)var_name}"
+    else
+      var_value="${!var_name}"
+    fi
 
     if [ -z "$var_value" ]; then
       if [ "$required" = "true" ]; then

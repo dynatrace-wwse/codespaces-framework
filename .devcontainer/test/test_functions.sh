@@ -180,7 +180,12 @@ assertEnvVariable(){
   # Usage: assertEnvVariable <var-name> [pattern]
   local var_name="$1"
   local pattern="$2"
-  local var_value="${!var_name}"
+  local var_value
+  if [[ "$(ps -p $$ -o comm=)" == "zsh" ]]; then
+    var_value="${(P)var_name}"
+  else
+    var_value="${!var_name}"
+  fi
 
   printInfoSection "Asserting env variable '$var_name'"
 
