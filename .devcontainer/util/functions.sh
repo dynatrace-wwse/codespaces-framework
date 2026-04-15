@@ -1268,11 +1268,13 @@ getAppURL() {
 
 registerApp() {
   # Registers an app in the app registry and creates an Ingress resource.
-  # Usage: registerApp <app-name> <namespace> <service-name> <service-port>
+  # Usage: registerApp <app-name> <namespace> <service-name> <service-port> [extra-annotations]
+  # extra-annotations: optional, newline-separated "key: value" pairs for nginx annotations
   local app_name="$1"
   local namespace="$2"
   local service_name="$3"
   local service_port="$4"
+  local extra_annotations="$5"
 
   if [[ -z "$app_name" || -z "$namespace" || -z "$service_name" || -z "$service_port" ]]; then
     printError "registerApp: requires <app-name> <namespace> <service-name> <service-port>"
@@ -1287,6 +1289,16 @@ registerApp() {
 
   printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
 
+  # Build annotations block
+  local annotations="    nginx.ingress.kubernetes.io/proxy-read-timeout: \"3600\"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: \"3600\"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: \"16k\""
+
+  if [[ -n "$extra_annotations" ]]; then
+    annotations="${annotations}
+${extra_annotations}"
+  fi
+
   kubectl apply -f - <<INGRESSEOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -1294,8 +1306,7 @@ metadata:
   name: ${app_name}-ingress
   namespace: ${namespace}
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+${annotations}
 spec:
   ingressClassName: nginx
   rules:
@@ -1634,7 +1645,11 @@ deployAstroshop(){
     waitAppCanHandleRequests $PORT 60
     printInfo "Astroshop deployed and available via NodePort=$PORT"
   else
-    registerApp "astroshop" "$NAMESPACE" "frontend-proxy" 8080
+    # frontend-proxy is an envoy proxy that routes internally based on Host header.
+    # We must tell nginx to set the upstream Host to the service name so envoy routes correctly.
+    registerApp "astroshop" "$NAMESPACE" "frontend-proxy" 8080 \
+      "    nginx.ingress.kubernetes.io/upstream-vhost: \"frontend-proxy.${NAMESPACE}.svc.cluster.local\"
+    nginx.ingress.kubernetes.io/proxy-body-size: \"10m\""
   fi
 }
 
