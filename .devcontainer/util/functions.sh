@@ -1853,7 +1853,9 @@ deployUnguard(){
     fi
     kubectl patch service unguard-envoy-proxy --namespace=unguard --patch="{\"spec\": {\"type\": \"NodePort\", \"ports\": [{\"port\": 8080, \"nodePort\": $PORT }]}}"
   else
-    registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080
+    # unguard-envoy-proxy routes internally by Host header — set upstream Host to service FQDN
+    registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080 \
+      "    nginx.ingress.kubernetes.io/upstream-vhost: \"unguard-envoy-proxy.unguard.svc.cluster.local:8080\""
   fi
 }
 
@@ -1865,6 +1867,119 @@ undeployUnguard() {
   kubectl delete ns unguard --force
 }
 
+deployOpentelemetryDemo(){
+  # Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained)
+  # https://opentelemetry.io/docs/demo/kubernetes-deployment/
+  local NAMESPACE="opentelemetry-demo"
+
+  printInfoSection "Deploying CNCF OpenTelemetry Demo in NS='$NAMESPACE'"
+  printInfo "Source: https://opentelemetry.io/docs/demo/kubernetes-deployment/"
+
+  helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts 2>/dev/null || true
+  helm repo update open-telemetry
+
+  helm install opentelemetry-demo open-telemetry/opentelemetry-demo \
+    --namespace "$NAMESPACE" --create-namespace
+
+  printWarn "OpenTelemetry Demo is heavy — pods may take a while to schedule"
+
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl patch service frontend-proxy --namespace="$NAMESPACE" --patch='{"spec": {"type": "NodePort"}}'
+    kubectl patch service frontend-proxy --namespace="$NAMESPACE" --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    printInfo "OpenTelemetry Demo available via NodePort=$PORT"
+  else
+    # Same multi-path ingress pattern as astroshop — otel-collector + frontend-proxy
+    registerOpentelemetryDemoIngress "$NAMESPACE"
+  fi
+}
+
+registerOpentelemetryDemoIngress() {
+  # Creates an Ingress for the CNCF OpenTelemetry Demo with multi-path routing:
+  # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
+  # - / → frontend-proxy:8080
+  local namespace="${1:-opentelemetry-demo}"
+  local detected_ip
+  detected_ip=$(detectIP)
+  local ingress_host="otel-demo.${detected_ip}.${MAGIC_DOMAIN}"
+
+  printInfo "Creating OpenTelemetry Demo Ingress (host: $ingress_host)"
+
+  kubectl apply -f - <<OTELINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-demo-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+      - path: /v1/traces
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: opentelemetry-demo-otelcol
+            port:
+              number: 4318
+      - path: /v1/metrics
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: opentelemetry-demo-otelcol
+            port:
+              number: 4318
+      - path: /v1/logs
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: opentelemetry-demo-otelcol
+            port:
+              number: 4318
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: opentelemetry-demo-frontendproxy
+            port:
+              number: 8080
+OTELINGRESSEOF
+
+  # Register in app registry
+  local cs_port=""
+  if [[ "$CODESPACES" == true ]]; then
+    cs_port=$(getNextCodespacesPort)
+    kubectl port-forward -n "$namespace" "svc/opentelemetry-demo-frontendproxy" "${cs_port}:8080" &>/dev/null &
+  fi
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  grep -v "^otel-demo|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+  mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  echo "otel-demo|${namespace}|opentelemetry-demo-frontendproxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+
+  local app_url
+  app_url=$(getAppURL "otel-demo" "$cs_port")
+  printInfo "OpenTelemetry Demo registered and accessible at: $app_url"
+}
+
+undeployOpentelemetryDemo(){
+  printInfoSection "Undeploying OpenTelemetry Demo"
+  unregisterApp "otel-demo" "opentelemetry-demo"
+  helm uninstall opentelemetry-demo --namespace opentelemetry-demo 2>/dev/null
+  kubectl delete namespace opentelemetry-demo --force 2>/dev/null
+}
 
 deployApp(){
   
@@ -1959,6 +2074,15 @@ deployApp(){
       fi
       ;;
 
+    8 | h | opentelemetry-demo | otel-demo)
+       if [[ $delete ]]; then
+        printInfo "Undeploying opentelemetry-demo..."
+        undeployOpentelemetryDemo
+      else
+        deployOpentelemetryDemo
+      fi
+      ;;
+
     *)
       printWarn "Invalid selection: '$input'. Please choose a valid app identifier."
       showDeployAppUsage
@@ -1985,7 +2109,9 @@ showDeployAppUsage(){
   printInfo "[5]   e   hipstershop           +       -                                   "
   printInfo "[6]   f   todoapp               +       +                                   "
   printInfo "[7]   g   unguard               +       -                                   "
+  printInfo "[8]   h   opentelemetry-demo    +       +    (CNCF upstream)                "
   printInfo "----------------------------------------------------------------------------"
+  printInfo "Astroshop = Dynatrace-curated demo | OpenTelemetry Demo = CNCF upstream    "
 }
 
 deleteCache(){
