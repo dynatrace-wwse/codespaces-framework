@@ -133,3 +133,70 @@ assertRunningHttp(){
   printError "❌ HTTP $URL is NOT responding after 5 attempts"
   exit 1
 }
+
+assertIngressRoute(){
+  # Assert an Ingress resource exists for an app
+  # Usage: assertIngressRoute <app-name> <namespace>
+  local app_name="$1"
+  local namespace="${2:-$1}"
+  local ingress_name="${app_name}-ingress"
+
+  printInfoSection "Asserting Ingress route '$ingress_name' exists in namespace '$namespace'"
+
+  if kubectl get ingress "$ingress_name" -n "$namespace" &>/dev/null; then
+    local host
+    host=$(kubectl get ingress "$ingress_name" -n "$namespace" -o jsonpath='{.spec.rules[0].host}')
+    printInfo "✅ Ingress '$ingress_name' exists with host: $host"
+  else
+    printError "❌ Ingress '$ingress_name' not found in namespace '$namespace'"
+    exit 1
+  fi
+}
+
+assertAppDeployed(){
+  # Assert a full app stack: pod running + service exists + ingress route (or NodePort)
+  # Usage: assertAppDeployed <app-name> <namespace> [port]
+  local app_name="$1"
+  local namespace="${2:-$1}"
+  local port="$3"
+
+  printInfoSection "Asserting full deployment of '$app_name'"
+
+  # Check pod
+  assertRunningPod "$namespace" "$app_name"
+
+  # Check exposure method
+  if [[ "$USE_LEGACY_PORTS" == "true" && -n "$port" ]]; then
+    assertRunningApp "$port"
+  elif [[ "$USE_LEGACY_PORTS" != "true" ]]; then
+    assertIngressRoute "$app_name" "$namespace"
+  fi
+
+  printInfo "✅ App '$app_name' fully deployed and accessible"
+}
+
+assertEnvVariable(){
+  # Assert an environment variable is set and optionally matches a pattern
+  # Usage: assertEnvVariable <var-name> [pattern]
+  local var_name="$1"
+  local pattern="$2"
+  local var_value="${!var_name}"
+
+  printInfoSection "Asserting env variable '$var_name'"
+
+  if [ -z "$var_value" ]; then
+    printError "❌ Variable '$var_name' is not set"
+    exit 1
+  fi
+
+  if [ -n "$pattern" ]; then
+    if echo "$var_value" | grep -qE "$pattern"; then
+      printInfo "✅ $var_name matches pattern '$pattern'"
+    else
+      printError "❌ $var_name='$var_value' does not match pattern '$pattern'"
+      exit 1
+    fi
+  else
+    printInfo "✅ $var_name is set"
+  fi
+}

@@ -30,13 +30,23 @@ CERTMANAGER_VERSION=1.15.3
 # RUNME Version
 RUNME_CLI_VERSION=3.13.2
 
-# NodePort Logic, export array in bash and zsh
+# NodePort Logic (legacy), export array in bash and zsh
 # Define an array of port numbers
 PORTS=("30100" "30200" "30300")
 # Convert array to a space-separated string
 PORTS_STRING="${PORTS[*]}"
 # Export the string
 export NODE_PORTS="$PORTS_STRING"
+
+# Ingress configuration
+# USE_LEGACY_PORTS=true will use NodePort (30100-30300) instead of ingress
+export USE_LEGACY_PORTS="${USE_LEGACY_PORTS:-false}"
+# App registry file — tracks deployed apps for ingress routing
+export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"
+# Codespaces port allocation starts here (one port per app)
+export INGRESS_CS_PORT_START=8080
+# nginx ingress controller version
+export INGRESS_NGINX_VERSION="1.12.1"
 
 # Setting up the variable since its not set when instantiating the vscode folder.
 #CODESPACE_VSCODE_FOLDER="$REPO_PATH"
