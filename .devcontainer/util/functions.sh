@@ -335,45 +335,87 @@ setUpTerminal(){
 
   setupAliases
 
-  setupMCPServer
+  # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
+  printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
+}
+
+enableMCP(){
+  # Generates .vscode/mcp.json so VS Code connects to the Dynatrace MCP Server.
+  # Uses DT_ENVIRONMENT from env vars or prompts via selectEnvironment.
+  printInfoSection "Enabling Dynatrace 🧠 MCP Server for VS Code"
+
+  # Ensure .env file exists
+  if [ ! -f "$ENV_FILE" ]; then
+    touch "$ENV_FILE"
+  fi
+
+  # If DT_ENVIRONMENT is not set, prompt the user
+  if [ -z "$DT_ENVIRONMENT" ]; then
+    # Check .env file for DT_ENVIRONMENT
+    if [ -f "$ENV_FILE" ]; then
+      local env_val
+      env_val=$(grep -E "^DT_ENVIRONMENT=" "$ENV_FILE" | head -1 | cut -d'=' -f2-)
+      if [ -n "$env_val" ]; then
+        export DT_ENVIRONMENT="$env_val"
+      fi
+    fi
+  fi
+
+  if [ -z "$DT_ENVIRONMENT" ]; then
+    printWarn "DT_ENVIRONMENT is not set. Launching environment selector..."
+    selectEnvironment
+    if [ -z "$DT_ENVIRONMENT" ]; then
+      printError "No environment selected. MCP not enabled."
+      return 1
+    fi
+  fi
+
+  # Ensure DT_ENVIRONMENT is in .env file (needed by MCP server)
+  if ! grep -qE "^DT_ENVIRONMENT=" "$ENV_FILE" 2>/dev/null; then
+    echo "DT_ENVIRONMENT=$DT_ENVIRONMENT" >> "$ENV_FILE"
+  fi
+
+  # Generate .vscode/mcp.json
+  local vscode_dir="$REPO_PATH/.vscode"
+  mkdir -p "$vscode_dir"
+
+  cat > "$vscode_dir/mcp.json" <<MCPEOF
+{
+  "servers": {
+    "dynatrace-mcp-server": {
+      "type": "stdio",
+      "command": "npx",
+      "cwd": "\${workspaceFolder}",
+      "args": ["-y", "@dynatrace-oss/dynatrace-mcp-server@latest"],
+      "envFile": "\${workspaceFolder}/.devcontainer/.env"
+    }
+  }
+}
+MCPEOF
+
+  printInfo "MCP Server enabled for $DT_ENVIRONMENT"
+  printInfo "Settings location: $vscode_dir/mcp.json"
+  printInfo "Environment variables location: $ENV_FILE"
+  printInfo "VS Code should detect the MCP server automatically. If not, go to Extensions > MCP Servers."
+  printInfo "To switch environments, type 'selectEnvironment'"
+  printInfo "To disable MCP, type 'disableMCP'"
+}
+
+disableMCP(){
+  # Removes .vscode/mcp.json to disable the Dynatrace MCP Server.
+  local mcp_file="$REPO_PATH/.vscode/mcp.json"
+  if [ -f "$mcp_file" ]; then
+    rm "$mcp_file"
+    printInfo "MCP Server disabled — removed $mcp_file"
+  else
+    printInfo "MCP Server is not enabled (no mcp.json found)"
+  fi
 }
 
 setupMCPServer(){
-  # Function that verifies if the .env file exists and if it contains the DT_ENVIRONMENT variable, if yes it sets it up, if not it defaults to playground.
-  printInfoSection "Setting up the Dynatrace 🧠 MCP Server for VS Code"
-  local environment=false
-  
-  # Check if .devcontainer/runlocal/.env file exists, if not then create it
-  if [ ! -f "$ENV_FILE" ]; then
-    printInfo ".env file not found. Creating it..."
-    touch "$ENV_FILE"
-    # Add default var
-    setEnvironmentInEnv
-  else
-    printInfo ".env file already exists."
-    
-    while IFS= read -r line || [ -n "$line" ]; do
-      # Skip empty lines and comments
-      if [[ -z "$line" || "$line" =~ ^# ]]; then
-        continue
-      fi
-      # Split the line into key and value
-      IFS='=' read -r key value <<< "$line"
-      # Print or process the key-value pair
-      if [ "$key" = "DT_ENVIRONMENT" ]; then
-          printInfo "DT_ENVIRONMENT is set to $value"
-          environment=true
-      fi
-    done < "$ENV_FILE"
-
-    if [ $environment = false ]; then
-      setEnvironmentInEnv
-    fi
-
-  fi
-
-  printInfo "Settings location: .vscode/mcp.json"
-  printInfo "Environment variables location: $ENV_FILE"
+  # DEPRECATED: Use enableMCP instead. Kept for backward compatibility.
+  printWarn "setupMCPServer is deprecated. Use 'enableMCP' to enable or 'disableMCP' to disable the MCP Server."
+  enableMCP
 }
 
 selectEnvironment(){
@@ -428,12 +470,18 @@ selectEnvironment(){
   fi
   echo "DT_ENVIRONMENT=$DT_ENVIRONMENT" >> "$ENV_FILE"
 
+  # Parse the environment to derive DT_TENANT, DT_ENV_TYPE, DT_OTEL_ENDPOINT
+  parseDynatraceEnvironment "$DT_ENVIRONMENT"
+
   printInfo "Selected Demo Environment: $DT_ENVIRONMENT"
 
-  printInfoSection "$DT_ENVIRONMENT selected, the VS Code agent should start the MPC server automatically"
-  printInfo "you can alternatively go to 'Extensions > MCP Servers installed > dynatrace-mcp-server' and start it."
-  printInfo "If you want to connect to another MCP server, just type the function 'selectEnvironment'"
-
+  # Update MCP config if it's already enabled
+  if [ -f "$REPO_PATH/.vscode/mcp.json" ]; then
+    printInfo "Updating MCP Server configuration for $DT_ENVIRONMENT"
+    enableMCP
+  else
+    printInfo "Type 'enableMCP' to connect VS Code to $DT_ENVIRONMENT"
+  fi
 }
 
 setEnvironmentInEnv(){
@@ -527,7 +575,12 @@ startKindCluster(){
     printInfo "No $KINDIMAGE was found, creating a new one..."
     createKindCluster
   fi
-  printInfo "Kind reachabe under:"
+  # Install ingress controller if not using legacy ports
+  if [[ "$USE_LEGACY_PORTS" != "true" ]]; then
+    installIngressController
+  fi
+
+  printInfo "Kind reachable under:"
   kubectl cluster-info --context kind-kind
   printInfo "-----"
   printInfo "The following functions are available for you to maximize your K8s experience:"
@@ -626,196 +679,269 @@ certmanagerEnable() {
   #bashas "cd $K8S_PLAY_DIR/cluster-setup/resources/ingress && bash add-ssl-certificates.sh"
 }
 
-validateSaveCredentials() {
-  #TODO: Refactor to evaluate variables with an indirect expansion (var name and value)
-  if [[ $# -eq 3 ]]; then
-    printInfo "Validating and saving Secrets DT_TENANT DT_OPERATOR_TOKEN DT_INGEST_TOKEN"
-    DT_TENANT=$1
-    DT_OPERATOR_TOKEN=$2
-    DT_INGEST_TOKEN=$3
-    #TODO: Fix this when refactoring, only printing out when return == 0 but not 1.
-    verifyParseSecret $DT_TENANT true; [ $? -eq 1 ] && verifyParseSecret $DT_TENANT false || DT_TENANT=$(verifyParseSecret $DT_TENANT false)
-    verifyParseSecret $DT_OPERATOR_TOKEN true; [ $? -eq 1 ] && verifyParseSecret $DT_OPERATOR_TOKEN false || DT_OPERATOR_TOKEN=$(verifyParseSecret $DT_OPERATOR_TOKEN false)
-    verifyParseSecret $DT_INGEST_TOKEN true; [ $? -eq 1 ] && verifyParseSecret $DT_INGEST_TOKEN false || DT_INGEST_TOKEN=$(verifyParseSecret $DT_INGEST_TOKEN false)
-    DT_OTEL_ENDPOINT=$DT_TENANT/api/v2/otlp
+# ======================================================================
+#          ------- Environment Variable Management -------              #
+#  Functions for validating, parsing and managing environment           #
+#  variables. Source-agnostic: works with Codespaces secrets,           #
+#  .env files, or exported env vars.                                    #
+# ======================================================================
 
-    kubectl delete configmap -n default dtcredentials 2>/dev/null
+parseDynatraceEnvironment() {
+  # Parses DT_ENVIRONMENT URL and derives DT_TENANT, DT_ENV_TYPE, DT_OTEL_ENDPOINT.
+  # Pure function — no K8s dependency.
+  # Usage: parseDynatraceEnvironment "https://abc123.apps.dynatrace.com"
+  #   or:  parseDynatraceEnvironment  (reads from $DT_ENVIRONMENT)
+  local env_url="${1:-$DT_ENVIRONMENT}"
 
-    kubectl create configmap -n default dtcredentials \
-      --from-literal=environment=${DT_ENVIRONMENT} \
-      --from-literal=tenant=${DT_TENANT} \
-      --from-literal=apiToken=${DT_OPERATOR_TOKEN} \
-      --from-literal=dataIngestToken=${DT_INGEST_TOKEN}
-    # Exporting clean values
-    export DT_ENVIRONMENT=$DT_ENVIRONMENT
-    export DT_TENANT=$DT_TENANT
-    export DT_OPERATOR_TOKEN=$DT_OPERATOR_TOKEN
-    export DT_INGEST_TOKEN=$DT_INGEST_TOKEN
-    export DT_INGEST_TOKEN=$DT_INGEST_TOKEN
-    export DT_OTEL_ENDPOINT=$DT_OTEL_ENDPOINT
-    return 0
-  else
-    printError "validateSaveCredentials function should be used like saveCredentials DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN"
+  if [ -z "$env_url" ]; then
+    printError "parseDynatraceEnvironment: No DT_ENVIRONMENT provided"
     return 1
   fi
+
+  # Validate URL format
+  if ! echo "$env_url" | grep -qE "^https://.+(\.dynatrace\.com|\.dynatracelabs\.com)"; then
+    printError "Invalid DT_ENVIRONMENT: must start with https:// and contain dynatrace.com or dynatracelabs.com"
+    printError "Example: https://abc123.apps.dynatrace.com or https://abc123.sprint.apps.dynatracelabs.com"
+    return 1
+  fi
+
+  local tenant="$env_url"
+  local env_type=""
+
+  # Detect environment type and transform URL for API usage
+  if echo "$env_url" | grep -q "\.apps\.dynatrace\.com"; then
+    # Production: https://abc123.apps.dynatrace.com -> https://abc123.live.dynatrace.com
+    env_type="prod"
+    tenant=$(echo "$env_url" | sed 's/\.apps\.dynatrace\.com.*$/.live.dynatrace.com/')
+    printInfo "Production environment detected — tenant for API: $tenant"
+
+  elif echo "$env_url" | grep -q "\.sprint\.apps\.dynatracelabs\.com"; then
+    # Sprint: https://abc123.sprint.apps.dynatracelabs.com -> https://abc123.sprint.dynatracelabs.com
+    env_type="sprint"
+    tenant=$(echo "$env_url" | sed 's/\.apps\.dynatracelabs\.com.*$/.dynatracelabs.com/')
+    printInfo "Sprint environment detected — tenant for API: $tenant"
+
+  elif echo "$env_url" | grep -q "\.dev\.apps\.dynatracelabs\.com"; then
+    # Dev: https://abc123.dev.apps.dynatracelabs.com -> https://abc123.dev.dynatracelabs.com
+    env_type="dev"
+    tenant=$(echo "$env_url" | sed 's/\.apps\.dynatracelabs\.com.*$/.dynatracelabs.com/')
+    printInfo "Dev environment detected — tenant for API: $tenant"
+
+  elif echo "$env_url" | grep -q "\.apps\.dynatracelabs\.com"; then
+    # Generic labs (sprint/dev without prefix): remove .apps.
+    env_type="labs"
+    tenant=$(echo "$env_url" | sed 's/\.apps\.dynatracelabs\.com.*$/.dynatracelabs.com/')
+    printInfo "Labs environment detected — tenant for API: $tenant"
+
+  else
+    # Direct tenant URL (already in API format)
+    env_type="custom"
+    printInfo "Custom environment detected — using as-is: $tenant"
+  fi
+
+  # Clean trailing paths after .com
+  tenant=$(echo "$tenant" | sed 's/\.com\/.*$/.com/')
+
+  export DT_ENVIRONMENT="$env_url"
+  export DT_TENANT="$tenant"
+  export DT_ENV_TYPE="$env_type"
+  export DT_OTEL_ENDPOINT="${tenant}/api/v2/otlp"
+
+  return 0
+}
+
+variablesNeeded() {
+  # Declarative environment variable validation.
+  # Usage in post-create.sh:
+  #   variablesNeeded DT_ENVIRONMENT:true DT_OPERATOR_TOKEN:true DT_INGEST_TOKEN:false
+  #
+  # - VAR_NAME:true  → required, error if missing
+  # - VAR_NAME:false → optional, warning if missing
+  # - DT_*TOKEN vars are validated for Dynatrace token format (dt0c01.* or dt0s01.*)
+  # - DT_ENVIRONMENT is validated and parsed (derives DT_TENANT, DT_OTEL_ENDPOINT)
+  #
+  # Returns 0 if all required vars pass, 1 if any required var is missing/invalid.
+
+  local has_errors=0
+  local missing_required=()
+  local missing_optional=()
+
+  for var_spec in "$@"; do
+    local var_name="${var_spec%%:*}"
+    local required="${var_spec##*:}"
+
+    # Get the value via indirect expansion
+    local var_value="${!var_name}"
+
+    if [ -z "$var_value" ]; then
+      if [ "$required" = "true" ]; then
+        printError "$var_name is required but not set"
+        missing_required+=("$var_name")
+        has_errors=1
+      else
+        printWarn "$var_name is not set (optional)"
+        missing_optional+=("$var_name")
+      fi
+      continue
+    fi
+
+    # Validate DT_ENVIRONMENT
+    if [ "$var_name" = "DT_ENVIRONMENT" ]; then
+      parseDynatraceEnvironment "$var_value"
+      if [ $? -ne 0 ]; then
+        has_errors=1
+      fi
+      continue
+    fi
+
+    # Validate Dynatrace tokens (DT_*TOKEN pattern)
+    if [[ "$var_name" == DT_*TOKEN ]]; then
+      if [[ "$var_value" == dt0c01.* || "$var_value" == dt0s01.* ]] && [ ${#var_value} -gt 60 ]; then
+        printInfo "$var_name: valid Dynatrace token format (${var_value:0:14}xxx...)"
+      else
+        printError "$var_name: invalid token format. Expected dt0c01.* or dt0s01.* with min 60 chars"
+        printError "  Got: ${var_value:0:20}... (length: ${#var_value})"
+        if [ "$required" = "true" ]; then
+          has_errors=1
+        fi
+      fi
+      continue
+    fi
+
+    # Generic variable — just confirm it's set
+    printInfo "$var_name is set"
+  done
+
+  # Summary
+  if [ ${#missing_required[@]} -gt 0 ]; then
+    printError "Missing required variables: ${missing_required[*]}"
+    printError "Set them in your Codespaces secrets or in .devcontainer/.env file"
+  fi
+
+  if [ ${#missing_optional[@]} -gt 0 ]; then
+    printWarn "Missing optional variables: ${missing_optional[*]}"
+  fi
+
+  return $has_errors
+}
+
+validateSaveCredentials() {
+  # Validates Dynatrace credentials using variablesNeeded + parseDynatraceEnvironment.
+  # Backward compatible: accepts 3 args (DT_ENVIRONMENT, DT_OPERATOR_TOKEN, DT_INGEST_TOKEN)
+  # or reads from environment variables.
+
+  if [[ $# -eq 3 ]]; then
+    DT_ENVIRONMENT="$1"
+    DT_OPERATOR_TOKEN="$2"
+    DT_INGEST_TOKEN="$3"
+  fi
+
+  printInfo "Validating Dynatrace credentials"
+
+  variablesNeeded DT_ENVIRONMENT:true DT_OPERATOR_TOKEN:true DT_INGEST_TOKEN:false
+  local validation_result=$?
+
+  if [[ $validation_result -ne 0 ]]; then
+    printError "Credential validation failed"
+    return 1
+  fi
+
+  export DT_ENVIRONMENT DT_TENANT DT_OPERATOR_TOKEN DT_INGEST_TOKEN DT_OTEL_ENDPOINT
+  return 0
 }
 
 verifyParseSecret(){
-  # Function to verify and parse Dynatrace Tenants and tokens so they can be used more comfortably.
-  # as first argument the tenant or token is passed, as second argument a boolean is passed for printing the logic. When print_log == true, then log is printed out but the 
-  # variable is not echoed out, this way is not printed in the log. If print_log =0 false, then the variable is echoed out so the value can be catched as return vaue and stored.
+  # DEPRECATED: Use parseDynatraceEnvironment for URL parsing and variablesNeeded for token validation.
+  # Kept for backward compatibility — delegates to parseDynatraceEnvironment for URLs
+  # and validates token format directly.
   local secret="$1"
-
-  local print_log="$2"
-  if [ -z "$print_log" ]; then
-    # As default no log is printed out. 
-    print_log=false
-  fi
+  local print_log="${2:-false}"
 
   if [ -z "$secret" ]; then
     printError "Function to validate secrets was called but no secret was provided" $print_log
     return 1
-  else 
-    # Logic
-    # convert apps to live
-    # https://abc123.apps.dynatrace.com -> https://abc123.live.dynatrace.com 
-    # remove apps from string
-    # https://abc123.sprint.apps.dynatracelabs.com -> https://abc123.sprint.dynatracelabs.com 
-    # https://abc123.dev.apps.dynatracelabs.com -> https://abc123.dev.dynatracelabs.com 
-    # Verify if its a valid tenant
-    if echo "$secret" | grep -E -q "^https:" && echo "$secret" | grep -E -q "\.dynatracelabs\.com|\.dynatrace\.com"; then
-       printInfo "Valid: String starts with 'https' and contains dynatrace.com or dynatracelabs.com" $print_log
-      
-      # Parse Production tenants
-      if echo "$secret" | grep -q "\.apps\.dynatrace\.com"; then
-        printInfo "Production environment changing apps for live for API request" $print_log
-        secret=$(echo "$secret" | sed 's/\.apps\.dynatrace\.com.*$/\.live.dynatrace\.com/g')
-      fi
-      
-      # Parse for Sprint & DEV tenants
-      if echo "$secret" | grep -q "\.apps\.dynatracelabs\.com"; then
-        printWarn "Sprint environment removing apps for API requests" $print_log
-        secret=$(echo "$secret" | sed 's/\.apps\.dynatracelabs\.com.*$/\.dynatracelabs\.com/g')
-      fi
-      # remove anything after .com
-      if echo "$secret" | grep -q "\.com/"; then
-        printWarn "/ detected after .com, invalid for API requests: removing anything after .com" $print_log
-        secret=$(echo "$secret" | sed 's/\.com.*$/\.com/')
-      fi
-      printInfo "Tenant URL valid for API requests: $secret" $print_log
+  fi
+
+  # Check if it's a URL (tenant)
+  if echo "$secret" | grep -qE "^https:"; then
+    # Use parseDynatraceEnvironment for URL transformation
+    parseDynatraceEnvironment "$secret" >/dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+      printInfo "Tenant URL valid for API requests: $DT_TENANT" $print_log
       if [ "${print_log}" = "false" ]; then
-        echo "$secret"
-      fi
-      return 0
-    elif  [[ "$secret" == dt0c01.*  && ${#secret} -gt 60 ]];  then
-      printInfo "Valid Dynatrace Token format. Starts with dt0c01.XXX and has the minimum lenght." $print_log
-      if [ "${print_log}" = "false" ]; then
-        echo "$secret"
+        echo "$DT_TENANT"
       fi
       return 0
     else
-      printError "Invalid secret, this is not a valid dynatrace tenant nor dynatrace token, please verify this: $secret" $print_log
+      printError "Invalid tenant URL: $secret" $print_log
       return 1
     fi
   fi
 
-}
-
-dynatraceEvalReadSaveCredentials() {
-  printInfoSection "Dynatrace evaluating and reading/saving secrets. Defined order 1.-arguments, 2.- environment variables, finally load from configmap"
-  if [ "${DT_EVAL_SECRETS}" = "true" ]; then 
-    printInfo "Dynatrace secrets have been evaluated already in the session. If you want to override them unset DT_EVAL_SECRETS and call this function again."
-    printInfo "For printing out the secrets call the function 'printSecrets' "
+  # Check if it's a token
+  if [[ "$secret" == dt0c01.* || "$secret" == dt0s01.* ]] && [ ${#secret} -gt 60 ]; then
+    printInfo "Valid Dynatrace Token format" $print_log
+    if [ "${print_log}" = "false" ]; then
+      echo "$secret"
+    fi
     return 0
   fi
 
-  local found=1
+  printError "Invalid secret, this is not a valid Dynatrace tenant nor token: $secret" $print_log
+  return 1
+}
 
-  if [[ $# -eq 3 ]]; then
-    DT_ENVIRONMENT=$1
-    DT_OPERATOR_TOKEN=$2
-    DT_INGEST_TOKEN=$3
-    # Passed as argument
-    # We shuffle environment to tenant to modify tenant for API usage
-    DT_TENANT=$DT_ENVIRONMENT
-    printInfo "Secrets passed as arguments"
-    validateSaveCredentials "$DT_TENANT" "$DT_OPERATOR_TOKEN" "$DT_INGEST_TOKEN"
-    found=0
+dynatraceEvalReadSaveCredentials() {
+  # Evaluates, validates, and exports Dynatrace credentials.
+  # Source: 1. Function arguments  2. Environment variables (from .env or Codespaces secrets)
+  printInfoSection "Evaluating Dynatrace credentials"
 
-  elif [[ -n "${DT_ENVIRONMENT}" && -n "${DT_OPERATOR_TOKEN}" && -n "${DT_INGEST_TOKEN}" ]]; then
-    # Found in env 
-    printInfo "Secrets found in environment variables"
-
-    # We shuffle environment to tenant to modify tenant for API usage
-    DT_TENANT=$DT_ENVIRONMENT
-    validateSaveCredentials "$DT_TENANT" "$DT_OPERATOR_TOKEN" "$DT_INGEST_TOKEN"
-    found=0
-  elif [[ -n "${DT_ENVIRONMENT}" ]]; then
-    printWarn "Dynatrace Environment defined but tokens are missing"
-
-    if [ -z "$DT_OPERATOR_TOKEN" ]; then
-      printWarn "DT_OPERATOR_TOKEN is missing"
-    fi
-    
-    if [ -z "$DT_INGEST_TOKEN" ]; then
-      printWarn "DT_INGEST_TOKEN is missing"
-    fi
-    
-    # We shuffle environment to tenant to modify tenant for API usage
-    DT_TENANT=$DT_ENVIRONMENT
-    validateSaveCredentials "$DT_TENANT" "$DT_OPERATOR_TOKEN" "$DT_INGEST_TOKEN"
-    found=0
-  else
-    printWarn "Dynatrace secrets not found as arguments nor env vars, trying to fetch from config map"
-    kubectl get configmap -n default dtcredentials 2>/dev/null
-    if [[ $? -eq 0 ]]; then
-      printInfo "ConfigMap found, reading from it"
-      # Getting the data size
-      data=$(kubectl get configmap -n default dtcredentials | awk '{print $2}')
-      # parsing to number
-      size=$(echo $data | grep -o '[0-9]*')
-      printInfo "The Configmap has $size variables stored"
-      DT_ENVIRONMENT=$(kubectl get configmap -n default dtcredentials -ojsonpath={.data.environment})
-      DT_TENANT=$(kubectl get configmap -n default dtcredentials -ojsonpath={.data.tenant})
-      DT_OPERATOR_TOKEN=$(kubectl get configmap -n default dtcredentials -ojsonpath={.data.apiToken})
-      DT_INGEST_TOKEN=$(kubectl get configmap -n default dtcredentials -ojsonpath={.data.dataIngestToken})
-      found=0
-    else
-        printInfo "ConfigMap not found, resetting variables"
-        unset DT_ENVIRONMENT DT_TENANT DT_OPERATOR_TOKEN DT_INGEST_TOKEN
-    fi
-
+  if [ "${DT_EVAL_SECRETS}" = "true" ]; then
+    printInfo "Dynatrace secrets already evaluated. To re-evaluate: unset DT_EVAL_SECRETS"
+    printInfo "To print secrets: printSecrets"
+    return 0
   fi
 
-  if [[ $found -eq 0 ]]; then
-
-    export DT_ENVIRONMENT=$DT_ENVIRONMENT
-    export DT_TENANT=$DT_TENANT
-    export DT_OPERATOR_TOKEN=$DT_OPERATOR_TOKEN
-    export DT_INGEST_TOKEN=$DT_INGEST_TOKEN
-    export DT_INGEST_TOKEN=$DT_INGEST_TOKEN
-    export DT_OTEL_ENDPOINT=$DT_OTEL_ENDPOINT
-    export DT_EVAL_SECRETS=true
-    printSecrets
-  else 
-    printError "No Dynatrace secrets have been found in the environment and are needed for Dynatrace components."
+  # Source 1: Function arguments
+  if [[ $# -eq 3 ]]; then
+    DT_ENVIRONMENT="$1"
+    DT_OPERATOR_TOKEN="$2"
+    DT_INGEST_TOKEN="$3"
+    printInfo "Credentials passed as arguments"
+  # Source 2: Environment variables (from .env file or Codespaces secrets)
+  elif [[ -n "${DT_ENVIRONMENT}" ]]; then
+    printInfo "Credentials found in environment variables"
+    if [ -z "$DT_OPERATOR_TOKEN" ]; then
+      printWarn "DT_OPERATOR_TOKEN is not set"
+    fi
+    if [ -z "$DT_INGEST_TOKEN" ]; then
+      printWarn "DT_INGEST_TOKEN is not set"
+    fi
+  else
+    printWarn "No Dynatrace credentials found. Set them as environment variables, in .devcontainer/.env, or as Codespaces secrets."
     unset DT_EVAL_SECRETS
     return 1
   fi
 
-  return $found
+  # Validate and parse
+  validateSaveCredentials "$DT_ENVIRONMENT" "$DT_OPERATOR_TOKEN" "$DT_INGEST_TOKEN"
+  if [[ $? -ne 0 ]]; then
+    unset DT_EVAL_SECRETS
+    return 1
+  fi
+
+  export DT_EVAL_SECRETS=true
+  printSecrets
+  return 0
 }
 
 printSecrets(){
-    # Print all known vars
     printInfo "Dynatrace Environment: $DT_ENVIRONMENT"
     printInfo "Dynatrace Tenant (for API): $DT_TENANT"
+    printInfo "Dynatrace Env Type: $DT_ENV_TYPE"
     printInfo "Dynatrace API & PaaS Token: ${DT_OPERATOR_TOKEN:0:14}xxx..."
     printInfo "Dynatrace Ingest Token: ${DT_INGEST_TOKEN:0:14}xxx..."
-    printInfo "Dynatrace Otel API Token: ${DT_INGEST_TOKEN:0:14}xxx..."
     printInfo "Dynatrace Otel Endpoint: $DT_OTEL_ENDPOINT"
-    printInfo "Secrets stored as configmap, type 'kubectl get configmap -n default dtcredentials -o json' to see them."
-
 }
 
 deployCloudNative() {
@@ -980,6 +1106,7 @@ generateDynakube(){
 
 }
 
+#deprecated
 deployOperatorViaKubectl(){
 
   printInfoSection "Deploying Operator via kubectl"
@@ -1031,6 +1158,18 @@ exposeMkdocs(){
   printInfo "Exposing Mkdocs in your dev.container in port 8000 & running in the background, type 'jobs' to show the process."
   nohup mkdocs serve --dev-addr=0.0.0.0:8000 --watch-theme --dirtyreload --livereload > /dev/null 2>&1 &
 
+  # Register mkdocs with ingress if available and not using legacy ports
+  if [[ "$USE_LEGACY_PORTS" != "true" ]] && kubectl get ns ingress-nginx &>/dev/null; then
+    registerMkdocs
+  else
+    local url
+    if [[ "$CODESPACES" == true ]]; then
+      url="https://${CODESPACE_NAME}-8000.app.github.dev"
+    else
+      url="http://localhost:8000"
+    fi
+    printInfo "Mkdocs available at: $url"
+  fi
 }
 
 
@@ -1051,6 +1190,269 @@ _buildLabGuide(){
 deployCertmanager(){
   certmanagerInstall
   certmanagerEnable
+}
+
+# ======================================================================
+#          ------- Ingress & App Exposure -------                       #
+#  Functions for nginx ingress, nip.io routing, and app registration.   #
+#  Replaces the legacy NodePort (30100-30300) approach.                 #
+# ======================================================================
+
+detectIP() {
+  # Returns the IP address used for nip.io subdomains.
+  # Priority: $EXTERNAL_IP > auto-detect based on instantiation type.
+  if [[ -n "$EXTERNAL_IP" ]]; then
+    echo "$EXTERNAL_IP"
+  elif [[ "$CODESPACES" == true ]]; then
+    echo "127.0.0.1"
+  else
+    # Try public IP first, fall back to local IP
+    local ip
+    ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null)
+    if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "$ip"
+    else
+      hostname -I 2>/dev/null | awk '{print $1}'
+    fi
+  fi
+}
+
+installIngressController() {
+  # Installs the nginx ingress controller in the Kind cluster.
+  # Uses the Kind-specific manifest from the ingress-nginx project.
+  printInfoSection "Installing nginx ingress controller"
+
+  # Check if already installed
+  if kubectl get ns ingress-nginx &>/dev/null && \
+     kubectl get pod -n ingress-nginx -l app.kubernetes.io/component=controller --no-headers 2>/dev/null | grep -q "Running"; then
+    printInfo "Ingress controller already running"
+    return 0
+  fi
+
+  # Install using the Kind-specific manifest (handles hostPort binding)
+  printInfo "Deploying ingress-nginx for Kind..."
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml
+
+  printInfo "Waiting for ingress controller to be ready..."
+  kubectl wait --namespace ingress-nginx \
+    --for=condition=ready pod \
+    --selector=app.kubernetes.io/component=controller \
+    --timeout=120s
+
+  printInfo "Ingress controller installed and ready"
+}
+
+getAppURL() {
+  # Returns the user-facing URL for an app based on environment type.
+  # Usage: getAppURL <app-name> [port]
+  local app_name="$1"
+  local cs_port="$2"
+  local detected_ip
+
+  if [[ "$CODESPACES" == true ]]; then
+    if [[ -n "$cs_port" ]]; then
+      echo "https://${CODESPACE_NAME}-${cs_port}.app.github.dev"
+    else
+      echo "https://${CODESPACE_NAME}-80.app.github.dev"
+    fi
+  else
+    detected_ip=$(detectIP)
+    echo "http://${app_name}.${detected_ip}.nip.io"
+  fi
+}
+
+registerApp() {
+  # Registers an app in the app registry and creates an Ingress resource.
+  # Usage: registerApp <app-name> <namespace> <service-name> <service-port>
+  local app_name="$1"
+  local namespace="$2"
+  local service_name="$3"
+  local service_port="$4"
+
+  if [[ -z "$app_name" || -z "$namespace" || -z "$service_name" || -z "$service_port" ]]; then
+    printError "registerApp: requires <app-name> <namespace> <service-name> <service-port>"
+    return 1
+  fi
+
+  local detected_ip
+  detected_ip=$(detectIP)
+
+  # Create the Ingress resource
+  local ingress_host="${app_name}.${detected_ip}.nip.io"
+
+  printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
+
+  kubectl apply -f - <<INGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${app_name}-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${service_name}
+            port:
+              number: ${service_port}
+INGRESSEOF
+
+  # For Codespaces: set up port forwarding for this app
+  local cs_port=""
+  if [[ "$CODESPACES" == true ]]; then
+    cs_port=$(getNextCodespacesPort)
+    printInfo "Setting up Codespaces port forward on port $cs_port for $app_name"
+    # Use kubectl port-forward in background
+    kubectl port-forward -n "$namespace" "svc/$service_name" "${cs_port}:${service_port}" &>/dev/null &
+  fi
+
+  # Write to app registry
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  echo "${app_name}|${namespace}|${service_name}|${service_port}|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+
+  local app_url
+  app_url=$(getAppURL "$app_name" "$cs_port")
+  printInfo "$app_name registered and accessible at: $app_url"
+}
+
+unregisterApp() {
+  # Removes an app from the registry and deletes its Ingress resource.
+  # Usage: unregisterApp <app-name> <namespace>
+  local app_name="$1"
+  local namespace="$2"
+
+  kubectl delete ingress "${app_name}-ingress" -n "$namespace" 2>/dev/null
+
+  # Kill any port-forward for this app
+  if [[ -f "$APP_REGISTRY" ]]; then
+    local cs_port
+    cs_port=$(grep "^${app_name}|" "$APP_REGISTRY" | cut -d'|' -f6)
+    if [[ -n "$cs_port" ]]; then
+      # Kill the port-forward process
+      pkill -f "port-forward.*${cs_port}:" 2>/dev/null || true
+    fi
+    # Remove from registry
+    grep -v "^${app_name}|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null
+    mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null
+  fi
+
+  printInfo "$app_name unregistered"
+}
+
+getNextCodespacesPort() {
+  # Returns the next available port for Codespaces port-forwarding.
+  # Starts at INGRESS_CS_PORT_START (8080) and increments.
+  local port=$INGRESS_CS_PORT_START
+  if [[ -f "$APP_REGISTRY" ]]; then
+    local max_port
+    max_port=$(awk -F'|' '{print $6}' "$APP_REGISTRY" | grep -v '^$' | sort -n | tail -1)
+    if [[ -n "$max_port" ]]; then
+      port=$((max_port + 1))
+    fi
+  fi
+  echo "$port"
+}
+
+listApps() {
+  # Lists all registered apps with their URLs.
+  if [[ ! -f "$APP_REGISTRY" ]] || [[ ! -s "$APP_REGISTRY" ]]; then
+    printInfo "No applications registered. Type 'deployApp' to see available apps."
+    return 0
+  fi
+
+  printInfoSection "Registered Applications"
+  while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port; do
+    local url
+    url=$(getAppURL "$app_name" "$cs_port")
+    printInfo "  ${app_name} (ns: ${namespace}) → ${url}"
+  done < "$APP_REGISTRY"
+}
+
+registerMkdocs() {
+  # Registers mkdocs as a non-K8s app routed through ingress.
+  # Creates a K8s Service + Endpoints pointing to the host, then an Ingress resource.
+  local detected_ip
+  detected_ip=$(detectIP)
+  local mkdocs_host="docs.${detected_ip}.nip.io"
+
+  printInfo "Registering mkdocs via ingress (host: $mkdocs_host)"
+
+  # Get the host IP from inside Kind (the docker bridge gateway)
+  local host_ip
+  host_ip=$(docker exec kind-control-plane sh -c "ip route | grep default | awk '{print \$3}'" 2>/dev/null)
+  if [[ -z "$host_ip" ]]; then
+    host_ip="172.17.0.1"  # Docker default gateway
+  fi
+
+  # Create a Service + Endpoints in default namespace pointing to host mkdocs
+  kubectl apply -f - <<MKDOCSEOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: mkdocs-external
+  namespace: default
+spec:
+  ports:
+  - port: 8000
+    targetPort: 8000
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mkdocs-external
+  namespace: default
+subsets:
+- addresses:
+  - ip: ${host_ip}
+  ports:
+  - port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mkdocs-ingress
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${mkdocs_host}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mkdocs-external
+            port:
+              number: 8000
+MKDOCSEOF
+
+  # Register in app registry
+  local cs_port=""
+  if [[ "$CODESPACES" == true ]]; then
+    cs_port=8000  # mkdocs already listens on 8000
+  fi
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  # Remove old entry if exists
+  grep -v "^docs|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+  mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  echo "docs|default|mkdocs-external|8000|${mkdocs_host}|${cs_port}" >> "$APP_REGISTRY"
+
+  local url
+  url=$(getAppURL "docs" "$cs_port")
+  printInfo "Mkdocs registered and accessible at: $url"
 }
 
 getNextFreeAppPort() {
@@ -1107,12 +1509,15 @@ deployAITravelAdvisorApp(){
   printInfo "Evaluating credentials"
 
   dynatraceEvalReadSaveCredentials
-  
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed"
-    return 1
+
+  local PORT=""
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
   fi
 
   kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/namespace.yaml
@@ -1146,41 +1551,43 @@ deployAITravelAdvisorApp(){
   kubectl -n ai-travel-advisor wait --for=condition=Ready pod --all --timeout=10m
   printInfo "AI Travel Advisor is ready"
 
-  # Define the NodePort to expose the app from the Cluster
-  kubectl patch service ai-travel-advisor --namespace=ai-travel-advisor --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  waitAppCanHandleRequests $PORT 20
-
-  printInfo "AI Travel Advisor is available via NodePort=$PORT"
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    kubectl patch service ai-travel-advisor --namespace=ai-travel-advisor --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    waitAppCanHandleRequests $PORT 20
+    printInfo "AI Travel Advisor is available via NodePort=$PORT"
+  else
+    registerApp "ai-travel-advisor" "ai-travel-advisor" "ai-travel-advisor" 8080
+  fi
 }
 
 deployTodoApp(){
 
   printInfoSection "Deploying Todo App"
 
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed"
-    return 1
-  fi
-
-  kubectl create ns todoapp
+  kubectl create ns todoapp 2>/dev/null || true
 
   # Create deployment of todoApp
   kubectl -n todoapp create deploy todoapp --image=shinojosa/todoapp:1.0.1
 
-  # Expose deployment of todoApp with a Service
-  kubectl -n todoapp expose deployment todoapp --type=NodePort --name=todoapp --port=8080 --target-port=8080
-
-  # Define the NodePort to expose the app from the Cluster
-  kubectl patch service todoapp --namespace=todoapp --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  waitForAllReadyPods todoapp
-
-  waitAppCanHandleRequests $PORT
-
-  printInfoSection "TodoApp is available via NodePort=$PORT"
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    # Legacy NodePort mode
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl -n todoapp expose deployment todoapp --type=NodePort --name=todoapp --port=8080 --target-port=8080
+    kubectl patch service todoapp --namespace=todoapp --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    waitForAllReadyPods todoapp
+    waitAppCanHandleRequests $PORT
+    printInfoSection "TodoApp is available via NodePort=$PORT"
+  else
+    # Ingress mode
+    kubectl -n todoapp expose deployment todoapp --type=ClusterIP --name=todoapp --port=8080 --target-port=8080 2>/dev/null || true
+    waitForAllReadyPods todoapp
+    registerApp "todoapp" "todoapp" "todoapp" 8080
+  fi
 }
 
 deployAstroshop(){
@@ -1194,76 +1601,63 @@ deployAstroshop(){
     return 1
   fi
 
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed"
-    return 1
-  fi
-
   NAMESPACE="astroshop"
 
   dynatraceEvalReadSaveCredentials
 
-  if [[ -z "${DT_INGEST_TOKEN}" || -z "${DT_OTEL_ENDPOINT}" ]]; then  
-    printWarn "DT_INGEST_TOKEN and/or DT_OTEL_ENDPOINT are not setted. DT_OTEL_ENDPOINT is calculated with the function 'dynatraceEvalReadSaveCredentials' and the env var DT_ENVIRONMENT"  
+  if [[ -z "${DT_INGEST_TOKEN}" || -z "${DT_OTEL_ENDPOINT}" ]]; then
+    printWarn "DT_INGEST_TOKEN and/or DT_OTEL_ENDPOINT are not set. DT_OTEL_ENDPOINT is calculated with the function 'dynatraceEvalReadSaveCredentials' and the env var DT_ENVIRONMENT"
   else
-    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"  
+    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"
   fi
 
   kubectl apply -n $NAMESPACE -f $FRAMEWORK_APPS_PATH/$ASTROSHOPDIR/yaml/astroshop-deployment.yaml
 
-  kubectl -n $NAMESPACE create secret generic dt-credentials --from-literal="DT_API_TOKEN=$DT_INGEST_TOKEN" --from-literal="DT_ENDPOINT=$DT_OTEL_ENDPOINT"
-  
-  printInfo "Waiting for all pods of $NAMESPACE to be scheduled"
-  
-  printWarn "Not waiting for all pods of $NAMESPACE to be scheduled, this can take a while, type 'kubectl get pod -n $NAMESPACE --all' to see the status of them"
-  
-  printInfo "Change astroshop frontend service from ClusterIP to NodePort so it can be exposed"
-  
-  kubectl patch service frontend-proxy --namespace=$NAMESPACE --patch='{"spec": {"type": "NodePort"}}'
+  kubectl -n $NAMESPACE create secret generic dt-credentials --from-literal="DT_API_TOKEN=$DT_INGEST_TOKEN" --from-literal="DT_ENDPOINT=$DT_OTEL_ENDPOINT" 2>/dev/null || true
 
-  printInfo "Exposing the $NAMESPACE frontend in NodePort $PORT"
+  printInfo "Waiting for pods of $NAMESPACE to be scheduled (this can take a while)"
 
-  kubectl patch service frontend-proxy --namespace=$NAMESPACE --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  waitAppCanHandleRequests $PORT 60
-
-  PUBLIC_IP=$(curl ifconfig.me)
-
-  printInfo "Astroshop deployed succesfully and handling request in http://$PUBLIC_IP:$PORT"
-
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl patch service frontend-proxy --namespace=$NAMESPACE --patch='{"spec": {"type": "NodePort"}}'
+    kubectl patch service frontend-proxy --namespace=$NAMESPACE --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    waitAppCanHandleRequests $PORT 60
+    printInfo "Astroshop deployed and available via NodePort=$PORT"
+  else
+    registerApp "astroshop" "$NAMESPACE" "frontend-proxy" 8080
+  fi
 }
 
 deployBugZapperApp(){
   [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
   printInfoSection "Deploying BugZapper App"
-  
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed"
-    return 1
-  fi
 
-  kubectl create ns bugzapper
-
-  # Create deployment of todoApp
+  kubectl create ns bugzapper 2>/dev/null || true
   kubectl -n bugzapper create deploy bugzapper --image=jhendrick/bugzapper-game:latest
 
-  # Expose deployment of todoApp with a Service
-  kubectl -n bugzapper expose deployment bugzapper --type=NodePort --name=bugzapper --port=3000 --target-port=3000
-
-  # Define the NodePort to expose the app from the Cluster
-  kubectl patch service bugzapper --namespace=bugzapper --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  waitForAllReadyPods bugzapper
-
-  waitAppCanHandleRequests $PORT
-
-  printInfoSection "Bugzapper is available via NodePort=$PORT"
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl -n bugzapper expose deployment bugzapper --type=NodePort --name=bugzapper --port=3000 --target-port=3000
+    kubectl patch service bugzapper --namespace=bugzapper --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    waitForAllReadyPods bugzapper
+    waitAppCanHandleRequests $PORT
+    printInfoSection "Bugzapper is available via NodePort=$PORT"
+  else
+    kubectl -n bugzapper expose deployment bugzapper --type=ClusterIP --name=bugzapper --port=3000 --target-port=3000 2>/dev/null || true
+    waitForAllReadyPods bugzapper
+    registerApp "bugzapper" "bugzapper" "bugzapper" 3000
+  fi
 }
 
 # deploy easytrade from manifests
@@ -1277,35 +1671,27 @@ deployEasyTrade() {
     return 1
   fi
 
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed"
-    return 1
-  fi
+  kubectl create namespace easytrade 2>/dev/null || true
 
-  # Create easytrade namespace
-  printInfo "Creating 'easytrade' namespace"
-
-  kubectl create namespace easytrade
-
-  # Deploy easytrade manifests
   printInfo "Deploying easytrade manifests"
-
   kubectl apply -f $FRAMEWORK_APPS_PATH/easytrade/manifests -n easytrade
 
-  # Validate pods are running
   printInfo "Waiting for all pods to start"
-
   waitForAllPods easytrade
 
-  printInfo "Exposing EasyTrade in your dev.container via NodePort $PORT"
-
-  kubectl patch service frontendreverseproxy-easytrade --namespace=easytrade --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  waitAppCanHandleRequests $PORT
-
-  printInfo "EasyTrade is available via NodePort=$PORT"
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl patch service frontendreverseproxy-easytrade --namespace=easytrade --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    waitAppCanHandleRequests $PORT
+    printInfo "EasyTrade is available via NodePort=$PORT"
+  else
+    registerApp "easytrade" "easytrade" "frontendreverseproxy-easytrade" 80
+  fi
 }
 
 # deploy hipstershop from manifests
@@ -1319,45 +1705,32 @@ deployHipsterShop() {
     return 1
   fi
 
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed"
-    return 1
-  fi
+  kubectl create namespace hipstershop 2>/dev/null || true
 
-  # Create hipstershop namespace
-  printInfo "Creating 'hipstershop' namespace"
-
-  kubectl create namespace hipstershop
-
-  # Deploy hipstershop manifests
   printInfo "Deploying hipstershop manifests"
-
   kubectl apply -f $FRAMEWORK_APPS_PATH/hipstershop/manifests -n hipstershop
 
-  # Validate pods are running
   printInfo "Waiting for all pods to start"
-
   waitForAllPods hipstershop
 
-  kubectl patch service frontend-external --namespace=hipstershop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-
-  waitAppCanHandleRequests $PORT
-  
-  printInfo "HipsterShop is available via NodePort=$PORT"
-  
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl patch service frontend-external --namespace=hipstershop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    waitAppCanHandleRequests $PORT
+    printInfo "HipsterShop is available via NodePort=$PORT"
+  else
+    registerApp "hipstershop" "hipstershop" "frontend-external" 80
+  fi
 }
 
 deployUnguard(){
 
   printInfoSection "Deploying Unguard"
-  getNextFreeAppPort true
-  PORT=$(getNextFreeAppPort)
-  if [[ $? -ne 0 ]]; then
-    printWarn "Application can't be deployed, all NodePorts are busy"
-    return 1
-  fi
 
   if [[ "$ARCH" != "x86_64" ]]; then
     printWarn "This version of the Unguard only supports AMD/x86 architectures and not ARM, exiting deployment..."
@@ -1370,24 +1743,29 @@ deployUnguard(){
   helm repo add bitnami https://charts.bitnami.com/bitnami
 
   printInfo "Installing unguard-mariadb ..."
-  #helm install unguard-mariadb bitnami/mariadb --version 12.0.2 --set primary.persistence.enabled=false --wait --namespace unguard --create-namespace
-
   helm install unguard-mariadb bitnami/mariadb \
   --version 11.5.7 \
   --set primary.persistence.enabled=false \
   --set image.repository=bitnamilegacy/mariadb \
   --namespace unguard --create-namespace
 
-  printInfo "waiting for mariadb to come online..."
-
+  printInfo "Waiting for mariadb to come online..."
   waitForAllReadyPods unguard
 
   printInfo "Installing Unguard"
-  helm install unguard  oci://ghcr.io/dynatrace-oss/unguard/chart/unguard --version 0.12.0 --namespace unguard 
+  helm install unguard oci://ghcr.io/dynatrace-oss/unguard/chart/unguard --version 0.12.0 --namespace unguard
 
-  kubectl patch service unguard-envoy-proxy --namespace=unguard --patch="{\"spec\": {\"type\": \"NodePort\", \"ports\": [{\"port\": 8080, \"nodePort\": $PORT }]}}"
-
-
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed, all NodePorts are busy"
+      return 1
+    fi
+    kubectl patch service unguard-envoy-proxy --namespace=unguard --patch="{\"spec\": {\"type\": \"NodePort\", \"ports\": [{\"port\": 8080, \"nodePort\": $PORT }]}}"
+  else
+    registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080
+  fi
 }
 
 undeployUnguard() {
@@ -1425,6 +1803,7 @@ deployApp(){
     1 | a | ai-travel-advisor)
       if [[ $delete ]]; then
         printInfoSection "Undeploying ai-travel-advisor..."
+        unregisterApp "ai-travel-advisor" "ai-travel-advisor"
         kubectl delete ns ai-travel-advisor --force
       else
         deployAITravelAdvisorApp
@@ -1434,6 +1813,7 @@ deployApp(){
     2 | b | astroshop)
       if [[ $delete ]]; then
         printInfoSection "Undeploying astroshop..."
+        unregisterApp "astroshop" "astroshop"
         kubectl delete ns astroshop --force
       else
         deployAstroshop
@@ -1443,6 +1823,7 @@ deployApp(){
     3 | c | bugzapper)
        if [[ $delete ]]; then
         printInfo "Undeploying bugzapper..."
+        unregisterApp "bugzapper" "bugzapper"
         kubectl delete ns bugzapper --force
       else
         deployBugZapperApp
@@ -1452,6 +1833,7 @@ deployApp(){
     4 | d | easytrade)
        if [[ $delete ]]; then
         printInfo "Undeploying easytrade..."
+        unregisterApp "easytrade" "easytrade"
         kubectl delete ns easytrade --force
       else
         deployEasyTrade
@@ -1461,6 +1843,7 @@ deployApp(){
     5 | e | hipstershop)
        if [[ $delete ]]; then
         printInfo "Undeploying hipstershop..."
+        unregisterApp "hipstershop" "hipstershop"
         kubectl delete ns hipstershop --force
       else
         deployHipsterShop
@@ -1470,6 +1853,7 @@ deployApp(){
     6 | f | todoapp)
        if [[ $delete ]]; then
         printInfo "Undeploying todoapp..."
+        unregisterApp "todoapp" "todoapp"
         kubectl delete ns todoapp --force
       else
         deployTodoApp
@@ -1479,6 +1863,7 @@ deployApp(){
     7 | g | unguard)
        if [[ $delete ]]; then
         printInfo "Undeploying unguard..."
+        unregisterApp "unguard" "unguard"
         undeployUnguard
       else
         deployUnguard
@@ -1562,36 +1947,69 @@ getRunningDockerContainernameByImagePattern(){
 
 verifyCodespaceCreation(){
   printInfoSection "Verify Codespace creation"
-  #TODO Enhance this function and send (part) of the error to the monitoring service
   calculateTime
+
+  # Collect raw logs based on instantiation type
+  local raw_errors=""
   if [[ $INSTANTIATION_TYPE == "github-codespaces" ]]; then
-    CODESPACE_ERRORS=$(cat $CODESPACE_PSHARE_FOLDER/creation.log | grep -i -E 'error|failed')
+    if [ -f "$CODESPACE_PSHARE_FOLDER/creation.log" ]; then
+      raw_errors=$(grep -i -E 'error|failed' "$CODESPACE_PSHARE_FOLDER/creation.log" 2>/dev/null || true)
+    fi
   elif [[ $INSTANTIATION_TYPE == "remote-container" ]] || [[ $INSTANTIATION_TYPE == "github-workflow" ]]; then
-    #FIXME: Verify instantiation of Github Actions & VS Code Remote containers
+    local containername
     containername=$(getRunningDockerContainernameByImagePattern "vsc")
-    
-    CODESPACE_ERRORS=$(docker logs $containername | grep -i -E 'error|failed')
-    # Print logs of VSCode and cat grep them.
-    printWarn "Container was created in a remote container, either VS Code or Github Actions. Verification of proper creation TBD"
+    if [ -n "$containername" ]; then
+      raw_errors=$(docker logs "$containername" 2>&1 | grep -i -E 'error|failed' || true)
+    fi
   elif [[ $INSTANTIATION_TYPE == "local-docker-container" ]]; then
+    local containername
     containername=$(getRunningDockerContainernameByImagePattern "dt-enablement")
-    CODESPACE_ERRORS=$(docker logs $containername | grep -i -E 'error|failed')
-    # above method works only calling it the first time. Otherwise the erros will be multiplied. We could clean them like below:
-    #awk '/Verify Codespace creation/ {exit} {print}' /tmp/dt-enablement.log > /tmp/dt-enablement-create.log
-  else 
-    printWarn "Container creation unknown."
+    if [ -n "$containername" ]; then
+      raw_errors=$(docker logs "$containername" 2>&1 | grep -i -E 'error|failed' || true)
+    fi
+  else
+    printWarn "Unknown instantiation type: $INSTANTIATION_TYPE"
+  fi
+
+  # Filter out known noise patterns that are not real errors
+  # These are informational log lines, expected warnings, or harmless messages
+  CODESPACE_ERRORS=""
+  if [ -n "$raw_errors" ]; then
+    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | grep -v -E \
+      -e 'configmap.*dtcredentials' \
+      -e 'Verify Codespace creation' \
+      -e 'issues detected in the creation' \
+      -e 'error_count' \
+      -e 'npm warn' \
+      -e 'npm WARN' \
+      -e 'WARN.*not set' \
+      -e 'warning:' \
+      -e 'ErrorPolicy' \
+      -e 'error-page' \
+      -e 'stderr' \
+      -e 'error_reporting' \
+      -e 'errorHandler' \
+      -e 'error\.html' \
+    || true)
   fi
 
   if [ -n "$CODESPACE_ERRORS" ]; then
-      ERROR_COUNT=$(printf "%s" "$CODESPACE_ERRORS" | wc -l) 
+    # wc -l counts newlines, not lines — add a trailing newline so the last line is counted
+    ERROR_COUNT=$(printf "%s\n" "$CODESPACE_ERRORS" | grep -c .)
   else
-      ERROR_COUNT=0
+    ERROR_COUNT=0
   fi
-  printInfo "$ERROR_COUNT issues detected in the creation of the codespace: $CODESPACE_ERRORS" 
+
+  if [ "$ERROR_COUNT" -gt 0 ]; then
+    printWarn "$ERROR_COUNT issues detected in the creation of the codespace:"
+    printWarn "$CODESPACE_ERRORS"
+  else
+    printInfo "No errors detected in the creation of the codespace"
+  fi
 
   export CODESPACE_ERRORS
+  export ERROR_COUNT
   updateEnvVariable ERROR_COUNT
- 
 }
 
 calculateTime(){
@@ -1604,7 +2022,7 @@ calculateTime(){
     DURATION="$SECONDS"
     updateEnvVariable DURATION
   fi
-  printInfo "It took $(($DURATION / 60)) minutes and $(($DURATION % 60)) seconds the post-creation of the codespace."
+  printInfo "It took $(($DURATION / 60)) minutes and $(($DURATION % 60)) seconds the finalizePostCreation-creation of the codespace."
 }
 
 updateEnvVariable(){

@@ -24,7 +24,8 @@ getDockerEnvsFromEnvFile
 CMD="./.devcontainer/post-create.sh; ./.devcontainer/post-start.sh; zsh"
 
 # Ports to map to the host, add as many as wanted
-PORTS="-p 30100:30100 -p 30200:30200 -p 30300:30300 -p 8000:8000"
+# Port 80/443 for ingress, 30100-30300 for legacy NodePort, 8000 for mkdocs
+PORTS="-p 80:80 -p 443:443 -p 30100:30100 -p 30200:30200 -p 30300:30300 -p 8000:8000"
 
 VOLUMEMOUNTS="-v /var/run/docker.sock:/var/run/docker.sock -v /lib/modules:/lib/modules -v $(dirname "$PWD"):/workspaces/$RepositoryName"
 
@@ -89,6 +90,32 @@ start(){
         fi
         run
     fi
+}
+
+cleanStart(){
+    echo "Cleaning up all containers for a fresh start..."
+
+    # 1. Stop and remove the framework container
+    echo "Removing framework container '$IMAGENAME'..."
+    docker kill "$IMAGENAME" 2>/dev/null
+    docker rm -f "$IMAGENAME" 2>/dev/null
+
+    # 2. Delete Kind clusters (removes kind-control-plane and similar containers)
+    echo "Deleting Kind clusters..."
+    for cluster in $(kind get clusters 2>/dev/null); do
+        echo "  Deleting Kind cluster: $cluster"
+        kind delete cluster --name "$cluster" 2>/dev/null
+    done
+
+    # 3. Remove any stale/exited containers from previous runs
+    stale=$(docker ps -a --filter "status=exited" --filter "status=dead" -q 2>/dev/null)
+    if [ -n "$stale" ]; then
+        echo "Removing stale containers..."
+        docker rm -f $stale 2>/dev/null
+    fi
+
+    echo "All containers cleaned. Starting a fresh environment..."
+    run
 }
 
 integration(){

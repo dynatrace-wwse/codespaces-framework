@@ -61,35 +61,57 @@ printCodespacesInformation(){
     if [[ $CODESPACES == true ]]; then
         echo -e "Codespaces name ${RESET}${CODESPACE_NAME}${NORMAL} running for gh-user ${RESET}${PRINT_USER}    "
     fi
-    echo -e " 🧠 Dynatrace MCP Server: ${RESET}installed"
+    # MCP Server status
+    if [ -f "$REPO_PATH/.vscode/mcp.json" ]; then
+        echo -e " 🧠 Dynatrace MCP Server: ${GREEN}enabled${NORMAL} — connected to ${RESET}${DT_ENVIRONMENT:-unknown}${NORMAL}"
+        echo -e "    ${NORMAL}Type ${RESET}disableMCP${NORMAL} to disconnect or ${RESET}selectEnvironment${NORMAL} to switch"
+    else
+        echo -e " 🧠 Dynatrace MCP Server: ${YELLOW}not enabled${NORMAL}"
+        echo -e "    ${NORMAL}Type ${RESET}enableMCP${NORMAL} to connect VS Code to Dynatrace"
+    fi
 }
 
 
 printRunningApplications(){
 
     local running_app=false
-    # Reconstruct array (portable for Bash and Zsh)
-    PORT_ARRAY=()
-    for port in $(echo "$NODE_PORTS"); do
-        PORT_ARRAY+=("$port")
-    done
-    for port in "${PORT_ARRAY[@]}"; do
-        # Searching for services attached to a specific port
-        svc_output=$(kubectl get svc --all-namespaces -o wide | grep "$port")
-        if [[ "$?" == '0' ]]; then
+
+    # Ingress mode: show apps from registry
+    if [[ "$USE_LEGACY_PORTS" != "true" ]] && [[ -f "$APP_REGISTRY" ]] && [[ -s "$APP_REGISTRY" ]]; then
+        while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port; do
             running_app=true
-            ns_as_name=$(echo $svc_output | awk '{print $1}')
-            if [[ $CODESPACES == true ]]; then
-                echo -e "${CYAN}   $ns_as_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-$port.app.github.dev"
+            if [[ $CODESPACES == true && -n "$cs_port" ]]; then
+                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-${cs_port}.app.github.dev"
             else
-                echo -e "${CYAN}   $ns_as_name ${NORMAL}is reachable under ${RESET}http://${HOSTNAME}:$port"
+                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}http://${ingress_host}"
             fi
-        fi
-    done
+        done < "$APP_REGISTRY"
+    fi
+
+    # Legacy NodePort mode: check ports
+    if [[ "$USE_LEGACY_PORTS" == "true" ]] || [[ $running_app == false ]]; then
+        PORT_ARRAY=()
+        for port in $(echo "$NODE_PORTS"); do
+            PORT_ARRAY+=("$port")
+        done
+        for port in "${PORT_ARRAY[@]}"; do
+            svc_output=$(kubectl get svc --all-namespaces -o wide 2>/dev/null | grep "$port")
+            if [[ "$?" == '0' ]]; then
+                running_app=true
+                ns_as_name=$(echo $svc_output | awk '{print $1}')
+                if [[ $CODESPACES == true ]]; then
+                    echo -e "${CYAN}   $ns_as_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-$port.app.github.dev"
+                else
+                    echo -e "${CYAN}   $ns_as_name ${NORMAL}is reachable under ${RESET}http://${HOSTNAME}:$port"
+                fi
+            fi
+        done
+    fi
+
     if [[ $running_app == false ]]; then
         echo -e "   ${NORMAL}No applications are running, to list the app repository ${PACKAGE} type ${RESET}deployApp${NORMAL}"
     else
-        echo -e "   ${NORMAL}For managing your apps ${PACKAGE} type ${RESET}deployApp${NORMAL}"
+        echo -e "   ${NORMAL}For managing your apps ${PACKAGE} type ${RESET}deployApp${NORMAL} or ${RESET}listApps${NORMAL}"
     fi
 }
 

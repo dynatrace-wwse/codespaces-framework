@@ -35,7 +35,16 @@ create_fake_cache() {
 
   # Minimal stubs so source doesn't fail
   echo '# variables stub' > "$FRAMEWORK_CACHE/.devcontainer/util/variables.sh"
-  echo '# functions stub' > "$FRAMEWORK_CACHE/.devcontainer/util/functions.sh"
+  # functions.sh stub must source my_functions.sh (like the real one does)
+  cat > "$FRAMEWORK_CACHE/.devcontainer/util/functions.sh" <<'FSTUB'
+# functions stub
+# Source repo-level my_functions.sh if it exists, otherwise framework stub
+if [ -f "$REPO_PATH/.devcontainer/util/my_functions.sh" ]; then
+  source "$REPO_PATH/.devcontainer/util/my_functions.sh"
+elif [ -n "$FRAMEWORK_CACHE" ] && [ -f "$FRAMEWORK_CACHE/.devcontainer/util/my_functions.sh" ]; then
+  source "$FRAMEWORK_CACHE/.devcontainer/util/my_functions.sh"
+fi
+FSTUB
   echo '# greeting stub' > "$FRAMEWORK_CACHE/.devcontainer/util/greeting.sh"
   echo '# my_functions stub' > "$FRAMEWORK_CACHE/.devcontainer/util/my_functions.sh"
   echo '# test_functions stub' > "$FRAMEWORK_CACHE/.devcontainer/test/test_functions.sh"
@@ -103,15 +112,17 @@ create_partial_cache() {
   [[ "$output" == *"NAME=my-enablement"* ]]
 }
 
-@test "cache hit: copies p10k config to HOME" {
+@test "cache hit: p10k files are available in cache (copied by setUpTerminal)" {
   create_fake_cache
 
   cd "$FAKE_REPO"
   run bash -c 'source .devcontainer/util/source_framework.sh'
 
   [ "$status" -eq 0 ]
-  [ -f "$HOME/.p10k.zsh" ]
-  [ -f "$HOME/.zshrc" ]
+  # source_framework.sh does NOT copy p10k — that is setUpTerminal's job.
+  # Verify the p10k files are available in the cache for setUpTerminal to use.
+  [ -f "$FRAMEWORK_CACHE/.devcontainer/p10k/.p10k.zsh" ]
+  [ -f "$FRAMEWORK_CACHE/.devcontainer/p10k/.zshrc" ]
 }
 
 # ============================================================
@@ -183,7 +194,7 @@ create_partial_cache() {
 # ============================================================
 # Test: FRAMEWORK_VERSION defaults to 1.2.0 when not set
 # ============================================================
-@test "FRAMEWORK_VERSION defaults to 1.2.0 when unset" {
+@test "FRAMEWORK_VERSION defaults to 1.2.5 when unset" {
   unset FRAMEWORK_VERSION
 
   cd "$FAKE_REPO"
@@ -193,8 +204,8 @@ create_partial_cache() {
     echo "VER=$FRAMEWORK_VERSION"
   '
 
-  # It will fail (no tag 1.2.0 exists for remote clone) but should set the variable
-  [[ "$output" == *"VER=1.2.0"* ]]
+  # It will fail (no matching tag for remote clone) but should set the variable
+  [[ "$output" == *"VER=1.2.5"* ]]
 }
 
 # ============================================================
