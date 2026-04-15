@@ -770,13 +770,9 @@ variablesNeeded() {
     local var_name="${var_spec%%:*}"
     local required="${var_spec##*:}"
 
-    # Get the value via indirect expansion (bash: ${!var}, zsh: ${(P)var})
+    # Get the value via indirect expansion (bash: ${!var}, zsh: eval)
     local var_value
-    if [[ "$(ps -p $$ -o comm=)" == "zsh" ]]; then
-      var_value="${(P)var_name}"
-    else
-      var_value="${!var_name}"
-    fi
+    eval "var_value=\"\${$var_name}\""
 
     if [ -z "$var_value" ]; then
       if [ "$required" = "true" ]; then
@@ -1700,7 +1696,7 @@ deployAstroshop(){
   if [[ -z "${DT_INGEST_TOKEN}" || -z "${DT_OTEL_ENDPOINT}" ]]; then
     printWarn "DT_INGEST_TOKEN and/or DT_OTEL_ENDPOINT are not set. DT_OTEL_ENDPOINT is calculated with the function 'dynatraceEvalReadSaveCredentials' and the env var DT_ENVIRONMENT"
   else
-    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"
+    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token ${DT_INGEST_TOKEN:0:14}xxx..."
   fi
 
   kubectl apply -n $NAMESPACE -f $FRAMEWORK_APPS_PATH/$ASTROSHOPDIR/yaml/astroshop-deployment.yaml
