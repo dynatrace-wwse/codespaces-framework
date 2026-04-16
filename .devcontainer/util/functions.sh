@@ -1234,6 +1234,14 @@ installIngressController() {
   printInfo "Deploying ingress-nginx for Kind..."
   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml
 
+  # Enable snippet annotations (disabled by default for security, but needed
+  # for Dynatrace RUM agent JS handling at the nginx level)
+  printInfo "Enabling snippet annotations for Dynatrace RUM support..."
+  kubectl patch configmap ingress-nginx-controller -n ingress-nginx \
+    --type merge -p '{"data":{"allow-snippet-annotations":"true"}}' 2>/dev/null || \
+  kubectl create configmap ingress-nginx-controller -n ingress-nginx \
+    --from-literal=allow-snippet-annotations=true 2>/dev/null
+
   printInfo "Waiting for ingress controller to be ready..."
   kubectl wait --namespace ingress-nginx \
     --for=condition=ready pod \
