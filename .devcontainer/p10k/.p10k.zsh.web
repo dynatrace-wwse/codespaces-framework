@@ -908,7 +908,9 @@
   typeset -g POWERLEVEL9K_CONTEXT_{REMOTE,REMOTE_SUDO}_TEMPLATE='%n @ dynatrace-enablement'
   typeset -g POWERLEVEL9K_CONTEXT_TEMPLATE='%n @ dynatrace-enablement'
 
-  # Always show context (removed the line that hid it in default/sudo mode)
+  # Force context to always show — even when local and not root
+  typeset -g POWERLEVEL9K_CONTEXT_DEFAULT_CONTENT_EXPANSION='%n @ dynatrace-enablement'
+  typeset -g POWERLEVEL9K_CONTEXT_SUDO_CONTENT_EXPANSION='%n @ dynatrace-enablement'
 
   # Custom icon (web-safe, no fancy unicode)
   typeset -g POWERLEVEL9K_CONTEXT_VISUAL_IDENTIFIER_EXPANSION='>'
