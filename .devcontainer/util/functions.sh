@@ -1234,14 +1234,6 @@ installIngressController() {
   printInfo "Deploying ingress-nginx for Kind..."
   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml
 
-  # Enable snippet annotations (disabled by default for security, but needed
-  # for Dynatrace RUM agent JS handling at the nginx level)
-  printInfo "Enabling snippet annotations for Dynatrace RUM support..."
-  kubectl patch configmap ingress-nginx-controller -n ingress-nginx \
-    --type merge -p '{"data":{"allow-snippet-annotations":"true"}}' 2>/dev/null || \
-  kubectl create configmap ingress-nginx-controller -n ingress-nginx \
-    --from-literal=allow-snippet-annotations=true 2>/dev/null
-
   printInfo "Waiting for ingress controller to be ready..."
   kubectl wait --namespace ingress-nginx \
     --for=condition=ready pod \
@@ -1294,17 +1286,9 @@ registerApp() {
   printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
 
   # Build annotations block
-  # The configuration-snippet handles Dynatrace RUM agent JS requests at the nginx level
-  # instead of proxying them to backends (which don't serve them → 404).
-  # When OneAgent is injected into nginx, it intercepts and serves the JS.
-  # When OneAgent is not yet injected, nginx returns 204 (no content) to avoid 404s.
   local annotations="    nginx.ingress.kubernetes.io/proxy-read-timeout: \"3600\"
     nginx.ingress.kubernetes.io/proxy-send-timeout: \"3600\"
-    nginx.ingress.kubernetes.io/proxy-buffer-size: \"16k\"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      location ~* /ruxitagentjs.*\\.js$ {
-        try_files \$uri =204;
-      }"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: \"16k\""
 
   if [[ -n "$extra_annotations" ]]; then
     annotations="${annotations}
@@ -1375,10 +1359,6 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      location ~* /ruxitagentjs.*\.js$ {
-        try_files $uri =204;
-      }
 spec:
   ingressClassName: nginx
   rules:
@@ -1940,10 +1920,6 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      location ~* /ruxitagentjs.*\.js$ {
-        try_files $uri =204;
-      }
 spec:
   ingressClassName: nginx
   rules:
