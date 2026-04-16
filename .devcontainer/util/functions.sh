@@ -1853,9 +1853,7 @@ deployUnguard(){
     fi
     kubectl patch service unguard-envoy-proxy --namespace=unguard --patch="{\"spec\": {\"type\": \"NodePort\", \"ports\": [{\"port\": 8080, \"nodePort\": $PORT }]}}"
   else
-    # unguard-envoy-proxy routes internally by Host header — set upstream Host to service FQDN
-    registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080 \
-      "    nginx.ingress.kubernetes.io/upstream-vhost: \"unguard-envoy-proxy.unguard.svc.cluster.local:8080\""
+    registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080
   fi
 }
 
