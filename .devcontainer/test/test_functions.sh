@@ -180,8 +180,8 @@ assertEnvVariable(){
   # Usage: assertEnvVariable <var-name> [pattern]
   local var_name="$1"
   local pattern="$2"
-  local var_value
-  eval "var_value=\"\${$var_name}\""
+  local var_value=""
+  var_value="$(eval "printf '%s' \"\${$var_name}\"")" 2>/dev/null
 
   printInfoSection "Asserting env variable '$var_name'"
 

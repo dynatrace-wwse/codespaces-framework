@@ -770,9 +770,9 @@ variablesNeeded() {
     local var_name="${var_spec%%:*}"
     local required="${var_spec##*:}"
 
-    # Get the value via indirect expansion (bash: ${!var}, zsh: eval)
-    local var_value
-    eval "var_value=\"\${$var_name}\""
+    # Get the value via indirect expansion — suppress all output
+    local var_value=""
+    var_value="$(eval "printf '%s' \"\${$var_name}\"")" 2>/dev/null
 
     if [ -z "$var_value" ]; then
       if [ "$required" = "true" ]; then
