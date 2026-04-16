@@ -621,3 +621,65 @@ LOGEOF
   # Two real errors, npm warn is filtered
   [ "$ERROR_COUNT" -eq 2 ]
 }
+
+@test "verifyCodespaceCreation: filters own output from subsequent runs" {
+  source_functions
+
+  export INSTANTIATION_TYPE="github-codespaces"
+  export SECONDS=15
+  export DURATION=0
+  mkdir -p "$(dirname "$COUNT_FILE")"
+  echo "DURATION=0" > "$COUNT_FILE"
+  echo "ERROR_COUNT=0" >> "$COUNT_FILE"
+
+  # Simulate logs that include the framework's own previous output
+  # This is what happens when you run verifyCodespaceCreation a second time
+  export CODESPACE_PSHARE_FOLDER="$TEST_DIR/codespaces"
+  mkdir -p "$CODESPACE_PSHARE_FOLDER"
+  cat > "$CODESPACE_PSHARE_FOLDER/creation.log" <<'LOGEOF'
+INFO: Starting Kind cluster
+INFO: Deployment complete
+[dynatrace.enablement| INFO | No errors detected in the creation of the codespace
+There has been no errors detected in the creation of the codespace.
+There has been 5 errors detected in the creation of the codespace, type verifyCodespaceCreation to understand more.
+[dynatrace.enablement| WARN | 2 issues detected in the creation of the codespace:
+[dynatrace.enablement| INFO | ERROR_COUNT=0
+LOGEOF
+
+  verifyCodespaceCreation
+
+  # All lines are framework's own output — should be zero real errors
+  [ "$ERROR_COUNT" -eq 0 ]
+}
+
+@test "verifyCodespaceCreation: filters framework log format noise" {
+  source_functions
+
+  export INSTANTIATION_TYPE="github-codespaces"
+  export SECONDS=10
+  export DURATION=0
+  mkdir -p "$(dirname "$COUNT_FILE")"
+  echo "DURATION=0" > "$COUNT_FILE"
+  echo "ERROR_COUNT=0" >> "$COUNT_FILE"
+
+  # Common framework/tool output that contains 'error' but isn't a real error
+  export CODESPACE_PSHARE_FOLDER="$TEST_DIR/codespaces"
+  mkdir -p "$CODESPACE_PSHARE_FOLDER"
+  cat > "$CODESPACE_PSHARE_FOLDER/creation.log" <<'LOGEOF'
+npm WARN deprecated package@1.0
+npm warn peer dep failed optional
+warning: LF will be replaced by CRLF
+error_reporting = E_ALL
+errorHandler is registered
+error-page configured for nginx
+stderr redirected to /dev/null
+printError is a function
+on-error callback registered
+errors=0 in final check
+LOGEOF
+
+  verifyCodespaceCreation
+
+  # All lines are noise — should be zero real errors
+  [ "$ERROR_COUNT" -eq 0 ]
+}

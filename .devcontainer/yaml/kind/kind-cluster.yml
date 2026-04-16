@@ -42,6 +42,14 @@ nodes:
   - hostPath: /
     containerPath: /mnt/root
   extraPortMappings:
+  # Ingress controller ports (primary app exposure method)
+  - hostPort: 80
+    containerPort: 80
+    protocol: TCP
+  - hostPort: 443
+    containerPort: 443
+    protocol: TCP
+  # Legacy NodePort mappings (backward compat, USE_LEGACY_PORTS=true)
   - hostPort: 30100
     containerPort: 30100
   - hostPort: 30200

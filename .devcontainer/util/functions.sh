@@ -770,8 +770,9 @@ variablesNeeded() {
     local var_name="${var_spec%%:*}"
     local required="${var_spec##*:}"
 
-    # Get the value via indirect expansion
-    local var_value="${!var_name}"
+    # Get the value via indirect expansion — suppress all output
+    local var_value=""
+    var_value="$(eval "printf '%s' \"\${$var_name}\"")" 2>/dev/null
 
     if [ -z "$var_value" ]; then
       if [ "$required" = "true" ]; then
@@ -1194,12 +1195,12 @@ deployCertmanager(){
 
 # ======================================================================
 #          ------- Ingress & App Exposure -------                       #
-#  Functions for nginx ingress, nip.io routing, and app registration.   #
+#  Functions for nginx ingress, magic DNS routing, and app registration.#
 #  Replaces the legacy NodePort (30100-30300) approach.                 #
 # ======================================================================
 
 detectIP() {
-  # Returns the IP address used for nip.io subdomains.
+  # Returns the IP address used for magic DNS subdomains (sslip.io/nip.io).
   # Priority: $EXTERNAL_IP > auto-detect based on instantiation type.
   if [[ -n "$EXTERNAL_IP" ]]; then
     echo "$EXTERNAL_IP"
@@ -1257,17 +1258,19 @@ getAppURL() {
     fi
   else
     detected_ip=$(detectIP)
-    echo "http://${app_name}.${detected_ip}.nip.io"
+    echo "http://${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
   fi
 }
 
 registerApp() {
   # Registers an app in the app registry and creates an Ingress resource.
-  # Usage: registerApp <app-name> <namespace> <service-name> <service-port>
+  # Usage: registerApp <app-name> <namespace> <service-name> <service-port> [extra-annotations]
+  # extra-annotations: optional, newline-separated "key: value" pairs for nginx annotations
   local app_name="$1"
   local namespace="$2"
   local service_name="$3"
   local service_port="$4"
+  local extra_annotations="$5"
 
   if [[ -z "$app_name" || -z "$namespace" || -z "$service_name" || -z "$service_port" ]]; then
     printError "registerApp: requires <app-name> <namespace> <service-name> <service-port>"
@@ -1278,9 +1281,19 @@ registerApp() {
   detected_ip=$(detectIP)
 
   # Create the Ingress resource
-  local ingress_host="${app_name}.${detected_ip}.nip.io"
+  local ingress_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
 
   printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
+
+  # Build annotations block
+  local annotations="    nginx.ingress.kubernetes.io/proxy-read-timeout: \"3600\"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: \"3600\"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: \"16k\""
+
+  if [[ -n "$extra_annotations" ]]; then
+    annotations="${annotations}
+${extra_annotations}"
+  fi
 
   kubectl apply -f - <<INGRESSEOF
 apiVersion: networking.k8s.io/v1
@@ -1289,8 +1302,7 @@ metadata:
   name: ${app_name}-ingress
   namespace: ${namespace}
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+${annotations}
 spec:
   ingressClassName: nginx
   rules:
@@ -1322,6 +1334,82 @@ INGRESSEOF
   local app_url
   app_url=$(getAppURL "$app_name" "$cs_port")
   printInfo "$app_name registered and accessible at: $app_url"
+}
+
+registerAstroshopIngress() {
+  # Creates a custom Ingress for the Astroshop with multi-path routing:
+  # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
+  # - / (everything else) → frontend-proxy:8080
+  local namespace="${1:-astroshop}"
+  local detected_ip
+  detected_ip=$(detectIP)
+  local ingress_host="astroshop.${detected_ip}.${MAGIC_DOMAIN}"
+
+  printInfo "Creating Astroshop Ingress with otel-collector routes (host: $ingress_host)"
+
+  kubectl apply -f - <<ASTROINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astroshop-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+      - path: /v1/traces
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /v1/metrics
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /v1/logs
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: otel-collector
+            port:
+              number: 4318
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-proxy
+            port:
+              number: 8080
+ASTROINGRESSEOF
+
+  # Register in app registry for greeting/listApps
+  local cs_port=""
+  if [[ "$CODESPACES" == true ]]; then
+    cs_port=$(getNextCodespacesPort)
+    kubectl port-forward -n "$namespace" "svc/frontend-proxy" "${cs_port}:8080" &>/dev/null &
+  fi
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  # Remove old entry if exists
+  grep -v "^astroshop|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+  mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  echo "astroshop|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+
+  local app_url
+  app_url=$(getAppURL "astroshop" "$cs_port")
+  printInfo "Astroshop registered and accessible at: $app_url"
 }
 
 unregisterApp() {
@@ -1382,7 +1470,7 @@ registerMkdocs() {
   # Creates a K8s Service + Endpoints pointing to the host, then an Ingress resource.
   local detected_ip
   detected_ip=$(detectIP)
-  local mkdocs_host="docs.${detected_ip}.nip.io"
+  local mkdocs_host="docs.${detected_ip}.${MAGIC_DOMAIN}"
 
   printInfo "Registering mkdocs via ingress (host: $mkdocs_host)"
 
@@ -1608,7 +1696,7 @@ deployAstroshop(){
   if [[ -z "${DT_INGEST_TOKEN}" || -z "${DT_OTEL_ENDPOINT}" ]]; then
     printWarn "DT_INGEST_TOKEN and/or DT_OTEL_ENDPOINT are not set. DT_OTEL_ENDPOINT is calculated with the function 'dynatraceEvalReadSaveCredentials' and the env var DT_ENVIRONMENT"
   else
-    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token $DT_INGEST_TOKEN"
+    printInfo "OTEL Configuration URL $DT_OTEL_ENDPOINT and Ingest Token ${DT_INGEST_TOKEN:0:14}xxx..."
   fi
 
   kubectl apply -n $NAMESPACE -f $FRAMEWORK_APPS_PATH/$ASTROSHOPDIR/yaml/astroshop-deployment.yaml
@@ -1629,7 +1717,8 @@ deployAstroshop(){
     waitAppCanHandleRequests $PORT 60
     printInfo "Astroshop deployed and available via NodePort=$PORT"
   else
-    registerApp "astroshop" "$NAMESPACE" "frontend-proxy" 8080
+    # Astroshop needs custom ingress: otel-collector paths + frontend-proxy catch-all
+    registerAstroshopIngress "$NAMESPACE"
   fi
 }
 
@@ -1776,6 +1865,119 @@ undeployUnguard() {
   kubectl delete ns unguard --force
 }
 
+deployOpentelemetryDemo(){
+  # Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained)
+  # https://opentelemetry.io/docs/demo/kubernetes-deployment/
+  local NAMESPACE="opentelemetry-demo"
+
+  printInfoSection "Deploying CNCF OpenTelemetry Demo in NS='$NAMESPACE'"
+  printInfo "Source: https://opentelemetry.io/docs/demo/kubernetes-deployment/"
+
+  helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts 2>/dev/null || true
+  helm repo update open-telemetry
+
+  helm install opentelemetry-demo open-telemetry/opentelemetry-demo \
+    --namespace "$NAMESPACE" --create-namespace
+
+  printWarn "OpenTelemetry Demo is heavy — pods may take a while to schedule"
+
+  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
+    getNextFreeAppPort true
+    PORT=$(getNextFreeAppPort)
+    if [[ $? -ne 0 ]]; then
+      printWarn "Application can't be deployed"
+      return 1
+    fi
+    kubectl patch service frontend-proxy --namespace="$NAMESPACE" --patch='{"spec": {"type": "NodePort"}}'
+    kubectl patch service frontend-proxy --namespace="$NAMESPACE" --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
+    printInfo "OpenTelemetry Demo available via NodePort=$PORT"
+  else
+    # Same multi-path ingress pattern as astroshop — otel-collector + frontend-proxy
+    registerOpentelemetryDemoIngress "$NAMESPACE"
+  fi
+}
+
+registerOpentelemetryDemoIngress() {
+  # Creates an Ingress for the CNCF OpenTelemetry Demo with multi-path routing:
+  # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
+  # - / → frontend-proxy:8080
+  local namespace="${1:-opentelemetry-demo}"
+  local detected_ip
+  detected_ip=$(detectIP)
+  local ingress_host="otel-demo.${detected_ip}.${MAGIC_DOMAIN}"
+
+  printInfo "Creating OpenTelemetry Demo Ingress (host: $ingress_host)"
+
+  kubectl apply -f - <<OTELINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-demo-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+      - path: /v1/traces
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: opentelemetry-demo-otelcol
+            port:
+              number: 4318
+      - path: /v1/metrics
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: opentelemetry-demo-otelcol
+            port:
+              number: 4318
+      - path: /v1/logs
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: opentelemetry-demo-otelcol
+            port:
+              number: 4318
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: opentelemetry-demo-frontendproxy
+            port:
+              number: 8080
+OTELINGRESSEOF
+
+  # Register in app registry
+  local cs_port=""
+  if [[ "$CODESPACES" == true ]]; then
+    cs_port=$(getNextCodespacesPort)
+    kubectl port-forward -n "$namespace" "svc/opentelemetry-demo-frontendproxy" "${cs_port}:8080" &>/dev/null &
+  fi
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  grep -v "^otel-demo|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+  mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  echo "otel-demo|${namespace}|opentelemetry-demo-frontendproxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+
+  local app_url
+  app_url=$(getAppURL "otel-demo" "$cs_port")
+  printInfo "OpenTelemetry Demo registered and accessible at: $app_url"
+}
+
+undeployOpentelemetryDemo(){
+  printInfoSection "Undeploying OpenTelemetry Demo"
+  unregisterApp "otel-demo" "opentelemetry-demo"
+  helm uninstall opentelemetry-demo --namespace opentelemetry-demo 2>/dev/null
+  kubectl delete namespace opentelemetry-demo --force 2>/dev/null
+}
 
 deployApp(){
   
@@ -1870,6 +2072,15 @@ deployApp(){
       fi
       ;;
 
+    8 | h | opentelemetry-demo | otel-demo)
+       if [[ $delete ]]; then
+        printInfo "Undeploying opentelemetry-demo..."
+        undeployOpentelemetryDemo
+      else
+        deployOpentelemetryDemo
+      fi
+      ;;
+
     *)
       printWarn "Invalid selection: '$input'. Please choose a valid app identifier."
       showDeployAppUsage
@@ -1896,7 +2107,9 @@ showDeployAppUsage(){
   printInfo "[5]   e   hipstershop           +       -                                   "
   printInfo "[6]   f   todoapp               +       +                                   "
   printInfo "[7]   g   unguard               +       -                                   "
+  printInfo "[8]   h   opentelemetry-demo    +       +    (CNCF upstream)                "
   printInfo "----------------------------------------------------------------------------"
+  printInfo "Astroshop = Dynatrace-curated demo | OpenTelemetry Demo = CNCF upstream    "
 }
 
 deleteCache(){
@@ -1971,25 +2184,42 @@ verifyCodespaceCreation(){
     printWarn "Unknown instantiation type: $INSTANTIATION_TYPE"
   fi
 
-  # Filter out known noise patterns that are not real errors
-  # These are informational log lines, expected warnings, or harmless messages
+  # Filter out known noise patterns that are not real errors.
+  # The grep for 'error|failed' is intentionally broad so we catch real issues,
+  # but it also catches the framework's own log output, informational messages,
+  # and compound words. We filter those out here.
   CODESPACE_ERRORS=""
   if [ -n "$raw_errors" ]; then
-    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | grep -v -E \
+    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | grep -v -i -E \
+      -e 'no errors detected' \
+      -e 'errors detected in the creation' \
+      -e 'There has been.*error' \
       -e 'configmap.*dtcredentials' \
       -e 'Verify Codespace creation' \
-      -e 'issues detected in the creation' \
       -e 'error_count' \
+      -e 'ERROR_COUNT' \
       -e 'npm warn' \
       -e 'npm WARN' \
       -e 'WARN.*not set' \
       -e 'warning:' \
       -e 'ErrorPolicy' \
       -e 'error-page' \
-      -e 'stderr' \
+      -e 'error\.html' \
       -e 'error_reporting' \
       -e 'errorHandler' \
-      -e 'error\.html' \
+      -e 'error-handling' \
+      -e 'stderr' \
+      -e 'printError' \
+      -e 'on-error' \
+      -e 'if-error' \
+      -e 'onerror' \
+      -e 'error\.log' \
+      -e 'errors=' \
+      -e 'error_' \
+      -e 'IfNotPresent.*failed' \
+      -e 'failedScheduling' \
+      -e 'Failed to check' \
+      -e 'FAILED_PRECONDITION' \
     || true)
   fi
 

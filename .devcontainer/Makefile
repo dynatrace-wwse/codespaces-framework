@@ -1,4 +1,4 @@
-.PHONY: start build build-nocache buildx integration test clean-start test-in-container
+.PHONY: start build build-nocache buildx integration test clean-start clean-cache test-in-container
 
 # Make file for building the image, cleaning, pushing and running locally and remote.
 
@@ -48,6 +48,13 @@ clean-start:
 	@bash -c ' \
 	source ./makefile.sh; \
 	cleanStart; \
+	echo "Done"; '
+
+# Clean framework cache (host + container)
+clean-cache:
+	@bash -c ' \
+	source ./makefile.sh; \
+	cleanCache; \
 	echo "Done"; '
 
 # Run unit tests inside the Docker container (runtime validation)

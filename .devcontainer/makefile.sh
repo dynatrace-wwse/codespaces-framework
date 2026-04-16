@@ -100,14 +100,22 @@ cleanStart(){
     docker kill "$IMAGENAME" 2>/dev/null
     docker rm -f "$IMAGENAME" 2>/dev/null
 
-    # 2. Delete Kind clusters (removes kind-control-plane and similar containers)
-    echo "Deleting Kind clusters..."
-    for cluster in $(kind get clusters 2>/dev/null); do
-        echo "  Deleting Kind cluster: $cluster"
-        kind delete cluster --name "$cluster" 2>/dev/null
-    done
+    # 2. Kill and remove Kind containers (kind-control-plane, *-control-plane)
+    echo "Removing Kind containers..."
+    kind_containers=$(docker ps -a --filter "name=control-plane" -q 2>/dev/null)
+    if [ -n "$kind_containers" ]; then
+        docker rm -f $kind_containers 2>/dev/null
+    fi
 
-    # 3. Remove any stale/exited containers from previous runs
+    # 3. Delete Kind clusters if kind CLI is available on host
+    if command -v kind &>/dev/null; then
+        for cluster in $(kind get clusters 2>/dev/null); do
+            echo "  Deleting Kind cluster: $cluster"
+            kind delete cluster --name "$cluster" 2>/dev/null
+        done
+    fi
+
+    # 4. Remove any stale/exited containers from previous runs
     stale=$(docker ps -a --filter "status=exited" --filter "status=dead" -q 2>/dev/null)
     if [ -n "$stale" ]; then
         echo "Removing stale containers..."
@@ -116,6 +124,24 @@ cleanStart(){
 
     echo "All containers cleaned. Starting a fresh environment..."
     run
+}
+
+cleanCache(){
+    echo "Cleaning framework cache..."
+    local container_cache="${_MAKEFILE_DIR}/.cache"
+    local host_cache="${HOME}/.cache/dt-framework"
+
+    if [ -d "$container_cache" ]; then
+        rm -rf "$container_cache"
+        echo "Container cache deleted: $container_cache"
+    fi
+
+    if [ -d "$host_cache" ]; then
+        rm -rf "$host_cache"
+        echo "Host cache deleted: $host_cache"
+    fi
+
+    echo "Cache cleaned."
 }
 
 integration(){
