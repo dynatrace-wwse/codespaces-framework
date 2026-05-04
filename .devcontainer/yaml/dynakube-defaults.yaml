@@ -19,8 +19,8 @@ mode: cloudnative
 # Features (all optional, toggle on/off)
 kspm: false
 log_monitoring: true
-telemetry_ingest: false
-extensions: true
+telemetry_ingest: true
+extensions: false
 sensitive_data: true
 
 # ActiveGate capabilities (toggle independently, any mode)
