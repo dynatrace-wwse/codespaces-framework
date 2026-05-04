@@ -1053,6 +1053,42 @@ dynatraceDeployOperator() {
   waitForAllPods dynatrace
 }
 
+getLatestEcrTag() {
+  # Resolves the latest version tag from ECR public gallery for a Dynatrace image.
+  # Usage: getLatestEcrTag <repository-name>
+  # Example: getLatestEcrTag "dynatrace-k8s-node-config-collector" → "1.5.8"
+  # Returns the highest semver tag (multi-arch, no -fips/-arm64/-s390x suffixes).
+  local repo="$1"
+  local tag=""
+
+  # Get anonymous auth token
+  local token
+  token=$(curl -s --max-time 10 "https://public.ecr.aws/token/" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+
+  if [[ -n "$token" ]]; then
+    tag=$(curl -s --max-time 10 -H "Authorization: Bearer $token" \
+      "https://public.ecr.aws/v2/dynatrace/${repo}/tags/list" | \
+      python3 -c "
+import sys, json, re
+try:
+    tags = json.load(sys.stdin).get('tags', [])
+    # Multi-arch version tags only: X.Y.Z or X.Y.Z.TIMESTAMP, no arch/fips/platform suffixes
+    version_tags = [t for t in tags if re.match(r'^[0-9]+\.[0-9]+', t) and not re.search(r'-(fips|arm|s390|amd|ppc)', t)]
+    version_tags.sort(key=lambda v: [int(x) for x in re.findall(r'\d+', v)])
+    print(version_tags[-1] if version_tags else '')
+except:
+    print('')
+" 2>/dev/null)
+  fi
+
+  if [[ -z "$tag" ]]; then
+    printWarn "Could not resolve latest tag for $repo from ECR — check network"
+    echo "latest"
+  else
+    echo "$tag"
+  fi
+}
+
 loadDynakubeConfig() {
   # Loads Dynakube configuration from repo-level config or framework defaults.
   # Repo config: .devcontainer/yaml/dynakube-config.yaml
@@ -1223,43 +1259,56 @@ AOEOF
   # k8s-only mode: no oneAgent section
 
   # --- Templates section (image refs required by operator validation) ---
+  # Resolve latest version tags from ECR public gallery
   local has_templates=false
   local templates_block=""
 
   if [[ "$kspm" == "true" ]]; then
+    local kspm_tag
+    kspm_tag=$(getLatestEcrTag "dynatrace-k8s-node-config-collector")
     has_templates=true
     templates_block="${templates_block}
     kspmNodeConfigurationCollector:
       imageRef:
         repository: public.ecr.aws/dynatrace/dynatrace-k8s-node-config-collector
-        tag: latest"
+        tag: \"${kspm_tag}\""
+    printInfo "KSPM node-config-collector: ${kspm_tag}"
   fi
 
   if [[ "$log_mon" == "true" ]]; then
+    local logmod_tag
+    logmod_tag=$(getLatestEcrTag "dynatrace-logmodule")
     has_templates=true
     templates_block="${templates_block}
     logMonitoring:
       imageRef:
         repository: public.ecr.aws/dynatrace/dynatrace-logmodule
-        tag: latest"
+        tag: \"${logmod_tag}\""
+    printInfo "Log module: ${logmod_tag}"
   fi
 
   if [[ "$extensions" == "true" ]]; then
+    local eec_tag
+    eec_tag=$(getLatestEcrTag "dynatrace-eec")
     has_templates=true
     templates_block="${templates_block}
     extensionExecutionController:
       imageRef:
         repository: public.ecr.aws/dynatrace/dynatrace-eec
-        tag: latest"
+        tag: \"${eec_tag}\""
+    printInfo "Extension Execution Controller: ${eec_tag}"
   fi
 
   if [[ "$telemetry" == "true" ]]; then
+    local otelcol_tag
+    otelcol_tag=$(getLatestEcrTag "dynatrace-otel-collector")
     has_templates=true
     templates_block="${templates_block}
     otelCollector:
       imageRef:
         repository: public.ecr.aws/dynatrace/dynatrace-otel-collector
-        tag: latest"
+        tag: \"${otelcol_tag}\""
+    printInfo "OTel Collector: ${otelcol_tag}"
   fi
 
   if [[ "$has_templates" == "true" ]]; then
