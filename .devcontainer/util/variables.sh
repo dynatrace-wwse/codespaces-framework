@@ -7,6 +7,8 @@
 
 
 # VARIABLES DECLARATION
+# AG and OA images are resolved dynamically from ECR at Dynakube generation time (getLatestEcrTag).
+# These static values are kept as fallback reference only.
 # Active Gate Version - https://gallery.ecr.aws/dynatrace/dynatrace-activegate
 AG_IMAGE="public.ecr.aws/dynatrace/dynatrace-activegate:1.327.28.20251118-083113"
 export AG_IMAGE=$AG_IMAGE

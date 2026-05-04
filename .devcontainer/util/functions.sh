@@ -1180,13 +1180,19 @@ generateDynakube() {
       - metrics-ingest"
   fi
 
-  # ARM image overrides
+  # ARM image overrides — resolve latest from ECR
   local ag_image_line=""
   local oa_image_line=""
   if [[ "$ARCH" == *"arm"* || "$ARCH" == *"aarch64"* ]]; then
-    printWarn "ARM architecture detected — using pinned images"
-    ag_image_line="    image: \"$AG_IMAGE\""
-    oa_image_line="      image: \"$OA_IMAGE\""
+    printInfo "ARM architecture detected — resolving latest AG and OA images from ECR..."
+    local ag_tag
+    ag_tag=$(getLatestEcrTag "dynatrace-activegate")
+    local oa_tag
+    oa_tag=$(getLatestEcrTag "dynatrace-oneagent")
+    ag_image_line="    image: \"public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}\""
+    oa_image_line="      image: \"public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}\""
+    printInfo "ActiveGate image: public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}"
+    printInfo "OneAgent image: public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}"
   fi
 
   # --- Build the Dynakube YAML ---
