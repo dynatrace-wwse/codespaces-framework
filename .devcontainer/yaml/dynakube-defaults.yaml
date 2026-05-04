@@ -17,11 +17,11 @@ dynakube_api_version: "v1beta6"
 mode: cloudnative
 
 # Features (all optional, toggle on/off)
-kspm: false
+kspm: true
 log_monitoring: true
-telemetry_ingest: false
-extensions: false
-sensitive_data: false
+telemetry_ingest: true
+extensions: true
+sensitive_data: true
 
 # ActiveGate resources — Kind-optimized defaults (single-node, 4-core, 16GB)
 # One Dynakube with combined capabilities to save resources

@@ -1116,14 +1116,19 @@ generateDynakube() {
   local extensions="${DK_EXTENSIONS:-false}"
   local sensitive="${DK_SENSITIVE_DATA:-false}"
 
-  # Determine AG capabilities based on mode
-  local ag_capabilities=""
-  if [[ "$mode" == "k8s-only" ]]; then
-    ag_capabilities="      - kubernetes-monitoring"
-  else
-    # For apponly and cloudnative, combine all capabilities in one AG
-    ag_capabilities="      - kubernetes-monitoring
-      - routing"
+  # Determine AG capabilities based on mode and feature flags
+  local ag_capabilities="      - kubernetes-monitoring"
+
+  if [[ "$mode" != "k8s-only" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - routing
+      - debugging
+      - dynatrace-api"
+  fi
+
+  if [[ "$telemetry" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - metrics-ingest"
   fi
 
   # ARM image overrides
