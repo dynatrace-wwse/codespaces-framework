@@ -10,23 +10,23 @@
 # All features are optional and can be toggled independently.
 
 # Operator and Dynakube versions
-operator_version: "1.8.1"
+operator_version: "1.9.0"
 dynakube_api_version: "v1beta6"
 
 # Monitoring mode: k8s-only | apponly | cloudnative
 mode: cloudnative
 
 # Features (all optional, toggle on/off)
-kspm: true
+kspm: false
 log_monitoring: true
-telemetry_ingest: true
+telemetry_ingest: false
 extensions: true
 sensitive_data: true
 
 # ActiveGate capabilities (toggle independently, any mode)
 routing: true
-debugging: true
-dynatrace_api: true
+debugging: false
+dynatrace_api: false
 
 # ActiveGate resources — Kind-optimized defaults (single-node, 4-core, 16GB)
 # One Dynakube with combined capabilities to save resources
