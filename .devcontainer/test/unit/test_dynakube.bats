@@ -155,7 +155,7 @@ EOF
   [[ "$output" == *"kubernetes-monitoring"* ]]
   [[ "$output" != *"cloudNativeFullStack"* ]]
   [[ "$output" != *"applicationMonitoring"* ]]
-  [[ "$output" != *"routing"* ]]
+  # routing/debugging/dynatrace-api are independent toggles — present if enabled in config
 }
 
 @test "generateDynakube: uses v1beta6 API version" {

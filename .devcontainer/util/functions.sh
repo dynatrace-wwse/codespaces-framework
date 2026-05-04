@@ -981,8 +981,6 @@ deployDynatrace() {
     return 1
   fi
 
-  printInfoSection "Deploying Dynatrace in $mode mode for $DT_ENVIRONMENT"
-
   # Generate the Dynakube YAML from config
   generateDynakube "$mode"
 
@@ -1239,6 +1237,12 @@ ${ag_image_line:+    ${ag_image_line}}
 DKEOF
 
   # --- OneAgent section (mode-dependent) ---
+  # Normalize mode aliases
+  case "$mode" in
+    app-only) mode="apponly" ;;
+    cloud-native|cnfs) mode="cloudnative" ;;
+  esac
+
   if [[ "$mode" == "cloudnative" ]]; then
     cat >> "$gen_file" <<CNFSEOF
   oneAgent:
@@ -1305,7 +1309,7 @@ AOEOF
     printInfo "Extension Execution Controller: ${eec_tag}"
   fi
 
-  if [[ "$telemetry" == "true" ]]; then
+  if [[ "$telemetry" == "true" || "$extensions" == "true" ]]; then
     local otelcol_tag
     otelcol_tag=$(getLatestEcrTag "dynatrace-otel-collector")
     has_templates=true
