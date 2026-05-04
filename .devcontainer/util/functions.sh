@@ -1116,13 +1116,26 @@ generateDynakube() {
   local extensions="${DK_EXTENSIONS:-false}"
   local sensitive="${DK_SENSITIVE_DATA:-false}"
 
-  # Determine AG capabilities based on mode and feature flags
+  # AG capability flags from config (independent of mode)
+  local routing="${DK_ROUTING:-true}"
+  local debugging="${DK_DEBUGGING:-true}"
+  local dynatrace_api="${DK_DYNATRACE_API:-true}"
+
+  # Build AG capabilities list
   local ag_capabilities="      - kubernetes-monitoring"
 
-  if [[ "$mode" != "k8s-only" ]]; then
+  if [[ "$routing" == "true" ]]; then
     ag_capabilities="${ag_capabilities}
-      - routing
-      - debugging
+      - routing"
+  fi
+
+  if [[ "$debugging" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - debugging"
+  fi
+
+  if [[ "$dynatrace_api" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
       - dynatrace-api"
   fi
 
