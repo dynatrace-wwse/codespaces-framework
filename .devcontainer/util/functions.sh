@@ -1222,6 +1222,50 @@ AOEOF
   fi
   # k8s-only mode: no oneAgent section
 
+  # --- Templates section (image refs required by operator validation) ---
+  local has_templates=false
+  local templates_block=""
+
+  if [[ "$kspm" == "true" ]]; then
+    has_templates=true
+    templates_block="${templates_block}
+    kspmNodeConfigurationCollector:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-k8s-node-config-collector
+        tag: latest"
+  fi
+
+  if [[ "$log_mon" == "true" ]]; then
+    has_templates=true
+    templates_block="${templates_block}
+    logMonitoring:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-logmodule
+        tag: latest"
+  fi
+
+  if [[ "$extensions" == "true" ]]; then
+    has_templates=true
+    templates_block="${templates_block}
+    extensionExecutionController:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-eec
+        tag: latest"
+  fi
+
+  if [[ "$telemetry" == "true" ]]; then
+    has_templates=true
+    templates_block="${templates_block}
+    otelCollector:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-otel-collector
+        tag: latest"
+  fi
+
+  if [[ "$has_templates" == "true" ]]; then
+    echo "  templates:${templates_block}" >> "$gen_file"
+  fi
+
   # --- Optional features ---
   if [[ "$log_mon" == "true" ]]; then
     echo "  logMonitoring: {}" >> "$gen_file"
