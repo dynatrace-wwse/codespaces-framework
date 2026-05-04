@@ -1349,10 +1349,10 @@ TELEOF
       - /etc
       - /proc/sys/kernel
       - /sys/fs
-      - /sys/kernel/security/apparmor
-      - /usr/lib/systemd/system
       - /var/lib
 KSPMEOF
+    # /sys/kernel/security/apparmor — not available in Kind (Docker-in-Docker, no apparmor)
+    # /usr/lib/systemd/system — may not exist in minimal Kind nodes
   fi
 
   # --- Sensitive data ClusterRole (optional) ---
