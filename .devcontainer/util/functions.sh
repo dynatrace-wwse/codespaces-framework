@@ -640,19 +640,34 @@ deleteKindCluster() {
 # ======================================================================
 
 startK3sCluster(){
-  printInfoSection "Starting Kubernetes Cluster (K3s)"
-  local status
-  status=$(docker inspect -f '{{.State.Status}}' "$K3S_CONTAINER_NAME" 2>/dev/null)
+  printInfoSection "Starting Kubernetes Cluster (K3d/K3s)"
 
-  if [[ "$status" == "exited" || "$status" == "dead" ]]; then
-    printWarn "K3s container stopped, restarting..."
-    docker start "$K3S_CONTAINER_NAME"
-    attachK3sCluster
-  elif [[ "$status" == "running" ]]; then
-    printWarn "K3s already running, attaching..."
-    attachK3sCluster
+  installK3d
+
+  # Check if K3d cluster exists
+  if k3d cluster list 2>/dev/null | grep -q "enablement"; then
+    local status
+    status=$(k3d cluster list -o json 2>/dev/null | python3 -c "
+import sys, json
+clusters = json.load(sys.stdin)
+for c in clusters:
+    if 'enablement' in c.get('name',''):
+        nodes = c.get('nodes',[])
+        running = sum(1 for n in nodes if n.get('state',{}).get('running',False))
+        print('running' if running > 0 else 'stopped')
+        break
+" 2>/dev/null)
+
+    if [[ "$status" == "running" ]]; then
+      printWarn "K3d cluster already running, attaching..."
+      attachK3sCluster
+    else
+      printInfo "K3d cluster exists but stopped, starting..."
+      k3d cluster start enablement
+      attachK3sCluster
+    fi
   else
-    printInfo "No K3s cluster found, creating a new one..."
+    printInfo "No K3d cluster found, creating a new one..."
     createK3sCluster
   fi
 
@@ -669,76 +684,68 @@ startK3sCluster(){
   kubectl config set-context --current --namespace=kube-system
 }
 
+installK3d() {
+  # Installs K3d if not already present
+  if command -v k3d &>/dev/null; then
+    return 0
+  fi
+  printInfo "Installing K3d..."
+  curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  k3d version
+}
+
 createK3sCluster() {
-  printInfoSection "Creating K3s Cluster"
+  printInfoSection "Creating K3d Cluster (K3s in Docker)"
 
-  # Run K3s as a Docker container with host network
-  # bind mount with rshared propagation needed for DT CSI driver (OneAgent volume injection)
-  local kubelet_dir="/tmp/k3s-kubelet"
-  mkdir -p "$kubelet_dir"
+  installK3d
 
-  docker run -d \
-    --name "$K3S_CONTAINER_NAME" \
-    --privileged \
-    --network=host \
-    --tmpfs /run \
-    --tmpfs /var/run \
-    --mount type=bind,src=${kubelet_dir},dst=/var/lib/kubelet,bind-propagation=rshared \
-    -v /lib/modules:/lib/modules:ro \
-    -e K3S_KUBECONFIG_MODE="644" \
-    "rancher/k3s:${K3S_VERSION}" \
-    server \
-      --disable=traefik \
-      --snapshotter=native \
-      --kubelet-arg=root-dir=/var/lib/kubelet
+  # K3d creates K3s nodes as Docker containers (like Kind) — proper node isolation
+  # Port 80/443 mapped to the load balancer for ingress
+  k3d cluster create enablement \
+    --api-port 6443 \
+    -p "80:80@loadbalancer" \
+    -p "443:443@loadbalancer" \
+    -p "30100:30100@server:0" \
+    -p "30200:30200@server:0" \
+    -p "30300:30300@server:0" \
+    --k3s-arg "--disable=traefik@server:0" \
+    --wait
 
-  printInfo "Waiting for K3s to be ready..."
-  local retries=0
-  while [[ $retries -lt 60 ]]; do
-    if docker exec "$K3S_CONTAINER_NAME" kubectl get nodes &>/dev/null; then
-      break
-    fi
-    retries=$((retries + 1))
-    sleep 2
-  done
-
-  if docker exec "$K3S_CONTAINER_NAME" kubectl get nodes &>/dev/null; then
-    printInfo "K3s cluster created successfully"
+  if k3d cluster list 2>/dev/null | grep -q "enablement"; then
+    printInfo "K3d cluster created successfully"
     attachK3sCluster
   else
-    printError "K3s cluster failed to start"
-    docker logs "$K3S_CONTAINER_NAME" 2>&1 | tail -10
+    printError "K3d cluster failed to start"
     return 1
   fi
 }
 
 attachK3sCluster(){
-  printInfoSection "Attaching to K3s Cluster"
+  printInfoSection "Attaching to K3d Cluster"
   local KUBEDIR="$HOME/.kube"
   mkdir -p "$KUBEDIR"
 
-  # Extract kubeconfig from K3s container
-  docker exec "$K3S_CONTAINER_NAME" cat /etc/rancher/k3s/k3s.yaml > "$KUBEDIR/config" 2>/dev/null
+  # K3d automatically merges kubeconfig
+  k3d kubeconfig merge enablement --kubeconfig-merge-default 2>/dev/null
+  kubectl config use-context k3d-enablement 2>/dev/null
 
-  # Fix server address (K3s uses 127.0.0.1:6443 which works with host network)
-  if [[ -f "$KUBEDIR/config" ]]; then
-    printInfo "Kubeconfig written to $KUBEDIR/config"
+  if kubectl get nodes &>/dev/null; then
+    printInfo "Connected to K3d cluster"
   else
-    printWarn "Could not extract kubeconfig from K3s"
+    printWarn "Could not connect to K3d cluster"
   fi
 }
 
 stopK3sCluster(){
-  printInfoSection "Stopping K3s Cluster"
-  docker stop "$K3S_CONTAINER_NAME" 2>/dev/null
-  printInfo "K3s cluster stopped."
+  printInfoSection "Stopping K3d Cluster"
+  k3d cluster stop enablement 2>/dev/null
+  printInfo "K3d cluster stopped."
 }
 
 deleteK3sCluster(){
-  printInfoSection "Deleting K3s Cluster"
-  docker rm -f "$K3S_CONTAINER_NAME" 2>/dev/null
-  rm -rf /tmp/k3s-kubelet 2>/dev/null
-  printInfo "K3s cluster deleted."
+  printInfoSection "Deleting K3d Cluster"
+  k3d cluster delete enablement 2>/dev/null
+  printInfo "K3d cluster deleted."
 }
 
 # ======================================================================
@@ -1138,12 +1145,13 @@ deployDynatrace() {
   # Wait for ActiveGate to be ready (the critical component for cluster monitoring)
   waitForPod dynatrace activegate
 
-  # For cloudnative mode on K3s: OneAgent DaemonSet may not work (CrashLoopBackOff)
-  # because K3s nodes are containers, not real hosts. Warn instead of blocking.
-  if [[ "$mode" == "cloudnative" && "$CLUSTER_ENGINE" == "k3s" ]]; then
-    printWarn "CloudNativeFullStack on K3s: OneAgent host monitoring may not work."
-    printWarn "Application code injection still works via CSI driver."
-    printWarn "For full host monitoring, use CLUSTER_ENGINE=kind."
+  # CloudNativeFullStack OneAgent DaemonSet may crash on container-based nodes (Kind, K3d)
+  # because the host init procedure fails inside Docker containers.
+  # Application monitoring via CSI code injection still works regardless.
+  if [[ "$mode" == "cloudnative" ]]; then
+    printInfo "Waiting for ActiveGate to be ready (OneAgent may take longer on container nodes)..."
+    # Don't block on OneAgent — it may CrashLoop on container nodes
+    sleep 10
   else
     waitForAllReadyPods dynatrace
   fi
@@ -1645,20 +1653,15 @@ installIngressController() {
   fi
 
   # Choose the right manifest based on cluster engine
+  # K3d uses provider/cloud (has built-in load balancer proxy on port 80/443)
+  # Kind uses provider/kind (has hostPort binding via extraPortMappings)
   local ingress_provider="kind"
   if [[ "$CLUSTER_ENGINE" == "k3s" ]]; then
-    ingress_provider="baremetal"
+    ingress_provider="cloud"
   fi
 
   printInfo "Deploying ingress-nginx (provider: $ingress_provider)..."
   kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/${ingress_provider}/deploy.yaml"
-
-  # For K3s: change ingress service to LoadBalancer (K3s has built-in ServiceLB/Klipper)
-  if [[ "$CLUSTER_ENGINE" == "k3s" ]]; then
-    printInfo "Patching ingress-nginx to LoadBalancer for K3s..."
-    kubectl patch service ingress-nginx-controller -n ingress-nginx \
-      -p '{"spec":{"type":"LoadBalancer"}}' 2>/dev/null || true
-  fi
 
   printInfo "Waiting for ingress controller to be ready..."
   kubectl wait --namespace ingress-nginx \

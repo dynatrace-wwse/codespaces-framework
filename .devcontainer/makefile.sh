@@ -100,9 +100,11 @@ cleanStart(){
     docker kill "$IMAGENAME" 2>/dev/null
     docker rm -f "$IMAGENAME" 2>/dev/null
 
-    # 2. Kill and remove K3s container
-    echo "Removing K3s containers..."
-    docker rm -f k3s-enablement 2>/dev/null
+    # 2. Delete K3d clusters
+    if command -v k3d &>/dev/null; then
+        echo "Removing K3d clusters..."
+        k3d cluster delete enablement 2>/dev/null
+    fi
 
     # 3. Kill and remove Kind containers (kind-control-plane, *-control-plane)
     echo "Removing Kind containers..."
