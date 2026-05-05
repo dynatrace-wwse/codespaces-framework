@@ -689,7 +689,6 @@ createK3sCluster() {
     "rancher/k3s:${K3S_VERSION}" \
     server \
       --disable=traefik \
-      --disable=servicelb \
       --snapshotter=native \
       --kubelet-arg=root-dir=/var/lib/kubelet
 
@@ -1654,11 +1653,11 @@ installIngressController() {
   printInfo "Deploying ingress-nginx (provider: $ingress_provider)..."
   kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/${ingress_provider}/deploy.yaml"
 
-  # For K3s baremetal: patch the service to use NodePort 80/443 (accessible via host network)
+  # For K3s: change ingress service to LoadBalancer (K3s has built-in ServiceLB/Klipper)
   if [[ "$CLUSTER_ENGINE" == "k3s" ]]; then
-    printInfo "Patching ingress-nginx service for K3s (NodePort 80/443)..."
-    kubectl patch service ingress-nginx-controller -n ingress-nginx --type='json' \
-      -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":80},{"op":"replace","path":"/spec/ports/1/nodePort","value":443}]' 2>/dev/null || true
+    printInfo "Patching ingress-nginx to LoadBalancer for K3s..."
+    kubectl patch service ingress-nginx-controller -n ingress-nginx \
+      -p '{"spec":{"type":"LoadBalancer"}}' 2>/dev/null || true
   fi
 
   printInfo "Waiting for ingress controller to be ready..."
