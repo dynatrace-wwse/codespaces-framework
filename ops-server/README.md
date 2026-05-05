@@ -55,7 +55,7 @@ GitHub Webhooks (org-level)
 | **Arch** | arm64 (Graviton3) | Faster CPU, required for ARM cross-compilation |
 | **vCPU** | 8 | 6 parallel k3d clusters + webhook + worker manager |
 | **RAM** | 16 GB | Each k3d cluster needs ~1-1.5 GB |
-| **Storage** | 100 GB gp3 | Docker images, repos, logs |
+| **Storage** | 200 GB gp3 | Docker images (~50 GB built, ~20 GB cache, ~10 GB vendor), repos, logs |
 | **OS** | Ubuntu 24.04 LTS (arm64) | |
 | **Network** | Public IP + security group | Port 8443 (webhook), 22 (SSH) |
 
