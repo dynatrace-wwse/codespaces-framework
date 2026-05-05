@@ -11,7 +11,7 @@
 
 {% block scripts %}
   {{ super() }}
-  {% if config.extra.rum_snippet %}
+  {% if config.extra.rum_snippet and page is defined and page.title %}
   <script>
     document.addEventListener('DOMContentLoaded', function() {
       if (typeof dynatrace !== 'undefined') {
