@@ -96,6 +96,7 @@ copyFramework(){
     --exclude='.devcontainer/post-*.sh'
     --exclude='.devcontainer/util/my_functions.sh'
     --exclude='.devcontainer/test/integration.sh'
+    --exclude='.devcontainer/yaml/dynakube-config.yaml'
         )
     fi
 

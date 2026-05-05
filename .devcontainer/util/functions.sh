@@ -1093,22 +1093,32 @@ except:
 }
 
 loadDynakubeConfig() {
-  # Loads Dynakube configuration from repo-level config or framework defaults.
-  # Repo config: .devcontainer/yaml/dynakube-config.yaml
-  # Defaults:    .devcontainer/yaml/dynakube-defaults.yaml (in framework)
-  # Values are exported as DK_* variables.
-  local config_file="$REPO_PATH/.devcontainer/yaml/dynakube-config.yaml"
+  # Loads Dynakube configuration: defaults first, then repo overrides on top.
+  # Defaults:    .devcontainer/yaml/dynakube-defaults.yaml (synced from framework)
+  # Overrides:   .devcontainer/yaml/dynakube-config.yaml (repo-specific, never synced)
+  # Values are exported as DK_* variables. Repo overrides win.
   local defaults_file="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml/dynakube-defaults.yaml"
-  local source_file="$defaults_file"
+  local config_file="$REPO_PATH/.devcontainer/yaml/dynakube-config.yaml"
 
-  if [[ -f "$config_file" ]]; then
-    source_file="$config_file"
-    printInfo "Loading Dynakube config from repo: $config_file"
+  # Step 1: Load defaults
+  if [[ -f "$defaults_file" ]]; then
+    _parseDynakubeYaml "$defaults_file"
   else
-    printInfo "Using framework default Dynakube config"
+    printWarn "Dynakube defaults not found at $defaults_file"
   fi
 
-  # Parse YAML key-value pairs (simple flat YAML only)
+  # Step 2: Overlay repo-specific overrides (only specified keys are overwritten)
+  if [[ -f "$config_file" ]]; then
+    printInfo "Applying repo-specific Dynakube overrides from: $config_file"
+    _parseDynakubeYaml "$config_file"
+  else
+    printInfo "No repo-specific Dynakube config — using defaults"
+  fi
+}
+
+_parseDynakubeYaml() {
+  # Parses a flat YAML file into DK_* exported variables.
+  local file="$1"
   while IFS=': ' read -r key value; do
     [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
     # Remove quotes and leading spaces
@@ -1116,7 +1126,7 @@ loadDynakubeConfig() {
     [[ -z "$value" ]] && continue
     local var_name="DK_$(echo "$key" | tr '[:lower:]' '[:upper:]')"
     eval "export $var_name=\"$value\""
-  done < "$source_file"
+  done < "$file"
 }
 
 generateDynakube() {
