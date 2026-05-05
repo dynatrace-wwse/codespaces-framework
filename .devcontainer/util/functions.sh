@@ -1625,7 +1625,8 @@ detectIP() {
 
 installIngressController() {
   # Installs the nginx ingress controller in the Kind cluster.
-  # Uses the Kind-specific manifest from the ingress-nginx project.
+  # Installs the nginx ingress controller.
+  # Uses Kind-specific or baremetal manifest depending on CLUSTER_ENGINE.
   printInfoSection "Installing nginx ingress controller"
 
   # Check if already installed
@@ -1635,9 +1636,21 @@ installIngressController() {
     return 0
   fi
 
-  # Install using the Kind-specific manifest (handles hostPort binding)
-  printInfo "Deploying ingress-nginx for Kind..."
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml
+  # Choose the right manifest based on cluster engine
+  local ingress_provider="kind"
+  if [[ "$CLUSTER_ENGINE" == "k3s" ]]; then
+    ingress_provider="baremetal"
+  fi
+
+  printInfo "Deploying ingress-nginx (provider: $ingress_provider)..."
+  kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/${ingress_provider}/deploy.yaml"
+
+  # For K3s baremetal: patch the service to use NodePort 80/443 (accessible via host network)
+  if [[ "$CLUSTER_ENGINE" == "k3s" ]]; then
+    printInfo "Patching ingress-nginx service for K3s (NodePort 80/443)..."
+    kubectl patch service ingress-nginx-controller -n ingress-nginx --type='json' \
+      -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":80},{"op":"replace","path":"/spec/ports/1/nodePort","value":443}]' 2>/dev/null || true
+  fi
 
   printInfo "Waiting for ingress controller to be ready..."
   kubectl wait --namespace ingress-nginx \
