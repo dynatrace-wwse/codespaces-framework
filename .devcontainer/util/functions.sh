@@ -673,14 +673,17 @@ createK3sCluster() {
   printInfoSection "Creating K3s Cluster"
 
   # Run K3s as a Docker container with host network
-  # Privileged + mount propagation needed for DT CSI driver (OneAgent volume injection)
+  # bind mount with rshared propagation needed for DT CSI driver (OneAgent volume injection)
+  local kubelet_dir="/tmp/k3s-kubelet"
+  mkdir -p "$kubelet_dir"
+
   docker run -d \
     --name "$K3S_CONTAINER_NAME" \
     --privileged \
     --network=host \
     --tmpfs /run \
     --tmpfs /var/run \
-    -v k3s-kubelet:/var/lib/kubelet:rshared \
+    --mount type=bind,src=${kubelet_dir},dst=/var/lib/kubelet,bind-propagation=rshared \
     -v /lib/modules:/lib/modules:ro \
     -e K3S_KUBECONFIG_MODE="644" \
     "rancher/k3s:${K3S_VERSION}" \
@@ -735,6 +738,7 @@ stopK3sCluster(){
 deleteK3sCluster(){
   printInfoSection "Deleting K3s Cluster"
   docker rm -f "$K3S_CONTAINER_NAME" 2>/dev/null
+  rm -rf /tmp/k3s-kubelet 2>/dev/null
   printInfo "K3s cluster deleted."
 }
 
