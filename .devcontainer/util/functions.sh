@@ -1136,9 +1136,18 @@ deployDynatrace() {
 
   kubectl -n dynatrace apply -f "$gen_file"
 
-  # Wait for pods
+  # Wait for ActiveGate to be ready (the critical component for cluster monitoring)
   waitForPod dynatrace activegate
-  waitForAllReadyPods dynatrace
+
+  # For cloudnative mode on K3s: OneAgent DaemonSet may not work (CrashLoopBackOff)
+  # because K3s nodes are containers, not real hosts. Warn instead of blocking.
+  if [[ "$mode" == "cloudnative" && "$CLUSTER_ENGINE" == "k3s" ]]; then
+    printWarn "CloudNativeFullStack on K3s: OneAgent host monitoring may not work."
+    printWarn "Application code injection still works via CSI driver."
+    printWarn "For full host monitoring, use CLUSTER_ENGINE=kind."
+  else
+    waitForAllReadyPods dynatrace
+  fi
 
   printInfo "Dynatrace deployed in $mode mode"
 }
