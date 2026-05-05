@@ -1,0 +1,22 @@
+[Unit]
+Description=Enablement Ops Nightly Test Run
+After=network.target redis-server.service
+Requires=redis-server.service
+
+[Service]
+Type=oneshot
+User=ops
+Group=ops
+WorkingDirectory=/home/ops/enablement-framework/codespaces-framework/ops-server
+ExecStart=/home/ops/ops-venv/bin/python -m nightly.scheduler nightly --stagger 5 --parallel 6
+Environment=PYTHONPATH=/home/ops/enablement-framework/codespaces-framework/ops-server
+EnvironmentFile=/home/ops/.env
+TimeoutStartSec=7200
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ops-nightly
+
+[Install]
+WantedBy=multi-user.target

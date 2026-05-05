@@ -1,0 +1,26 @@
+[Unit]
+Description=Enablement Ops Worker Manager
+After=network.target redis-server.service ops-webhook.service
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=ops
+Group=ops
+WorkingDirectory=/home/ops/enablement-framework/codespaces-framework/ops-server
+ExecStart=/home/ops/ops-venv/bin/python -m workers.manager
+Restart=always
+RestartSec=10
+Environment=PYTHONPATH=/home/ops/enablement-framework/codespaces-framework/ops-server
+EnvironmentFile=/home/ops/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ops-worker
+
+# Workers need docker access — no filesystem restriction
+SupplementaryGroups=docker
+
+[Install]
+WantedBy=multi-user.target
