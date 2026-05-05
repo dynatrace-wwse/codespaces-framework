@@ -1028,7 +1028,12 @@ uninstallDynatrace() {
 dynatraceDeployOperator() {
   # Deploys the Dynatrace Operator via Helm and generates the Dynakube.
   # Usage: dynatraceDeployOperator [DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN]
-  printInfoSection "Deploying Dynatrace Operator v${DT_OPERATOR_VERSION}"
+
+  # Load operator version from dynakube config
+  loadDynakubeConfig
+  local operator_version="${DK_OPERATOR_VERSION:-1.8.1}"
+
+  printInfoSection "Deploying Dynatrace Operator v${operator_version}"
 
   dynatraceEvalReadSaveCredentials "$@"
 
@@ -1039,7 +1044,7 @@ dynatraceDeployOperator() {
 
   # Deploy Operator via Helm
   helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator \
-    --version "$DT_OPERATOR_VERSION" \
+    --version "$operator_version" \
     --create-namespace --namespace dynatrace --atomic
 
   # Create the secret for Dynakube to use

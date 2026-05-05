@@ -17,21 +17,21 @@ dynakube_api_version: "v1beta6"
 mode: cloudnative
 
 # Features (all optional, toggle on/off)
-kspm: false
+kspm: true
 log_monitoring: true
 telemetry_ingest: true
-extensions: false
+extensions: true
 sensitive_data: true
 
 # ActiveGate capabilities (toggle independently, any mode)
 routing: true
-debugging: false
-dynatrace_api: false
+debugging: true
+dynatrace_api: true
 
 # ActiveGate resources — Kind-optimized defaults (single-node, 4-core, 16GB)
 # One Dynakube with combined capabilities to save resources
 ag_cpu_request: "100m"
 ag_cpu_limit: "500m"
 ag_memory_request: "512Mi"
-ag_memory_limit: "768Mi"
+ag_memory_limit: "1Gi"
 ag_replicas: 1

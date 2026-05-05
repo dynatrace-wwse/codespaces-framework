@@ -7,17 +7,8 @@
 
 
 # VARIABLES DECLARATION
-# AG and OA images are resolved dynamically from ECR at Dynakube generation time (getLatestEcrTag).
-# These static values are kept as fallback reference only.
-# Active Gate Version - https://gallery.ecr.aws/dynatrace/dynatrace-activegate
-AG_IMAGE="public.ecr.aws/dynatrace/dynatrace-activegate:1.327.28.20251118-083113"
-export AG_IMAGE=$AG_IMAGE
-# OneAgent Version - https://gallery.ecr.aws/dynatrace/dynatrace-oneagent
-OA_IMAGE="public.ecr.aws/dynatrace/dynatrace-oneagent:1.325.66.20251118-131645"
-export OA_IMAGE=$OA_IMAGE
-# Operator Version - https://github.com/Dynatrace/dynatrace-operator/releases
-DT_OPERATOR_VERSION="1.8.1"
-export DT_OPERATOR_VERSION=$DT_OPERATOR_VERSION
+# Dynatrace versions (operator, AG, OA images) are defined in dynakube-defaults.yaml
+# and resolved dynamically from ECR at Dynakube generation time (getLatestEcrTag).
 
 ENDPOINT_CODESPACES_TRACKER=https://codespaces-tracker.whydevslovedynatrace.com/api/receive
 CODESPACES_TRACKER_TOKEN_STRING="ilovedynatrace"

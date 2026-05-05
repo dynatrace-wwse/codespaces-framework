@@ -89,8 +89,9 @@ source_functions() {
   loadDynakubeConfig
 
   [ "$DK_MODE" = "cloudnative" ]
-  [ "$DK_OPERATOR_VERSION" = "1.8.1" ]
-  [ "$DK_DYNAKUBE_API_VERSION" = "v1beta6" ]
+  # Operator version should be set (whatever is in dynakube-defaults.yaml)
+  [[ -n "$DK_OPERATOR_VERSION" ]]
+  [[ "$DK_DYNAKUBE_API_VERSION" == *"v1beta6"* ]]
   [ "$DK_AG_REPLICAS" = "1" ]
 }
 
@@ -217,13 +218,13 @@ EOF
   [[ "$output" == *"logMonitoring"* ]]
 }
 
-@test "generateDynakube: kspm disabled by default" {
+@test "generateDynakube: kspm enabled by default" {
   source_functions
 
   generateDynakube
 
   run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
-  [[ "$output" != *"kspm"* ]]
+  [[ "$output" == *"kspm"* ]]
 }
 
 @test "generateDynakube: kspm enabled via config" {
