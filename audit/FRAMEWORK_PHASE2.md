@@ -53,6 +53,30 @@ Verify the monitoring data, enhance it, add a worldmap and better visualizations
 **Improve Integration tests for each repo**
 We need to improve the integration.sh (integration tests of the repos) to make sure that they work, as an example see the live-debugger-bug-hunting repo. It has more mature tests and assertions that make sure that the repo works. The tests make sure that the different sections of the repo work. I want to implement this for all repos, so on every PR we can make sure that nothing breaks and that the enablement works. We will use the organisation secrets so we can monitor all repos. Goal for this is later to have self-service enablements with assertions and validations to make sure the student understand the tasks and we can give certifications or badges for the trainings done. We can test also locally when we do make start inside each repo inside the .devcontainer directory. Important is that when we run make start no docker container is running, for this we can implement a Make target called make clean-start where we kill and remove running docker images so we build and start a new environment. inside the environment we can run runIntegrationTest to validate if the integration.sh tests in codespaces work as we would like to.
 
+**Sync Dynakube logic to all repos**
+Synchronize the new config-driven Dynakube deployment to all repos. Each repo using Dynatrace will use the dynakube-defaults.yaml from the framework and can optionally override with a dynakube-config.yaml. The synchronizer already excludes dynakube-config.yaml from being overwritten. Repos that previously used the old generateDynakube with YAML templates need to be migrated to the new approach.
+
+**Sync MkDocs refactoring to all repos**
+The mkdocs configuration was refactored in a separate session. The JavaScript injection per markdown file is no longer needed (RUM is handled at the framework level). This change needs to be synchronized to all repos. Remove the per-page BizEvent JavaScript snippets from docs and update the mkdocs.yaml configuration across all repos.
+
+**Update Framework Documentation**
+Document all Phase 2 changes in the framework docs (https://dynatrace-wwse.github.io/codespaces-framework/). Key sections to update:
+- Instantiation types (Codespaces, Dev Container, local Docker, GitHub Actions)
+- Make targets: make start, make clean-start, make test, make test-in-container, make clean-cache
+- freeUpSpace function
+- Ingress/sslip.io app exposure (replacing NodePort documentation)
+- Dynakube configuration (defaults + per-repo overrides)
+- variablesNeeded and environment variable management
+- MCP Server opt-in (enableMCP/disableMCP)
+- Integration testing approach
+
+**Nightly Regression Tests**
+Implement staggered nightly regression tests across the fleet. Important: tests must be staggered (not simultaneous) to avoid GitHub Actions rate limiting which caused the account ban. Approach:
+- Schedule tests using cron with offsets per repo (e.g., 5-minute gaps)
+- Or use a single orchestrator workflow that runs repos sequentially
+- Report results to the codespaces-tracker for monitoring
+- Auto-create GitHub issues on failure with context
+
 ** Migration from gen2 to gen3**
 Now, within this task we want to emulate the user/student and do the enablement for them. From beginning to end following the documentation. we need to spot inconsistencies and things that are wrong or changed. We want to validate clarify in the explanation, if the documentation is missing or wrong. Be the role of a Dynatrace professor. We want to curate all the repos and make sure that they  actually work
 But before that we need integration test and  to all repos using the core functions that we will change in the previous tasks. We also want to refactor some core functions so we have better varables management, better error handling and better installation of Dynatrace and better app exposure. 
