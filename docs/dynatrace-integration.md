@@ -1,4 +1,3 @@
---8<-- "snippets/dynatrace-integration.js"
 
 !!! info "Dynatrace MCP integration & Observability"
     This section explains how the [Dynatrace MCP Server](#mcp-server-integration) operates within your environment and how [Dynatrace Observability](#dynatrace-observability) is activated to monitor any application running in the enablement repositories.

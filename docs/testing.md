@@ -1,4 +1,3 @@
---8<-- "snippets/testing.js"
 
 
 !!! example "Quality Assurance"
