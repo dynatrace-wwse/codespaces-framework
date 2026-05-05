@@ -2,7 +2,7 @@
 # =============================================================================
 # Enablement Ops Server — Bootstrap Script
 # =============================================================================
-# Run on a fresh Ubuntu 24.04 EC2 instance (c5.2xlarge recommended).
+# Run on a fresh Ubuntu 24.04 EC2 instance (c7g.2xlarge ARM recommended).
 # Usage: sudo bash setup.sh
 # =============================================================================
 
@@ -22,7 +22,15 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && error "Run as root: sudo bash setup.sh"
 
-info "Starting Enablement Ops Server setup..."
+# ── Detect architecture ──────────────────────────────────────────────────────
+ARCH=$(uname -m)
+case "${ARCH}" in
+    aarch64|arm64) ARCH_DEB="arm64"; ARCH_K8S="arm64"; ARCH_GO="arm64" ;;
+    x86_64)        ARCH_DEB="amd64"; ARCH_K8S="amd64"; ARCH_GO="amd64" ;;
+    *)             error "Unsupported architecture: ${ARCH}" ;;
+esac
+
+info "Starting Enablement Ops Server setup (arch: ${ARCH} → ${ARCH_DEB})..."
 
 # ── Create ops user ──────────────────────────────────────────────────────────
 if ! id -u "${OPS_USER}" &>/dev/null; then
@@ -81,7 +89,7 @@ fi
 # ── Install kubectl ──────────────────────────────────────────────────────────
 if ! command -v kubectl &>/dev/null; then
     info "Installing kubectl..."
-    curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH_K8S}/kubectl" \
         -o /usr/local/bin/kubectl
     chmod +x /usr/local/bin/kubectl
 fi
@@ -109,7 +117,7 @@ if ! command -v dtctl &>/dev/null; then
     info "Installing dtctl..."
     DTCTL_VERSION=$(curl -fsSL "https://api.github.com/repos/dynatrace-oss/dynatrace-cli/releases/latest" | jq -r .tag_name)
     curl -fsSL -o /tmp/dtctl.tar.gz \
-        "https://github.com/dynatrace-oss/dynatrace-cli/releases/download/${DTCTL_VERSION}/dtctl_linux_amd64.tar.gz"
+        "https://github.com/dynatrace-oss/dynatrace-cli/releases/download/${DTCTL_VERSION}/dtctl_linux_${ARCH_GO}.tar.gz"
     tar -xzf /tmp/dtctl.tar.gz -C /usr/local/bin/ dtctl
     chmod +x /usr/local/bin/dtctl
     rm /tmp/dtctl.tar.gz

@@ -48,22 +48,23 @@ GitHub Webhooks (org-level)
 
 ## EC2 Machine Requirements
 
-### Recommended: `c5.2xlarge`
+### Recommended: `c7g.2xlarge` (ARM / Graviton3)
 
 | Spec | Value | Why |
 |------|-------|-----|
+| **Arch** | arm64 (Graviton3) | Faster CPU, required for ARM cross-compilation |
 | **vCPU** | 8 | 6 parallel k3d clusters + webhook + worker manager |
 | **RAM** | 16 GB | Each k3d cluster needs ~1-1.5 GB |
 | **Storage** | 100 GB gp3 | Docker images, repos, logs |
-| **OS** | Ubuntu 24.04 LTS | Matches GitHub Actions runners |
+| **OS** | Ubuntu 24.04 LTS (arm64) | |
 | **Network** | Public IP + security group | Port 8443 (webhook), 22 (SSH) |
 
-### Alternative: `c5.4xlarge` (16 vCPU, 32 GB)
+### Alternative: `c7g.4xlarge` (16 vCPU, 32 GB)
 
 For maximum parallelism (8+ concurrent tests) or if running Claude agents
 alongside integration tests simultaneously.
 
-### Budget option: `c5.xlarge` (4 vCPU, 8 GB)
+### Budget option: `c7g.xlarge` (4 vCPU, 8 GB)
 
 Supports 2-3 parallel tests. Good for starting out.
 
@@ -71,9 +72,11 @@ Supports 2-3 parallel tests. Good for starting out.
 
 | Instance | On-Demand | Reserved (1yr) | Spot |
 |----------|-----------|-----------------|------|
-| c5.xlarge | ~$124 | ~$78 | ~$37 |
-| c5.2xlarge | ~$248 | ~$156 | ~$74 |
-| c5.4xlarge | ~$496 | ~$312 | ~$148 |
+| c7g.xlarge | ~$105 | ~$66 | ~$31 |
+| c7g.2xlarge | ~$210 | ~$132 | ~$63 |
+| c7g.4xlarge | ~$420 | ~$264 | ~$126 |
+
+> The setup script auto-detects architecture — works on both ARM and x86.
 
 ---
 
