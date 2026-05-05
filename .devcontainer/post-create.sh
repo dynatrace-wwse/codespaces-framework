@@ -5,7 +5,8 @@ source .devcontainer/util/source_framework.sh
 
 setUpTerminal
 
-startKindCluster
+# Start Kubernetes cluster (K3s by default, or Kind if CLUSTER_ENGINE=kind)
+startCluster
 
 installK9s
 

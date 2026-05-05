@@ -634,6 +634,140 @@ deleteKindCluster() {
   printInfo "Kind cluster deleted successfully."
 }
 
+# ======================================================================
+#          ------- K3s Cluster Functions -------                         #
+#  Lightweight Kubernetes via K3s in Docker. Default engine.             #
+# ======================================================================
+
+startK3sCluster(){
+  printInfoSection "Starting Kubernetes Cluster (K3s)"
+  local status
+  status=$(docker inspect -f '{{.State.Status}}' "$K3S_CONTAINER_NAME" 2>/dev/null)
+
+  if [[ "$status" == "exited" || "$status" == "dead" ]]; then
+    printWarn "K3s container stopped, restarting..."
+    docker start "$K3S_CONTAINER_NAME"
+    attachK3sCluster
+  elif [[ "$status" == "running" ]]; then
+    printWarn "K3s already running, attaching..."
+    attachK3sCluster
+  else
+    printInfo "No K3s cluster found, creating a new one..."
+    createK3sCluster
+  fi
+
+  # Install ingress controller
+  if [[ "$USE_LEGACY_PORTS" != "true" ]]; then
+    installIngressController
+  fi
+
+  printInfo "K3s reachable under:"
+  kubectl cluster-info
+  printInfo "-----"
+  printInfo "Available functions: startK3sCluster stopK3sCluster deleteK3sCluster"
+  printInfo "-----"
+  kubectl config set-context --current --namespace=kube-system
+}
+
+createK3sCluster() {
+  printInfoSection "Creating K3s Cluster"
+
+  # Run K3s as a Docker container with host network
+  # Privileged + mount propagation needed for DT CSI driver (OneAgent volume injection)
+  docker run -d \
+    --name "$K3S_CONTAINER_NAME" \
+    --privileged \
+    --network=host \
+    --tmpfs /run \
+    --tmpfs /var/run \
+    -v k3s-kubelet:/var/lib/kubelet:rshared \
+    -v /lib/modules:/lib/modules:ro \
+    -e K3S_KUBECONFIG_MODE="644" \
+    "rancher/k3s:${K3S_VERSION}" \
+    server \
+      --disable=traefik \
+      --disable=servicelb \
+      --snapshotter=native \
+      --kubelet-arg=root-dir=/var/lib/kubelet
+
+  printInfo "Waiting for K3s to be ready..."
+  local retries=0
+  while [[ $retries -lt 60 ]]; do
+    if docker exec "$K3S_CONTAINER_NAME" kubectl get nodes &>/dev/null; then
+      break
+    fi
+    retries=$((retries + 1))
+    sleep 2
+  done
+
+  if docker exec "$K3S_CONTAINER_NAME" kubectl get nodes &>/dev/null; then
+    printInfo "K3s cluster created successfully"
+    attachK3sCluster
+  else
+    printError "K3s cluster failed to start"
+    docker logs "$K3S_CONTAINER_NAME" 2>&1 | tail -10
+    return 1
+  fi
+}
+
+attachK3sCluster(){
+  printInfoSection "Attaching to K3s Cluster"
+  local KUBEDIR="$HOME/.kube"
+  mkdir -p "$KUBEDIR"
+
+  # Extract kubeconfig from K3s container
+  docker exec "$K3S_CONTAINER_NAME" cat /etc/rancher/k3s/k3s.yaml > "$KUBEDIR/config" 2>/dev/null
+
+  # Fix server address (K3s uses 127.0.0.1:6443 which works with host network)
+  if [[ -f "$KUBEDIR/config" ]]; then
+    printInfo "Kubeconfig written to $KUBEDIR/config"
+  else
+    printWarn "Could not extract kubeconfig from K3s"
+  fi
+}
+
+stopK3sCluster(){
+  printInfoSection "Stopping K3s Cluster"
+  docker stop "$K3S_CONTAINER_NAME" 2>/dev/null
+  printInfo "K3s cluster stopped."
+}
+
+deleteK3sCluster(){
+  printInfoSection "Deleting K3s Cluster"
+  docker rm -f "$K3S_CONTAINER_NAME" 2>/dev/null
+  printInfo "K3s cluster deleted."
+}
+
+# ======================================================================
+#          ------- Unified Cluster Functions -------                     #
+#  Routes to K3s or Kind based on CLUSTER_ENGINE variable.              #
+# ======================================================================
+
+startCluster(){
+  # Starts the Kubernetes cluster based on CLUSTER_ENGINE (k3s or kind)
+  if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+    startKindCluster
+  else
+    startK3sCluster
+  fi
+}
+
+stopCluster(){
+  if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+    stopKindCluster
+  else
+    stopK3sCluster
+  fi
+}
+
+deleteCluster(){
+  if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+    deleteKindCluster
+  else
+    deleteK3sCluster
+  fi
+}
+
 certmanagerInstall() {
   printInfoSection "Install CertManager $CERTMANAGER_VERSION"
   kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v$CERTMANAGER_VERSION/cert-manager.yaml

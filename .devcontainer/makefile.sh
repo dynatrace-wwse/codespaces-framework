@@ -100,14 +100,18 @@ cleanStart(){
     docker kill "$IMAGENAME" 2>/dev/null
     docker rm -f "$IMAGENAME" 2>/dev/null
 
-    # 2. Kill and remove Kind containers (kind-control-plane, *-control-plane)
+    # 2. Kill and remove K3s container
+    echo "Removing K3s containers..."
+    docker rm -f k3s-enablement 2>/dev/null
+
+    # 3. Kill and remove Kind containers (kind-control-plane, *-control-plane)
     echo "Removing Kind containers..."
     kind_containers=$(docker ps -a --filter "name=control-plane" -q 2>/dev/null)
     if [ -n "$kind_containers" ]; then
         docker rm -f $kind_containers 2>/dev/null
     fi
 
-    # 3. Delete Kind clusters if kind CLI is available on host
+    # 4. Delete Kind clusters if kind CLI is available on host
     if command -v kind &>/dev/null; then
         for cluster in $(kind get clusters 2>/dev/null); do
             echo "  Deleting Kind cluster: $cluster"
