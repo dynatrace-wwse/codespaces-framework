@@ -93,6 +93,14 @@ fi
 ARCH=$(arch)
 export ARCH=$ARCH
 
+# Cluster engine: k3s (default, lightweight) or kind (full K8s for advanced trainings)
+export CLUSTER_ENGINE="${CLUSTER_ENGINE:-k3s}"
+
+# K3s configuration
+export K3S_CONTAINER_NAME="k3s-enablement"
+export K3S_VERSION="${K3S_VERSION:-latest}"
+
+# Kind configuration (legacy, used when CLUSTER_ENGINE=kind)
 export KINDIMAGE="kind-control-plane"
 #get Kind status
 KIND_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
