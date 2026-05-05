@@ -109,7 +109,7 @@ aws ec2 run-instances \
 ### 2. SSH in and run the bootstrap
 
 ```bash
-ssh -i your-key.pem ubuntu@<ec2-ip>
+ssh -i your-key.pem ubuntu@autonomous-enablements.whydevslovedynatrace.com
 
 # Clone the framework
 git clone https://github.com/dynatrace-wwse/codespaces-framework.git ~/enablement-framework/codespaces-framework
@@ -183,7 +183,7 @@ Go to: `github.com/organizations/dynatrace-wwse/settings/hooks`
 
 | Setting | Value |
 |---------|-------|
-| Payload URL | `http://<ec2-public-ip>:8443/webhook` |
+| Payload URL | `https://autonomous-enablements.whydevslovedynatrace.com:8443/webhook` |
 | Content type | `application/json` |
 | Secret | Same value as `WEBHOOK_SECRET` in `.env` |
 | Events | Issues, Pull requests, Check suites, Pushes |
