@@ -702,12 +702,12 @@ deleteKindCluster() {
 }
 
 # ======================================================================
-#          ------- K3s Cluster Functions -------                         #
-#  Lightweight Kubernetes via K3s in Docker. Default engine.             #
+#          ------- K3d Cluster Functions -------                         #
+#  Lightweight Kubernetes via K3d (K3s in Docker). Default engine.       #
 # ======================================================================
 
-startK3sCluster(){
-  printInfoSection "Starting Kubernetes Cluster (K3d/K3s)"
+startK3dCluster(){
+  printInfoSection "Starting Kubernetes Cluster (K3d)"
 
   installK3d
 
@@ -727,15 +727,15 @@ for c in clusters:
 
     if [[ "$status" == "running" ]]; then
       printWarn "K3d cluster already running, attaching..."
-      attachK3sCluster
+      attachK3dCluster
     else
       printInfo "K3d cluster exists but stopped, starting..."
       k3d cluster start enablement
-      attachK3sCluster
+      attachK3dCluster
     fi
   else
     printInfo "No K3d cluster found, creating a new one..."
-    createK3sCluster
+    createK3dCluster
   fi
 
   # Install ingress controller
@@ -743,13 +743,15 @@ for c in clusters:
     installIngressController
   fi
 
-  printInfo "K3s reachable under:"
+  printInfo "K3d cluster reachable under:"
   kubectl cluster-info
   printInfo "-----"
-  printInfo "Available functions: startK3sCluster stopK3sCluster deleteK3sCluster"
+  printInfo "Available functions: startK3dCluster stopK3dCluster deleteK3dCluster"
   printInfo "-----"
   kubectl config set-context --current --namespace=kube-system
 }
+# Backward compatibility aliases
+startK3sCluster() { startK3dCluster "$@"; }
 
 installK3d() {
   # Installs K3d if not already present
@@ -761,8 +763,8 @@ installK3d() {
   k3d version
 }
 
-createK3sCluster() {
-  printInfoSection "Creating K3d Cluster (K3s in Docker)"
+createK3dCluster() {
+  printInfoSection "Creating K3d cluster"
 
   installK3d
 
@@ -780,15 +782,16 @@ createK3sCluster() {
 
   if k3d cluster list 2>/dev/null | grep -q "enablement"; then
     printInfo "K3d cluster created successfully"
-    attachK3sCluster
+    attachK3dCluster
   else
     printError "K3d cluster failed to start"
     return 1
   fi
 }
+createK3sCluster() { createK3dCluster "$@"; }
 
-attachK3sCluster(){
-  printInfoSection "Attaching to K3d Cluster"
+attachK3dCluster(){
+  printInfoSection "Attaching to K3d cluster"
   local KUBEDIR="$HOME/.kube"
   mkdir -p "$KUBEDIR"
 
@@ -802,30 +805,33 @@ attachK3sCluster(){
     printWarn "Could not connect to K3d cluster"
   fi
 }
+attachK3sCluster() { attachK3dCluster "$@"; }
 
-stopK3sCluster(){
-  printInfoSection "Stopping K3d Cluster"
+stopK3dCluster(){
+  printInfoSection "Stopping K3d cluster"
   k3d cluster stop enablement 2>/dev/null
   printInfo "K3d cluster stopped."
 }
+stopK3sCluster() { stopK3dCluster "$@"; }
 
-deleteK3sCluster(){
-  printInfoSection "Deleting K3d Cluster"
+deleteK3dCluster(){
+  printInfoSection "Deleting K3d cluster"
   k3d cluster delete enablement 2>/dev/null
   printInfo "K3d cluster deleted."
 }
+deleteK3sCluster() { deleteK3dCluster "$@"; }
 
 # ======================================================================
 #          ------- Unified Cluster Functions -------                     #
-#  Routes to K3s or Kind based on CLUSTER_ENGINE variable.              #
+#  Routes to K3d or Kind based on CLUSTER_ENGINE variable.              #
 # ======================================================================
 
 startCluster(){
-  # Starts the Kubernetes cluster based on CLUSTER_ENGINE (k3s or kind)
+  # Starts the Kubernetes cluster based on CLUSTER_ENGINE (k3d or kind)
   if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
     startKindCluster
   else
-    startK3sCluster
+    startK3dCluster
   fi
 }
 
@@ -833,7 +839,7 @@ stopCluster(){
   if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
     stopKindCluster
   else
-    stopK3sCluster
+    stopK3dCluster
   fi
 }
 
@@ -841,7 +847,7 @@ deleteCluster(){
   if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
     deleteKindCluster
   else
-    deleteK3sCluster
+    deleteK3dCluster
   fi
 }
 
@@ -1170,7 +1176,7 @@ printSecrets(){
 
 deployCloudNative() {
   # Warn if running on k3d — OneAgent DaemonSet will CrashLoopBackOff on container-based nodes
-  if [[ "${CLUSTER_ENGINE:-k3s}" != "kind" ]]; then
+  if [[ "${CLUSTER_ENGINE:-k3d}" != "kind" ]]; then
     printWarn "═══════════════════════════════════════════════════════════════════════════════"
     printWarn " CloudNativeFullStack on K3d: OneAgent DaemonSet will NOT start properly."
     printWarn " K3d nodes are Docker containers — OneAgent host init fails inside them."
@@ -1179,7 +1185,7 @@ deployCloudNative() {
     printWarn " To get full OneAgent host monitoring, switch to Kind:"
     printWarn "   export CLUSTER_ENGINE=kind"
     printWarn "   # then re-create the cluster and redeploy:"
-    printWarn "   deleteK3sCluster && startCluster && dynatraceDeployOperator && deployCloudNative"
+    printWarn "   deleteCluster && startCluster && dynatraceDeployOperator && deployCloudNative"
     printWarn ""
     printWarn " Or use application-only mode (no CrashLoopBackOff, full app observability):"
     printWarn "   deployApplicationMonitoring"
@@ -1738,7 +1744,7 @@ installIngressController() {
   # K3d uses provider/cloud (has built-in load balancer proxy on port 80/443)
   # Kind uses provider/kind (has hostPort binding via extraPortMappings)
   local ingress_provider="kind"
-  if [[ "$CLUSTER_ENGINE" == "k3s" ]]; then
+  if [[ "$CLUSTER_ENGINE" != "kind" ]]; then
     ingress_provider="cloud"
   fi
 

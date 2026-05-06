@@ -93,8 +93,8 @@ fi
 ARCH=$(arch)
 export ARCH=$ARCH
 
-# Cluster engine: k3s (default, lightweight via K3d) or kind (full K8s for advanced trainings)
-export CLUSTER_ENGINE="${CLUSTER_ENGINE:-k3s}"
+# Cluster engine: k3d (default, lightweight K3s-in-Docker) or kind (full K8s for CloudNativeFullStack)
+export CLUSTER_ENGINE="${CLUSTER_ENGINE:-k3d}"
 
 # Kind configuration (used when CLUSTER_ENGINE=kind)
 export KINDIMAGE="kind-control-plane"
