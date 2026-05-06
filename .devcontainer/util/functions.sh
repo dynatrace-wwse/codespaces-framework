@@ -764,60 +764,82 @@ installK3d() {
 }
 
 createK3dCluster() {
-  printInfoSection "Creating K3d cluster"
+  # Configurable via env vars so multiple clusters can coexist on one host.
+  # Defaults match prior behavior (single dev cluster owns 80/443).
+  #
+  #   K3D_CLUSTER_NAME      cluster name              (default: enablement)
+  #   K3D_LB_HTTP_PORT      host port for ingress :80 (default: 80)
+  #   K3D_LB_HTTPS_PORT     host port for ingress :443 (default: 443)
+  #   K3D_API_PORT          host port for k8s API     (default: 6443)
+  #   K3D_NODEPORT_BASE     first NodePort exposed    (default: 30100)
+  #
+  # On the ops server (where 80/443 are nginx's), set:
+  #   export K3D_LB_HTTP_PORT=30080 K3D_LB_HTTPS_PORT=30443 K3D_API_PORT=6444
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  : "${K3D_LB_HTTP_PORT:=80}"
+  : "${K3D_LB_HTTPS_PORT:=443}"
+  : "${K3D_API_PORT:=6443}"
+  : "${K3D_NODEPORT_BASE:=30100}"
+
+  printInfoSection "Creating K3d cluster ($K3D_CLUSTER_NAME)"
+  printInfo "Ports — http:$K3D_LB_HTTP_PORT  https:$K3D_LB_HTTPS_PORT  api:$K3D_API_PORT  nodeports:$K3D_NODEPORT_BASE..+200"
 
   installK3d
 
-  # K3d creates K3s nodes as Docker containers (like Kind) — proper node isolation
-  # Port 80/443 mapped to the load balancer for ingress
-  k3d cluster create enablement \
-    --api-port 6443 \
-    -p "80:80@loadbalancer" \
-    -p "443:443@loadbalancer" \
-    -p "30100:30100@server:0" \
-    -p "30200:30200@server:0" \
-    -p "30300:30300@server:0" \
+  local NP1=$K3D_NODEPORT_BASE
+  local NP2=$((K3D_NODEPORT_BASE + 100))
+  local NP3=$((K3D_NODEPORT_BASE + 200))
+
+  k3d cluster create "$K3D_CLUSTER_NAME" \
+    --api-port "$K3D_API_PORT" \
+    -p "${K3D_LB_HTTP_PORT}:80@loadbalancer" \
+    -p "${K3D_LB_HTTPS_PORT}:443@loadbalancer" \
+    -p "${NP1}:${NP1}@server:0" \
+    -p "${NP2}:${NP2}@server:0" \
+    -p "${NP3}:${NP3}@server:0" \
     --k3s-arg "--disable=traefik@server:0" \
     --wait
 
-  if k3d cluster list 2>/dev/null | grep -q "enablement"; then
-    printInfo "K3d cluster created successfully"
+  if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME} "; then
+    printInfo "K3d cluster '$K3D_CLUSTER_NAME' created — reach ingress at http://localhost:${K3D_LB_HTTP_PORT}/"
     attachK3dCluster
   else
-    printError "K3d cluster failed to start"
+    printError "K3d cluster '$K3D_CLUSTER_NAME' failed to start"
     return 1
   fi
 }
 createK3sCluster() { createK3dCluster "$@"; }
 
 attachK3dCluster(){
-  printInfoSection "Attaching to K3d cluster"
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  printInfoSection "Attaching to K3d cluster ($K3D_CLUSTER_NAME)"
   local KUBEDIR="$HOME/.kube"
   mkdir -p "$KUBEDIR"
 
-  # K3d automatically merges kubeconfig
-  k3d kubeconfig merge enablement --kubeconfig-merge-default 2>/dev/null
-  kubectl config use-context k3d-enablement 2>/dev/null
+  k3d kubeconfig merge "$K3D_CLUSTER_NAME" --kubeconfig-merge-default 2>/dev/null
+  kubectl config use-context "k3d-${K3D_CLUSTER_NAME}" 2>/dev/null
 
   if kubectl get nodes &>/dev/null; then
-    printInfo "Connected to K3d cluster"
+    printInfo "Connected to K3d cluster '$K3D_CLUSTER_NAME'"
   else
-    printWarn "Could not connect to K3d cluster"
+    printWarn "Could not connect to K3d cluster '$K3D_CLUSTER_NAME'"
   fi
 }
 attachK3sCluster() { attachK3dCluster "$@"; }
 
 stopK3dCluster(){
-  printInfoSection "Stopping K3d cluster"
-  k3d cluster stop enablement 2>/dev/null
-  printInfo "K3d cluster stopped."
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  printInfoSection "Stopping K3d cluster ($K3D_CLUSTER_NAME)"
+  k3d cluster stop "$K3D_CLUSTER_NAME" 2>/dev/null
+  printInfo "K3d cluster '$K3D_CLUSTER_NAME' stopped."
 }
 stopK3sCluster() { stopK3dCluster "$@"; }
 
 deleteK3dCluster(){
-  printInfoSection "Deleting K3d cluster"
-  k3d cluster delete enablement 2>/dev/null
-  printInfo "K3d cluster deleted."
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  printInfoSection "Deleting K3d cluster ($K3D_CLUSTER_NAME)"
+  k3d cluster delete "$K3D_CLUSTER_NAME" 2>/dev/null
+  printInfo "K3d cluster '$K3D_CLUSTER_NAME' deleted."
 }
 deleteK3sCluster() { deleteK3dCluster "$@"; }
 

@@ -58,6 +58,12 @@ run(){
         CMD="$1"
     fi
 
+    # Use -it when attached to a TTY (developer workflow), -i otherwise
+    # (CI / systemd / piped output) so the container still gets stdin/stdout
+    # but doesn't need a real terminal.
+    local DOCKER_TTY="-i"
+    if [ -t 1 ]; then DOCKER_TTY="-it"; fi
+
     docker run $DOCKER_ENVS \
         --name $IMAGENAME \
         --privileged \
@@ -66,7 +72,7 @@ run(){
         $PORTS \
         $VOLUMEMOUNTS \
         $WORKINGDIR \
-        -it $REPOTAG \
+        $DOCKER_TTY $REPOTAG \
         /usr/bin/zsh -c "$CMD"
 }
 

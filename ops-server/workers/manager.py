@@ -211,59 +211,86 @@ class WorkerManager:
         }
 
     async def _run_integration_test(self, job: dict) -> dict:
-        """Run an integration test for a repo using devcontainer CI."""
+        """Run an integration test by invoking the framework's own Makefile.
+
+        Same flow as a developer running locally:
+          make clean-start  → k3d cluster + Dynatrace operator + apps
+          make integration  → runs .devcontainer/test/integration.sh
+          make clean        → tears everything down
+        """
         repo = job["repo"]
         repo_name = repo.split("/")[-1]
         repo_dir = REPOS_DIR / repo_name
+        devcontainer_dir = repo_dir / ".devcontainer"
         log_file = LOGS_DIR / f"{job['job_id']}.log"
 
         await self._ensure_repo(repo, repo_dir)
         await self._make_world_writable(repo_dir)
+        await self._write_devcontainer_env(devcontainer_dir, job.get("arch", "arm64"))
 
-        # Run the integration test via devcontainer.
-        # GIT_CONFIG_* + chmod above let the in-container `vscode` user
-        # operate on a workspace cloned by the host's `ops` user.
-        cmd = [
-            "docker", "run",
-            "--rm",
-            "--privileged",
-            "--network=host",
-            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-v", f"{repo_dir}:/workspace",
-            "-e", f"DT_ENVIRONMENT={DT_ENVIRONMENT}",
-            "-e", f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}",
-            "-e", f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}",
-            "-e", "INSTANTIATION_TYPE=ops-server",
-            "-e", "GIT_CONFIG_COUNT=1",
-            "-e", "GIT_CONFIG_KEY_0=safe.directory",
-            "-e", "GIT_CONFIG_VALUE_0=*",
-            "-w", "/workspace",
-            "shinojosa/dt-enablement:v1.2",
-            "zsh", "-c", ".devcontainer/test/integration.sh",
-        ]
+        full_cmd = (
+            "make clean-start && (make integration; rc=$?) || rc=1; "
+            "make clean >/dev/null 2>&1 || true; "
+            "exit ${rc:-1}"
+        )
 
         start_time = time.time()
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+        log.info("make clean-start && make integration for %s (master-arm)", repo_name)
+        proc = await asyncio.create_subprocess_shell(
+            full_cmd,
+            cwd=str(devcontainer_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=900  # 15 minute timeout
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=1800  # 30 min — clean-start can be slow
+            )
+            timed_out = False
+        except asyncio.TimeoutError:
+            proc.kill()
+            stdout, stderr = await proc.communicate()
+            timed_out = True
+
         duration = int(time.time() - start_time)
+        rc = proc.returncode if not timed_out else 124
 
         log_file.write_text(
-            f"=== STDOUT ===\n{stdout.decode()}\n\n=== STDERR ===\n{stderr.decode()}"
+            f"=== JOB: {job['job_id']} ===\n"
+            f"=== REPO: {repo} | ARCH: arm64 (master) ===\n"
+            f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n\n"
+            f"=== STDOUT ===\n{stdout.decode(errors='replace')}\n\n"
+            f"=== STDERR ===\n{stderr.decode(errors='replace')}"
         )
 
         return {
             "test": "integration",
-            "exit_code": proc.returncode,
+            "arch": "arm64",
+            "exit_code": rc,
             "duration_seconds": duration,
-            "passed": proc.returncode == 0,
+            "passed": rc == 0,
+            "timed_out": timed_out,
             "log_file": str(log_file),
         }
+
+    async def _write_devcontainer_env(self, devcontainer_dir: Path, arch: str):
+        """Drop a .env file for the framework's makefile to source.
+
+        High-port assignments avoid conflict with nginx (80/443) on master.
+        """
+        devcontainer_dir.mkdir(parents=True, exist_ok=True)
+        env_path = devcontainer_dir / ".env"
+        env_path.write_text(
+            f"DT_ENVIRONMENT={DT_ENVIRONMENT}\n"
+            f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}\n"
+            f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}\n"
+            f"INSTANTIATION_TYPE=ops-server\n"
+            f"WORKER_ARCH={arch}\n"
+            f"K3D_CLUSTER_NAME=worker-{arch}\n"
+            f"K3D_LB_HTTP_PORT=30080\n"
+            f"K3D_LB_HTTPS_PORT=30443\n"
+            f"K3D_API_PORT=6444\n"
+        )
 
     async def _run_sync(self, job: dict, command: str) -> dict:
         """Run a sync CLI command."""
