@@ -70,22 +70,34 @@ printError() {
 }
 
 postCodespaceTracker(){
-  
+
   printInfo "Sending bizevent for $RepositoryName with $ERROR_COUNT issues built in $DURATION seconds"
 
-  curl -X POST $ENDPOINT_CODESPACES_TRACKER \
+  # Sanitize error detail for JSON (escape quotes, newlines)
+  local error_detail=""
+  if [[ -n "$CODESPACE_ERRORS" ]]; then
+    error_detail=$(printf '%s' "$CODESPACE_ERRORS" | tr '\n' ' ' | sed 's/"/\\"/g' | head -c 500)
+  fi
+
+  # Unique app ID for RUM monitoring: dynatrace-wwse-{repo-name}
+  local app_id="dynatrace-wwse-${RepositoryName}"
+
+  curl -s -X POST "$ENDPOINT_CODESPACES_TRACKER" \
   -H "Content-Type: application/json" \
   -H "Authorization: $CODESPACES_TRACKER_TOKEN" \
   -d "{
   \"repository\": \"$GITHUB_REPOSITORY\",
   \"repository.name\": \"$RepositoryName\",
   \"codespace.errors\": \"$ERROR_COUNT\",
+  \"codespace.errors_detail\": \"$error_detail\",
   \"codespace.creation\": \"$DURATION\",
   \"codespace.type\": \"$INSTANTIATION_TYPE\",
   \"codespace.arch\": \"$ARCH\",
   \"codespace.name\": \"$CODESPACE_NAME\",
+  \"codespace.app_id\": \"$app_id\",
   \"environment\": \"$DT_ENVIRONMENT\",
-  \"tenant\": \"$DT_TENANT\"
+  \"tenant\": \"$DT_TENANT\",
+  \"framework.version\": \"$FRAMEWORK_VERSION\"
   }"
 }
 
@@ -1013,46 +1025,51 @@ printSecrets(){
 }
 
 deployCloudNative() {
-  dynatraceEvalReadSaveCredentials "$@"
-
-  printInfoSection "Deploying Dynatrace in CloudNativeFullStack mode for $DT_ENVIRONMENT"
-  if [ -n "${DT_TENANT}" ]; then
-    # Check if the Webhook has been created and is ready
-    kubectl -n dynatrace wait pod --for=condition=ready --selector=app.kubernetes.io/name=dynatrace-operator,app.kubernetes.io/component=webhook --timeout=300s
-
-    kubectl -n dynatrace apply -f $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml
-
-    printInfo "Log capturing will be handled by the Host agent."
-    
-    # we wait for the AG to be scheduled
-    waitForPod dynatrace activegate
-    
-    waitForAllReadyPods dynatrace
-  else
-    printInfo "Not deploying the Dynatrace Operator, no credentials found"
-  fi
+  # Convenience wrapper — deploys DT in CloudNativeFullStack mode
+  deployDynatrace cloudnative "$@"
 }
 
-deployApplicationMonitoring() { 
+deployApplicationMonitoring() {
+  # Convenience wrapper — deploys DT in ApplicationMonitoring mode
+  deployDynatrace apponly "$@"
+}
+
+deployDynatrace() {
+  # Unified Dynatrace deployment function.
+  # Usage: deployDynatrace [mode] [DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN]
+  #   mode: cloudnative (default) | apponly | k8s-only
+  local mode="${1:-cloudnative}"
+  shift 2>/dev/null
 
   dynatraceEvalReadSaveCredentials "$@"
 
-  printInfoSection "Deploying Dynatrace in ApplicationMonitoring mode for $DT_ENVIRONMENT"
-  if [ -n "${DT_TENANT}" ]; then
-    # Check if the Webhook has been created and is ready
-    kubectl -n dynatrace wait pod --for=condition=ready --selector=app.kubernetes.io/name=dynatrace-operator,app.kubernetes.io/component=webhook --timeout=300s
-
-    kubectl -n dynatrace apply -f $REPO_PATH/.devcontainer/yaml/gen/dynakube-apponly.yaml
-    
-    # we wait for the AG to be scheduled
-    waitForPod dynatrace activegate
-
-    #FIXME: When deploying in AppOnly we need to capture the logs, either with log module or FluentBit
-    #FIXME: Get log module "latest" is it possible for prod and sprint? verify
-    waitForAllReadyPods dynatrace
-  else
-    printInfo "Not deploying the Dynatrace Operator, no credentials found"
+  if [ -z "${DT_TENANT}" ]; then
+    printWarn "Not deploying Dynatrace — no credentials found"
+    return 1
   fi
+
+  # Generate the Dynakube YAML from config
+  generateDynakube "$mode"
+
+  # Wait for the webhook to be ready (operator must be deployed first)
+  kubectl -n dynatrace wait pod --for=condition=ready \
+    --selector=app.kubernetes.io/name=dynatrace-operator,app.kubernetes.io/component=webhook \
+    --timeout=300s
+
+  # Apply the generated Dynakube
+  local gen_file="$REPO_PATH/.devcontainer/yaml/gen/dynakube.yaml"
+  if [ ! -f "$gen_file" ]; then
+    printError "Generated Dynakube not found at $gen_file"
+    return 1
+  fi
+
+  kubectl -n dynatrace apply -f "$gen_file"
+
+  # Wait for pods
+  waitForPod dynatrace activegate
+  waitForAllReadyPods dynatrace
+
+  printInfo "Dynatrace deployed in $mode mode"
 }
 
 undeployDynakubes() {
@@ -1076,128 +1093,378 @@ uninstallDynatrace() {
 
 # shellcheck disable=SC2120
 dynatraceDeployOperator() {
+  # Deploys the Dynatrace Operator via Helm and generates the Dynakube.
+  # Usage: dynatraceDeployOperator [DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN]
 
-  printInfoSection "Deploying Dynatrace Operator"
-  # posssibility to load functions.sh and call dynatraceDeployOperator A B C to save credentials and override
-  # or just run in normal deployment
-  #TODO: Evaluate also Tokens and not deploy if not found.
+  # Load operator version from dynakube config
+  loadDynakubeConfig
+  local operator_version="${DK_OPERATOR_VERSION:-1.8.1}"
+
+  printInfoSection "Deploying Dynatrace Operator v${operator_version}"
+
   dynatraceEvalReadSaveCredentials "$@"
-  # new lines, needed for workflow-k8s-playground, cluster in dt needs to have the name k8s-playground-{requestuser} to be able to spin up multiple instances per tenant
 
-  if [ -n "${DT_TENANT}" ]; then
-    # Deploy Operator
+  if [ -z "${DT_TENANT}" ]; then
+    printWarn "Not deploying the Dynatrace Operator — no credentials found"
+    return 1
+  fi
 
-    deployOperatorViaHelm
+  # Deploy Operator via Helm
+  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator \
+    --version "$operator_version" \
+    --create-namespace --namespace dynatrace --atomic
 
-    waitForAllPods dynatrace
+  # Create the secret for Dynakube to use
+  kubectl -n dynatrace create secret generic "$RepositoryName" \
+    --from-literal="apiToken=$DT_OPERATOR_TOKEN" \
+    --from-literal="dataIngestToken=$DT_INGEST_TOKEN" \
+    2>/dev/null || true
 
-    #FIXME: Add Ingress Nginx instrumentation and always expose in a port so all apps have RUM regardless of technology
-    #printInfoSection "Instrumenting NGINX Ingress"
-    #bashas "cd $K8S_PLAY_DIR/apps/nginx && bash instrument-nginx.sh"
+  waitForAllPods dynatrace
+}
 
+getLatestEcrTag() {
+  # Resolves the latest version tag from ECR public gallery for a Dynatrace image.
+  # Usage: getLatestEcrTag <repository-name>
+  # Example: getLatestEcrTag "dynatrace-k8s-node-config-collector" → "1.5.8"
+  # Returns the highest semver tag (multi-arch, no -fips/-arm64/-s390x suffixes).
+  local repo="$1"
+  local tag=""
+
+  # Get anonymous auth token
+  local token
+  token=$(curl -s --max-time 10 "https://public.ecr.aws/token/" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+
+  if [[ -n "$token" ]]; then
+    tag=$(curl -s --max-time 10 -H "Authorization: Bearer $token" \
+      "https://public.ecr.aws/v2/dynatrace/${repo}/tags/list" | \
+      python3 -c "
+import sys, json, re
+try:
+    tags = json.load(sys.stdin).get('tags', [])
+    # Multi-arch version tags only: X.Y.Z or X.Y.Z.TIMESTAMP, no arch/fips/platform suffixes
+    version_tags = [t for t in tags if re.match(r'^[0-9]+\.[0-9]+', t) and not re.search(r'-(fips|arm|s390|amd|ppc)', t)]
+    version_tags.sort(key=lambda v: [int(x) for x in re.findall(r'\d+', v)])
+    print(version_tags[-1] if version_tags else '')
+except:
+    print('')
+" 2>/dev/null)
+  fi
+
+  if [[ -z "$tag" ]]; then
+    printWarn "Could not resolve latest tag for $repo from ECR — check network"
+    echo "latest"
   else
-    printInfo "Not deploying the Dynatrace Operator, no credentials found"
+    echo "$tag"
   fi
 }
 
+loadDynakubeConfig() {
+  # Loads Dynakube configuration: defaults first, then repo overrides on top.
+  # Defaults:    .devcontainer/yaml/dynakube-defaults.yaml (synced from framework)
+  # Overrides:   .devcontainer/yaml/dynakube-config.yaml (repo-specific, never synced)
+  # Values are exported as DK_* variables. Repo overrides win.
+  local defaults_file="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml/dynakube-defaults.yaml"
+  local config_file="$REPO_PATH/.devcontainer/yaml/dynakube-config.yaml"
 
-generateDynakube(){
-    #FIXME: This code needs to be refactored. Generate a cleaner Dynakube for both architectures.
-    # Skeleton YAMLs are in the framework cache (or local in DEV mode)
-    # Generated output goes to the repo's yaml/gen/ directory
-    YAML_SRC="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml"
-    YAML_GEN="$REPO_PATH/.devcontainer/yaml/gen"
-    mkdir -p "$YAML_GEN"
+  # Step 1: Load defaults
+  if [[ -f "$defaults_file" ]]; then
+    _parseDynakubeYaml "$defaults_file"
+  else
+    printWarn "Dynakube defaults not found at $defaults_file"
+  fi
 
-    # SET API URL
-    API="/api"
-    DT_API_URL=$DT_TENANT$API
-
-    # Read the actual hostname in case changed during instalation
-    CLUSTERNAME=$(hostname)
-    export CLUSTERNAME
-
-    ARM=false
-
-    if [[ "$ARCH" == "x86_64" ]]; then
-      printInfo "Codespace is running in AMD (x86_64), Dynakube image is set as default to pull the latest from the environment $DT_ENVIRONMENT"
-    elif [[ "$ARCH" == *"arm"* || "$ARCH" == *"aarch64"* ]]; then
-      printWarn "Codespace is running in ARM architecture ($ARCH), Dynakube image will be set in Dynakube for AG and OneAgent."
-      printWarn "ActiveGate image: $AG_IMAGE"
-      printWarn "OneAgent image: $OA_IMAGE"
-      ARM=true
-    else
-      printInfo "Codespace is running on an unkown architecture ($ARCH), Dynakube image will be set in Dynakube for AG and OneAgent."
-      printInfo "ActiveGate image: $AG_IMAGE"
-      printInfo "OneAgent image: $OA_IMAGE"
-      ARM=true
-    fi
-
-    # Generate DynaKubeSkel with API URL
-    sed -e 's~apiUrl: https://ENVIRONMENTID.live.dynatrace.com/api~apiUrl: '"$DT_API_URL"'~' "$YAML_SRC/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # ClusterName for API
-    sed 's~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "CLUSTERNAME"~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "'"$CLUSTERNAME"'"~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-
-    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # Replace Networkzone
-    sed 's~networkZone: CLUSTERNAME~networkZone: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-
-    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # Add ActiveGate config (added first so its applied to both CNFS and AppOnly)
-    cat "$YAML_SRC/dynakube-body-activegate.yaml" >> "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # Set ActiveGate Group
-    sed 's~group: CLUSTERNAME~group: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-
-    if [[ $ARM == true  ]]; then
-      sed 's~# image: ""~image: "'$AG_IMAGE'"~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-      mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-    fi
-
-    # Generate CloudNative Body (head + CNFS)
-    cat "$YAML_GEN/dynakube-skel-head.yaml" "$YAML_SRC/dynakube-body-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml"
-
-    # Set CloudNative HostGroup
-    sed 's~hostGroup: CLUSTERNAME~hostGroup: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml.tmp"
-    mv "$YAML_GEN/dynakube-cloudnative.yaml.tmp" "$YAML_GEN/dynakube-cloudnative.yaml"
-
-    if [[ $ARM == true  ]]; then
-      sed 's~# image: ""~image: "'$OA_IMAGE'"~g' "$YAML_GEN/dynakube-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml.tmp"
-      mv "$YAML_GEN/dynakube-cloudnative.yaml.tmp" "$YAML_GEN/dynakube-cloudnative.yaml"
-    fi
-    # Generate AppOnly Body
-    cat "$YAML_GEN/dynakube-skel-head.yaml" "$YAML_SRC/dynakube-body-apponly.yaml" > "$YAML_GEN/dynakube-apponly.yaml"
-
+  # Step 2: Overlay repo-specific overrides (only specified keys are overwritten)
+  if [[ -f "$config_file" ]]; then
+    printInfo "Applying repo-specific Dynakube overrides from: $config_file"
+    _parseDynakubeYaml "$config_file"
+  else
+    printInfo "No repo-specific Dynakube config — using defaults"
+  fi
 }
 
-#deprecated
-deployOperatorViaKubectl(){
+_parseDynakubeYaml() {
+  # Parses a flat YAML file into DK_* exported variables.
+  local file="$1"
+  while IFS=': ' read -r key value; do
+    [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+    # Remove quotes and leading spaces
+    value=$(echo "$value" | sed 's/^["'\'']*//;s/["'\'']*$//' | xargs)
+    [[ -z "$value" ]] && continue
+    local var_name="DK_$(echo "$key" | tr '[:lower:]' '[:upper:]')"
+    eval "export $var_name=\"$value\""
+  done < "$file"
+}
 
-  printInfoSection "Deploying Operator via kubectl"
+generateDynakube() {
+  # Generates a Dynakube YAML from config into .devcontainer/yaml/gen/dynakube.yaml.
+  # Usage: generateDynakube [mode]
+  #   mode overrides the config file's mode setting
+  local mode_override="$1"
 
-  kubectl create namespace dynatrace
+  printInfoSection "Generating Dynakube"
 
-  kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/download/v${DT_OPERATOR_VERSION}/kubernetes-csi.yaml
+  # Load config
+  loadDynakubeConfig
 
-  # Save Dynatrace Secret
-  kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
+  local mode="${mode_override:-${DK_MODE:-cloudnative}}"
+  local api_version="${DK_DYNAKUBE_API_VERSION:-v1beta6}"
+  local cluster_name="${RepositoryName:-$(hostname)}"
+  local api_url="${DT_TENANT}/api"
 
-  generateDynakube
+  local gen_dir="$REPO_PATH/.devcontainer/yaml/gen"
+  mkdir -p "$gen_dir"
+  local gen_file="$gen_dir/dynakube.yaml"
 
+  printInfo "Mode: $mode | API: $api_url | Cluster: $cluster_name"
+
+  # AG resources from config (Kind-optimized defaults)
+  local ag_cpu_req="${DK_AG_CPU_REQUEST:-100m}"
+  local ag_cpu_lim="${DK_AG_CPU_LIMIT:-500m}"
+  local ag_mem_req="${DK_AG_MEMORY_REQUEST:-512Mi}"
+  local ag_mem_lim="${DK_AG_MEMORY_LIMIT:-768Mi}"
+  local ag_replicas="${DK_AG_REPLICAS:-1}"
+
+  # Feature flags
+  local kspm="${DK_KSPM:-false}"
+  local log_mon="${DK_LOG_MONITORING:-true}"
+  local telemetry="${DK_TELEMETRY_INGEST:-false}"
+  local extensions="${DK_EXTENSIONS:-false}"
+  local sensitive="${DK_SENSITIVE_DATA:-false}"
+
+  # AG capability flags from config (independent of mode)
+  local routing="${DK_ROUTING:-true}"
+  local debugging="${DK_DEBUGGING:-true}"
+  local dynatrace_api="${DK_DYNATRACE_API:-true}"
+
+  # Build AG capabilities list
+  local ag_capabilities="      - kubernetes-monitoring"
+
+  if [[ "$routing" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - routing"
+  fi
+
+  if [[ "$debugging" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - debugging"
+  fi
+
+  if [[ "$dynatrace_api" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - dynatrace-api"
+  fi
+
+  if [[ "$telemetry" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - metrics-ingest"
+  fi
+
+  # ARM image overrides — resolve latest from ECR
+  local ag_image_line=""
+  local oa_image_line=""
+  if [[ "$ARCH" == *"arm"* || "$ARCH" == *"aarch64"* ]]; then
+    printInfo "ARM architecture detected — resolving latest AG and OA images from ECR..."
+    local ag_tag
+    ag_tag=$(getLatestEcrTag "dynatrace-activegate")
+    local oa_tag
+    oa_tag=$(getLatestEcrTag "dynatrace-oneagent")
+    ag_image_line="    image: \"public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}\""
+    oa_image_line="      image: \"public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}\""
+    printInfo "ActiveGate image: public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}"
+    printInfo "OneAgent image: public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}"
+  fi
+
+  # --- Build the Dynakube YAML ---
+
+  cat > "$gen_file" <<DKEOF
+# Generated by the Dynatrace Enablement Framework — do not edit manually.
+# Regenerate with: generateDynakube $mode
+# Config: ${DK_DYNAKUBE_API_VERSION:-v1beta6} | Mode: $mode | Cluster: $cluster_name
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${cluster_name}
+  namespace: dynatrace
+data:
+  apiToken: $(printf '%s' "$DT_OPERATOR_TOKEN" | base64 -w0)
+  dataIngestToken: $(printf '%s' "$DT_INGEST_TOKEN" | base64 -w0)
+type: Opaque
+---
+apiVersion: dynatrace.com/${api_version}
+kind: DynaKube
+metadata:
+  name: ${cluster_name}
+  namespace: dynatrace
+spec:
+  apiUrl: ${api_url}
+  tokens: ${cluster_name}
+  networkZone: ${cluster_name}
+  skipCertCheck: true
+  metadataEnrichment:
+    enabled: true
+  activeGate:
+    capabilities:
+${ag_capabilities}
+${ag_image_line:+    ${ag_image_line}}
+    replicas: ${ag_replicas}
+    resources:
+      requests:
+        cpu: ${ag_cpu_req}
+        memory: ${ag_mem_req}
+      limits:
+        cpu: ${ag_cpu_lim}
+        memory: ${ag_mem_lim}
+DKEOF
+
+  # --- OneAgent section (mode-dependent) ---
+  # Normalize mode aliases
+  case "$mode" in
+    app-only) mode="apponly" ;;
+    cloud-native|cnfs) mode="cloudnative" ;;
+  esac
+
+  if [[ "$mode" == "cloudnative" ]]; then
+    cat >> "$gen_file" <<CNFSEOF
+  oneAgent:
+    hostGroup: ${cluster_name}
+    cloudNativeFullStack:
+${oa_image_line:+      ${oa_image_line}}
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      env:
+        - name: ONEAGENT_ENABLE_VOLUME_STORAGE
+          value: "true"
+CNFSEOF
+  elif [[ "$mode" == "apponly" ]]; then
+    cat >> "$gen_file" <<AOEOF
+  oneAgent:
+    applicationMonitoring: {}
+AOEOF
+  fi
+  # k8s-only mode: no oneAgent section
+
+  # --- Templates section (image refs required by operator validation) ---
+  # Resolve latest version tags from ECR public gallery
+  local has_templates=false
+  local templates_block=""
+
+  if [[ "$kspm" == "true" ]]; then
+    local kspm_tag
+    kspm_tag=$(getLatestEcrTag "dynatrace-k8s-node-config-collector")
+    has_templates=true
+    templates_block="${templates_block}
+    kspmNodeConfigurationCollector:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-k8s-node-config-collector
+        tag: \"${kspm_tag}\""
+    printInfo "KSPM node-config-collector: ${kspm_tag}"
+  fi
+
+  if [[ "$log_mon" == "true" ]]; then
+    local logmod_tag
+    logmod_tag=$(getLatestEcrTag "dynatrace-logmodule")
+    has_templates=true
+    templates_block="${templates_block}
+    logMonitoring:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-logmodule
+        tag: \"${logmod_tag}\""
+    printInfo "Log module: ${logmod_tag}"
+  fi
+
+  if [[ "$extensions" == "true" ]]; then
+    local eec_tag
+    eec_tag=$(getLatestEcrTag "dynatrace-eec")
+    has_templates=true
+    templates_block="${templates_block}
+    extensionExecutionController:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-eec
+        tag: \"${eec_tag}\""
+    printInfo "Extension Execution Controller: ${eec_tag}"
+  fi
+
+  if [[ "$telemetry" == "true" || "$extensions" == "true" ]]; then
+    local otelcol_tag
+    otelcol_tag=$(getLatestEcrTag "dynatrace-otel-collector")
+    has_templates=true
+    templates_block="${templates_block}
+    otelCollector:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-otel-collector
+        tag: \"${otelcol_tag}\""
+    printInfo "OTel Collector: ${otelcol_tag}"
+  fi
+
+  if [[ "$has_templates" == "true" ]]; then
+    echo "  templates:${templates_block}" >> "$gen_file"
+  fi
+
+  # --- Optional features ---
+  if [[ "$log_mon" == "true" ]]; then
+    echo "  logMonitoring: {}" >> "$gen_file"
+  fi
+
+  if [[ "$telemetry" == "true" ]]; then
+    cat >> "$gen_file" <<TELEOF
+  telemetryIngest:
+    protocols:
+      - otlp
+      - statsd
+      - zipkin
+TELEOF
+  fi
+
+  if [[ "$extensions" == "true" ]]; then
+    echo "  extensions:" >> "$gen_file"
+    echo "    prometheus: {}" >> "$gen_file"
+  fi
+
+  if [[ "$kspm" == "true" ]]; then
+    cat >> "$gen_file" <<KSPMEOF
+  kspm:
+    mappedHostPaths:
+      - /boot
+      - /etc
+      - /proc/sys/kernel
+      - /sys/fs
+      - /usr/lib/systemd/system
+      - /var/lib
+KSPMEOF
+    # /sys/kernel/security/apparmor — not available in Kind (Docker-in-Docker, no apparmor)
+  fi
+
+  # --- Sensitive data ClusterRole (optional) ---
+  if [[ "$sensitive" == "true" ]]; then
+    cat >> "$gen_file" <<SENSEOF
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dynatrace-kubernetes-monitoring-sensitive
+  labels:
+    rbac.dynatrace.com/aggregate-to-monitoring: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["list", "watch", "get"]
+SENSEOF
+  fi
+
+  printInfo "Dynakube generated: $gen_file"
+  printInfo "Features: log_monitoring=$log_mon telemetry=$telemetry extensions=$extensions kspm=$kspm sensitive_data=$sensitive"
 }
 
 deployOperatorViaHelm(){
-  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator --version "$DT_OPERATOR_VERSION" --create-namespace --namespace dynatrace --atomic
-
-  # Save Dynatrace Secret
-  kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
-
-  generateDynakube
-
+  # Legacy wrapper — calls dynatraceDeployOperator
+  dynatraceDeployOperator "$@"
 }
 
 undeployOperatorViaHelm(){

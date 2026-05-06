@@ -9,30 +9,35 @@ theme:
   logo: https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg
   features:
     - content.code.copy
+    - content.code.annotate
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - search.highlight
+    - search.suggest
+
+  font:
+    text: Inter
+    code: JetBrains Mono
 
   palette:
-  # Palette toggle for automatic mode
-  - media: "(prefers-color-scheme)"
-    primary: deep-purple
-    toggle:
-      icon: material/brightness-auto
-      name: Switch to light mode
-
-  # Palette toggle for light mode
-  - media: "(prefers-color-scheme: light)"
-    scheme: default
-    primary: deep-purple
-    toggle:
-      icon: material/brightness-7
-      name: Switch to dark mode
-
-  # Palette toggle for dark mode
+  # Dark mode — shown first (default for most modern systems)
   - media: "(prefers-color-scheme: dark)"
     scheme: slate
-    primary: deep-purple
+    primary: custom
+    accent: custom
+    toggle:
+      icon: material/brightness-7
+      name: Switch to light mode
+
+  # Light mode
+  - media: "(prefers-color-scheme: light)"
+    scheme: default
+    primary: custom
+    accent: custom
     toggle:
       icon: material/brightness-4
-      name: Switch to system preference
+      name: Switch to dark mode
 
 markdown_extensions:
   - toc:
@@ -47,6 +52,9 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: ["docs"]
   - attr_list
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search

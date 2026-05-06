@@ -1,4 +1,3 @@
---8<-- "snippets/instantiation-types.js"
 
 !!! success "Choose the option that best fits your needs! 🚀" 
     The Dynatrace Enablement Framework supports multiple ways to instantiate your development environment. You can run it in Github Codespaces, VS Code Dev Containers or local containers, in AMD or ARM architectures.  
