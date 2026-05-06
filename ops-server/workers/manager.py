@@ -211,40 +211,76 @@ class WorkerManager:
         }
 
     async def _run_integration_test(self, job: dict) -> dict:
-        """Run an integration test by invoking the framework's own Makefile.
+        """Run an integration test, matching the GHA integration-tests.yaml flow.
 
-        Same flow as a developer running locally:
-          make clean-start  → k3d cluster + Dynatrace operator + apps
-          make integration  → runs .devcontainer/test/integration.sh
-          make clean        → tears everything down
+        Single docker run that chains:
+            ./.devcontainer/post-create.sh   → k3d cluster + DT operator + apps
+            ./.devcontainer/post-start.sh    → greeting / final setup
+            zsh ./.devcontainer/test/integration.sh  → the actual test
+        Equivalent to what devcontainers/ci@v0.3 does on the GHA runner.
         """
-        repo = job["repo"]
+        import shutil
+
+        repo      = job["repo"]
+        head_repo = job.get("head_repo") or repo
+        ref       = job.get("ref") or job.get("head_branch") or "main"
         repo_name = repo.split("/")[-1]
-        repo_dir = REPOS_DIR / repo_name
-        devcontainer_dir = repo_dir / ".devcontainer"
-        log_file = LOGS_DIR / f"{job['job_id']}.log"
+        job_id    = job["job_id"]
+        log_file  = LOGS_DIR / f"{job_id}.log"
 
-        await self._ensure_repo(repo, repo_dir)
+        # Per-job working dir. Master nginx owns 80/443 so we override ingress
+        # ports via .env (relies on framework supporting K3D_* env vars).
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-test cleanup so leftover clusters / containers / kubeconfig
+        # from earlier runs can't poison this run.
+        await self._cleanup_clusters()
+
+        log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
+        await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        await self._write_devcontainer_env(devcontainer_dir, job.get("arch", "arm64"))
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
 
-        full_cmd = (
-            "make clean-start && (make integration; rc=$?) || rc=1; "
-            "make clean >/dev/null 2>&1 || true; "
-            "exit ${rc:-1}"
+        workspace = f"/workspaces/{repo_name}"
+        env_file = f"{repo_dir}/.devcontainer/.env"
+        chained_cmd = (
+            "set -e; "
+            "./.devcontainer/post-create.sh; "
+            "./.devcontainer/post-start.sh; "
+            "zsh ./.devcontainer/test/integration.sh"
         )
+        cmd = [
+            "docker", "run",
+            "--rm",
+            "--init",
+            "--privileged",
+            "--network=host",
+            "--env-file", env_file,
+            "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", "/lib/modules:/lib/modules",
+            "-v", f"{repo_dir}:{workspace}",
+            "-w", workspace,
+            "-e", "GIT_CONFIG_COUNT=1",
+            "-e", "GIT_CONFIG_KEY_0=safe.directory",
+            "-e", "GIT_CONFIG_VALUE_0=*",
+            "shinojosa/dt-enablement:v1.2",
+            "/usr/bin/zsh", "-c", chained_cmd,
+        ]
 
         start_time = time.time()
-        log.info("make clean-start && make integration for %s (master-arm)", repo_name)
-        proc = await asyncio.create_subprocess_shell(
-            full_cmd,
-            cwd=str(devcontainer_dir),
+        log.info("Running integration test for %s (arch=arm64, ref=%s)", repo_name, ref)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=1800  # 30 min — clean-start can be slow
+                proc.communicate(), timeout=1800
             )
             timed_out = False
         except asyncio.TimeoutError:
@@ -256,16 +292,20 @@ class WorkerManager:
         rc = proc.returncode if not timed_out else 124
 
         log_file.write_text(
-            f"=== JOB: {job['job_id']} ===\n"
-            f"=== REPO: {repo} | ARCH: arm64 (master) ===\n"
+            f"=== JOB: {job_id} ===\n"
+            f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: arm64 (master) ===\n"
             f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n\n"
             f"=== STDOUT ===\n{stdout.decode(errors='replace')}\n\n"
             f"=== STDERR ===\n{stderr.decode(errors='replace')}"
         )
 
+        await self._cleanup_clusters()
+        shutil.rmtree(work_dir, ignore_errors=True)
+
         return {
             "test": "integration",
             "arch": "arm64",
+            "ref": ref,
             "exit_code": rc,
             "duration_seconds": duration,
             "passed": rc == 0,
@@ -273,24 +313,65 @@ class WorkerManager:
             "log_file": str(log_file),
         }
 
-    async def _write_devcontainer_env(self, devcontainer_dir: Path, arch: str):
-        """Drop a .env file for the framework's makefile to source.
+    def _write_env_file(self, env_path: Path, arch: str):
+        """Mirror the GHA workflow's .env writing.
 
-        High-port assignments avoid conflict with nginx (80/443) on master.
+        Adds K3D_* port overrides so the in-container k3d cluster doesn't
+        try to bind to nginx's 80/443 on the master host.
         """
-        devcontainer_dir.mkdir(parents=True, exist_ok=True)
-        env_path = devcontainer_dir / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(
             f"DT_ENVIRONMENT={DT_ENVIRONMENT}\n"
             f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}\n"
             f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}\n"
-            f"INSTANTIATION_TYPE=ops-server\n"
-            f"WORKER_ARCH={arch}\n"
-            f"K3D_CLUSTER_NAME=worker-{arch}\n"
+            f"K3D_CLUSTER_NAME=master-{arch}\n"
             f"K3D_LB_HTTP_PORT=30080\n"
             f"K3D_LB_HTTPS_PORT=30443\n"
             f"K3D_API_PORT=6444\n"
         )
+
+    async def _git_clone(self, repo: str, ref: str, dest: Path):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        url = f"https://github.com/{repo}.git"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--branch", ref, url, str(dest),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            log.warning("git clone --branch %s failed; retrying default branch", ref)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth", "1", url, str(dest),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"git clone {url} failed (rc={proc.returncode}): {stderr.decode()[:500]}"
+                )
+
+    async def _cleanup_clusters(self):
+        """Wipe stale clusters / containers / kubeconfig (best-effort)."""
+        cmds = [
+            ["bash", "-c", "k3d cluster list -o name 2>/dev/null | xargs -r -I{} k3d cluster delete {}"],
+            ["bash", "-c", "kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {}"],
+            ["bash", "-c", "docker rm -f dt-enablement 2>/dev/null || true"],
+            ["bash", "-c", "docker ps -aq --filter 'ancestor=rancher/k3s' | xargs -r docker rm -f 2>/dev/null || true"],
+            ["bash", "-c", "docker ps -aq --filter 'name=k3d-' | xargs -r docker rm -f 2>/dev/null || true"],
+            ["bash", "-c", "rm -f ~/.kube/config 2>/dev/null || true"],
+        ]
+        for cmd in cmds:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=60)
+            except Exception:
+                pass
 
     async def _run_sync(self, job: dict, command: str) -> dict:
         """Run a sync CLI command."""

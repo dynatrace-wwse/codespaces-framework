@@ -1,14 +1,26 @@
-"""Test executor — runs integration tests in Docker/k3d on the worker node."""
+"""Test executor — mirrors the GitHub Actions integration-tests.yaml flow.
+
+The repo's GHA workflow uses devcontainers/ci@v0.3 to:
+  1. Build/pull the devcontainer image
+  2. Run the container with the devcontainer.json runArgs + --env-file
+  3. Execute postCreateCommand (sets up k3d cluster + DT operator + apps)
+  4. Execute postStartCommand
+  5. Execute the user runCmd: zsh .devcontainer/test/integration.sh
+
+We replicate that as a single ``docker run`` that chains those steps so
+each PR is tested the same way the GHA workflow tests it.
+"""
 
 import asyncio
 import logging
-import os
+import shutil
 import time
 from pathlib import Path
 
 from .config import (
     REPOS_DIR,
     LOGS_DIR,
+    WORKDIR,
     DT_ENVIRONMENT,
     DT_OPERATOR_TOKEN,
     DT_INGEST_TOKEN,
@@ -21,42 +33,66 @@ log = logging.getLogger("ops-worker-agent")
 
 
 async def execute_integration_test(job: dict) -> dict:
-    """Run an integration test by invoking the framework's own Makefile.
-
-    Flow (mirrors what a developer runs locally):
-      1. Clone/pull the repo
-      2. Write .devcontainer/.env with DT credentials + per-worker port config
-      3. cd .devcontainer && make clean-start  (k3d cluster + operator + apps)
-      4.                       make integration (runs .devcontainer/test/integration.sh)
-      5. make clean (always — even on test failure)
-
-    The framework's makefile.sh handles the dev container, k3d cluster setup,
-    operator deploy, app deploys, and test execution. We are a thin wrapper
-    that captures stdout/stderr and turns the exit code into pass/fail.
-    """
-    repo = job["repo"]
+    """Run an integration test against the PR's branch (or main, for nightly)."""
+    repo      = job["repo"]                       # base repo, e.g. dynatrace-wwse/codespaces-framework
+    head_repo = job.get("head_repo") or repo      # for fork PRs (head.repo.full_name), else same as base
+    ref       = job.get("ref") or job.get("head_branch") or "main"
     repo_name = repo.split("/")[-1]
-    repo_dir = REPOS_DIR / repo_name
-    devcontainer_dir = repo_dir / ".devcontainer"
-    log_file = LOGS_DIR / f"{job['job_id']}.log"
+    job_id    = job["job_id"]
+    log_file  = LOGS_DIR / f"{job_id}.log"
 
-    await _ensure_repo(repo, repo_dir)
+    # Per-job working dir so concurrent tests can't trample each other
+    work_dir = WORKDIR / job_id
+    repo_dir = work_dir / repo_name
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-test cleanup: ensure no stale clusters/containers from earlier runs.
+    # Without this, kubeconfig and port bindings can leak between tests.
+    await _cleanup_clusters()
+
+    log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
+    await _git_clone(head_repo, ref, repo_dir)
     await _make_world_writable(repo_dir)
-    await _write_devcontainer_env(devcontainer_dir)
+    _write_env_file(repo_dir / ".devcontainer" / ".env")
 
     start_time = time.time()
-    log.info("make clean-start && make integration for %s (arch=%s)", repo_name, WORKER_ARCH)
+    log.info("Running integration test for %s (arch=%s, ref=%s)", repo_name, WORKER_ARCH, ref)
 
-    # Always run `make clean` after, even if integration fails. Preserves the
-    # integration exit code as the overall result.
-    full_cmd = (
-        "make clean-start && (make integration; rc=$?) || rc=1; "
-        "make clean >/dev/null 2>&1 || true; "
-        "exit ${rc:-1}"
+    # Single docker run that mirrors devcontainers/ci@v0.3:
+    #   postCreateCommand → postStartCommand → integration.sh
+    # Mounted at /workspaces/<name> to match devcontainer convention.
+    workspace = f"/workspaces/{repo_name}"
+    env_file = f"{repo_dir}/.devcontainer/.env"
+    chained_cmd = (
+        "set -e; "
+        "./.devcontainer/post-create.sh; "
+        "./.devcontainer/post-start.sh; "
+        "zsh ./.devcontainer/test/integration.sh"
     )
-    proc = await asyncio.create_subprocess_shell(
-        full_cmd,
-        cwd=str(devcontainer_dir),
+    cmd = [
+        "docker", "run",
+        "--rm",
+        "--init",
+        "--privileged",
+        "--network=host",
+        "--env-file", env_file,
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "-v", "/lib/modules:/lib/modules",
+        "-v", f"{repo_dir}:{workspace}",
+        "-w", workspace,
+        # safe.directory inside the container so git ops on /workspaces/* don't fail
+        # when the host clone was created by a different uid
+        "-e", "GIT_CONFIG_COUNT=1",
+        "-e", "GIT_CONFIG_KEY_0=safe.directory",
+        "-e", "GIT_CONFIG_VALUE_0=*",
+        TEST_IMAGE,
+        "/usr/bin/zsh", "-c", chained_cmd,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -75,16 +111,22 @@ async def execute_integration_test(job: dict) -> dict:
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
     log_file.write_text(
-        f"=== JOB: {job['job_id']} ===\n"
-        f"=== REPO: {repo} | ARCH: {WORKER_ARCH} ===\n"
+        f"=== JOB: {job_id} ===\n"
+        f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: {WORKER_ARCH} ===\n"
         f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n\n"
         f"=== STDOUT ===\n{stdout.decode(errors='replace')}\n\n"
         f"=== STDERR ===\n{stderr.decode(errors='replace')}"
     )
 
+    # Best-effort cleanup: clusters created by post-create.sh
+    await _cleanup_clusters()
+    # Wipe the per-job workspace
+    shutil.rmtree(work_dir, ignore_errors=True)
+
     return {
         "test": "integration",
         "arch": WORKER_ARCH,
+        "ref": ref,
         "exit_code": rc,
         "duration_seconds": duration,
         "passed": rc == 0,
@@ -93,34 +135,18 @@ async def execute_integration_test(job: dict) -> dict:
     }
 
 
-async def _write_devcontainer_env(devcontainer_dir: Path):
-    """Drop a .env file for the framework's makefile to source.
-
-    Picks high ports so we don't collide with the master's nginx (80/443)
-    or anything else on the host. Cluster name is per-arch so the worker
-    never fights with a developer running ``make clean-start`` manually
-    for their own debugging.
-    """
-    devcontainer_dir.mkdir(parents=True, exist_ok=True)
-    env_path = devcontainer_dir / ".env"
+def _write_env_file(env_path: Path):
+    """Mirror what the GHA workflow writes to .devcontainer/.env."""
+    env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
         f"DT_ENVIRONMENT={DT_ENVIRONMENT}\n"
         f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}\n"
         f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}\n"
-        f"INSTANTIATION_TYPE=ops-server\n"
-        f"WORKER_ARCH={WORKER_ARCH}\n"
-        f"K3D_CLUSTER_NAME=worker-{WORKER_ARCH}\n"
-        f"K3D_LB_HTTP_PORT=30080\n"
-        f"K3D_LB_HTTPS_PORT=30443\n"
-        f"K3D_API_PORT=6444\n"
     )
 
 
 async def _make_world_writable(repo_dir: Path):
-    """Widen permissions so a container running as a different uid can write.
-
-    The clone is transient (recloned per test), so loose perms here are fine.
-    """
+    """Widen perms so the container's vscode user (uid 1000) can write a clone owned by ops (uid 1001)."""
     proc = await asyncio.create_subprocess_exec(
         "chmod", "-R", "go+rwX", str(repo_dir),
         stdout=asyncio.subprocess.DEVNULL,
@@ -129,40 +155,58 @@ async def _make_world_writable(repo_dir: Path):
     await proc.wait()
 
 
-async def _ensure_repo(repo: str, repo_dir: Path):
-    """Clone or pull latest for a repo.
-
-    Handles three states:
-      - dir exists with .git → pull
-      - dir exists without .git (broken from a previous failed clone) → wipe and re-clone
-      - dir doesn't exist → clone
-    """
-    import shutil
-    is_git = (repo_dir / ".git").exists()
-    if repo_dir.exists() and is_git:
-        proc = await asyncio.create_subprocess_exec(
-            "git", "pull", "--ff-only",
-            cwd=str(repo_dir),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        if await proc.wait() == 0:
-            return
-        log.warning("git pull failed for %s — wiping and re-cloning", repo)
-        is_git = False
-
-    if repo_dir.exists() and not is_git:
-        shutil.rmtree(str(repo_dir), ignore_errors=True)
-
-    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+async def _git_clone(repo: str, ref: str, dest: Path):
+    """Shallow-clone the given repo at the given ref (branch or tag) into ``dest``."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://github.com/{repo}.git"
+    # --branch accepts branches and tags. Falls back to default branch if ref doesn't exist.
     proc = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", url, str(repo_dir),
+        "git", "clone", "--depth", "1", "--branch", ref, url, str(dest),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"git clone {url} failed (rc={proc.returncode}): {stderr.decode()[:500]}"
+        # Retry without --branch in case ref is a sha (rare for our workflow).
+        log.warning("git clone --branch %s failed; retrying default branch", ref)
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", url, str(dest),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git clone {url} failed (rc={proc.returncode}): {stderr.decode()[:500]}"
+            )
+
+
+async def _cleanup_clusters():
+    """Wipe stale clusters / containers / kubeconfig before or after a test.
+
+    Failures are ignored — best-effort cleanup. The next test will pick up
+    a clean slate either way.
+    """
+    cmds = [
+        # Remove all k3d clusters (most common state from a previous test)
+        ["bash", "-c", "k3d cluster list -o name 2>/dev/null | xargs -r -I{} k3d cluster delete {}"],
+        # Remove all kind clusters (if framework was switched to kind engine)
+        ["bash", "-c", "kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {}"],
+        # Force-remove any framework dev container with a known name
+        ["bash", "-c", "docker rm -f dt-enablement 2>/dev/null || true"],
+        # Stale rancher/k3s containers (k3d nodes that didn't get cleaned)
+        ["bash", "-c", "docker ps -aq --filter 'ancestor=rancher/k3s' | xargs -r docker rm -f 2>/dev/null || true"],
+        ["bash", "-c", "docker ps -aq --filter 'name=k3d-' | xargs -r docker rm -f 2>/dev/null || true"],
+        # Stale kubeconfig — k3d/kind write here; next post-create.sh will rewrite cleanly
+        ["bash", "-c", "rm -f ~/.kube/config 2>/dev/null || true"],
+    ]
+    for cmd in cmds:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=60)
+        except Exception:
+            pass
