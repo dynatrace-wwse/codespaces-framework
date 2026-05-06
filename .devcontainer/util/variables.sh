@@ -98,9 +98,20 @@ export CLUSTER_ENGINE="${CLUSTER_ENGINE:-k3s}"
 
 # Kind configuration (used when CLUSTER_ENGINE=kind)
 export KINDIMAGE="kind-control-plane"
-#get Kind status
-KIND_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
-export KIND_STATUS=$KIND_STATUS
+
+# Detect cluster status based on engine
+if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+  CLUSTER_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
+  CLUSTER_TYPE="Kind"
+else
+  # K3d: check if the enablement cluster node is running
+  CLUSTER_STATUS=$(docker inspect -f '{{.State.Status}}' k3d-enablement-server-0 2>/dev/null)
+  CLUSTER_TYPE="K3d (K3s)"
+fi
+export CLUSTER_STATUS=$CLUSTER_STATUS
+export CLUSTER_TYPE=$CLUSTER_TYPE
+# Legacy variable for backward compatibility
+export KIND_STATUS=$CLUSTER_STATUS
 
 CODESPACES_TRACKER_TOKEN=$(echo -n $CODESPACES_TRACKER_TOKEN_STRING | base64)
 export CODESPACES_TRACKER_TOKEN=$CODESPACES_TRACKER_TOKEN

@@ -32,15 +32,16 @@ printDynatraceLogo(){
 }
 
 printKubernetesInformation(){
-    if [[ $"$KIND_STATUS" == "running" ]]; then
-        echo -e " ${LILA}Kubernetes Cluster ${NORMAL}       "
+    if [[ "$CLUSTER_STATUS" == "running" ]]; then
+        echo -e " ${LILA}Kubernetes Cluster (${CLUSTER_TYPE}) ${NORMAL}       "
         kubectl version
     else
         echo -e " ${YELLOW}${WARNING}${ORANGE} No Kubernetes Cluster is running ${NORMAL}       "
-        echo -e "   ${RESET}startKindCluster${NORMAL} will start, create or attach to a running Cluster                                 "
+        echo -e "   ${RESET}startCluster${NORMAL} will start, create or attach to a running Cluster (engine: ${CLUSTER_ENGINE})  "
+        echo -e "   ${NORMAL}Change engine with: ${RESET}export CLUSTER_ENGINE=kind${NORMAL} or ${RESET}export CLUSTER_ENGINE=k3s${NORMAL}"
         echo -e "                                                                                                             "
     fi
-    echo -e "${RESET}${thinline}"                                                                     
+    echo -e "${RESET}${thinline}"
     echo -e "                                                                                                             "
 }
 
@@ -118,19 +119,19 @@ printRunningApplications(){
 printApplications(){
     echo -e "                                                                                                             "
     echo -e " ${LILA}Running applications in your Kubernetes Cluster: ${NORMAL}   "
-    if [[ $"$KIND_STATUS" == "running" ]]; then
+    if [[ "$CLUSTER_STATUS" == "running" ]]; then
         printRunningApplications
         echo -e "                                                                                                             "
     else
         echo -e "${YELLOW}${WARNING}${ORANGE} First start the Kubernetes cluster. ${RESET} "
         echo -e "                                                                                                             "
-    fi 
+    fi
 }
 
 
 printCodespacesVerification(){
     echo -e "${CYAN}This container has the following tools installed and configured for your best experience:${RESET} "
-    echo -e "  ${RESET}k9s kubectl helm node npm jq python3 gh zsh kind p10k ${RESET} "
+    echo -e "  ${RESET}k9s kubectl helm node npm jq python3 gh zsh k3d kind p10k ${RESET} "
     echo -e "                                                                                                             "
     echo -e "${CYAN}If you want to make the endpoints public accesible, just go to the ports section in VsCode, right click on them and change the visibility to public ${NORMAL}"
     echo -e "${CYAN}When you are finished with your codespace, you can comfortably delete it by typing in the Terminal${RESET} deleteCodespace"

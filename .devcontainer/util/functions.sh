@@ -1169,7 +1169,22 @@ printSecrets(){
 }
 
 deployCloudNative() {
-  # Convenience wrapper — deploys DT in CloudNativeFullStack mode
+  # Warn if running on k3d — OneAgent DaemonSet will CrashLoopBackOff on container-based nodes
+  if [[ "${CLUSTER_ENGINE:-k3s}" != "kind" ]]; then
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+    printWarn " CloudNativeFullStack on K3d: OneAgent DaemonSet will NOT start properly."
+    printWarn " K3d nodes are Docker containers — OneAgent host init fails inside them."
+    printWarn " Application monitoring (code injection) will still work via CSI driver."
+    printWarn ""
+    printWarn " To get full OneAgent host monitoring, switch to Kind:"
+    printWarn "   export CLUSTER_ENGINE=kind"
+    printWarn "   # then re-create the cluster and redeploy:"
+    printWarn "   deleteK3sCluster && startCluster && dynatraceDeployOperator && deployCloudNative"
+    printWarn ""
+    printWarn " Or use application-only mode (no CrashLoopBackOff, full app observability):"
+    printWarn "   deployApplicationMonitoring"
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+  fi
   deployDynatrace cloudnative "$@"
 }
 
