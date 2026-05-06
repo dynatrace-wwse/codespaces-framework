@@ -159,6 +159,13 @@ th {
 .status-fail { color: var(--red); font-weight: 600; }
 .status-none { color: var(--text-muted); }
 
+.log-link {
+    text-decoration: none;
+    border-bottom: 1px dotted currentColor;
+    cursor: pointer;
+}
+.log-link:hover { border-bottom-style: solid; }
+
 .arch-badge {
     display: inline-block;
     padding: 2px 8px;

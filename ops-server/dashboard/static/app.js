@@ -107,7 +107,10 @@ function buildCell(build) {
     const cls = build.passed ? 'status-pass' : 'status-fail';
     const icon = build.passed ? 'PASS' : 'FAIL';
     const time = build.duration ? `${build.duration}s` : '';
-    return `<span class="${cls}">${icon}</span> <span style="color:var(--text-muted);font-size:0.75rem">${time}</span>`;
+    const status = build.job_id
+        ? `<a href="/api/jobs/${build.job_id}/log" target="_blank" class="${cls} log-link">${icon}</a>`
+        : `<span class="${cls}">${icon}</span>`;
+    return `${status} <span style="color:var(--text-muted);font-size:0.75rem">${time}</span>`;
 }
 
 async function triggerBuild(repo, arch) {
@@ -189,11 +192,14 @@ async function loadNightly() {
     tbody.innerHTML = data.results.map(job => {
         const r = job.result || {};
         const cls = r.passed ? 'status-pass' : 'status-fail';
-        const status = r.passed ? 'PASS' : 'FAIL';
+        const label = r.passed ? 'PASS' : 'FAIL';
+        const status = job.job_id
+            ? `<a href="/api/jobs/${job.job_id}/log" target="_blank" class="${cls} log-link">${label}</a>`
+            : `<span class="${cls}">${label}</span>`;
         return `<tr>
             <td>${job.repo.split('/').pop()}</td>
             <td><span class="arch-badge">${r.arch || job.worker_arch || '?'}</span></td>
-            <td><span class="${cls}">${status}</span></td>
+            <td>${status}</td>
             <td>${r.duration_seconds || 0}s</td>
             <td>${formatTime(job.finished_at)}</td>
         </tr>`;

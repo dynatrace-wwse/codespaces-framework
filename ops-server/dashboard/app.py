@@ -191,6 +191,22 @@ async def api_trigger_build(request: Request):
     return {"status": "queued", "repo": repo, "jobs": jobs_queued}
 
 
+@app.get("/api/jobs/{job_id}/log", response_class=HTMLResponse)
+async def api_job_log(job_id: str):
+    """Serve a per-job log as plain text. Workers push logs to
+    ``job:log:<id>`` in Redis with a 7-day TTL when the job completes."""
+    from fastapi.responses import PlainTextResponse
+    content = await pool.get(f"job:log:{job_id}")
+    if content is None:
+        return PlainTextResponse(
+            f"No log found for job {job_id}.\n\n"
+            "Either the job has not finished, the 7-day TTL expired, "
+            "or it ran before the log-upload feature was deployed.",
+            status_code=404,
+        )
+    return PlainTextResponse(content)
+
+
 @app.get("/api/health")
 async def api_health():
     """Platform health overview."""

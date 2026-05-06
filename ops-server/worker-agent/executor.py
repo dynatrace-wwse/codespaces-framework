@@ -82,20 +82,39 @@ async def execute_integration_test(job: dict) -> dict:
 
 
 async def _ensure_repo(repo: str, repo_dir: Path):
-    """Clone or pull latest for a repo."""
-    if repo_dir.exists():
+    """Clone or pull latest for a repo.
+
+    Handles three states:
+      - dir exists with .git → pull
+      - dir exists without .git (broken from a previous failed clone) → wipe and re-clone
+      - dir doesn't exist → clone
+    """
+    import shutil
+    is_git = (repo_dir / ".git").exists()
+    if repo_dir.exists() and is_git:
         proc = await asyncio.create_subprocess_exec(
             "git", "pull", "--ff-only",
             cwd=str(repo_dir),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await proc.wait()
-    else:
-        repo_dir.parent.mkdir(parents=True, exist_ok=True)
-        proc = await asyncio.create_subprocess_exec(
-            "gh", "repo", "clone", repo, str(repo_dir),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+        if await proc.wait() == 0:
+            return
+        log.warning("git pull failed for %s — wiping and re-cloning", repo)
+        is_git = False
+
+    if repo_dir.exists() and not is_git:
+        shutil.rmtree(str(repo_dir), ignore_errors=True)
+
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    url = f"https://github.com/{repo}.git"
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", "--depth", "1", url, str(repo_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git clone {url} failed (rc={proc.returncode}): {stderr.decode()[:500]}"
         )
-        await proc.wait()

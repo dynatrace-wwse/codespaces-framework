@@ -132,10 +132,37 @@ class WorkerAgent:
                 job["status"] = "failed"
             finally:
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
+                await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 await self.pool.ltrim("jobs:completed", -500, -1)
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished: %s → %s", job_id, job["status"])
+
+    async def _publish_log(self, job: dict):
+        """Upload the per-job log to master Redis so the dashboard can serve it.
+
+        The log file lives on the worker's local filesystem; we read it,
+        truncate to the last 256KB, and store under ``job:log:<id>`` with a
+        7-day TTL.
+        """
+        result = job.get("result", {}) or {}
+        log_path = result.get("log_file")
+        if not log_path:
+            return
+        try:
+            content = open(log_path, "r", errors="replace").read()
+        except OSError as e:
+            content = f"(log unavailable: {e})"
+        # Cap at 256KB — integration tests can be huge
+        max_bytes = 256 * 1024
+        if len(content.encode()) > max_bytes:
+            content = "... (truncated; see /home/ops/logs/{}.log on worker) ...\n\n".format(
+                job["job_id"]
+            ) + content[-max_bytes:]
+        try:
+            await self.pool.set(f"job:log:{job['job_id']}", content, ex=86400 * 7)
+        except Exception as e:
+            log.warning("Could not publish log for %s: %s", job["job_id"], e)
 
 
 async def main():

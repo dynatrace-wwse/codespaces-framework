@@ -100,11 +100,35 @@ class WorkerManager:
                 job["status"] = "failed"
             finally:
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
+                await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 # Trim to keep last 500 completed jobs
                 await self.pool.ltrim("jobs:completed", -500, -1)
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished job: %s → %s", job_id, job["status"])
+
+    async def _publish_log(self, job: dict):
+        """Upload the per-job log to Redis so the dashboard can serve it.
+
+        Stored under ``job:log:<id>`` with a 7-day TTL, capped at 256KB.
+        """
+        result = job.get("result", {}) or {}
+        log_path = result.get("log_file")
+        if not log_path:
+            return
+        try:
+            content = open(log_path, "r", errors="replace").read()
+        except OSError as e:
+            content = f"(log unavailable: {e})"
+        max_bytes = 256 * 1024
+        if len(content.encode()) > max_bytes:
+            content = "... (truncated; see {} on master) ...\n\n".format(
+                log_path
+            ) + content[-max_bytes:]
+        try:
+            await self.pool.set(f"job:log:{job['job_id']}", content, ex=86400 * 7)
+        except Exception as e:
+            log.warning("Could not publish log for %s: %s", job["job_id"], e)
 
     async def _dispatch(self, job: dict) -> dict:
         """Dispatch a job to the appropriate handler."""
@@ -260,23 +284,42 @@ class WorkerManager:
         }
 
     async def _ensure_repo(self, repo: str, repo_dir: Path):
-        """Clone or pull latest for a repo."""
-        if repo_dir.exists():
+        """Clone or pull latest for a repo.
+
+        Handles three states:
+          - dir exists with .git → pull
+          - dir exists without .git (broken from earlier failed clone) → wipe and re-clone
+          - dir doesn't exist → clone
+        """
+        import shutil
+        is_git = (repo_dir / ".git").exists()
+        if repo_dir.exists() and is_git:
             proc = await asyncio.create_subprocess_exec(
                 "git", "pull", "--ff-only",
                 cwd=str(repo_dir),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await proc.wait()
-        else:
-            repo_dir.parent.mkdir(parents=True, exist_ok=True)
-            proc = await asyncio.create_subprocess_exec(
-                "gh", "repo", "clone", repo, str(repo_dir),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            if await proc.wait() == 0:
+                return
+            log.warning("git pull failed for %s — wiping and re-cloning", repo)
+            is_git = False
+
+        if repo_dir.exists() and not is_git:
+            shutil.rmtree(str(repo_dir), ignore_errors=True)
+
+        repo_dir.parent.mkdir(parents=True, exist_ok=True)
+        url = f"https://github.com/{repo}.git"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", url, str(repo_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git clone {url} failed (rc={proc.returncode}): {stderr.decode()[:500]}"
             )
-            await proc.wait()
 
     def _build_agent_prompt(self, agent_type: str, job: dict) -> str:
         """Build a Claude Code prompt for the given agent type."""
