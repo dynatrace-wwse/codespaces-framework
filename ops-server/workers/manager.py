@@ -247,58 +247,102 @@ class WorkerManager:
 
         workspace = f"/workspaces/{repo_name}"
         env_file = f"{repo_dir}/.devcontainer/.env"
-        chained_cmd = (
-            "set -e; "
-            "./.devcontainer/post-create.sh; "
-            "./.devcontainer/post-start.sh; "
-            "zsh ./.devcontainer/test/integration.sh"
-        )
-        cmd = [
-            "docker", "run",
-            "--rm",
-            "--init",
-            "--privileged",
-            "--network=host",
-            "--env-file", env_file,
-            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-v", "/lib/modules:/lib/modules",
-            "-v", f"{repo_dir}:{workspace}",
-            "-w", workspace,
-            "-e", "GIT_CONFIG_COUNT=1",
-            "-e", "GIT_CONFIG_KEY_0=safe.directory",
-            "-e", "GIT_CONFIG_VALUE_0=*",
-            "shinojosa/dt-enablement:v1.2",
-            "/usr/bin/zsh", "-c", chained_cmd,
-        ]
+        container_name = f"test-{job_id[-32:]}"
 
+        # Mirror devcontainers/ci@v0.3: detached `sleep infinity` container,
+        # then docker exec for each step. Avoids the entrypoint's debug env
+        # dump that triggers when $@ is anything other than `sleep`.
+        sections: list[str] = []
+        rc = 0
+        timed_out = False
+        TEST_TIMEOUT = 1800
         start_time = time.time()
+        deadline = start_time + TEST_TIMEOUT
+
         log.info("Running integration test for %s (arch=arm64, ref=%s)", repo_name, ref)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=1800
+            run_cmd = [
+                "docker", "run",
+                "-d",
+                "--name", container_name,
+                "--init",
+                "--privileged",
+                "--network=host",
+                "--env-file", env_file,
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", "/lib/modules:/lib/modules",
+                "-v", f"{repo_dir}:{workspace}",
+                "-w", workspace,
+                "-e", "GIT_CONFIG_COUNT=1",
+                "-e", "GIT_CONFIG_KEY_0=safe.directory",
+                "-e", "GIT_CONFIG_VALUE_0=*",
+                "shinojosa/dt-enablement:v1.2",
+                "sleep", "infinity",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            timed_out = False
-        except asyncio.TimeoutError:
-            proc.kill()
-            stdout, stderr = await proc.communicate()
-            timed_out = True
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("container start failed")
+
+            steps = [
+                ("postCreateCommand", "./.devcontainer/post-create.sh"),
+                ("postStartCommand",  "./.devcontainer/post-start.sh"),
+                ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
+            ]
+            for label, script in steps:
+                sections.append(f"\n=== {label} ===\n")
+                remaining = max(60, int(deadline - time.time()))
+                exec_cmd = [
+                    "docker", "exec",
+                    "-w", workspace,
+                    container_name,
+                    "bash", "-lc", script,
+                ]
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *exec_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=remaining)
+                    sections.append(out.decode(errors="replace"))
+                    if proc.returncode != 0:
+                        rc = proc.returncode
+                        sections.append(f"\n=== {label} exited with rc={rc} — stopping ===\n")
+                        break
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    out, _ = await proc.communicate()
+                    sections.append(out.decode(errors="replace"))
+                    sections.append(f"\n=== {label} timed out ===\n")
+                    rc = 124
+                    timed_out = True
+                    break
+        except Exception as e:
+            sections.append(f"\n=== executor error: {e} ===\n")
+            if rc == 0:
+                rc = 1
+        finally:
+            try:
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", container_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(kill_proc.wait(), timeout=30)
+            except Exception:
+                pass
 
         duration = int(time.time() - start_time)
-        rc = proc.returncode if not timed_out else 124
-
-        body = (
+        header = (
             f"=== JOB: {job_id} ===\n"
             f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: arm64 (master) ===\n"
-            f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n\n"
-            f"=== STDOUT ===\n{stdout.decode(errors='replace')}\n\n"
-            f"=== STDERR ===\n{stderr.decode(errors='replace')}"
+            f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n"
         )
-        log_file.write_text(self._mask_secrets(body))
+        log_file.write_text(self._mask_secrets(header + "".join(sections)))
 
         await self._cleanup_clusters()
         shutil.rmtree(work_dir, ignore_errors=True)
