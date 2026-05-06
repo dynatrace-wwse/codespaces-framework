@@ -52,6 +52,9 @@ class WorkerManager:
         await asyncio.gather(
             self._consume_queue("agent", self.agent_semaphore),
             self._consume_queue("sync", self.agent_semaphore),
+            # Local ARM worker consumes arch-specific queue
+            self._consume_queue("test:arm64", self.test_semaphore),
+            # Legacy queue for backwards compatibility
             self._consume_queue("test", self.test_semaphore),
         )
 

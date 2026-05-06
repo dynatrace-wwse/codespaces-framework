@@ -1,0 +1,194 @@
+:root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+header h1 { font-size: 1.4rem; font-weight: 600; }
+
+.health-badge {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+
+.health-badge.healthy { border-color: var(--green); color: var(--green); }
+.health-badge.unhealthy { border-color: var(--red); color: var(--red); }
+
+nav {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.tab {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.tab.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+.view { display: none; }
+.view.active { display: block; }
+
+.controls {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.controls input, .controls select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+}
+
+.controls input { flex: 1; max-width: 300px; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+}
+
+th {
+    background: var(--bg);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.5px;
+}
+
+.status-pass { color: var(--green); font-weight: 600; }
+.status-fail { color: var(--red); font-weight: 600; }
+.status-none { color: var(--text-muted); }
+
+.arch-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: var(--bg);
+    border: 1px solid var(--border);
+}
+
+.btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.btn:hover { opacity: 0.85; }
+.btn-small { padding: 3px 8px; font-size: 0.75rem; }
+
+.worker-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.worker-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.worker-card h4 { margin-bottom: 8px; }
+.worker-card .meta { color: var(--text-muted); font-size: 0.8rem; }
+.worker-card.ready { border-left: 3px solid var(--green); }
+.worker-card.busy { border-left: 3px solid var(--yellow); }
+.worker-card.offline { border-left: 3px solid var(--red); }
+
+.queue-grid {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.queue-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 18px;
+    text-align: center;
+    min-width: 120px;
+}
+
+.queue-item .count { font-size: 1.5rem; font-weight: 700; }
+.queue-item .label { font-size: 0.75rem; color: var(--text-muted); }
+
+.nightly-header {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    display: flex;
+    gap: 24px;
+    align-items: center;
+}
+
+.nightly-header .stat { text-align: center; }
+.nightly-header .stat .value { font-size: 1.8rem; font-weight: 700; }
+.nightly-header .stat .label { font-size: 0.75rem; color: var(--text-muted); }
+
+.loading { text-align: center; color: var(--text-muted); padding: 20px; }

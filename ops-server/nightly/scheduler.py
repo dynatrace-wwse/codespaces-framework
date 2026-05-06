@@ -37,6 +37,7 @@ def load_testable_repos() -> list[dict]:
             "name": r["name"],
             "repo": r["repo"],
             "duration": r.get("duration", "1h"),
+            "arch": r.get("arch", "both"),  # arm64 | amd64 | both
         })
 
     return repos
@@ -68,6 +69,7 @@ def build_schedule(repos: list[dict], stagger_minutes: int = 5) -> list[dict]:
             "repo": repo["repo"],
             "name": repo["name"],
             "duration": repo["duration"],
+            "arch": repo.get("arch", "both"),
             "offset_minutes": i * stagger_minutes,
             "order": i + 1,
         })
@@ -115,7 +117,7 @@ async def run_nightly(
     }
     await pool.set(f"nightly:{run_id}:meta", json.dumps(run_meta))
 
-    # Queue jobs with staggered delays
+    # Queue jobs with staggered delays — route to arch-specific queues
     for entry in schedule:
         offset = entry["offset_minutes"]
 
@@ -123,17 +125,21 @@ async def run_nightly(
             log.info("Waiting %dm before queueing %s...", offset, entry["name"])
             await asyncio.sleep(offset * 60)
 
-        job = {
-            "type": "integration-test",
-            "repo": entry["repo"],
-            "queue": "test",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "nightly_run_id": run_id,
-            "order": entry["order"],
-        }
+        arch = entry.get("arch", "both")
+        arches = [arch] if arch != "both" else ["arm64", "amd64"]
 
-        await pool.rpush("queue:test", json.dumps(job))
-        log.info("Queued: %s (order %d)", entry["name"], entry["order"])
+        for a in arches:
+            job = {
+                "type": "integration-test",
+                "repo": entry["repo"],
+                "arch": a,
+                "queue": "test",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "nightly_run_id": run_id,
+                "order": entry["order"],
+            }
+            await pool.rpush(f"queue:test:{a}", json.dumps(job))
+            log.info("Queued: %s → queue:test:%s (order %d)", entry["name"], a, entry["order"])
 
     log.info("All %d repos queued for nightly run %s", len(schedule), run_id)
     await pool.aclose()

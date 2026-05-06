@@ -144,8 +144,25 @@ cp "${OPS_DIR}/codespaces-framework/ops-server/systemd/"*.service /etc/systemd/s
 cp "${OPS_DIR}/codespaces-framework/ops-server/systemd/"*.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable ops-webhook.service
+systemctl enable ops-dashboard.service
 systemctl enable ops-nightly.timer
 systemctl enable ops-sync-daemon.service
+
+# ── Configure Redis for remote workers ──────────────────────────────────────
+info "Configuring Redis for remote worker access..."
+REDIS_PASSWORD=$(openssl rand -hex 16)
+sed -i "s/^# requirepass .*/requirepass ${REDIS_PASSWORD}/" /etc/redis/redis.conf
+sed -i "s/^bind 127.0.0.1.*/bind 0.0.0.0/" /etc/redis/redis.conf
+systemctl restart redis-server
+echo "REDIS_PASSWORD=${REDIS_PASSWORD}" >> "${OPS_HOME}/.env.generated"
+info "Redis password saved to ${OPS_HOME}/.env.generated (share with workers)"
+
+# ── Install Nginx site config ───────────────────────────────────────────────
+info "Installing Nginx config..."
+cp "${OPS_DIR}/codespaces-framework/ops-server/nginx/ops-server.conf" \
+    /etc/nginx/sites-available/ops-server
+ln -sf /etc/nginx/sites-available/ops-server /etc/nginx/sites-enabled/ops-server
+rm -f /etc/nginx/sites-enabled/default
 
 # ── Create directories ──────────────────────────────────────────────────────
 sudo -u "${OPS_USER}" mkdir -p \
