@@ -339,6 +339,73 @@ setUpTerminal(){
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
 }
 
+
+setUpHostTerminal() {
+  printInfoSection "Setting up Zsh + Oh My Zsh + Powerlevel10k on host Ubuntu server for user $USER"
+  printInfo "Usage: source .devcontainer/util/source_framework.sh && setUpHostTerminal"
+
+  if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
+    printWarn "This function is designed for Ubuntu. Proceeding anyway but results may vary."
+  fi
+
+  local P10K_DIR
+  P10K_DIR="${FRAMEWORK_CACHE:+${FRAMEWORK_CACHE}/.devcontainer/p10k}"
+  P10K_DIR="${P10K_DIR:-$REPO_PATH/.devcontainer/p10k}"
+
+  if [ ! -d "$P10K_DIR" ]; then
+    printError "Powerlevel10k config directory not found at $P10K_DIR"
+    return 1
+  fi
+
+  # Install zsh
+  if ! command -v zsh >/dev/null 2>&1; then
+    printInfo "Installing zsh..."
+    sudo apt-get update -y && sudo apt-get install -y zsh
+  else
+    printInfo "✅ zsh already installed: $(zsh --version)"
+  fi
+
+  # Install Oh My Zsh (non-interactive, do not switch shell yet, do not run zsh)
+  if [ ! -d "$HOME/.oh-my-zsh" ]; then
+    printInfo "Installing Oh My Zsh..."
+    RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+  else
+    printInfo "✅ Oh My Zsh already installed"
+  fi
+
+  # Clone Powerlevel10k theme
+  local P10K_THEME_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
+  if [ ! -d "$P10K_THEME_DIR" ]; then
+    printInfo "Cloning Powerlevel10k theme..."
+    git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_THEME_DIR"
+  else
+    printInfo "✅ Powerlevel10k theme already present"
+  fi
+
+  # Deploy framework p10k config and zshrc template
+  printInfo "Copying Powerlevel10k configuration from $P10K_DIR"
+  cp "$P10K_DIR/.p10k.zsh" "$HOME/.p10k.zsh"
+  cp "$P10K_DIR/.zshrc" "$HOME/.zshrc"
+
+  # Add aliases only — no framework functions bound to the shell
+  setupAliases
+
+  # Set zsh as default shell
+  local ZSH_BIN
+  ZSH_BIN="$(command -v zsh)"
+  if [ "$(getent passwd "$USER" | cut -d: -f7)" != "$ZSH_BIN" ]; then
+    printInfo "Changing default shell to zsh for $USER..."
+    sudo chsh -s "$ZSH_BIN" "$USER"
+  else
+    printInfo "✅ Default shell is already zsh"
+  fi
+
+  printInfoSection "✅ Host terminal setup complete for $USER"
+  printInfo "Run 'exec zsh' to start your new shell, or log out and back in."
+  printInfo "Type 'p10k configure' inside zsh to customize your prompt."
+}
+
+
 enableMCP(){
   # Generates .vscode/mcp.json so VS Code connects to the Dynatrace MCP Server.
   # Uses DT_ENVIRONMENT from env vars or prompts via selectEnvironment.
