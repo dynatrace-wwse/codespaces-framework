@@ -8,6 +8,9 @@
 
 set -euo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 OPS_USER="ops"
 OPS_HOME="/home/${OPS_USER}"
 OPS_DIR="${OPS_HOME}/enablement-framework"
@@ -44,7 +47,6 @@ info "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
     docker.io \
-    docker-compose-plugin \
     git \
     curl \
     wget \
@@ -107,26 +109,23 @@ if ! command -v k3d &>/dev/null; then
 fi
 
 # ── Install Claude Code ─────────────────────────────────────────────────────
-if ! command -v claude &>/dev/null; then
+if ! command -v claude &>/dev/null && ! sudo -u "${OPS_USER}" bash -c 'command -v claude' 2>/dev/null; then
     info "Installing Claude Code..."
-    npm install -g @anthropic-ai/claude-code
+    /usr/bin/npm install -g @anthropic-ai/claude-code
 fi
 
 # ── Install dtctl ────────────────────────────────────────────────────────────
 if ! command -v dtctl &>/dev/null; then
-    info "Installing dtctl..."
-    DTCTL_VERSION=$(curl -fsSL "https://api.github.com/repos/dynatrace-oss/dynatrace-cli/releases/latest" | jq -r .tag_name)
-    curl -fsSL -o /tmp/dtctl.tar.gz \
-        "https://github.com/dynatrace-oss/dynatrace-cli/releases/download/${DTCTL_VERSION}/dtctl_linux_${ARCH_GO}.tar.gz"
-    tar -xzf /tmp/dtctl.tar.gz -C /usr/local/bin/ dtctl
-    chmod +x /usr/local/bin/dtctl
-    rm /tmp/dtctl.tar.gz
+    info "Installing dtctl (best-effort — no arm64 binary available)..."
+    warn "dtctl skipped — no arm64 release. Install manually if needed: https://github.com/dynatrace-oss/dynatrace-cli"
 fi
 
 # ── Clone enablement-framework ──────────────────────────────────────────────
-if [[ ! -d "${OPS_DIR}" ]]; then
-    info "Cloning enablement-framework..."
+if [[ ! -d "${OPS_DIR}/codespaces-framework/.git" ]]; then
+    info "Cloning enablement-framework (branch: rfe/ops-server)..."
+    rm -rf "${OPS_DIR}/codespaces-framework"
     sudo -u "${OPS_USER}" git clone \
+        --branch rfe/ops-server \
         https://github.com/dynatrace-wwse/codespaces-framework.git \
         "${OPS_DIR}/codespaces-framework"
 fi

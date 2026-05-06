@@ -5,7 +5,7 @@
 A master-worker CI/CD platform supporting ARM (Graviton3) and AMD (x86_64) builds.
 Single control plane, distributed test execution across architectures.
 
-**DNS**: `autonomous-enablement.whydevslovedynatrace.com` → Master node (ARM)
+**DNS**: `autonomous-enablements.whydevslovedynatrace.com` → Master node (ARM)
 
 ---
 
@@ -13,7 +13,7 @@ Single control plane, distributed test execution across architectures.
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │  autonomous-enablement.whydevslovedynatrace.com  │
+                    │  autonomous-enablements.whydevslovedynatrace.com  │
                     └──────────────────────┬───────────────────────────┘
                                            │
                     ┌──────────────────────────────────────────────────┐
@@ -86,7 +86,7 @@ Lightweight — just Docker, k3d, and the worker agent. Pull jobs from master Re
 
 ### 3. Dashboard
 
-Web UI at `https://autonomous-enablement.whydevslovedynatrace.com`
+Web UI at `https://autonomous-enablements.whydevslovedynatrace.com`
 
 **Views:**
 - **Fleet overview**: All 27 repos, last build status per arch, framework version
@@ -178,7 +178,7 @@ HGETALL worker:<id>  →  get worker details
 ### DNS
 
 ```
-autonomous-enablement.whydevslovedynatrace.com  →  Master public IP (Elastic IP)
+autonomous-enablements.whydevslovedynatrace.com  →  Master public IP (Elastic IP)
 ```
 
 ### Security Groups
@@ -304,10 +304,10 @@ repos:
 ```nginx
 server {
     listen 443 ssl;
-    server_name autonomous-enablement.whydevslovedynatrace.com;
+    server_name autonomous-enablements.whydevslovedynatrace.com;
 
-    ssl_certificate     /etc/letsencrypt/live/autonomous-enablement.whydevslovedynatrace.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/autonomous-enablement.whydevslovedynatrace.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/autonomous-enablements.whydevslovedynatrace.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/autonomous-enablements.whydevslovedynatrace.com/privkey.pem;
 
     # Dashboard UI + API
     location / {
@@ -335,7 +335,7 @@ server {
 
 server {
     listen 80;
-    server_name autonomous-enablement.whydevslovedynatrace.com;
+    server_name autonomous-enablements.whydevslovedynatrace.com;
     return 301 https://$host$request_uri;
 }
 ```

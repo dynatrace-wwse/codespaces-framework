@@ -8,6 +8,9 @@
 
 set -euo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 OPS_USER="ops"
 OPS_HOME="/home/${OPS_USER}"
 VENV_DIR="${OPS_HOME}/ops-venv"
@@ -42,7 +45,6 @@ info "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
     docker.io \
-    docker-compose-plugin \
     git \
     curl \
     wget \
