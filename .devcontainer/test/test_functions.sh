@@ -16,19 +16,29 @@ assertDynatraceCloudNative(){
 }
 
 assertRunningApp(){
-  # The 1st agument is the port.
+  # The 1st argument is the port.
   if [ -z "$1" ]; then
     PORT=30100
   else
     PORT=$1
   fi
-    
+
   URL="http://127.0.0.1:$PORT"
   printInfoSection "Testing Deployed app running in $URL"
 
-  printInfo "Asserting app is running as NodePort in kind-control-plane in port $URL"
+  # NodePorts are exposed differently per cluster engine:
+  #   - kind: bound only inside the kind-control-plane container, so we curl from there
+  #   - k3d:  forwarded to the host via k3d's port mapping → curl directly
+  # Detect which is running and route accordingly.
+  if docker ps --format '{{.Names}}' | grep -qx 'kind-control-plane'; then
+    printInfo "Asserting app via 'docker exec kind-control-plane' on $URL"
+    CMD=(docker exec kind-control-plane sh -c "curl --silent --fail $URL")
+  else
+    printInfo "Asserting app via host curl on $URL (k3d/host networking)"
+    CMD=(curl --silent --fail "$URL")
+  fi
 
-  if docker exec kind-control-plane sh -c "curl --silent --fail $URL" > /dev/null; then
+  if "${CMD[@]}" > /dev/null; then
     printInfo "✅ App is running on $URL"
   else
     printError "❌ App is NOT running on $URL"

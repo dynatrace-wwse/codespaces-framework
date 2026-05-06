@@ -1466,8 +1466,12 @@ generateDynakube() {
     ag_tag=$(getLatestEcrTag "dynatrace-activegate")
     local oa_tag
     oa_tag=$(getLatestEcrTag "dynatrace-oneagent")
-    ag_image_line="    image: \"public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}\""
-    oa_image_line="      image: \"public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}\""
+    # NOTE: indentation is added by the template expansions below
+    # (${ag_image_line:+    ...} and ${oa_image_line:+      ...}).
+    # Putting spaces here too would double-indent and slot the line
+    # under the previous list item, breaking YAML parsing.
+    ag_image_line="image: \"public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}\""
+    oa_image_line="image: \"public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}\""
     printInfo "ActiveGate image: public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}"
     printInfo "OneAgent image: public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}"
   fi
