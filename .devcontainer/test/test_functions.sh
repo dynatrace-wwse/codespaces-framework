@@ -16,32 +16,20 @@ assertDynatraceCloudNative(){
 }
 
 assertRunningApp(){
-  # The 1st argument is the port.
-  if [ -z "$1" ]; then
-    PORT=30100
-  else
-    PORT=$1
-  fi
+  # Assert an app is reachable via its ingress URL.
+  # Usage: assertRunningApp <app-name>
+  # Constructs URL: http://<app-name>.<detected-ip>.<MAGIC_DOMAIN>
+  local app_name="$1"
+  local detected_ip
+  detected_ip=$(detectIP)
+  local hostname="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
 
-  URL="http://127.0.0.1:$PORT"
-  printInfoSection "Testing Deployed app running in $URL"
+  printInfoSection "Testing app via ingress: $hostname on localhost"
 
-  # NodePorts are exposed differently per cluster engine:
-  #   - kind: bound only inside the kind-control-plane container, so we curl from there
-  #   - k3d:  forwarded to the host via k3d's port mapping → curl directly
-  # Detect which is running and route accordingly.
-  if docker ps --format '{{.Names}}' | grep -qx 'kind-control-plane'; then
-    printInfo "Asserting app via 'docker exec kind-control-plane' on $URL"
-    CMD=(docker exec kind-control-plane sh -c "curl --silent --fail $URL")
+  if curl --silent --fail --max-time 10 -H "Host: $hostname" http://localhost > /dev/null; then
+    printInfo "✅ App is running via ingress $hostname on localhost"
   else
-    printInfo "Asserting app via host curl on $URL (k3d/host networking)"
-    CMD=(curl --silent --fail "$URL")
-  fi
-
-  if "${CMD[@]}" > /dev/null; then
-    printInfo "✅ App is running on $URL"
-  else
-    printError "❌ App is NOT running on $URL"
+    printError "❌ App is NOT running via ingress $hostname on localhost"
     exit 1
   fi
 }

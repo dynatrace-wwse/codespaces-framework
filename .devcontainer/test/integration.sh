@@ -17,7 +17,8 @@ assertRunningPod dynatrace activegate
 
 assertRunningPod todoapp todoapp
 
-assertRunningApp 30100
+# Test app is reachable via nginx ingress + magic DNS (sslip.io)
+assertRunningApp todoapp
 
 
 printInfoSection "Integration tests completed for $RepositoryName"
