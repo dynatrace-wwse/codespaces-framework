@@ -291,13 +291,14 @@ class WorkerManager:
         duration = int(time.time() - start_time)
         rc = proc.returncode if not timed_out else 124
 
-        log_file.write_text(
+        body = (
             f"=== JOB: {job_id} ===\n"
             f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: arm64 (master) ===\n"
             f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n\n"
             f"=== STDOUT ===\n{stdout.decode(errors='replace')}\n\n"
             f"=== STDERR ===\n{stderr.decode(errors='replace')}"
         )
+        log_file.write_text(self._mask_secrets(body))
 
         await self._cleanup_clusters()
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -312,6 +313,20 @@ class WorkerManager:
             "timed_out": timed_out,
             "log_file": str(log_file),
         }
+
+    def _mask_secrets(self, content: str) -> str:
+        """Redact known DT tokens before writing the log."""
+        import re
+        for secret in (DT_OPERATOR_TOKEN, DT_INGEST_TOKEN):
+            if secret and len(secret) > 12:
+                content = content.replace(secret, secret[:14] + "***REDACTED***")
+        # Catch-all for any dt0* token shape
+        content = re.sub(
+            r"\bdt0[cs]\d{2}\.[A-Z0-9]{24}\.[A-Z0-9]{60,80}\b",
+            lambda m: m.group(0)[:14] + "***REDACTED***",
+            content,
+        )
+        return content
 
     def _write_env_file(self, env_path: Path, arch: str):
         """Mirror the GHA workflow's .env writing.

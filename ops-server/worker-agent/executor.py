@@ -110,13 +110,14 @@ async def execute_integration_test(job: dict) -> dict:
     rc = proc.returncode if not timed_out else 124
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    log_file.write_text(
+    body = (
         f"=== JOB: {job_id} ===\n"
         f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: {WORKER_ARCH} ===\n"
         f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n\n"
         f"=== STDOUT ===\n{stdout.decode(errors='replace')}\n\n"
         f"=== STDERR ===\n{stderr.decode(errors='replace')}"
     )
+    log_file.write_text(_mask_secrets(body))
 
     # Best-effort cleanup: clusters created by post-create.sh
     await _cleanup_clusters()
@@ -133,6 +134,38 @@ async def execute_integration_test(job: dict) -> dict:
         "timed_out": timed_out,
         "log_file": str(log_file),
     }
+
+
+def _mask_secrets(content: str) -> str:
+    """Redact known DT tokens before writing/uploading the log.
+
+    The dt-enablement image's entrypoint dumps the environment via ``set``
+    for debugging after switching to the docker group, which leaks tokens
+    if not masked. We also mask any literal token value found anywhere
+    in stdout/stderr (e.g. helm install args, kubectl secrets dumps).
+    """
+    import re
+    # Mask each known token value verbatim
+    for secret in (DT_OPERATOR_TOKEN, DT_INGEST_TOKEN):
+        if secret and len(secret) > 12:
+            content = content.replace(secret, _redact(secret))
+    # Catch-all for any dt0c01.*/dt0s01.*/dt0s16.* token shape we missed
+    # (60+ chars, alphanumeric + dots/underscores)
+    content = re.sub(
+        r"\bdt0[cs]\d{2}\.[A-Z0-9]{24}\.[A-Z0-9]{60,80}\b",
+        lambda m: _redact(m.group(0)),
+        content,
+    )
+    return content
+
+
+def _redact(token: str) -> str:
+    """Keep the prefix (dt0c01.XXXXXXXX) so we can still tell which token
+    is which; replace the secret part with stars."""
+    if not token:
+        return "***"
+    # Show first 14 chars (dt0c01.XXXXXXXX) then mask the rest
+    return token[:14] + "***REDACTED***"
 
 
 def _write_env_file(env_path: Path):
