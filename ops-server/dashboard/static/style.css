@@ -45,6 +45,49 @@ header h1 { font-size: 1.4rem; font-weight: 600; }
 .health-badge.healthy { border-color: var(--green); color: var(--green); }
 .health-badge.unhealthy { border-color: var(--red); color: var(--red); }
 
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.btn-auth {
+    background: #24292f;
+    color: #fff;
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    border: 1px solid var(--border);
+}
+.btn-auth:hover { background: #30363d; }
+
+.btn-secondary {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    text-decoration: none;
+}
+.btn-secondary:hover { background: var(--bg); }
+
+.user-info {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+.user-info #user-name { color: var(--text); font-weight: 500; }
+
+.btn:disabled,
+.btn[disabled] {
+    background: var(--surface);
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 0.6;
+    border: 1px solid var(--border);
+}
+
 nav {
     display: flex;
     gap: 8px;

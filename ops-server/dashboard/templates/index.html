@@ -9,7 +9,16 @@
 <body>
     <header>
         <h1>Enablement Ops Platform</h1>
-        <div id="health-status" class="health-badge">checking...</div>
+        <div class="header-right">
+            <div id="health-status" class="health-badge">checking...</div>
+            <div id="auth-status" class="auth-status">
+                <a href="/oauth2/sign_in" class="btn btn-auth" id="sign-in-btn" hidden>Sign in with GitHub</a>
+                <span id="user-info" class="user-info" hidden>
+                    <span id="user-name"></span>
+                    <a href="/oauth2/sign_out?rd=/" class="btn btn-small btn-secondary">Sign out</a>
+                </span>
+            </div>
+        </div>
     </header>
 
     <nav>

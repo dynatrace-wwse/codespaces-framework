@@ -2,6 +2,40 @@
 
 const API = '';
 
+// Auth state — checked on load via oauth2-proxy /oauth2/userinfo.
+// authState.signedIn determines whether trigger buttons are enabled.
+const authState = { signedIn: false, user: null };
+
+async function loadAuthState() {
+    try {
+        const res = await fetch('/oauth2/userinfo', { credentials: 'same-origin' });
+        if (res.ok) {
+            const data = await res.json();
+            authState.signedIn = true;
+            authState.user = data.user || data.preferredUsername || data.email || 'signed in';
+        } else {
+            authState.signedIn = false;
+        }
+    } catch {
+        authState.signedIn = false;
+    }
+    renderAuthHeader();
+}
+
+function renderAuthHeader() {
+    const signInBtn = document.getElementById('sign-in-btn');
+    const userInfo = document.getElementById('user-info');
+    const userName = document.getElementById('user-name');
+    if (authState.signedIn) {
+        signInBtn.hidden = true;
+        userInfo.hidden = false;
+        userName.textContent = authState.user;
+    } else {
+        signInBtn.hidden = false;
+        userInfo.hidden = true;
+    }
+}
+
 // ── Tab Navigation ──────────────────────────────────────────────────────────
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -41,6 +75,7 @@ async function loadFleet() {
     const data = await res.json();
     const tbody = document.getElementById('fleet-body');
 
+    const disabled = authState.signedIn ? '' : 'disabled title="Sign in with GitHub to trigger builds"';
     tbody.innerHTML = data.repos.map(repo => {
         const arm = repo.builds.arm64;
         const amd = repo.builds.amd64;
@@ -51,9 +86,9 @@ async function loadFleet() {
             <td>${buildCell(amd)}</td>
             <td>${repo.duration}</td>
             <td>
-                <button class="btn btn-small" onclick="triggerBuild('${repo.repo}', 'both')">Build All</button>
-                <button class="btn btn-small" onclick="triggerBuild('${repo.repo}', 'arm64')">ARM</button>
-                <button class="btn btn-small" onclick="triggerBuild('${repo.repo}', 'amd64')">AMD</button>
+                <button class="btn btn-small" ${disabled} onclick="triggerBuild('${repo.repo}', 'both')">Build All</button>
+                <button class="btn btn-small" ${disabled} onclick="triggerBuild('${repo.repo}', 'arm64')">ARM</button>
+                <button class="btn btn-small" ${disabled} onclick="triggerBuild('${repo.repo}', 'amd64')">AMD</button>
             </td>
         </tr>`;
     }).join('');
@@ -76,12 +111,21 @@ function buildCell(build) {
 }
 
 async function triggerBuild(repo, arch) {
-    await fetch(`${API}/api/builds/trigger`, {
+    if (!authState.signedIn) {
+        window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        return;
+    }
+    const res = await fetch(`${API}/api/builds/trigger`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ repo, arch, requested_by: 'dashboard' }),
     });
-    // Refresh queue status
+    if (res.status === 401) {
+        // Session expired — bounce to sign-in
+        window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        return;
+    }
     loadWorkers();
 }
 
@@ -166,10 +210,13 @@ function formatTime(iso) {
 
 // ── Init ────────────────────────────────────────────────────────────────────
 
-checkHealth();
-loadFleet();
-loadWorkers();
-loadNightly();
+(async () => {
+    await loadAuthState();   // sets authState.signedIn before fleet renders
+    checkHealth();
+    loadFleet();
+    loadWorkers();
+    loadNightly();
+})();
 
 // Auto-refresh every 30s
 setInterval(() => {
