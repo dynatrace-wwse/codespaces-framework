@@ -107,8 +107,9 @@ function buildCell(build) {
     const cls = build.passed ? 'status-pass' : 'status-fail';
     const icon = build.passed ? 'PASS' : 'FAIL';
     const time = build.duration ? `${build.duration}s` : '';
-    const status = build.job_id
-        ? `<a href="/api/jobs/${build.job_id}/log" target="_blank" class="${cls} log-link">${icon}</a>`
+    // Link to GitHub Actions run page when available; fall back to plain status
+    const status = build.run_url
+        ? `<a href="${build.run_url}" target="_blank" rel="noopener" class="${cls} log-link" title="View run on GitHub">${icon}</a>`
         : `<span class="${cls}">${icon}</span>`;
     return `${status} <span style="color:var(--text-muted);font-size:0.75rem">${time}</span>`;
 }

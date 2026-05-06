@@ -69,6 +69,12 @@ async def webhook(request: Request):
 
     log.info("Event: %s.%s on %s (delivery: %s)", event_type, action, repo_full, delivery_id)
 
+    # GitHub Actions workflow runs are recorded directly in Redis
+    # (no Claude agent or worker needs to handle them).
+    if event_type == "workflow_run" and action == "completed":
+        await record_workflow_run(data, repo_full, delivery_id)
+        return {"status": "recorded", "type": "workflow-run"}
+
     job = route_event(event_type, action, data, repo_full, delivery_id)
 
     if job:
@@ -77,6 +83,53 @@ async def webhook(request: Request):
         return {"status": "queued", "queue": job["queue"], "type": job["type"]}
 
     return {"status": "ignored", "event": f"{event_type}.{action}"}
+
+
+async def record_workflow_run(data: dict, repo: str, delivery_id: str):
+    """Persist a completed GitHub Actions run to Redis.
+
+    Two writes:
+      - ci:<repo>:<workflow>:<branch>  → hash with the latest status (read by dashboard)
+      - ci:history:<repo>              → audit trail (last 200 runs per repo)
+    """
+    run = data.get("workflow_run", {}) or {}
+    started = run.get("run_started_at")
+    finished = run.get("updated_at")
+    duration_s: int | None = None
+    if started and finished:
+        try:
+            s = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            f = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+            duration_s = int((f - s).total_seconds())
+        except ValueError:
+            pass
+
+    workflow = run.get("name") or run.get("path", "").split("/")[-1] or "unknown"
+    branch   = run.get("head_branch", "main")
+
+    record = {
+        "repo": repo,
+        "workflow": workflow,
+        "branch": branch,
+        "head_sha": run.get("head_sha", ""),
+        "conclusion": run.get("conclusion", "unknown"),  # success | failure | cancelled | skipped
+        "run_id": str(run.get("id", "")),
+        "run_url": run.get("html_url", ""),
+        "run_number": str(run.get("run_number", "")),
+        "duration_seconds": str(duration_s or 0),
+        "finished_at": finished or datetime.now(timezone.utc).isoformat(),
+        "delivery_id": delivery_id,
+    }
+
+    latest_key = f"ci:{repo}:{workflow}:{branch}"
+    await pool.hset(latest_key, mapping=record)
+
+    history_key = f"ci:history:{repo}"
+    await pool.rpush(history_key, json.dumps(record))
+    await pool.ltrim(history_key, -200, -1)
+
+    log.info("Recorded workflow_run: %s/%s@%s → %s",
+             repo, workflow, branch, record["conclusion"])
 
 
 def route_event(
