@@ -75,12 +75,19 @@ async def webhook(request: Request):
         await record_workflow_run(data, repo_full, delivery_id)
         return {"status": "recorded", "type": "workflow-run"}
 
-    job = route_event(event_type, action, data, repo_full, delivery_id)
+    jobs = route_event(event_type, action, data, repo_full, delivery_id)
 
-    if job:
-        await pool.rpush(f"queue:{job['queue']}", json.dumps(job))
-        log.info("Queued job: %s → queue:%s", job["type"], job["queue"])
-        return {"status": "queued", "queue": job["queue"], "type": job["type"]}
+    if jobs:
+        # route_event may return a single dict or a list of jobs (PRs fan out
+        # to a Claude review agent + per-arch integration tests).
+        if isinstance(jobs, dict):
+            jobs = [jobs]
+        queued = []
+        for job in jobs:
+            await pool.rpush(f"queue:{job['queue']}", json.dumps(job))
+            log.info("Queued job: %s → queue:%s", job["type"], job["queue"])
+            queued.append({"type": job["type"], "queue": job["queue"]})
+        return {"status": "queued", "jobs": queued}
 
     return {"status": "ignored", "event": f"{event_type}.{action}"}
 
@@ -187,19 +194,49 @@ def route_event(
             }
 
     # ── Pull Requests ────────────────────────────────────────────────────
-    if event_type == "pull_request" and action == "opened":
+    # Open / reopen / new push: trigger Claude review + per-arch integration tests.
+    if event_type == "pull_request" and action in ("opened", "reopened", "synchronize"):
         pr = data.get("pull_request", {})
         # Skip PRs created by the ops bot itself
         if pr.get("user", {}).get("login", "") == "ops-bot":
             return None
-        return {
-            **base,
-            "queue": "agent",
-            "type": "review-pr",
-            "pr_number": pr["number"],
-            "pr_url": pr.get("html_url", ""),
-            "title": pr.get("title", ""),
-        }
+
+        head = pr.get("head", {}) or {}
+        head_sha    = head.get("sha", "")
+        head_branch = head.get("ref", "")
+        pr_number   = pr["number"]
+        pr_url      = pr.get("html_url", "")
+        title       = pr.get("title", "")
+
+        out: list[dict] = []
+        # Only run the Claude review on first open (not on every push)
+        if action == "opened":
+            out.append({
+                **base,
+                "queue": "agent",
+                "type": "review-pr",
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "title": title,
+            })
+        # Integration test on every push
+        for arch in ("arm64", "amd64"):
+            out.append({
+                **base,
+                "queue": f"test:{arch}",
+                "type": "integration-test",
+                "arch": arch,
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "title": title,
+                "head_sha": head_sha,
+                "head_branch": head_branch,
+                "ref": head_branch,
+                "trigger": f"pull_request.{action}",
+                "nightly_run_id": f"pr-{pr_number}-{action}",
+                "requested_by": pr.get("user", {}).get("login", "github"),
+            })
+        return out
 
     # ── CI Check Failures ────────────────────────────────────────────────
     if event_type == "check_suite" and action == "completed":
