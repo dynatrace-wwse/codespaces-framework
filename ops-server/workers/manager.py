@@ -509,7 +509,15 @@ class WorkerManager:
 
         Adds K3D_* port overrides so the in-container k3d cluster doesn't
         try to bind to nginx's 80/443 on the master host.
+
+        EXTERNAL_HOSTNAME is the master's hostname — passed through so that
+        registerApp's hostname-based ingress route is stable across parallel
+        workers (otherwise each worker's dt container would use its own
+        random container hostname).
         """
+        import socket
+        external_hostname = os.environ.get("EXTERNAL_HOSTNAME") or socket.gethostname()
+
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(
             f"DT_ENVIRONMENT={DT_ENVIRONMENT}\n"
@@ -519,6 +527,7 @@ class WorkerManager:
             f"K3D_LB_HTTP_PORT=30080\n"
             f"K3D_LB_HTTPS_PORT=30443\n"
             f"K3D_API_PORT=6444\n"
+            f"EXTERNAL_HOSTNAME={external_hostname}\n"
         )
 
     async def _git_clone(self, repo: str, ref: str, dest: Path):

@@ -34,12 +34,22 @@ assertRunningApp(){
 
   printInfoSection "Testing app via ingress on ${target}"
 
+  # Retry — ingress-nginx needs a moment to reconcile a freshly-created
+  # Ingress resource. In parallel-worker runs the curl can race the
+  # controller, so probe up to 8 times with 3s spacing per host.
   local h failed=0
   for h in "$ip_host" "$name_host"; do
-    if curl --silent --fail --max-time 10 -H "Host: $h" "$target" > /dev/null; then
-      printInfo "✅ App reachable via Host: $h on $target"
-    else
-      printError "❌ App NOT reachable via Host: $h on $target"
+    local ok=0 i
+    for i in $(seq 1 8); do
+      if curl --silent --fail --max-time 5 -H "Host: $h" "$target" > /dev/null; then
+        printInfo "✅ App reachable via Host: $h on $target (attempt $i)"
+        ok=1
+        break
+      fi
+      sleep 3
+    done
+    if [[ "$ok" -eq 0 ]]; then
+      printError "❌ App NOT reachable via Host: $h on $target after 8 attempts"
       failed=1
     fi
   done
