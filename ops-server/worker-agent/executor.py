@@ -30,6 +30,14 @@ async def execute_integration_test(job: dict) -> dict:
     # Ensure repo is cloned and up to date
     await _ensure_repo(repo, repo_dir)
 
+    # The container runs as `vscode` (uid 1000) while the host cloned as
+    # `ops` (uid 1001). Two side effects inside the container:
+    #   (a) git rejects /workspace as "dubious ownership" — fixed via
+    #       GIT_CONFIG_* env vars adding safe.directory=*
+    #   (b) writes inside the repo (e.g. .count) get EACCES — fixed by
+    #       widening perms to go+w on the host clone
+    await _make_world_writable(repo_dir)
+
     # Run the integration test via Docker
     cmd = [
         "docker", "run",
@@ -43,6 +51,10 @@ async def execute_integration_test(job: dict) -> dict:
         "-e", f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}",
         "-e", "INSTANTIATION_TYPE=ops-server",
         "-e", f"WORKER_ARCH={WORKER_ARCH}",
+        # Tell git inside the container that any directory is safe to operate on
+        "-e", "GIT_CONFIG_COUNT=1",
+        "-e", "GIT_CONFIG_KEY_0=safe.directory",
+        "-e", "GIT_CONFIG_VALUE_0=*",
         "-w", "/workspace",
         TEST_IMAGE,
         "zsh", "-c", ".devcontainer/test/integration.sh",
@@ -79,6 +91,19 @@ async def execute_integration_test(job: dict) -> dict:
         "passed": proc.returncode == 0,
         "log_file": str(log_file),
     }
+
+
+async def _make_world_writable(repo_dir: Path):
+    """Widen permissions so a container running as a different uid can write.
+
+    The clone is transient (recloned per test), so loose perms here are fine.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "chmod", "-R", "go+rwX", str(repo_dir),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
 
 
 async def _ensure_repo(repo: str, repo_dir: Path):

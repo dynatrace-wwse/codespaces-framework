@@ -64,13 +64,11 @@ async def index(request: Request):
 
 @app.get("/api/repos")
 async def api_repos():
-    """List all repos with their latest GitHub Actions build matrix.
+    """List all repos with the latest build matrix.
 
-    Reads ``ci:<repo>:<workflow>:main`` hashes that the webhook server
-    populates from ``workflow_run.completed`` events. The convention is
-    one workflow per arch — ``Integration Test arm64`` and
-    ``Integration Test amd64`` — but any workflow whose name ends in
-    ``arm64`` or ``amd64`` is picked up.
+    Merges two data sources:
+      - ``jobs:completed``     — local worker results (primary, links to /api/jobs/<id>/log)
+      - ``ci:<repo>:*:main``   — GHA workflow_run events (used as fallback)
     """
     import yaml
 
@@ -78,34 +76,45 @@ async def api_repos():
     with open(repos_path) as f:
         data = yaml.safe_load(f)
 
+    completed_raw = await pool.lrange("jobs:completed", -200, -1)
+    local_matrix: dict[str, dict] = {}
+    for raw in completed_raw:
+        job = json.loads(raw)
+        if job.get("type") != "integration-test":
+            continue
+        repo = job["repo"]
+        arch = job.get("arch") or job.get("result", {}).get("arch") or job.get("worker_arch") or "arm64"
+        result = job.get("result", {}) or {}
+        local_matrix.setdefault(repo, {})[arch] = {
+            "passed": bool(result.get("passed")),
+            "duration": int(result.get("duration_seconds", 0)),
+            "finished_at": job.get("finished_at", ""),
+            "job_id": job.get("job_id", ""),
+            "source": "local",
+        }
+
     repos_out = []
     for r in data.get("repos", []):
         if r.get("status") != "active":
             continue
         repo_full = r["repo"]
-        builds: dict[str, dict] = {}
-        # Find any ci:<repo>:*:main keys for this repo
+        builds: dict[str, dict] = dict(local_matrix.get(repo_full, {}))
+
+        # Fall back to GHA workflow_run records for any arch we don't have locally
         async for key in pool.scan_iter(match=f"ci:{repo_full}:*:main"):
             wf_data = await pool.hgetall(key)
             if not wf_data:
                 continue
-            # Detect arch from workflow name suffix
             workflow = wf_data.get("workflow", "")
-            arch = None
-            for a in ("arm64", "amd64"):
-                if workflow.lower().endswith(a):
-                    arch = a
-                    break
-            if not arch:
-                # Fall back: trust whatever's in the record
-                arch = wf_data.get("arch") or "amd64"
+            arch = next((a for a in ("arm64", "amd64") if workflow.lower().endswith(a)), None)
+            if not arch or arch in builds:
+                continue
             builds[arch] = {
                 "passed": wf_data.get("conclusion") == "success",
-                "conclusion": wf_data.get("conclusion", "unknown"),
                 "duration": int(wf_data.get("duration_seconds", 0)),
                 "finished_at": wf_data.get("finished_at", ""),
                 "run_url": wf_data.get("run_url", ""),
-                "run_number": wf_data.get("run_number", ""),
+                "source": "github-actions",
             }
 
         repos_out.append({
@@ -118,6 +127,21 @@ async def api_repos():
         })
 
     return {"repos": repos_out, "total": len(repos_out)}
+
+
+@app.get("/api/jobs/{job_id}/log")
+async def api_job_log(job_id: str):
+    """Plain-text log for a completed local worker job (7-day TTL)."""
+    from fastapi.responses import PlainTextResponse
+    content = await pool.get(f"job:log:{job_id}")
+    if content is None:
+        return PlainTextResponse(
+            f"No log found for job {job_id}.\n"
+            "Either the job hasn't finished, the 7-day TTL expired, "
+            "or the job ran on GitHub Actions (use the run URL instead).",
+            status_code=404,
+        )
+    return PlainTextResponse(content)
 
 
 @app.get("/api/workers")
@@ -184,64 +208,39 @@ async def api_nightly_latest():
 
 @app.post("/api/builds/trigger")
 async def api_trigger_build(request: Request):
-    """Trigger GitHub Actions workflow_dispatch for the given repo.
+    """Push integration-test jobs into the local worker queue.
 
-    Convention: each repo has ``integration-arm64.yml`` and ``integration-amd64.yml``
-    workflows. Calling with ``arch=both`` dispatches both; ``arm64`` or ``amd64``
-    dispatches just one. See ``ops-server/templates/integration-{arch}.yml``.
+    For ``arch=both`` (default), pushes one job to ``queue:test:arm64`` AND
+    ``queue:test:amd64`` so both architectures run in parallel.
+    The local worker-manager (master ARM) and worker-agent (remote AMD)
+    pick the jobs up and execute ``.devcontainer/test/integration.sh``.
     """
-    if not GH_TOKEN:
-        raise HTTPException(
-            status_code=500,
-            detail="GH_TOKEN not configured on the server — cannot dispatch workflows.",
-        )
-
     body = await request.json()
-    repo = body["repo"]                          # "dynatrace-wwse/codespaces-framework"
+    repo = body["repo"]
     arch = body.get("arch", "both")              # arm64 | amd64 | both
     ref  = body.get("ref", "main")
     requested_by = body.get("requested_by",
                             request.headers.get("x-auth-user", "dashboard"))
 
     arches = ["arm64", "amd64"] if arch == "both" else [arch]
-    headers = {
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept":        "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    timestamp = datetime.now(timezone.utc).isoformat()
+    queued = []
+    for a in arches:
+        job = {
+            "type": "integration-test",
+            "repo": repo,
+            "arch": a,
+            "queue": f"test:{a}",
+            "ref": ref,
+            "timestamp": timestamp,
+            "trigger": "dashboard",
+            "nightly_run_id": f"manual-{int(datetime.now(timezone.utc).timestamp())}",
+            "requested_by": requested_by,
+        }
+        await pool.rpush(f"queue:test:{a}", json.dumps(job))
+        queued.append({"arch": a, "queue": f"queue:test:{a}"})
 
-    results = []
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for a in arches:
-            workflow = f"integration-{a}.yml"
-            url = f"{GH_API}/repos/{repo}/actions/workflows/{workflow}/dispatches"
-            payload = {"ref": ref, "inputs": {"requested_by": requested_by}}
-            r = await client.post(url, json=payload, headers=headers)
-            ok = r.status_code in (201, 204)
-            results.append({
-                "arch": a,
-                "workflow": workflow,
-                "status_code": r.status_code,
-                "ok": ok,
-                "error": None if ok else r.text[:200],
-            })
-            if ok:
-                log.info("Dispatched %s/%s ref=%s by %s", repo, workflow, ref, requested_by)
-            else:
-                log.warning("Dispatch failed %s/%s: %s %s",
-                            repo, workflow, r.status_code, r.text[:200])
-
-    failed = [x for x in results if not x["ok"]]
-    if failed and len(failed) == len(results):
-        raise HTTPException(status_code=502, detail={"results": results})
-
-    return {
-        "status": "dispatched" if not failed else "partial",
-        "repo": repo,
-        "ref": ref,
-        "requested_by": requested_by,
-        "results": results,
-    }
+    return {"status": "queued", "repo": repo, "ref": ref, "requested_by": requested_by, "jobs": queued}
 
 
 @app.get("/api/health")

@@ -218,8 +218,11 @@ class WorkerManager:
         log_file = LOGS_DIR / f"{job['job_id']}.log"
 
         await self._ensure_repo(repo, repo_dir)
+        await self._make_world_writable(repo_dir)
 
-        # Run the integration test via devcontainer
+        # Run the integration test via devcontainer.
+        # GIT_CONFIG_* + chmod above let the in-container `vscode` user
+        # operate on a workspace cloned by the host's `ops` user.
         cmd = [
             "docker", "run",
             "--rm",
@@ -231,6 +234,9 @@ class WorkerManager:
             "-e", f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}",
             "-e", f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}",
             "-e", "INSTANTIATION_TYPE=ops-server",
+            "-e", "GIT_CONFIG_COUNT=1",
+            "-e", "GIT_CONFIG_KEY_0=safe.directory",
+            "-e", "GIT_CONFIG_VALUE_0=*",
             "-w", "/workspace",
             "shinojosa/dt-enablement:v1.2",
             "zsh", "-c", ".devcontainer/test/integration.sh",
@@ -282,6 +288,15 @@ class WorkerManager:
             "exit_code": proc.returncode,
             "output": stdout.decode()[-2000:],  # Last 2000 chars
         }
+
+    async def _make_world_writable(self, repo_dir: Path):
+        """Widen perms so a container running as a different uid can write."""
+        proc = await asyncio.create_subprocess_exec(
+            "chmod", "-R", "go+rwX", str(repo_dir),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
 
     async def _ensure_repo(self, repo: str, repo_dir: Path):
         """Clone or pull latest for a repo.
