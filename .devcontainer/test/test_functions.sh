@@ -16,20 +16,35 @@ assertDynatraceCloudNative(){
 }
 
 assertRunningApp(){
-  # Assert an app is reachable via its ingress URL.
-  # Usage: assertRunningApp <app-name>
-  # Constructs URL: http://<app-name>.<detected-ip>.<MAGIC_DOMAIN>
+  # Assert an app is reachable via BOTH ingress hosts:
+  #   1. magic-DNS public IP host: <app>.<detected-ip>.<MAGIC_DOMAIN>
+  #   2. server hostname host:     <app>.<detected-hostname>
+  # Probes localhost on the configured ingress port (K3D_LB_HTTP_PORT, default 80).
+  # Required for parallel-worker testing where each worker's k3d binds to a
+  # non-default port (e.g. 30080) and is reachable only via Host-header curl.
   local app_name="$1"
-  local detected_ip
+  local detected_ip detected_hostname port
   detected_ip=$(detectIP)
-  local hostname="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
+  detected_hostname=$(detectHostname)
+  port="${K3D_LB_HTTP_PORT:-80}"
 
-  printInfoSection "Testing app via ingress: $hostname on localhost"
+  local ip_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
+  local name_host="${app_name}.${detected_hostname}"
+  local target="http://localhost:${port}"
 
-  if curl --silent --fail --max-time 10 -H "Host: $hostname" http://localhost > /dev/null; then
-    printInfo "✅ App is running via ingress $hostname on localhost"
-  else
-    printError "❌ App is NOT running via ingress $hostname on localhost"
+  printInfoSection "Testing app via ingress on ${target}"
+
+  local h failed=0
+  for h in "$ip_host" "$name_host"; do
+    if curl --silent --fail --max-time 10 -H "Host: $h" "$target" > /dev/null; then
+      printInfo "✅ App reachable via Host: $h on $target"
+    else
+      printError "❌ App NOT reachable via Host: $h on $target"
+      failed=1
+    fi
+  done
+
+  if [[ "$failed" -ne 0 ]]; then
     exit 1
   fi
 }

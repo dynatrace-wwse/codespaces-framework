@@ -1753,6 +1753,24 @@ detectIP() {
   fi
 }
 
+detectHostname() {
+  # Returns a hostname-based subdomain used as a second ingress host.
+  # Priority: $EXTERNAL_HOSTNAME > $(hostname) > "localhost".
+  # Used so apps registered in parallel workers are reachable via both
+  # the public-IP magic-DNS host AND a hostname-based host.
+  if [[ -n "$EXTERNAL_HOSTNAME" ]]; then
+    echo "$EXTERNAL_HOSTNAME"
+  else
+    local h
+    h=$(hostname 2>/dev/null)
+    if [[ -n "$h" ]]; then
+      echo "$h"
+    else
+      echo "localhost"
+    fi
+  fi
+}
+
 installIngressController() {
   # Installs the nginx ingress controller in the Kind cluster.
   # Installs the nginx ingress controller.
@@ -1820,13 +1838,21 @@ registerApp() {
     return 1
   fi
 
-  local detected_ip
+  local detected_ip detected_hostname
   detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
 
-  # Create the Ingress resource
+  # Create the Ingress resource — two hosts so the app is reachable via:
+  #   1. magic-DNS public IP    (e.g. todoapp.18.134.158.252.sslip.io)
+  #   2. server hostname        (e.g. todoapp.autonomous-enablements)
+  # The hostname route lets parallel workers test their own k3d-hosted app
+  # via Host-header curl on localhost without depending on public DNS.
   local ingress_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
+  local hostname_host="${app_name}.${detected_hostname}"
 
-  printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
+  printInfo "Creating Ingress for $app_name → $service_name:$service_port"
+  printInfo "  host (ip):       $ingress_host"
+  printInfo "  host (hostname): $hostname_host"
 
   # Build annotations block
   local annotations="    nginx.ingress.kubernetes.io/proxy-read-timeout: \"3600\"
@@ -1850,6 +1876,16 @@ spec:
   ingressClassName: nginx
   rules:
   - host: ${ingress_host}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${service_name}
+            port:
+              number: ${service_port}
+  - host: ${hostname_host}
     http:
       paths:
       - path: /
@@ -1884,31 +1920,18 @@ registerAstroshopIngress() {
   # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
   # - / (everything else) → frontend-proxy:8080
   local namespace="${1:-astroshop}"
-  local detected_ip
+  local detected_ip detected_hostname
   detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
   local ingress_host="astroshop.${detected_ip}.${MAGIC_DOMAIN}"
+  local hostname_host="astroshop.${detected_hostname}"
 
-  printInfo "Creating Astroshop Ingress with otel-collector routes (host: $ingress_host)"
+  printInfo "Creating Astroshop Ingress with otel-collector routes"
+  printInfo "  host (ip):       $ingress_host"
+  printInfo "  host (hostname): $hostname_host"
 
-  kubectl apply -f - <<ASTROINGRESSEOF
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: astroshop-ingress
-  namespace: ${namespace}
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-spec:
-  ingressClassName: nginx
-  rules:
-  - host: ${ingress_host}
-    http:
-      paths:
-      - path: /v1/traces
+  # Path block reused for both hosts.
+  local astro_paths='      - path: /v1/traces
         pathType: ImplementationSpecific
         backend:
           service:
@@ -1935,7 +1958,31 @@ spec:
           service:
             name: frontend-proxy
             port:
-              number: 8080
+              number: 8080'
+
+  kubectl apply -f - <<ASTROINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astroshop-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+${astro_paths}
+  - host: ${hostname_host}
+    http:
+      paths:
+${astro_paths}
 ASTROINGRESSEOF
 
   # Register in app registry for greeting/listApps
@@ -2445,31 +2492,17 @@ registerOpentelemetryDemoIngress() {
   # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
   # - / → frontend-proxy:8080
   local namespace="${1:-opentelemetry-demo}"
-  local detected_ip
+  local detected_ip detected_hostname
   detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
   local ingress_host="otel-demo.${detected_ip}.${MAGIC_DOMAIN}"
+  local hostname_host="otel-demo.${detected_hostname}"
 
-  printInfo "Creating OpenTelemetry Demo Ingress (host: $ingress_host)"
+  printInfo "Creating OpenTelemetry Demo Ingress"
+  printInfo "  host (ip):       $ingress_host"
+  printInfo "  host (hostname): $hostname_host"
 
-  kubectl apply -f - <<OTELINGRESSEOF
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: otel-demo-ingress
-  namespace: ${namespace}
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-spec:
-  ingressClassName: nginx
-  rules:
-  - host: ${ingress_host}
-    http:
-      paths:
-      - path: /v1/traces
+  local otel_paths='      - path: /v1/traces
         pathType: ImplementationSpecific
         backend:
           service:
@@ -2496,7 +2529,31 @@ spec:
           service:
             name: opentelemetry-demo-frontendproxy
             port:
-              number: 8080
+              number: 8080'
+
+  kubectl apply -f - <<OTELINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-demo-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+${otel_paths}
+  - host: ${hostname_host}
+    http:
+      paths:
+${otel_paths}
 OTELINGRESSEOF
 
   # Register in app registry
