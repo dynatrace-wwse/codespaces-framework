@@ -70,7 +70,13 @@ class WorkerManager:
 
                 _, job_json = result
                 job = json.loads(job_json)
-                job_id = f"{job['type']}-{job['repo'].split('/')[-1]}-{int(time.time())}"
+                # Use ms precision + 6-char random suffix so 3+ jobs picked up
+                # within the same second can't collide on workdir / container name.
+                import uuid
+                job_id = (
+                    f"{job['type']}-{job['repo'].split('/')[-1]}"
+                    f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+                )
                 job["job_id"] = job_id
 
                 # Acquire semaphore slot before dispatching
@@ -248,22 +254,21 @@ class WorkerManager:
             shutil.rmtree(work_dir, ignore_errors=True)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        # Pre-test cleanup so leftover clusters / containers / kubeconfig
-        # from earlier runs can't poison this run.
-        await self._cleanup_clusters()
-
         log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
 
+        # Sysbox-isolated nested containers (see executor.py for the same
+        # architecture): outer Sysbox container runs docker:25-dind; inner
+        # dockerd hosts the dt-enablement container which spins up its own
+        # k3d cluster. Multiple jobs run in parallel without colliding on
+        # ports, container names, or cluster names.
         workspace = f"/workspaces/{repo_name}"
-        env_file = f"{repo_dir}/.devcontainer/.env"
-        container_name = f"test-{job_id[-32:]}"
+        env_file_inside = f"{workspace}/.devcontainer/.env"
+        sb_name = f"sb-{job_id[-32:]}"
+        inner_name = "dt"
 
-        # Mirror devcontainers/ci@v0.3: detached `sleep infinity` container,
-        # then docker exec for each step. Avoids the entrypoint's debug env
-        # dump that triggers when $@ is anything other than `sleep`.
         sections: list[str] = []
         rc = 0
         timed_out = False
@@ -273,17 +278,44 @@ class WorkerManager:
 
         log.info("Running integration test for %s (arch=arm64, ref=%s)", repo_name, ref)
         try:
+            # 1. Outer Sysbox container running docker:25-dind
             run_cmd = [
                 "docker", "run",
                 "-d",
-                "--name", container_name,
-                "--init",
-                "--privileged",
-                "--network=host",
-                "--env-file", env_file,
-                "-v", "/var/run/docker.sock:/var/run/docker.sock",
-                "-v", "/lib/modules:/lib/modules",
+                "--runtime=sysbox-runc",
+                "--name", sb_name,
                 "-v", f"{repo_dir}:{workspace}",
+                "docker:25-dind",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("sysbox container start failed")
+
+            # 2. Wait for inner dockerd
+            await self._wait_for_inner_docker(sb_name)
+
+            # 3. Pull dt-enablement inside the Sysbox
+            pull = await asyncio.create_subprocess_exec(
+                "docker", "exec", sb_name,
+                "docker", "pull", "shinojosa/dt-enablement:v1.2",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await pull.wait()
+
+            # 4. Start dt-enablement detached inside the Sysbox
+            inner_run = [
+                "docker", "exec", sb_name,
+                "docker", "run", "-d",
+                "--init", "--privileged", "--network=host",
+                "--name", inner_name,
+                "--env-file", env_file_inside,
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", f"{workspace}:{workspace}",
                 "-w", workspace,
                 "-e", "GIT_CONFIG_COUNT=1",
                 "-e", "GIT_CONFIG_KEY_0=safe.directory",
@@ -292,17 +324,16 @@ class WorkerManager:
                 "sleep", "infinity",
             ]
             proc = await asyncio.create_subprocess_exec(
-                *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                *inner_run, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             _, err = await proc.communicate()
             if proc.returncode != 0:
-                sections.append(f"=== docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                sections.append(f"=== inner docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
                 rc = proc.returncode
-                raise RuntimeError("container start failed")
+                raise RuntimeError("inner container start failed")
 
-            # Wait until vscode inside the container has docker group access
-            # (entrypoint sets this up asynchronously after docker run -d).
-            await self._wait_for_docker_access(container_name)
+            # 5. Wait for vscode inside dt-enablement to have docker access
+            await self._wait_for_inner_dt_ready(sb_name, inner_name)
 
             steps = [
                 ("postCreateCommand", "./.devcontainer/post-create.sh"),
@@ -317,10 +348,12 @@ class WorkerManager:
                 sections.append(header)
                 await self.pool.append(livelog_key, header)
                 remaining = max(60, int(deadline - time.time()))
+                # docker exec <sysbox> docker exec <dt> bash -lc <script>
                 exec_cmd = [
+                    "docker", "exec", sb_name,
                     "docker", "exec",
                     "-w", workspace,
-                    container_name,
+                    inner_name,
                     "bash", "-lc", script,
                 ]
                 try:
@@ -348,12 +381,14 @@ class WorkerManager:
             if rc == 0:
                 rc = 1
         finally:
+            # Removing the outer Sysbox container takes the inner dockerd,
+            # dt-enablement, and k3d cluster down with it.
             try:
                 kill_proc = await asyncio.create_subprocess_exec(
-                    "docker", "rm", "-f", container_name,
+                    "docker", "rm", "-f", sb_name,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                 )
-                await asyncio.wait_for(kill_proc.wait(), timeout=30)
+                await asyncio.wait_for(kill_proc.wait(), timeout=60)
             except Exception:
                 pass
 
@@ -365,7 +400,8 @@ class WorkerManager:
         )
         log_file.write_text(self._mask_secrets(header + "".join(sections)))
 
-        await self._cleanup_clusters()
+        # No host-level cleanup needed — Sysbox tear-down (above) takes the
+        # inner dockerd, dt-enablement, and k3d cluster down with it.
         shutil.rmtree(work_dir, ignore_errors=True)
 
         return {
@@ -423,12 +459,28 @@ class WorkerManager:
         await flush()
         return "".join(full)
 
-    async def _wait_for_docker_access(self, container_name: str, timeout_s: int = 60):
-        """Block until vscode inside the container can reach docker.sock."""
+    async def _wait_for_inner_docker(self, sb_name: str, timeout_s: int = 60):
+        """Wait until the Sysbox container's inner dockerd is responsive."""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_name,
+                "docker", "exec", sb_name,
+                "docker", "info",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            if (await proc.wait()) == 0:
+                return
+            await asyncio.sleep(1)
+        raise RuntimeError(f"inner dockerd never came up in {sb_name}")
+
+    async def _wait_for_inner_dt_ready(self, sb_name: str, inner_name: str, timeout_s: int = 60):
+        """Wait until vscode in the dt-enablement container can talk to docker."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", sb_name,
+                "docker", "exec", inner_name,
                 "sh", "-c", "docker info >/dev/null 2>&1",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -436,7 +488,7 @@ class WorkerManager:
             if (await proc.wait()) == 0:
                 return
             await asyncio.sleep(1)
-        raise RuntimeError("container ready check timed out (no docker.sock access)")
+        raise RuntimeError(f"vscode never got docker access in {sb_name}/{inner_name}")
 
     def _mask_secrets(self, content: str) -> str:
         """Redact known DT tokens before writing the log."""

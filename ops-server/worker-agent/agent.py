@@ -101,7 +101,11 @@ class WorkerAgent:
 
                 _, job_json = result
                 job = json.loads(job_json)
-                job_id = f"{WORKER_ID}-{job['repo'].split('/')[-1]}-{int(time.time())}"
+                import uuid
+                job_id = (
+                    f"{WORKER_ID}-{job['repo'].split('/')[-1]}"
+                    f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+                )
                 job["job_id"] = job_id
                 job["worker_id"] = WORKER_ID
                 job["worker_arch"] = WORKER_ARCH

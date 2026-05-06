@@ -56,10 +56,6 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pre-test cleanup: ensure no stale clusters/containers from earlier runs.
-    # Without this, kubeconfig and port bindings can leak between tests.
-    await _cleanup_clusters()
-
     log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
     await _git_clone(head_repo, ref, repo_dir)
     await _make_world_writable(repo_dir)
@@ -68,12 +64,22 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     start_time = time.time()
     log.info("Running integration test for %s (arch=%s, ref=%s)", repo_name, WORKER_ARCH, ref)
 
-    # Mirror devcontainers/ci@v0.3: keep the container alive with `sleep infinity`
-    # (so the entrypoint's setup runs once with sleep as $@, no env-dump triggered),
-    # then run each step via `docker exec` — bypassing the entrypoint entirely.
+    # Architecture: Sysbox isolates each test in its own kernel/network/filesystem
+    # bubble so multiple tests can run on the same host without colliding on
+    # ports, container names, or k3d cluster names.
+    #
+    #   Outer container (--runtime=sysbox-runc):  docker:25-dind
+    #     └─ Inner dockerd (private to this Sysbox)
+    #         └─ dt-enablement test container (--privileged, --network=host
+    #            within the Sysbox)
+    #             └─ k3d cluster (server + LB, all confined to inner dockerd)
+    #
+    # The host docker daemon never sees the k3d containers; only the outer
+    # Sysbox container is visible from `docker ps` on the host.
     workspace = f"/workspaces/{repo_name}"
-    env_file = f"{repo_dir}/.devcontainer/.env"
-    container_name = f"test-{job_id[-32:]}"
+    env_file_inside = f"{workspace}/.devcontainer/.env"
+    sb_name = f"sb-{job_id[-32:]}"
+    inner_name = "dt"
 
     sections = []
     rc = 0
@@ -81,18 +87,46 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     deadline = start_time + TEST_TIMEOUT
 
     try:
-        # 1. Start container detached
+        # 1. Start outer Sysbox container running docker:25-dind
         run_cmd = [
             "docker", "run",
             "-d",
-            "--name", container_name,
-            "--init",
-            "--privileged",
-            "--network=host",
-            "--env-file", env_file,
-            "-v", "/var/run/docker.sock:/var/run/docker.sock",
-            "-v", "/lib/modules:/lib/modules",
+            "--runtime=sysbox-runc",
+            "--name", sb_name,
             "-v", f"{repo_dir}:{workspace}",
+            "docker:25-dind",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+            rc = proc.returncode
+            raise RuntimeError("sysbox container start failed")
+
+        # 2. Wait for the Sysbox's inner dockerd to be ready
+        await _wait_for_inner_docker(sb_name)
+
+        # 3. Pull dt-enablement image inside the Sysbox (cached after first run)
+        pull = await asyncio.create_subprocess_exec(
+            "docker", "exec", sb_name,
+            "docker", "pull", TEST_IMAGE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await pull.wait()
+
+        # 4. Start the inner dt-enablement container (bind-mount workspace
+        #    from the Sysbox's view, mount the inner docker.sock so k3d can
+        #    operate inside the Sysbox).
+        inner_run = [
+            "docker", "exec", sb_name,
+            "docker", "run", "-d",
+            "--init", "--privileged", "--network=host",
+            "--name", inner_name,
+            "--env-file", env_file_inside,
+            "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", f"{workspace}:{workspace}",
             "-w", workspace,
             "-e", "GIT_CONFIG_COUNT=1",
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
@@ -101,22 +135,21 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             "sleep", "infinity",
         ]
         proc = await asyncio.create_subprocess_exec(
-            *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *inner_run, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await proc.communicate()
+        _, err = await proc.communicate()
         if proc.returncode != 0:
-            sections.append(f"=== docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+            sections.append(f"=== inner docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
             rc = proc.returncode
-            raise RuntimeError("container start failed")
+            raise RuntimeError("inner container start failed")
 
-        # The dt-enablement entrypoint races us: it does
-        # `usermod -aG docker vscode && newgrp docker -- sleep infinity` after
-        # docker run -d returns. If we exec before that completes, vscode has
-        # no docker group → k3d cluster create fails with EACCES on docker.sock.
-        # Poll until vscode can talk to docker.
-        await _wait_for_docker_access(container_name)
+        # 5. Wait for vscode (inside dt) to have docker access. The dt-enablement
+        #    entrypoint adds vscode to the docker group asynchronously after
+        #    `docker run -d` returns; if we exec before that finishes, k3d
+        #    fails with EACCES on docker.sock.
+        await _wait_for_inner_dt_ready(sb_name, inner_name)
 
-        # 2. Run each step via docker exec, streaming output to Redis
+        # 6. Run each step via nested docker exec, streaming output to Redis
         steps = [
             ("postCreateCommand", "./.devcontainer/post-create.sh"),
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
@@ -132,10 +165,12 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             if livelog_key:
                 await redis_pool.append(livelog_key, header)
             remaining = max(60, int(deadline - time.time()))
+            # docker exec <sysbox> docker exec <dt> bash -lc <script>
             exec_cmd = [
+                "docker", "exec", sb_name,
                 "docker", "exec",
                 "-w", workspace,
-                container_name,
+                inner_name,
                 "bash", "-lc", script,
             ]
             try:
@@ -171,13 +206,14 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         if rc == 0:
             rc = 1
     finally:
-        # 3. Always tear down the container
+        # 7. Always tear down the outer Sysbox container — everything inside
+        #    (inner dockerd, dt-enablement, k3d cluster) goes with it.
         try:
             kill_proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", container_name,
+                "docker", "rm", "-f", sb_name,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(kill_proc.wait(), timeout=30)
+            await asyncio.wait_for(kill_proc.wait(), timeout=60)
         except Exception:
             pass
 
@@ -190,9 +226,8 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     )
     log_file.write_text(_mask_secrets(header + "".join(sections)))
 
-    # Best-effort cleanup: clusters created by post-create.sh
-    await _cleanup_clusters()
-    # Wipe the per-job workspace
+    # No host-level cleanup needed — Sysbox container teardown above already
+    # took the inner dockerd, dt-enablement, and k3d cluster with it.
     shutil.rmtree(work_dir, ignore_errors=True)
 
     return {
@@ -262,16 +297,29 @@ async def _stream_to_redis(proc, redis_pool, livelog_key, timeout_s: int) -> str
     return "".join(full)
 
 
-async def _wait_for_docker_access(container_name: str, timeout_s: int = 60):
-    """Block until vscode inside the container can talk to docker.sock.
-
-    The entrypoint adds vscode to the docker group asynchronously after
-    `docker run -d` returns; we have to wait or k3d fails with EACCES.
-    """
+async def _wait_for_inner_docker(sb_name: str, timeout_s: int = 60):
+    """Wait until the Sysbox container's inner dockerd is responsive."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", container_name,
+            "docker", "exec", sb_name,
+            "docker", "info",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        if (await proc.wait()) == 0:
+            return
+        await asyncio.sleep(1)
+    raise RuntimeError(f"inner dockerd never came up in {sb_name}")
+
+
+async def _wait_for_inner_dt_ready(sb_name: str, inner_name: str, timeout_s: int = 60):
+    """Wait until vscode inside the dt-enablement container can talk to docker."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", sb_name,
+            "docker", "exec", inner_name,
             "sh", "-c", "docker info >/dev/null 2>&1",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
@@ -279,7 +327,7 @@ async def _wait_for_docker_access(container_name: str, timeout_s: int = 60):
         if (await proc.wait()) == 0:
             return
         await asyncio.sleep(1)
-    raise RuntimeError("container ready check timed out (no docker.sock access)")
+    raise RuntimeError(f"vscode never got docker access in {sb_name}/{inner_name}")
 
 
 def _mask_secrets(content: str) -> str:
