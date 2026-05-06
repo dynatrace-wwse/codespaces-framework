@@ -155,15 +155,17 @@ function buildCell(build) {
     if (!build) return '<span class="status-none">—</span>';
     const cls = build.passed ? 'status-pass' : 'status-fail';
     const icon = build.passed ? 'PASS' : 'FAIL';
-    let status;
     if (build.job_id) {
-        status = `<a href="/api/jobs/${build.job_id}/log" target="_blank" class="${cls} log-link" title="View worker log">${icon}</a>`;
-    } else if (build.run_url) {
-        status = `<a href="${build.run_url}" target="_blank" rel="noopener" class="${cls} log-link" title="View run on GitHub Actions">${icon}</a>`;
-    } else {
-        status = `<span class="${cls}">${icon}</span>`;
+        // Open in the same modal as live runs (reuses ANSI rendering + auto-tail)
+        return `<a href="#" class="${cls} log-link"
+                   data-final-job="${build.job_id}"
+                   title="View worker log">${icon}</a>`;
     }
-    return `${status}`;
+    if (build.run_url) {
+        // GitHub Actions logs live on github.com — keep external link
+        return `<a href="${build.run_url}" target="_blank" rel="noopener" class="${cls} log-link" title="View run on GitHub Actions">${icon}</a>`;
+    }
+    return `<span class="${cls}">${icon}</span>`;
 }
 
 async function triggerBuildFromRow(repo, safeRepo, btn) {
@@ -194,6 +196,79 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
     }
 }
 
+// ── ANSI colour rendering ───────────────────────────────────────────────────
+// Convert raw ANSI escape sequences (\x1b[...m) into <span style="...">
+// so the log retains the same coloring you'd see in a terminal.
+
+const ANSI_BASIC = {
+    '30':'#000000', '31':'#cd3131', '32':'#0dbc79', '33':'#e5e510',
+    '34':'#2472c8', '35':'#bc3fbc', '36':'#11a8cd', '37':'#e5e5e5',
+    '90':'#666666', '91':'#f14c4c', '92':'#23d18b', '93':'#f5f543',
+    '94':'#3b8eea', '95':'#d670d6', '96':'#29b8db', '97':'#ffffff',
+};
+
+function ansi256(n) {
+    if (n < 16) return ANSI_BASIC[String(n < 8 ? 30 + n : 90 + (n - 8))];
+    if (n < 232) {
+        n -= 16;
+        const r = Math.floor(n / 36) * 51;
+        const g = Math.floor((n / 6) % 6) * 51;
+        const b = (n % 6) * 51;
+        return `rgb(${r},${g},${b})`;
+    }
+    const v = (n - 232) * 10 + 8;
+    return `rgb(${v},${v},${v})`;
+}
+
+function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function ansiToHtml(text) {
+    let out = '';
+    let i = 0;
+    let openSpans = 0;
+    // Match \x1b[...m
+    const re = /\x1b\[([0-9;]*)m/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        out += escapeHtml(text.slice(i, m.index));
+        i = m.index + m[0].length;
+        const codes = m[1].split(';').filter(c => c !== '');
+        if (codes.length === 0 || codes[0] === '0') {
+            while (openSpans-- > 0) out += '</span>';
+            openSpans = 0;
+            continue;
+        }
+        let color = null, bold = false, j = 0;
+        while (j < codes.length) {
+            const c = codes[j];
+            if (c === '0') {
+                while (openSpans-- > 0) out += '</span>';
+                openSpans = 0;
+            } else if (c === '1') {
+                bold = true;
+            } else if (c === '38' && codes[j+1] === '5' && codes[j+2] !== undefined) {
+                color = ansi256(parseInt(codes[j+2], 10));
+                j += 2;
+            } else if (ANSI_BASIC[c]) {
+                color = ANSI_BASIC[c];
+            }
+            j++;
+        }
+        if (color || bold) {
+            const styles = [];
+            if (color) styles.push('color:' + color);
+            if (bold) styles.push('font-weight:bold');
+            out += `<span style="${styles.join(';')}">`;
+            openSpans++;
+        }
+    }
+    out += escapeHtml(text.slice(i));
+    while (openSpans-- > 0) out += '</span>';
+    return out;
+}
+
 // ── Live log modal ──────────────────────────────────────────────────────────
 
 let livelogPoll = null;
@@ -201,20 +276,23 @@ let livelogPoll = null;
 function openLiveLog(jobId, title) {
     document.getElementById('livelog-title').textContent = title;
     const pre = document.getElementById('livelog-pre');
-    pre.textContent = 'Loading…';
+    pre.innerHTML = '<em style="color:var(--text-muted)">Loading…</em>';
     document.getElementById('livelog-modal').hidden = false;
     if (livelogPoll) clearInterval(livelogPoll);
+
     const fetchOnce = async () => {
         try {
-            // Try livelog first (running). 404 → fall back to final log.
+            // Try livelog first (running). 404 → fall back to final log + stop polling.
             let res = await fetch(`/api/jobs/${jobId}/livelog`);
             if (res.status === 404) {
                 res = await fetch(`/api/jobs/${jobId}/log`);
                 if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
             }
             if (res.ok) {
-                pre.textContent = await res.text();
-                pre.scrollTop = pre.scrollHeight;
+                const text = await res.text();
+                const wasAtBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+                pre.innerHTML = ansiToHtml(text);
+                if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
             }
         } catch {}
     };
@@ -228,13 +306,39 @@ function closeLiveLog() {
 }
 
 document.addEventListener('click', e => {
-    if (e.target.id === 'livelog-close') closeLiveLog();
-    const link = e.target.closest('a.spinner');
-    if (link && link.dataset.jobId) {
+    if (e.target.id === 'livelog-close') { closeLiveLog(); return; }
+
+    // Spinner (running test) → open live-tailing modal
+    const spin = e.target.closest('a.spinner');
+    if (spin && spin.dataset.jobId) {
         e.preventDefault();
-        const row = link.closest('tr');
+        const row = spin.closest('tr');
         const repo = row ? row.dataset.repo : '';
-        openLiveLog(link.dataset.jobId, `${repo} (${link.dataset.arch})`);
+        openLiveLog(spin.dataset.jobId, `${repo} (${spin.dataset.arch})`);
+        return;
+    }
+
+    // Final PASS/FAIL link → open same modal with the historical log
+    const finalLink = e.target.closest('a[data-final-job]');
+    if (finalLink) {
+        e.preventDefault();
+        const row = finalLink.closest('tr');
+        const repo = row ? row.dataset.repo : '';
+        const arch = finalLink.closest('td')?.dataset.arch || '';
+        openLiveLog(finalLink.dataset.finalJob,
+                    `${repo}${arch ? ' (' + arch + ')' : ''}`);
+        return;
+    }
+
+    // ESC closes the modal — handled separately, but treat backdrop click as close
+    if (e.target.id === 'livelog-modal') closeLiveLog();
+});
+
+// ESC closes the live-log modal
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('livelog-modal');
+        if (modal && !modal.hidden) closeLiveLog();
     }
 });
 
