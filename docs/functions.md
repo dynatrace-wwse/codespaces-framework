@@ -34,10 +34,20 @@ printError "Deployment failed — check kubectl events"
 | Function | Description |
 |---|---|
 | `setUpTerminal` | Installs Powerlevel10k, sources framework functions, and adds aliases to `.zshrc` |
+| `setUpHostTerminal` | Converts a plain Ubuntu server to Zsh + Oh My Zsh + Powerlevel10k with aliases — no framework functions bound to the shell |
 | `bindFunctionsInShell` | Appends the `source_framework.sh` loader and greeting call to `.zshrc` |
 | `setupAliases` | Adds shell and `kubectl` convenience aliases to `.zshrc` |
 
-`setUpTerminal` is called once during container creation. Aliases added by `setupAliases`:
+`setUpTerminal` is called once during container creation. `setUpHostTerminal` is for standalone Ubuntu servers — run it once after cloning the framework:
+
+```bash
+source .devcontainer/util/source_framework.sh && setUpHostTerminal
+exec zsh   # or log out and back in
+```
+
+`setUpHostTerminal` installs zsh and Oh My Zsh if missing, clones the Powerlevel10k theme, deploys the framework's `.zshrc` and `.p10k.zsh` configs, and appends aliases. It does **not** bind framework functions into the shell. Type `p10k configure` inside zsh to reconfigure the prompt.
+
+Aliases added by `setupAliases`:
 
 ```
 las     → ls -las          c       → clear
