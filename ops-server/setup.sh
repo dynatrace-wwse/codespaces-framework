@@ -52,6 +52,7 @@ apt-get install -y -qq \
     wget \
     unzip \
     jq \
+    gettext-base \
     python3 \
     python3-pip \
     python3-venv \
@@ -162,6 +163,47 @@ cp "${OPS_DIR}/codespaces-framework/ops-server/nginx/ops-server.conf" \
     /etc/nginx/sites-available/ops-server
 ln -sf /etc/nginx/sites-available/ops-server /etc/nginx/sites-enabled/ops-server
 rm -f /etc/nginx/sites-enabled/default
+
+# ── Install oauth2-proxy (GitHub SSO for dashboard writes) ──────────────────
+if ! command -v oauth2-proxy &>/dev/null; then
+    info "Installing oauth2-proxy..."
+    OAUTH2_VERSION="v7.7.1"
+    OAUTH2_TARBALL="oauth2-proxy-${OAUTH2_VERSION}.linux-${ARCH_GO}.tar.gz"
+    curl -fsSL -o /tmp/${OAUTH2_TARBALL} \
+        "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/${OAUTH2_VERSION}/${OAUTH2_TARBALL}"
+    tar -xzf /tmp/${OAUTH2_TARBALL} -C /tmp/
+    mv /tmp/oauth2-proxy-${OAUTH2_VERSION}.linux-${ARCH_GO}/oauth2-proxy /usr/local/bin/
+    chmod +x /usr/local/bin/oauth2-proxy
+    rm -rf /tmp/oauth2-proxy-${OAUTH2_VERSION}* /tmp/${OAUTH2_TARBALL}
+fi
+
+# Create oauth2-proxy system user + config dir
+id -u oauth2-proxy &>/dev/null || useradd -r -s /usr/sbin/nologin oauth2-proxy
+mkdir -p /etc/oauth2-proxy
+chown root:oauth2-proxy /etc/oauth2-proxy
+chmod 750 /etc/oauth2-proxy
+
+# Render oauth2-proxy config from template — pulls secrets from ops user's .env
+if [[ -f "${OPS_HOME}/.env" ]]; then
+    info "Rendering oauth2-proxy config from ~/.env..."
+    set +u
+    # shellcheck disable=SC1091
+    source "${OPS_HOME}/.env"
+    export OAUTH2_CLIENT_ID OAUTH2_CLIENT_SECRET OAUTH2_GITHUB_ORG OAUTH2_COOKIE_SECRET
+    envsubst < "${OPS_DIR}/codespaces-framework/ops-server/oauth2-proxy/oauth2-proxy.cfg.template" \
+        > /etc/oauth2-proxy/oauth2-proxy.cfg
+    chown root:oauth2-proxy /etc/oauth2-proxy/oauth2-proxy.cfg
+    chmod 640 /etc/oauth2-proxy/oauth2-proxy.cfg
+    set -u
+
+    cp "${OPS_DIR}/codespaces-framework/ops-server/systemd/oauth2-proxy.service" \
+        /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable oauth2-proxy.service
+else
+    warn "${OPS_HOME}/.env not found — skipping oauth2-proxy config render."
+    warn "After filling .env with OAUTH2_* values, re-run: sudo bash setup.sh"
+fi
 
 # ── Create directories ──────────────────────────────────────────────────────
 sudo -u "${OPS_USER}" mkdir -p \

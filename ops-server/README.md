@@ -138,13 +138,39 @@ cp ~/enablement-framework/codespaces-framework/ops-server/agents/env.template ~/
 nano ~/.env
 
 # Required values:
-#   WEBHOOK_SECRET     — generate with: openssl rand -hex 32
-#   ANTHROPIC_API_KEY  — from console.anthropic.com
-#   DT_ENVIRONMENT     — https://geu80787.apps.dynatrace.com
-#   DT_OPERATOR_TOKEN  — Dynatrace operator token
-#   DT_INGEST_TOKEN    — Dynatrace ingest token
-#   DT_API_TOKEN       — Dynatrace API token (for MCP + dtctl)
+#   WEBHOOK_SECRET        — generate with: openssl rand -hex 32
+#   ANTHROPIC_API_KEY     — from console.anthropic.com
+#   DT_ENVIRONMENT        — https://geu80787.apps.dynatrace.com
+#   DT_OPERATOR_TOKEN     — Dynatrace operator token
+#   DT_INGEST_TOKEN       — Dynatrace ingest token
+#   DT_API_TOKEN          — Dynatrace API token (for MCP + dtctl)
+#   OAUTH2_CLIENT_ID      — GitHub OAuth App Client ID (see step 4a)
+#   OAUTH2_CLIENT_SECRET  — GitHub OAuth App Client Secret
+#   OAUTH2_GITHUB_ORG     — GitHub org allowed to sign in (default: dynatrace-wwse)
+#   OAUTH2_COOKIE_SECRET  — generate with: openssl rand -base64 32 | tr -- '+/' '-_'
 ```
+
+### 4a. Create the GitHub OAuth App (for dashboard SSO)
+
+The dashboard reads are public, but **build triggers** require GitHub SSO via
+[oauth2-proxy](https://oauth2-proxy.github.io/). Members of the configured GitHub
+org can sign in; everyone else can view but cannot trigger anything.
+
+1. Go to: `https://github.com/organizations/dynatrace-wwse/settings/applications/new`
+2. Fill in:
+   | Field | Value |
+   |---|---|
+   | Application name | `Enablement Ops Dashboard` |
+   | Homepage URL | `https://autonomous-enablements.whydevslovedynatrace.com` |
+   | Authorization callback URL | `https://autonomous-enablements.whydevslovedynatrace.com/oauth2/callback` |
+3. Save the **Client ID** and click **Generate a new client secret**. Copy both into `~/.env`.
+4. Re-run `sudo bash ~/enablement-framework/codespaces-framework/ops-server/setup.sh` —
+   the script will render `/etc/oauth2-proxy/oauth2-proxy.cfg` from
+   `~/.env` and install the `oauth2-proxy.service` systemd unit.
+
+> The OAuth secret is **never** committed. The repo only ships
+> `ops-server/oauth2-proxy/oauth2-proxy.cfg.template`, which `setup.sh`
+> renders via `envsubst` from `~/.env`.
 
 ### 5. Configure Claude Code MCP
 
@@ -316,10 +342,14 @@ ops-server/
 │   ├── CLAUDE.md              # Claude Code agent instructions
 │   ├── mcp.json               # Dynatrace MCP server config
 │   ├── dtctl.yaml             # dtctl CLI config template
-│   └── env.template           # Environment variables template
+│   └── env.template           # Environment variables template (incl. OAUTH2_*)
+├── oauth2-proxy/
+│   └── oauth2-proxy.cfg.template  # GitHub SSO config (rendered by setup.sh)
 └── systemd/
     ├── ops-webhook.service    # Webhook server (always-on)
     ├── ops-worker.service     # Worker manager (always-on)
+    ├── ops-dashboard.service  # Dashboard UI (always-on)
+    ├── oauth2-proxy.service   # GitHub SSO sidecar (always-on)
     ├── ops-nightly.service    # Nightly test runner (oneshot)
     ├── ops-nightly.timer      # Nightly cron (02:00 UTC)
     ├── ops-sync-daemon.service # Sync status check (oneshot)
