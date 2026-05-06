@@ -122,8 +122,18 @@ class WorkerAgent:
             self.active_jobs[job_id] = job
             log.info("Starting: %s (%s)", job_id, job["repo"])
 
+            # Mark this (repo, arch) as running so the dashboard can show a
+            # spinner. TTL of 1h is safety net in case we crash before clear.
+            running_key = f"job:running:{job['repo']}:{job.get('arch', WORKER_ARCH)}"
+            await self.pool.set(running_key, json.dumps({
+                "job_id": job_id,
+                "ref": job.get("ref") or job.get("head_branch") or "main",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "worker_id": WORKER_ID,
+            }), ex=3600)
+
             try:
-                result = await execute_integration_test(job)
+                result = await execute_integration_test(job, redis_pool=self.pool)
                 job["result"] = result
                 job["status"] = "completed"
             except Exception as e:
@@ -135,6 +145,7 @@ class WorkerAgent:
                 await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 await self.pool.ltrim("jobs:completed", -500, -1)
+                await self.pool.delete(running_key)
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished: %s → %s", job_id, job["status"])
 

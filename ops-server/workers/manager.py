@@ -90,6 +90,17 @@ class WorkerManager:
             self.active_jobs[job_id] = job
             log.info("Starting job: %s (%s on %s)", job_id, job["type"], job["repo"])
 
+            # Track running state for the dashboard (only meaningful for tests).
+            running_key = None
+            if job.get("type") == "integration-test":
+                running_key = f"job:running:{job['repo']}:{job.get('arch', 'arm64')}"
+                await self.pool.set(running_key, json.dumps({
+                    "job_id": job_id,
+                    "ref": job.get("ref") or job.get("head_branch") or "main",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "worker_id": "master",
+                }), ex=3600)
+
             try:
                 result = await self._dispatch(job)
                 job["result"] = result
@@ -102,8 +113,9 @@ class WorkerManager:
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
                 await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
-                # Trim to keep last 500 completed jobs
                 await self.pool.ltrim("jobs:completed", -500, -1)
+                if running_key:
+                    await self.pool.delete(running_key)
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished job: %s → %s", job_id, job["status"])
 
@@ -288,13 +300,22 @@ class WorkerManager:
                 rc = proc.returncode
                 raise RuntimeError("container start failed")
 
+            # Wait until vscode inside the container has docker group access
+            # (entrypoint sets this up asynchronously after docker run -d).
+            await self._wait_for_docker_access(container_name)
+
             steps = [
                 ("postCreateCommand", "./.devcontainer/post-create.sh"),
                 ("postStartCommand",  "./.devcontainer/post-start.sh"),
                 ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
             ]
+            livelog_key = f"job:livelog:{job_id}"
+            await self.pool.set(livelog_key, "", ex=3600)
+
             for label, script in steps:
-                sections.append(f"\n=== {label} ===\n")
+                header = f"\n=== {label} ===\n"
+                sections.append(header)
+                await self.pool.append(livelog_key, header)
                 remaining = max(60, int(deadline - time.time()))
                 exec_cmd = [
                     "docker", "exec",
@@ -308,16 +329,16 @@ class WorkerManager:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
                     )
-                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=remaining)
-                    sections.append(out.decode(errors="replace"))
+                    step_out = await self._stream_to_redis(proc, livelog_key, remaining)
+                    sections.append(step_out)
                     if proc.returncode != 0:
                         rc = proc.returncode
-                        sections.append(f"\n=== {label} exited with rc={rc} — stopping ===\n")
+                        msg = f"\n=== {label} exited with rc={rc} — stopping ===\n"
+                        sections.append(msg)
+                        await self.pool.append(livelog_key, msg)
                         break
                 except asyncio.TimeoutError:
                     proc.kill()
-                    out, _ = await proc.communicate()
-                    sections.append(out.decode(errors="replace"))
                     sections.append(f"\n=== {label} timed out ===\n")
                     rc = 124
                     timed_out = True
@@ -357,6 +378,65 @@ class WorkerManager:
             "timed_out": timed_out,
             "log_file": str(log_file),
         }
+
+    async def _stream_to_redis(self, proc, livelog_key: str, timeout_s: int) -> str:
+        """Stream proc.stdout to ``livelog_key`` (~1s flush) for the dashboard."""
+        full = []
+        pending = []
+        last_flush = time.time()
+        deadline = last_flush + timeout_s
+        MAX_LIVE_BYTES = 256 * 1024
+
+        async def flush():
+            if not pending:
+                return
+            chunk = self._mask_secrets("".join(pending))
+            pending.clear()
+            try:
+                await self.pool.append(livelog_key, chunk)
+                cur = await self.pool.strlen(livelog_key)
+                if cur and cur > MAX_LIVE_BYTES:
+                    tail = await self.pool.getrange(livelog_key, cur - MAX_LIVE_BYTES, cur)
+                    await self.pool.set(livelog_key, tail, ex=3600)
+            except Exception as e:
+                log.warning("livelog flush failed: %s", e)
+
+        while True:
+            if time.time() > deadline:
+                await flush()
+                raise asyncio.TimeoutError()
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+            except asyncio.TimeoutError:
+                line = b""
+            if not line:
+                if proc.returncode is not None or proc.stdout.at_eof():
+                    break
+                if time.time() - last_flush > 1.0:
+                    await flush(); last_flush = time.time()
+                continue
+            decoded = line.decode(errors="replace")
+            full.append(decoded); pending.append(decoded)
+            if time.time() - last_flush > 1.0:
+                await flush(); last_flush = time.time()
+        await proc.wait()
+        await flush()
+        return "".join(full)
+
+    async def _wait_for_docker_access(self, container_name: str, timeout_s: int = 60):
+        """Block until vscode inside the container can reach docker.sock."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_name,
+                "sh", "-c", "docker info >/dev/null 2>&1",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            if (await proc.wait()) == 0:
+                return
+            await asyncio.sleep(1)
+        raise RuntimeError("container ready check timed out (no docker.sock access)")
 
     def _mask_secrets(self, content: str) -> str:
         """Redact known DT tokens before writing the log."""

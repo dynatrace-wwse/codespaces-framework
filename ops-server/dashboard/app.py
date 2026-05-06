@@ -163,16 +163,50 @@ async def api_workers():
 
 @app.get("/api/builds/running")
 async def api_builds_running():
-    """Currently executing jobs (from all workers)."""
-    # Active jobs are tracked in worker hashes — we can't see them directly
-    # Instead, show queue depths as a proxy
+    """Currently executing tests, plus pending queue depths.
+
+    Workers write a ``job:running:<repo>:<arch>`` key when they pick a job up
+    and delete it when done. Used by the dashboard to render a spinner on the
+    matching repo row.
+    """
     queues = {}
     for arch in ("arm64", "amd64"):
         queues[arch] = await pool.llen(f"queue:test:{arch}")
     queues["agent"] = await pool.llen("queue:agent")
-    queues["sync"] = await pool.llen("queue:sync")
+    queues["sync"]  = await pool.llen("queue:sync")
 
-    return {"queues": queues}
+    running = []
+    async for key in pool.scan_iter(match="job:running:*"):
+        # key shape: job:running:<owner>/<name>:<arch>
+        parts = key.split(":", 3)
+        if len(parts) < 4:
+            continue
+        repo, arch = parts[2], parts[3]
+        raw = await pool.get(key)
+        try:
+            meta = json.loads(raw) if raw else {}
+        except Exception:
+            meta = {}
+        running.append({
+            "repo": repo,
+            "arch": arch,
+            "job_id": meta.get("job_id"),
+            "ref": meta.get("ref"),
+            "started_at": meta.get("started_at"),
+            "worker_id": meta.get("worker_id"),
+        })
+
+    return {"queues": queues, "running": running}
+
+
+@app.get("/api/jobs/{job_id}/livelog")
+async def api_job_livelog(job_id: str):
+    """Plain-text live log for an in-flight test (updated ~1s by the worker)."""
+    from fastapi.responses import PlainTextResponse
+    content = await pool.get(f"job:livelog:{job_id}")
+    if content is None:
+        return PlainTextResponse("(no livelog — job may have finished)", status_code=404)
+    return PlainTextResponse(content)
 
 
 @app.get("/api/nightly/latest")

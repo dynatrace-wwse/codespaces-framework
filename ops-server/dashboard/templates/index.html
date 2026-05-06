@@ -46,7 +46,7 @@
                     <th>Arch</th>
                     <th>ARM64</th>
                     <th>AMD64</th>
-                    <th>Duration</th>
+                    <th>Branch</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -55,6 +55,17 @@
             </tbody>
         </table>
     </section>
+
+    <!-- Live log overlay -->
+    <div id="livelog-modal" class="modal" hidden>
+        <div class="modal-inner">
+            <header class="modal-header">
+                <h3 id="livelog-title">Live log</h3>
+                <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+            </header>
+            <pre id="livelog-pre"></pre>
+        </div>
+    </div>
 
     <!-- Workers View -->
     <section id="view-workers" class="view">

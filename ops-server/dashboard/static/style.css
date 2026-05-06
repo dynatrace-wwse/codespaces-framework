@@ -166,6 +166,68 @@ th {
 }
 .log-link:hover { border-bottom-style: solid; }
 
+/* Running indicator (spinner) on a build cell */
+td.running { background: rgba(88, 166, 255, 0.08); }
+.spinner {
+    display: inline-block;
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 4px;
+    animation: spin 1.4s linear infinite;
+    text-decoration: none;
+    border-bottom: none;
+}
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* Branch input + arch select inside table rows */
+.branch-input,
+.arch-select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 0.8rem;
+}
+.branch-input { width: 110px; }
+.arch-select { margin-right: 4px; }
+
+/* Live-log modal */
+.modal {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+}
+.modal-inner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: min(1100px, 95vw);
+    height: min(80vh, 800px);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+}
+.modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+.modal-header h3 { font-size: 0.95rem; font-weight: 600; }
+.modal-inner pre {
+    flex: 1;
+    overflow: auto;
+    padding: 12px 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #0a0d11;
+    color: #d0d7de;
+}
+
 .arch-badge {
     display: inline-block;
     padding: 2px 8px;

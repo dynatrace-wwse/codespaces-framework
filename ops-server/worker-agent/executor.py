@@ -7,15 +7,19 @@ The repo's GHA workflow uses devcontainers/ci@v0.3 to:
   4. Execute postStartCommand
   5. Execute the user runCmd: zsh .devcontainer/test/integration.sh
 
-We replicate that as a single ``docker run`` that chains those steps so
-each PR is tested the same way the GHA workflow tests it.
+We replicate that with: ``docker run -d ... sleep infinity`` + per-step
+``docker exec`` so each PR is tested the same way GHA tests it, while
+streaming live output to Redis for the dashboard.
 """
 
 import asyncio
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
+
+import redis.asyncio as redis_async
 
 from .config import (
     REPOS_DIR,
@@ -32,8 +36,12 @@ from .config import (
 log = logging.getLogger("ops-worker-agent")
 
 
-async def execute_integration_test(job: dict) -> dict:
-    """Run an integration test against the PR's branch (or main, for nightly)."""
+async def execute_integration_test(job: dict, redis_pool=None) -> dict:
+    """Run an integration test against the PR's branch (or main, for nightly).
+
+    If ``redis_pool`` is given, live output is streamed to ``job:livelog:<id>``
+    every 2s while the test runs so the dashboard can tail it.
+    """
     repo      = job["repo"]                       # base repo, e.g. dynatrace-wwse/codespaces-framework
     head_repo = job.get("head_repo") or repo      # for fork PRs (head.repo.full_name), else same as base
     ref       = job.get("ref") or job.get("head_branch") or "main"
@@ -101,14 +109,28 @@ async def execute_integration_test(job: dict) -> dict:
             rc = proc.returncode
             raise RuntimeError("container start failed")
 
-        # 2. Run each step via docker exec; stop on first failure
+        # The dt-enablement entrypoint races us: it does
+        # `usermod -aG docker vscode && newgrp docker -- sleep infinity` after
+        # docker run -d returns. If we exec before that completes, vscode has
+        # no docker group → k3d cluster create fails with EACCES on docker.sock.
+        # Poll until vscode can talk to docker.
+        await _wait_for_docker_access(container_name)
+
+        # 2. Run each step via docker exec, streaming output to Redis
         steps = [
             ("postCreateCommand", "./.devcontainer/post-create.sh"),
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
             ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
         ]
+        livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
+        if livelog_key:
+            await redis_pool.set(livelog_key, "", ex=3600)
+
         for label, script in steps:
-            sections.append(f"\n=== {label} ===\n")
+            header = f"\n=== {label} ===\n"
+            sections.append(header)
+            if livelog_key:
+                await redis_pool.append(livelog_key, header)
             remaining = max(60, int(deadline - time.time()))
             exec_cmd = [
                 "docker", "exec",
@@ -120,18 +142,26 @@ async def execute_integration_test(job: dict) -> dict:
                 proc = await asyncio.create_subprocess_exec(
                     *exec_cmd,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,  # interleave so order matches GHA
+                    stderr=asyncio.subprocess.STDOUT,
                 )
-                out, _ = await asyncio.wait_for(proc.communicate(), timeout=remaining)
-                sections.append(out.decode(errors="replace"))
+                step_out = await _stream_to_redis(
+                    proc, redis_pool, livelog_key, remaining
+                )
+                sections.append(step_out)
                 if proc.returncode != 0:
                     rc = proc.returncode
-                    sections.append(f"\n=== {label} exited with rc={rc} — stopping ===\n")
+                    msg = f"\n=== {label} exited with rc={rc} — stopping ===\n"
+                    sections.append(msg)
+                    if livelog_key:
+                        await redis_pool.append(livelog_key, msg)
                     break
             except asyncio.TimeoutError:
                 proc.kill()
-                out, _ = await proc.communicate()
-                sections.append(out.decode(errors="replace"))
+                try:
+                    rest = await proc.stdout.read()
+                    sections.append(rest.decode(errors="replace"))
+                except Exception:
+                    pass
                 sections.append(f"\n=== {label} timed out ===\n")
                 rc = 124
                 timed_out = True
@@ -175,6 +205,81 @@ async def execute_integration_test(job: dict) -> dict:
         "timed_out": timed_out,
         "log_file": str(log_file),
     }
+
+
+async def _stream_to_redis(proc, redis_pool, livelog_key, timeout_s: int) -> str:
+    """Read proc.stdout line-by-line and append to ``livelog_key`` every ~1s.
+
+    Returns the full captured output. Caps the live key at 256KB by trimming
+    to the tail when the buffer grows; the on-disk log keeps the full thing.
+    """
+    full = []
+    pending = []
+    last_flush = time.time()
+    deadline = last_flush + timeout_s
+    MAX_LIVE_BYTES = 256 * 1024
+
+    async def flush():
+        if not pending or redis_pool is None or livelog_key is None:
+            return
+        chunk = "".join(pending)
+        pending.clear()
+        try:
+            await redis_pool.append(livelog_key, _mask_secrets(chunk))
+            # Trim if it grew past max
+            current = await redis_pool.strlen(livelog_key)
+            if current and current > MAX_LIVE_BYTES:
+                tail = await redis_pool.getrange(livelog_key, current - MAX_LIVE_BYTES, current)
+                await redis_pool.set(livelog_key, tail, ex=3600)
+        except Exception as e:
+            log.warning("livelog flush failed: %s", e)
+
+    while True:
+        if time.time() > deadline:
+            await flush()
+            raise asyncio.TimeoutError()
+        try:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+        except asyncio.TimeoutError:
+            line = b""
+        if not line:
+            if proc.returncode is not None or proc.stdout.at_eof():
+                break
+            # No data this tick — flush what we have
+            if time.time() - last_flush > 1.0:
+                await flush()
+                last_flush = time.time()
+            continue
+        decoded = line.decode(errors="replace")
+        full.append(decoded)
+        pending.append(decoded)
+        if time.time() - last_flush > 1.0:
+            await flush()
+            last_flush = time.time()
+
+    await proc.wait()
+    await flush()
+    return "".join(full)
+
+
+async def _wait_for_docker_access(container_name: str, timeout_s: int = 60):
+    """Block until vscode inside the container can talk to docker.sock.
+
+    The entrypoint adds vscode to the docker group asynchronously after
+    `docker run -d` returns; we have to wait or k3d fails with EACCES.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", container_name,
+            "sh", "-c", "docker info >/dev/null 2>&1",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        if (await proc.wait()) == 0:
+            return
+        await asyncio.sleep(1)
+    raise RuntimeError("container ready check timed out (no docker.sock access)")
 
 
 def _mask_secrets(content: str) -> str:

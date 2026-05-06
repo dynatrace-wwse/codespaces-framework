@@ -70,6 +70,40 @@ async function checkHealth() {
 
 // ── Fleet View ──────────────────────────────────────────────────────────────
 
+// repo+arch → { job_id, ref, started_at } when a test is currently running.
+// Refreshed every poll so we can show spinners.
+let runningMap = {};
+
+async function loadRunning() {
+    try {
+        const res = await fetch(`${API}/api/builds/running`);
+        const data = await res.json();
+        runningMap = {};
+        for (const r of (data.running || [])) {
+            runningMap[`${r.repo}|${r.arch}`] = r;
+        }
+        // Update spinners on existing rows without re-rendering everything
+        document.querySelectorAll('tr[data-repo]').forEach(row => {
+            const repo = row.dataset.repo;
+            for (const arch of ['arm64', 'amd64']) {
+                const cell = row.querySelector(`td[data-arch="${arch}"]`);
+                if (!cell) continue;
+                const isRunning = !!runningMap[`${repo}|${arch}`];
+                cell.classList.toggle('running', isRunning);
+                let spinner = cell.querySelector('.spinner');
+                if (isRunning && !spinner) {
+                    const r = runningMap[`${repo}|${arch}`];
+                    cell.insertAdjacentHTML('afterbegin',
+                        `<a class="spinner log-link" title="View live log" href="#"
+                            data-job-id="${r.job_id}" data-arch="${arch}">⟳</a> `);
+                } else if (!isRunning && spinner) {
+                    spinner.remove();
+                }
+            }
+        });
+    } catch {}
+}
+
 async function loadFleet() {
     const res = await fetch(`${API}/api/repos`);
     const data = await res.json();
@@ -79,63 +113,130 @@ async function loadFleet() {
     tbody.innerHTML = data.repos.map(repo => {
         const arm = repo.builds.arm64;
         const amd = repo.builds.amd64;
-        return `<tr>
+        const safeRepo = repo.repo.replace(/[^a-z0-9-]/gi, '_');
+        return `<tr data-repo="${repo.repo}">
             <td><strong>${repo.name}</strong><br><span style="color:var(--text-muted);font-size:0.75rem">${repo.repo}</span></td>
             <td><span class="arch-badge">${repo.arch}</span></td>
-            <td>${buildCell(arm)}</td>
-            <td>${buildCell(amd)}</td>
-            <td>${repo.duration}</td>
+            <td data-arch="arm64">${buildCell(arm)}</td>
+            <td data-arch="amd64">${buildCell(amd)}</td>
             <td>
-                <button class="btn btn-small" ${disabled} onclick="triggerBuild('${repo.repo}', 'both')">Build All</button>
-                <button class="btn btn-small" ${disabled} onclick="triggerBuild('${repo.repo}', 'arm64')">ARM</button>
-                <button class="btn btn-small" ${disabled} onclick="triggerBuild('${repo.repo}', 'amd64')">AMD</button>
+                <input class="branch-input" id="branch-${safeRepo}"
+                       type="text" value="main" placeholder="main"
+                       size="10" autocomplete="off">
+            </td>
+            <td>
+                <select class="arch-select" id="arch-${safeRepo}" ${disabled}>
+                    <option value="both">both</option>
+                    <option value="arm64">arm64</option>
+                    <option value="amd64">amd64</option>
+                </select>
+                <button class="btn btn-small" ${disabled}
+                        onclick="triggerBuildFromRow('${repo.repo}', '${safeRepo}', this)">
+                    Trigger
+                </button>
             </td>
         </tr>`;
     }).join('');
 
     // Filter handlers
-    document.getElementById('repo-filter').addEventListener('input', e => {
+    const filt = document.getElementById('repo-filter');
+    filt.oninput = e => {
         const filter = e.target.value.toLowerCase();
         tbody.querySelectorAll('tr').forEach(row => {
             row.style.display = row.textContent.toLowerCase().includes(filter) ? '' : 'none';
         });
-    });
+    };
+
+    // Wire spinners that already exist on first paint
+    await loadRunning();
 }
 
 function buildCell(build) {
     if (!build) return '<span class="status-none">—</span>';
     const cls = build.passed ? 'status-pass' : 'status-fail';
     const icon = build.passed ? 'PASS' : 'FAIL';
-    const time = build.duration ? `${build.duration}s` : '';
     let status;
     if (build.job_id) {
-        status = `<a href="/api/jobs/${build.job_id}/log" target="_blank" class="${cls} log-link" title="View local worker log">${icon}</a>`;
+        status = `<a href="/api/jobs/${build.job_id}/log" target="_blank" class="${cls} log-link" title="View worker log">${icon}</a>`;
     } else if (build.run_url) {
         status = `<a href="${build.run_url}" target="_blank" rel="noopener" class="${cls} log-link" title="View run on GitHub Actions">${icon}</a>`;
     } else {
         status = `<span class="${cls}">${icon}</span>`;
     }
-    return `${status} <span style="color:var(--text-muted);font-size:0.75rem">${time}</span>`;
+    return `${status}`;
 }
 
-async function triggerBuild(repo, arch) {
+async function triggerBuildFromRow(repo, safeRepo, btn) {
     if (!authState.signedIn) {
         window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
         return;
     }
-    const res = await fetch(`${API}/api/builds/trigger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ repo, arch, requested_by: 'dashboard' }),
-    });
-    if (res.status === 401) {
-        // Session expired — bounce to sign-in
-        window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
-        return;
+    const branch = document.getElementById(`branch-${safeRepo}`).value.trim() || 'main';
+    const arch = document.getElementById(`arch-${safeRepo}`).value;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const res = await fetch(`${API}/api/builds/trigger`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ repo, arch, ref: branch, requested_by: 'dashboard' }),
+        });
+        if (res.status === 401) {
+            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            return;
+        }
+        if (!res.ok) {
+            alert('Trigger failed: HTTP ' + res.status);
+        }
+    } finally {
+        btn.disabled = false; btn.textContent = 'Trigger';
+        await loadRunning();
     }
-    loadWorkers();
 }
+
+// ── Live log modal ──────────────────────────────────────────────────────────
+
+let livelogPoll = null;
+
+function openLiveLog(jobId, title) {
+    document.getElementById('livelog-title').textContent = title;
+    const pre = document.getElementById('livelog-pre');
+    pre.textContent = 'Loading…';
+    document.getElementById('livelog-modal').hidden = false;
+    if (livelogPoll) clearInterval(livelogPoll);
+    const fetchOnce = async () => {
+        try {
+            // Try livelog first (running). 404 → fall back to final log.
+            let res = await fetch(`/api/jobs/${jobId}/livelog`);
+            if (res.status === 404) {
+                res = await fetch(`/api/jobs/${jobId}/log`);
+                if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+            }
+            if (res.ok) {
+                pre.textContent = await res.text();
+                pre.scrollTop = pre.scrollHeight;
+            }
+        } catch {}
+    };
+    fetchOnce();
+    livelogPoll = setInterval(fetchOnce, 2000);
+}
+
+function closeLiveLog() {
+    document.getElementById('livelog-modal').hidden = true;
+    if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+}
+
+document.addEventListener('click', e => {
+    if (e.target.id === 'livelog-close') closeLiveLog();
+    const link = e.target.closest('a.spinner');
+    if (link && link.dataset.jobId) {
+        e.preventDefault();
+        const row = link.closest('tr');
+        const repo = row ? row.dataset.repo : '';
+        openLiveLog(link.dataset.jobId, `${repo} (${link.dataset.arch})`);
+    }
+});
 
 // ── Workers View ────────────────────────────────────────────────────────────
 
@@ -229,11 +330,7 @@ function formatTime(iso) {
     loadNightly();
 })();
 
-// Auto-refresh every 30s
-setInterval(() => {
-    checkHealth();
-    loadWorkers();
-}, 30000);
-
-// Refresh fleet every 2min
+// Auto-refresh
+setInterval(() => { checkHealth(); loadWorkers(); }, 30000);
+setInterval(loadRunning, 5000);    // spinner liveness
 setInterval(loadFleet, 120000);
