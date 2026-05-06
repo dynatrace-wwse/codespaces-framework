@@ -1,4 +1,3 @@
---8<-- "snippets/framework.js"
 
 
 ![run codespace](img/framework.png){ align=right ; width="400";}

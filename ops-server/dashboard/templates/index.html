@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enablement Ops — Multi-Arch Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Enablement Ops Platform</h1>
+        <div class="header-right">
+            <div id="health-status" class="health-badge">checking...</div>
+            <div id="auth-status" class="auth-status">
+                <a href="/oauth2/sign_in" class="btn btn-auth" id="sign-in-btn" hidden>Sign in with GitHub</a>
+                <span id="user-info" class="user-info" hidden>
+                    <span id="user-name"></span>
+                    <a href="/oauth2/sign_out?rd=/" class="btn btn-small btn-secondary">Sign out</a>
+                </span>
+            </div>
+        </div>
+    </header>
+
+    <nav>
+        <button class="tab active" data-view="fleet">Fleet</button>
+        <button class="tab" data-view="workers">Workers</button>
+        <button class="tab" data-view="nightly">Nightly</button>
+    </nav>
+
+    <!-- Fleet View -->
+    <section id="view-fleet" class="view active">
+        <div class="controls">
+            <input type="text" id="repo-filter" placeholder="Filter repos...">
+            <select id="arch-filter">
+                <option value="all">All architectures</option>
+                <option value="arm64">ARM only</option>
+                <option value="amd64">AMD only</option>
+                <option value="both">Both</option>
+            </select>
+        </div>
+
+        <table id="fleet-table">
+            <thead>
+                <tr>
+                    <th>Repository</th>
+                    <th>Arch</th>
+                    <th>ARM64</th>
+                    <th>AMD64</th>
+                    <th>Duration</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="fleet-body">
+                <tr><td colspan="6" class="loading">Loading repos...</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- Workers View -->
+    <section id="view-workers" class="view">
+        <div class="worker-grid" id="worker-grid">
+            <p class="loading">Loading workers...</p>
+        </div>
+        <h3>Queue Depths</h3>
+        <div id="queue-status" class="queue-grid"></div>
+    </section>
+
+    <!-- Nightly View -->
+    <section id="view-nightly" class="view">
+        <div id="nightly-summary" class="nightly-header"></div>
+        <table id="nightly-table">
+            <thead>
+                <tr>
+                    <th>Repository</th>
+                    <th>Arch</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Finished</th>
+                </tr>
+            </thead>
+            <tbody id="nightly-body">
+                <tr><td colspan="5" class="loading">Loading nightly results...</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

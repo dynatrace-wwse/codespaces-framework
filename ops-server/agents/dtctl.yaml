@@ -1,0 +1,14 @@
+apiVersion: dtctl.io/v1
+kind: Config
+current-context: ops
+contexts:
+  - name: ops
+    context:
+      environment: "${DT_ENVIRONMENT}"
+      token-ref: ops-token
+      safety-level: dangerously-unrestricted
+tokens:
+  - name: ops-token
+    token: "${DT_API_TOKEN}"
+preferences:
+  output: table

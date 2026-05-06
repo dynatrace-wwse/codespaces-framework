@@ -1,0 +1,10 @@
+[Unit]
+Description=Enablement Ops Gen2 Drift Scanner Timer (daily at 06:00 UTC)
+Requires=ops-gen2scan.service
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

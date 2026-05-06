@@ -1,4 +1,3 @@
---8<-- "snippets/container-image.js"
 
 ## Overview
 

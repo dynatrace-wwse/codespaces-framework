@@ -1,4 +1,3 @@
---8<-- "snippets/whats-next.js"
 
 --8<-- "snippets/feedback.md"
 

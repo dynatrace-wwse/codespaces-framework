@@ -1,5 +1,4 @@
 
---8<-- "snippets/versioning.js"
 
 ## 📋 Versioning Policy
 

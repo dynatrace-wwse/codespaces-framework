@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "dynatrace": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@dynatrace-oss/dynatrace-mcp-server@latest"],
+      "env": {
+        "DT_ENVIRONMENT": "${DT_ENVIRONMENT}",
+        "DT_API_TOKEN": "${DT_API_TOKEN}"
+      }
+    }
+  }
+}
