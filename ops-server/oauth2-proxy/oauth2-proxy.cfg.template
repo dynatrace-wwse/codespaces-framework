@@ -22,3 +22,11 @@ reverse_proxy = true
 
 # Required by oauth2-proxy; we accept any verified GitHub email
 email_domains = ["*"]
+
+# Send X-Auth-Request-User / X-Auth-Request-Email on /oauth2/auth subrequest
+# responses. nginx captures these via auth_request_set and forwards them as
+# X-Auth-User / X-Auth-Email to the upstream dashboard so role gating and
+# trigger attribution can identify the caller. Without this flag oauth2-proxy
+# 200s the auth check but doesn't tell us *who* the user is — the dashboard
+# would treat every signed-in caller as anonymous (guest).
+set_xauthrequest = true

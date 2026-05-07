@@ -596,7 +596,7 @@ const countEl = document.getElementById('count');
 const WRAP_KEY = 'fullscreen-log-wrap';
 let poll = null, currentHtml = '', term = '', idx = 0, total = 0;
 
-function getWrap(){ return localStorage.getItem(WRAP_KEY) !== '0'; }
+function getWrap(){ return localStorage.getItem(WRAP_KEY) === '1'; }  // default: noWrap
 function applyWrap(){
   const w = getWrap();
   pre.classList.toggle('nowrap', !w);
@@ -858,6 +858,121 @@ async def api_sync_history(limit: int = 50):
         })
         if len(rows) >= limit: break
     return {"rows": rows}
+
+
+# ── Synchronizer live-data tabs ───────────────────────────────────────────────
+# These endpoints power the Status / PRs / Issues sub-tabs inside the
+# Synchronizer view.  They run gh CLI commands inline (not via the job queue)
+# and cache results in Redis for 5 minutes so repeated tab-switches are free.
+
+async def _gh_json(cache_key: str, *gh_args: str, ttl: int = 300) -> dict:
+    """Run a gh command, cache JSON result in Redis, return parsed dict."""
+    cached = await pool.get(cache_key)
+    if cached:
+        return json.loads(cached)
+    proc = await asyncio.create_subprocess_exec(
+        "gh", *gh_args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return {"error": stderr.decode(errors="replace")[:500], "rows": []}
+    try:
+        data = json.loads(stdout.decode())
+    except Exception:
+        return {"error": "JSON parse error", "rows": [], "raw": stdout.decode()[:500]}
+    payload = {"rows": data if isinstance(data, list) else data, "cached_at": datetime.now(timezone.utc).isoformat()}
+    await pool.set(cache_key, json.dumps(payload), ex=ttl)
+    return payload
+
+
+@app.get("/api/sync/status-summary")
+async def api_sync_status_summary():
+    """Framework-version drift across the fleet via sync status --json.
+
+    Runs ``python3 -m sync.cli status --json`` (cached 5 min) and returns the
+    parsed rows so the UI can render a sortable drift table without opening a
+    log stream.
+    """
+    cache_key = "sync:status-summary"
+    cached = await pool.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
+    sync_dir = FRAMEWORK_DIR
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "-m", "sync.cli", "status", "--json",
+        cwd=str(sync_dir),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "PYTHONPATH": str(sync_dir), "PYTHONUNBUFFERED": "1"},
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"error": "sync status timed out after 60 s", "rows": []}
+    if proc.returncode != 0:
+        return {"error": stderr.decode(errors="replace")[:500], "rows": []}
+    # Output may contain non-JSON preamble lines; find first '[' or '{'
+    raw = stdout.decode(errors="replace")
+    json_start = next((i for i, c in enumerate(raw) if c in ("[", "{")), None)
+    if json_start is None:
+        return {"error": "No JSON in sync status output", "rows": [], "raw": raw[:500]}
+    try:
+        data = json.loads(raw[json_start:])
+    except Exception as exc:
+        return {"error": f"JSON parse: {exc}", "rows": [], "raw": raw[:500]}
+    rows = data if isinstance(data, list) else data.get("repos", data.get("rows", []))
+    payload = {"rows": rows, "cached_at": datetime.now(timezone.utc).isoformat()}
+    await pool.set(cache_key, json.dumps(payload), ex=300)
+    return payload
+
+
+@app.get("/api/sync/prs")
+async def api_sync_prs():
+    """Open framework-update PRs across the org (cached 5 min).
+
+    Uses ``gh search prs`` scoped to the org with state=open so it covers
+    all repos in one API call rather than iterating per-repo.
+    """
+    return await _gh_json(
+        "sync:prs",
+        "search", "prs",
+        "--owner", GH_ORG,
+        "--state", "open",
+        "--limit", "100",
+        "--json", "number,title,repository,author,createdAt,updatedAt,url,labels",
+    )
+
+
+@app.post("/api/sync/prs/invalidate")
+async def api_sync_prs_invalidate(request: Request):
+    """Bust the PR cache so the next GET returns fresh data."""
+    await _require_writer(request)
+    await pool.delete("sync:prs")
+    return {"status": "cache cleared"}
+
+
+@app.get("/api/sync/issues")
+async def api_sync_issues():
+    """Open issues across the org (cached 5 min)."""
+    return await _gh_json(
+        "sync:issues",
+        "search", "issues",
+        "--owner", GH_ORG,
+        "--state", "open",
+        "--limit", "100",
+        "--json", "number,title,repository,author,createdAt,updatedAt,url,labels",
+    )
+
+
+@app.post("/api/sync/issues/invalidate")
+async def api_sync_issues_invalidate(request: Request):
+    """Bust the issues cache."""
+    await _require_writer(request)
+    await pool.delete("sync:issues")
+    return {"status": "cache cleared"}
 
 
 @app.get("/api/repos/{owner}/{repo}/branches")

@@ -65,7 +65,7 @@
                         <option value="amd64">amd64 only</option>
                     </select>
                     <span id="fleet-target-count" class="fleet-target-count"></span>
-                    <button class="btn" id="fleet-trigger-btn" disabled>Trigger fleet build</button>
+                    <button class="btn" id="fleet-trigger-btn" data-action>Trigger fleet build</button>
                 </div>
             </div>
 
@@ -180,23 +180,108 @@
 
         <!-- Synchronizer View -->
         <section id="view-sync" class="view">
-            <div id="sync-cards" class="sync-grid"></div>
-            <h3>Recent runs</h3>
-            <table id="sync-history-table">
-                <thead>
-                    <tr>
-                        <th>Started</th>
-                        <th>Command</th>
-                        <th>Duration</th>
-                        <th>Status</th>
-                        <th>Triggered by</th>
-                        <th>Log</th>
-                    </tr>
-                </thead>
-                <tbody id="sync-history-body">
-                    <tr><td colspan="6" class="loading">Loading sync history…</td></tr>
-                </tbody>
-            </table>
+            <!-- Sub-tab bar -->
+            <nav class="sync-subnav">
+                <button class="sync-tab active" data-sync-view="commands">Commands</button>
+                <button class="sync-tab" data-sync-view="status">Status</button>
+                <button class="sync-tab" data-sync-view="prs">Open PRs</button>
+                <button class="sync-tab" data-sync-view="issues">Open Issues</button>
+            </nav>
+
+            <!-- Commands sub-view -->
+            <div id="sync-view-commands" class="sync-subview">
+                <div id="sync-cards" class="sync-grid"></div>
+                <h3>Recent runs</h3>
+                <table id="sync-history-table">
+                    <thead>
+                        <tr>
+                            <th>Started</th>
+                            <th>Command</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                            <th>Triggered by</th>
+                            <th>Log</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-history-body">
+                        <tr><td colspan="6" class="loading">Loading sync history…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Status sub-view -->
+            <div id="sync-view-status" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Framework-version drift across the fleet</span>
+                    <button class="btn btn-small btn-secondary" id="sync-status-refresh">↻ Refresh</button>
+                </div>
+                <table id="sync-status-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>Pinned version</th>
+                            <th>Latest version</th>
+                            <th>Drift</th>
+                            <th>CI</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-status-body">
+                        <tr><td colspan="5" class="loading">Loading status…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Open PRs sub-view -->
+            <div id="sync-view-prs" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Open PRs across <strong id="sync-prs-org"></strong></span>
+                    <button class="btn btn-small btn-secondary" id="sync-prs-refresh" data-action>↻ Refresh</button>
+                </div>
+                <div class="controls" style="margin-bottom:8px">
+                    <input type="text" id="sync-prs-filter" placeholder="Filter by title or repo…">
+                </div>
+                <table id="sync-prs-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>#</th>
+                            <th>Title</th>
+                            <th>Author</th>
+                            <th>Labels</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-prs-body">
+                        <tr><td colspan="6" class="loading">Loading PRs…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Open Issues sub-view -->
+            <div id="sync-view-issues" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Open issues across <strong id="sync-issues-org"></strong></span>
+                    <button class="btn btn-small btn-secondary" id="sync-issues-refresh" data-action>↻ Refresh</button>
+                </div>
+                <div class="controls" style="margin-bottom:8px">
+                    <input type="text" id="sync-issues-filter" placeholder="Filter by title or repo…">
+                </div>
+                <table id="sync-issues-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>#</th>
+                            <th>Title</th>
+                            <th>Author</th>
+                            <th>Labels</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-issues-body">
+                        <tr><td colspan="6" class="loading">Loading issues…</td></tr>
+                    </tbody>
+                </table>
+            </div>
         </section>
 
         <!-- Live log overlay -->
@@ -219,7 +304,7 @@
                         <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
                            target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
                         <button id="livelog-terminate" class="btn btn-small btn-danger"
-                                title="Kill this job"
+                                data-action title="Kill this job"
                                 hidden>■ Terminate</button>
                         <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
                     </div>

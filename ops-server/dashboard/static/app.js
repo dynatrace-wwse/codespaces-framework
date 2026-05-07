@@ -61,21 +61,14 @@ function renderAuthHeader() {
     }
 }
 
-// Disable every action surface for guests. Re-applied after every dynamic
-// render so DOM mutations don't smuggle a clickable button past the gate.
+// Toggle a body class for CSS-driven guest gating. We don't touch the
+// disabled attribute on individual elements — that would clobber legitimate
+// state-based disabling (e.g. "no branch selected", "trigger in flight"). CSS
+// rule body.role-guest [data-action] disables interaction for guests.
 function applyRoleGating() {
     const writer = isWriter();
     document.body.classList.toggle('role-guest', !writer);
     document.body.classList.toggle('role-writer', writer);
-    document.querySelectorAll('[data-action]').forEach(el => {
-        if (writer) {
-            el.removeAttribute('disabled');
-            el.removeAttribute('title');
-        } else {
-            el.setAttribute('disabled', 'disabled');
-            el.setAttribute('title', 'Sign in as an org member to use this action.');
-        }
-    });
 }
 
 // ── Tab Navigation ──────────────────────────────────────────────────────────
@@ -165,8 +158,39 @@ async function loadFleet() {
         const arm = repo.builds.arm64;
         const amd = repo.builds.amd64;
         const safeRepo = repo.repo.replace(/[^a-z0-9-]/gi, '_');
+        const repoUrl = `https://github.com/${repo.repo}`;
+        const ghPagesUrl = `https://${repo.repo.split('/')[0]}.github.io/${repo.repo.split('/')[1]}/`;
+        const repoShort = repo.repo.split('/').pop();
+        const releaseBadge =
+            `<img class="release-badge"
+                  src="https://img.shields.io/github/v/release/${repo.repo}?label=release&style=flat-square&color=00b4de&labelColor=16202f"
+                  alt="release"
+                  loading="lazy">`;
         return `<tr data-repo="${repo.repo}">
-            <td><strong>${repo.name}</strong><br><span style="color:var(--text-muted);font-size:0.75rem">${repo.repo}</span></td>
+            <td class="fleet-repo-cell">
+                <a class="fleet-repo-link" href="${repoUrl}" target="_blank" rel="noopener"
+                   title="Open ${repo.repo} on GitHub">
+                    <strong>${escapeHtml(repo.name)}</strong>
+                    <span class="fleet-repo-org">${escapeHtml(repo.repo)}</span>
+                </a>
+                <div class="fleet-repo-actions">
+                    <a class="repo-action" href="${repoUrl}/issues" target="_blank" rel="noopener" title="Open issues">
+                        <span>🐛</span> Issues
+                    </a>
+                    <a class="repo-action" href="${repoUrl}/pulls" target="_blank" rel="noopener" title="Open pull requests">
+                        <span>🔀</span> PRs
+                    </a>
+                    <a class="repo-action" href="${repoUrl}/actions" target="_blank" rel="noopener" title="GitHub Actions">
+                        <span>⚙️</span> Actions
+                    </a>
+                    <a class="repo-action" href="${ghPagesUrl}" target="_blank" rel="noopener" title="GitHub Pages docs">
+                        <span>📖</span> Docs
+                    </a>
+                    <a class="repo-action repo-action-badge" href="${repoUrl}/releases" target="_blank" rel="noopener" title="Latest release">
+                        ${releaseBadge}
+                    </a>
+                </div>
+            </td>
             <td><span class="arch-badge">${repo.arch}</span></td>
             <td data-arch="arm64">${buildCell(arm)}</td>
             <td data-arch="amd64">${buildCell(amd)}</td>
@@ -505,7 +529,9 @@ let currentSearchTotal = 0;
 const WRAP_KEY = 'livelog-wrap';
 
 function getWrapPref() {
-    return localStorage.getItem(WRAP_KEY) !== '0'; // default: wrap on
+    // Default: noWrap. Long lines stay on one line so structure is preserved;
+    // user can toggle to wrap with the button or the "W" hotkey.
+    return localStorage.getItem(WRAP_KEY) === '1';
 }
 
 function applyWrapPref() {
@@ -965,7 +991,7 @@ async function loadRunningDetail() {
                     ? `<a href="https://github.com/${r.repo}" target="_blank" rel="noopener">${escapeHtml(repoShort)}</a>`
                     : '—';
                 const termBtn = r.job_id
-                    ? `<button class="btn btn-small btn-danger row-terminate" data-job-id="${escapeHtml(r.job_id)}" title="Terminate this job">■ Terminate</button>
+                    ? `<button class="btn btn-small btn-danger row-terminate" data-action data-job-id="${escapeHtml(r.job_id)}" title="Terminate this job">■ Terminate</button>
                        <a href="#" class="btn btn-small btn-secondary log-link" data-final-job="${escapeHtml(r.job_id)}" title="View live log">log</a>
                        <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener" class="btn btn-small btn-secondary" title="Fullscreen">⤢</a>`
                     : '—';
@@ -1016,6 +1042,22 @@ document.addEventListener('click', async e => {
 // ── Synchronizer tab ────────────────────────────────────────────────────────
 
 let syncCommandsCache = null;
+let activeSyncView = 'commands';
+
+// Sub-tab switching
+document.addEventListener('click', e => {
+    const stab = e.target.closest('.sync-tab');
+    if (!stab) return;
+    const view = stab.dataset.syncView;
+    if (!view) return;
+    activeSyncView = view;
+    document.querySelectorAll('.sync-tab').forEach(t => t.classList.toggle('active', t === stab));
+    document.querySelectorAll('.sync-subview').forEach(sv => sv.hidden = true);
+    document.getElementById(`sync-view-${view}`).hidden = false;
+    if (view === 'status') loadSyncStatus();
+    if (view === 'prs')    loadSyncPRs();
+    if (view === 'issues') loadSyncIssues();
+});
 
 async function loadSyncTab() {
     if (!syncCommandsCache) {
@@ -1028,13 +1070,19 @@ async function loadSyncTab() {
     }
     const grid = document.getElementById('sync-cards');
     grid.innerHTML = syncCommandsCache.map(c => `
-        <div class="sync-card" data-cmd-id="${escapeHtml(c.id)}">
+        <div class="sync-card" data-action data-cmd-id="${escapeHtml(c.id)}">
             <h4>${c.icon || '⚙'} ${escapeHtml(c.label)}${c.destructive ? ' <span style="color:var(--red);font-size:0.7rem">⚠ DESTRUCTIVE</span>' : ''}</h4>
             <p>${escapeHtml(c.description)}</p>
             <span class="cmd">sync ${c.args.join(' ')}</span>
         </div>
     `).join('');
     loadSyncHistory();
+    // Restore the active sub-view
+    document.querySelectorAll('.sync-subview').forEach(sv => sv.hidden = true);
+    document.getElementById(`sync-view-${activeSyncView}`).hidden = false;
+    document.querySelectorAll('.sync-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.syncView === activeSyncView);
+    });
 }
 
 async function loadSyncHistory() {
@@ -1068,6 +1116,180 @@ async function loadSyncHistory() {
     }
 }
 
+// ── Synchronizer: Status sub-tab ─────────────────────────────────────────────
+
+async function loadSyncStatus(force = false) {
+    const tbody = document.getElementById('sync-status-body');
+    tbody.innerHTML = '<tr><td colspan="5" class="loading">Running sync status…</td></tr>';
+    try {
+        const url = force ? `${API}/api/sync/status-summary?bust=${Date.now()}` : `${API}/api/sync/status-summary`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.error) {
+            tbody.innerHTML = `<tr><td colspan="5" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
+            return;
+        }
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="loading">No status data returned.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => {
+            const repo    = escapeHtml(r.repo || r.name || '');
+            const pinned  = escapeHtml(r.framework_version || r.pinned_version || r.version || '—');
+            const latest  = escapeHtml(r.latest_tag || r.latest_version || r.latest || '—');
+            const status  = r.status || '';
+            let drift;
+            if (status === 'up-to-date') {
+                drift = '<span style="color:var(--green)">up to date</span>';
+            } else if (status === 'behind' || status.includes('behind')) {
+                drift = `<span style="color:var(--amber)">${escapeHtml(status)}</span>`;
+            } else if (status === 'error') {
+                drift = '<span style="color:var(--red)">error</span>';
+            } else if (status === 'unknown') {
+                drift = '<span style="color:var(--text-3)">unknown</span>';
+            } else {
+                drift = escapeHtml(status) || '—';
+            }
+            const ci = r.ci === false
+                ? '<span style="color:var(--text-3)">off</span>'
+                : (r.ci === true ? '<span style="color:var(--green)">on</span>' : '—');
+            return `<tr>
+                <td><a href="https://github.com/${repo}" target="_blank" rel="noopener">${repo}</a></td>
+                <td style="font-family:ui-monospace,monospace">${pinned}</td>
+                <td style="font-family:ui-monospace,monospace">${latest}</td>
+                <td>${drift}</td>
+                <td>${ci}</td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+document.getElementById('sync-status-refresh').addEventListener('click', () => {
+    loadSyncStatus(true);
+});
+
+// ── Synchronizer: PRs sub-tab ────────────────────────────────────────────────
+
+let syncPRsData = [];
+
+async function loadSyncPRs(force = false) {
+    const tbody = document.getElementById('sync-prs-body');
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Fetching open PRs…</td></tr>';
+    try {
+        if (force) await fetch(`${API}/api/sync/prs/invalidate`, { method: 'POST' });
+        const res = await fetch(`${API}/api/sync/prs`);
+        const data = await res.json();
+        if (data.error) {
+            tbody.innerHTML = `<tr><td colspan="6" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
+            return;
+        }
+        syncPRsData = Array.isArray(data.rows) ? data.rows : [];
+        // Derive org label from first row
+        const firstPR = syncPRsData[0];
+        if (firstPR) {
+            const org = (firstPR.repository?.nameWithOwner || '').split('/')[0] || '';
+            if (org) document.getElementById('sync-prs-org').textContent = org;
+        }
+        renderSyncPRs();
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+function renderSyncPRs() {
+    const filter = (document.getElementById('sync-prs-filter').value || '').toLowerCase();
+    const tbody = document.getElementById('sync-prs-body');
+    const rows = syncPRsData.filter(r => {
+        if (!filter) return true;
+        const title = (r.title || '').toLowerCase();
+        const repo  = (r.repository?.nameWithOwner || r.repository?.name || '').toLowerCase();
+        return title.includes(filter) || repo.includes(filter);
+    });
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">No open PRs found.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => {
+        const repo    = r.repository?.nameWithOwner || r.repository?.name || '—';
+        const author  = r.author?.login || r.author || '—';
+        const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
+        const updated = formatTime(r.updatedAt || r.updated_at);
+        return `<tr>
+            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a></td>
+            <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${escapeHtml(String(r.number))}</a></td>
+            <td>${escapeHtml(r.title)}</td>
+            <td>${escapeHtml(String(author))}</td>
+            <td>${labels || '—'}</td>
+            <td>${updated}</td>
+        </tr>`;
+    }).join('');
+}
+
+document.getElementById('sync-prs-filter').addEventListener('input', renderSyncPRs);
+document.getElementById('sync-prs-refresh').addEventListener('click', () => loadSyncPRs(true));
+
+// ── Synchronizer: Issues sub-tab ─────────────────────────────────────────────
+
+let syncIssuesData = [];
+
+async function loadSyncIssues(force = false) {
+    const tbody = document.getElementById('sync-issues-body');
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Fetching open issues…</td></tr>';
+    try {
+        if (force) await fetch(`${API}/api/sync/issues/invalidate`, { method: 'POST' });
+        const res = await fetch(`${API}/api/sync/issues`);
+        const data = await res.json();
+        if (data.error) {
+            tbody.innerHTML = `<tr><td colspan="6" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
+            return;
+        }
+        syncIssuesData = Array.isArray(data.rows) ? data.rows : [];
+        const firstIssue = syncIssuesData[0];
+        if (firstIssue) {
+            const org = (firstIssue.repository?.nameWithOwner || '').split('/')[0] || '';
+            if (org) document.getElementById('sync-issues-org').textContent = org;
+        }
+        renderSyncIssues();
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+function renderSyncIssues() {
+    const filter = (document.getElementById('sync-issues-filter').value || '').toLowerCase();
+    const tbody = document.getElementById('sync-issues-body');
+    const rows = syncIssuesData.filter(r => {
+        if (!filter) return true;
+        const title = (r.title || '').toLowerCase();
+        const repo  = (r.repository?.nameWithOwner || r.repository?.name || '').toLowerCase();
+        return title.includes(filter) || repo.includes(filter);
+    });
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">No open issues found.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map(r => {
+        const repo    = r.repository?.nameWithOwner || r.repository?.name || '—';
+        const author  = r.author?.login || r.author || '—';
+        const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
+        const updated = formatTime(r.updatedAt || r.updated_at);
+        return `<tr>
+            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a></td>
+            <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${escapeHtml(String(r.number))}</a></td>
+            <td>${escapeHtml(r.title)}</td>
+            <td>${escapeHtml(String(author))}</td>
+            <td>${labels || '—'}</td>
+            <td>${updated}</td>
+        </tr>`;
+    }).join('');
+}
+
+document.getElementById('sync-issues-filter').addEventListener('input', renderSyncIssues);
+document.getElementById('sync-issues-refresh').addEventListener('click', () => loadSyncIssues(true));
+
 document.addEventListener('click', async e => {
     const card = e.target.closest('.sync-card');
     if (!card) return;
@@ -1097,7 +1319,6 @@ document.addEventListener('click', async e => {
             return;
         }
         const data = await res.json();
-        // Open the live-log modal immediately to tail output
         openLiveLog(data.job_id, `sync ${spec.args.join(' ')}`);
         setTimeout(loadSyncHistory, 1500);
     } finally {
