@@ -23,6 +23,12 @@ from webhook.config import (
     DT_OPERATOR_TOKEN,
     DT_INGEST_TOKEN,
 )
+from telemetry.reporter import (
+    report_test_result,
+    report_build_started,
+    report_build_deferred,
+    extract_framework_version,
+)
 
 # 2h: longer than any expected build. If a worker crashes mid-job, the lock
 # auto-expires and the next enqueue for the same triple proceeds.
@@ -242,7 +248,17 @@ class WorkerManager:
                     log.info(
                         "Lock held for %s — deferring job %s", triple, job_id
                     )
+                    holder = await self.pool.get(lock_key) or ""
                     await self.pool.rpush(f"deferred:{triple}", json.dumps(job))
+                    try:
+                        await report_build_deferred(
+                            repo=job["repo"], arch=arch, branch=_branch_of(job),
+                            triggered_by=job.get("trigger") or job.get("nightly_run_id", ""),
+                            worker_id="master", job_id=job_id,
+                            holder_job_id=holder,
+                        )
+                    except Exception as e:
+                        log.warning("telemetry report_build_deferred failed: %s", e)
                     self.active_jobs.pop(job_id, None)
                     return
                 running_key = f"job:running:{job_id}"
@@ -256,6 +272,16 @@ class WorkerManager:
                     "worker_id": "master",
                 })
                 await self.pool.expire(running_key, LOCK_TTL_SECONDS)
+                # Best-effort build.started telemetry
+                try:
+                    await report_build_started(
+                        repo=job["repo"], arch=arch, branch=_branch_of(job),
+                        triggered_by=job.get("trigger") or job.get("nightly_run_id", ""),
+                        worker_id="master", job_id=job_id,
+                        nightly_run_id=job.get("nightly_run_id", ""),
+                    )
+                except Exception as e:
+                    log.warning("telemetry report_build_started failed: %s", e)
 
             try:
                 result = await self._dispatch(job)
@@ -298,6 +324,33 @@ class WorkerManager:
                             )
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished job: %s → %s", job_id, job["status"])
+                # Telemetry: integration-test results emit test.result with the
+                # full schema. Best-effort — never block on tracker outage.
+                if job.get("type") == "integration-test":
+                    try:
+                        result = job.get("result", {}) or {}
+                        repo_name = job["repo"].split("/")[-1]
+                        work_dir = WORKDIR / job_id / repo_name
+                        fw_ver = extract_framework_version(work_dir)
+                        await report_test_result(
+                            repo=job["repo"],
+                            passed=bool(result.get("passed")),
+                            duration_seconds=int(result.get("duration_seconds", 0)),
+                            error_detail=str(result.get("error", ""))[:500],
+                            nightly_run_id=job.get("nightly_run_id", ""),
+                            framework_version=fw_ver,
+                            arch=arch,
+                            branch=_branch_of(job),
+                            commit_sha=result.get("commit_sha", ""),
+                            triggered_by=job.get("trigger") or
+                                        ("nightly" if job.get("nightly_run_id", "").startswith("nightly-")
+                                         else "manual"),
+                            worker_id="master",
+                            job_id=job_id,
+                            status=job.get("status", "completed"),
+                        )
+                    except Exception as e:
+                        log.warning("telemetry report_test_result failed: %s", e)
 
     async def _publish_log(self, job: dict):
         """Upload the per-job log to Redis so the dashboard can serve it.

@@ -23,6 +23,8 @@
 
     <nav>
         <button class="tab active" data-view="fleet">Fleet</button>
+        <button class="tab" data-view="running">Running</button>
+        <button class="tab" data-view="history">History</button>
         <button class="tab" data-view="workers">Workers</button>
         <button class="tab" data-view="nightly">Nightly</button>
     </nav>
@@ -73,6 +75,78 @@
             <pre id="livelog-pre"></pre>
         </div>
     </div>
+
+    <!-- Running Jobs View -->
+    <section id="view-running" class="view">
+        <div id="running-summary" class="nightly-header"></div>
+        <table id="running-table">
+            <thead>
+                <tr>
+                    <th>Repository</th>
+                    <th>Branch</th>
+                    <th>Arch</th>
+                    <th>Worker</th>
+                    <th>Started</th>
+                    <th>Elapsed</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="running-body">
+                <tr><td colspan="7" class="loading">Loading running jobs…</td></tr>
+            </tbody>
+        </table>
+        <h3 style="margin-top: 24px;">Deferred (queued behind a running test)</h3>
+        <table id="deferred-table">
+            <thead>
+                <tr>
+                    <th>Triple (repo:branch:arch)</th>
+                    <th>Depth</th>
+                </tr>
+            </thead>
+            <tbody id="deferred-body">
+                <tr><td colspan="2" class="loading">—</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- History View -->
+    <section id="view-history" class="view">
+        <div class="controls">
+            <select id="history-repo"><option value="">All repos</option></select>
+            <select id="history-arch">
+                <option value="">All arches</option>
+                <option value="arm64">arm64</option>
+                <option value="amd64">amd64</option>
+            </select>
+            <select id="history-branch"><option value="">All branches</option></select>
+            <select id="history-status">
+                <option value="">All statuses</option>
+                <option value="completed">completed</option>
+                <option value="failed">failed</option>
+                <option value="terminated">terminated</option>
+            </select>
+            <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
+            <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
+        </div>
+        <table id="history-table">
+            <thead>
+                <tr>
+                    <th>Started</th>
+                    <th>Repository</th>
+                    <th>Branch</th>
+                    <th>Arch</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                    <th>Trigger</th>
+                    <th>Worker</th>
+                    <th>Log</th>
+                </tr>
+            </thead>
+            <tbody id="history-body">
+                <tr><td colspan="9" class="loading">Loading history…</td></tr>
+            </tbody>
+        </table>
+    </section>
 
     <!-- Workers View -->
     <section id="view-workers" class="view">

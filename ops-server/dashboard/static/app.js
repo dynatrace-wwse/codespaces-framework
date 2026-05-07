@@ -44,6 +44,8 @@ document.querySelectorAll('.tab').forEach(tab => {
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
+        if (tab.dataset.view === 'history') loadHistory();
+        if (tab.dataset.view === 'running') loadRunningDetail();
     });
 });
 
@@ -459,7 +461,176 @@ async function loadNightly() {
     }).join('');
 }
 
+// ── History View ────────────────────────────────────────────────────────────
+
+let historyFilters = {};
+let historyDistinct = { repos: [], arches: [], branches: [] };
+
+async function loadHistory() {
+    const params = new URLSearchParams();
+    const repo = document.getElementById('history-repo').value;
+    const arch = document.getElementById('history-arch').value;
+    const branch = document.getElementById('history-branch').value;
+    const status = document.getElementById('history-status').value;
+    if (repo) params.set('repo', repo);
+    if (arch) params.set('arch', arch);
+    if (branch) params.set('branch', branch);
+    if (status) params.set('status', status);
+    params.set('limit', '200');
+
+    const tbody = document.getElementById('history-body');
+    tbody.innerHTML = '<tr><td colspan="9" class="loading">Loading history…</td></tr>';
+    try {
+        const res = await fetch(`${API}/api/builds/history?` + params.toString());
+        const data = await res.json();
+        // Update distinct dropdowns once (don't blow away the user's current selection)
+        if (JSON.stringify(data.filters.repos) !== JSON.stringify(historyDistinct.repos)) {
+            historyDistinct = data.filters;
+            const fillSelect = (id, values, current) => {
+                const sel = document.getElementById(id);
+                const all = sel.querySelector('option[value=""]');
+                const allHtml = all ? all.outerHTML : '';
+                sel.innerHTML = allHtml + values.map(v =>
+                    `<option value="${escapeHtml(v)}"${v === current ? ' selected' : ''}>${escapeHtml(v)}</option>`
+                ).join('');
+            };
+            fillSelect('history-repo', data.filters.repos, repo);
+            fillSelect('history-branch', data.filters.branches, branch);
+        }
+        document.getElementById('history-count').textContent =
+            `${data.total_returned} runs`;
+
+        if (!data.rows.length) {
+            tbody.innerHTML = '<tr><td colspan="9" class="loading">No matching runs.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.rows.map(r => {
+            const dur = formatDuration(r.duration);
+            const statusCls = r.status === 'terminated' ? 'status-terminated'
+                            : r.passed ? 'status-pass' : 'status-fail';
+            const statusLabel = r.status === 'terminated' ? 'TERM'
+                              : r.passed ? 'PASS' : 'FAIL';
+            const repoShort = r.repo.split('/').pop();
+            const repoLink = `<a href="https://github.com/${r.repo}" target="_blank" rel="noopener" title="${escapeHtml(r.repo)}">${escapeHtml(repoShort)}</a>`;
+            const logLink = r.job_id
+                ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>
+                   · <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener" title="Fullscreen">⤢</a>`
+                : '—';
+            return `<tr>
+                <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
+                <td>${repoLink}</td>
+                <td>${escapeHtml(r.branch)}</td>
+                <td><span class="arch-badge">${escapeHtml(r.arch)}</span></td>
+                <td>${dur}</td>
+                <td><span class="${statusCls}">${statusLabel}</span></td>
+                <td>${escapeHtml(r.trigger || '')}</td>
+                <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
+                <td>${logLink}</td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="9" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+['history-repo', 'history-arch', 'history-branch', 'history-status'].forEach(id => {
+    document.addEventListener('change', e => {
+        if (e.target.id === id) loadHistory();
+    });
+});
+document.addEventListener('click', e => {
+    if (e.target.id === 'history-refresh') loadHistory();
+});
+
+// ── Running Jobs Detail View ────────────────────────────────────────────────
+
+async function loadRunningDetail() {
+    const tbody = document.getElementById('running-body');
+    const dtbody = document.getElementById('deferred-body');
+    const summary = document.getElementById('running-summary');
+    try {
+        const res = await fetch(`${API}/api/builds/running`);
+        const data = await res.json();
+        const now = Date.now();
+
+        summary.innerHTML = `
+            <div class="stat"><div class="value">${data.running.length}</div><div class="label">Running</div></div>
+            <div class="stat"><div class="value">${data.deferred.length}</div><div class="label">Deferred triples</div></div>
+            <div class="stat"><div class="value">${data.queues.arm64}</div><div class="label">arm64 queued</div></div>
+            <div class="stat"><div class="value">${data.queues.amd64}</div><div class="label">amd64 queued</div></div>
+        `;
+
+        if (!data.running.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="loading">No jobs running.</td></tr>';
+        } else {
+            tbody.innerHTML = data.running.map(r => {
+                const elapsed = r.started_at ? Math.round((now - new Date(r.started_at).getTime()) / 1000) : 0;
+                const repoShort = (r.repo || '').split('/').pop();
+                const repoLink = r.repo
+                    ? `<a href="https://github.com/${r.repo}" target="_blank" rel="noopener">${escapeHtml(repoShort)}</a>`
+                    : '—';
+                const termBtn = r.job_id
+                    ? `<button class="btn btn-small btn-danger row-terminate" data-job-id="${escapeHtml(r.job_id)}" title="Terminate this job">■ Terminate</button>
+                       <a href="#" class="btn btn-small btn-secondary log-link" data-final-job="${escapeHtml(r.job_id)}" title="View live log">log</a>
+                       <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener" class="btn btn-small btn-secondary" title="Fullscreen">⤢</a>`
+                    : '—';
+                return `<tr>
+                    <td>${repoLink}</td>
+                    <td>${escapeHtml(r.branch || r.ref || '')}</td>
+                    <td><span class="arch-badge">${escapeHtml(r.arch || '')}</span></td>
+                    <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
+                    <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
+                    <td>${formatDuration(elapsed)}</td>
+                    <td>${termBtn}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        if (!data.deferred.length) {
+            dtbody.innerHTML = '<tr><td colspan="2" class="loading">None</td></tr>';
+        } else {
+            dtbody.innerHTML = data.deferred.map(d =>
+                `<tr><td>${escapeHtml(d.triple)}</td><td>${d.depth}</td></tr>`
+            ).join('');
+        }
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+document.addEventListener('click', async e => {
+    const btn = e.target.closest('.row-terminate');
+    if (!btn) return;
+    e.preventDefault();
+    const jobId = btn.dataset.jobId;
+    if (!confirm(`Terminate job ${jobId}?`)) return;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const res = await fetch(`/api/jobs/${jobId}/terminate`, { method: 'POST' });
+        if (!res.ok) alert(`Termination failed (${res.status})`);
+    } finally {
+        btn.disabled = false; btn.textContent = '■ Terminate';
+        loadRunningDetail();
+    }
+});
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'
+    }[c]));
+}
+
+function formatDuration(seconds) {
+    if (!seconds || seconds < 0) return '—';
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    if (m < 60) return `${m}m ${s}s`;
+    const h = Math.floor(m / 60);
+    return `${h}h ${m % 60}m`;
+}
 
 function formatTime(iso) {
     if (!iso) return '—';
@@ -481,3 +652,9 @@ function formatTime(iso) {
 setInterval(() => { checkHealth(); loadWorkers(); }, 30000);
 setInterval(loadRunning, 5000);    // spinner liveness
 setInterval(loadFleet, 120000);
+// Refresh active tabs when they're showing
+setInterval(() => {
+    const active = document.querySelector('.tab.active')?.dataset.view;
+    if (active === 'running') loadRunningDetail();
+    if (active === 'history') loadHistory();
+}, 5000);

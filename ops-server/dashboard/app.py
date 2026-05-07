@@ -366,6 +366,77 @@ async def api_job_status(job_id: str):
     return {"job_id": job_id, "status": "unknown"}
 
 
+@app.get("/api/builds/history")
+async def api_builds_history(
+    repo: str | None = None,
+    arch: str | None = None,
+    branch: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+):
+    """Past integration-test runs from ``jobs:completed``, filterable.
+
+    Source of truth is the trimmed ``jobs:completed`` LIST (last 500). When
+    Phase 2 of the design doc lands, this should switch to ``builds:by_time``
+    ZSET for richer time-range queries.
+    """
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    rows = []
+    distinct_repos: set[str] = set()
+    distinct_branches: set[str] = set()
+    distinct_arches: set[str] = set()
+    for raw in reversed(completed_raw):  # newest first
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        if j.get("type") != "integration-test":
+            continue
+        result = j.get("result", {}) or {}
+        row_repo = j.get("repo", "")
+        row_arch = j.get("arch") or result.get("arch") or j.get("worker_arch", "") or "unknown"
+        row_branch = j.get("ref") or j.get("head_branch") or result.get("ref", "") or "main"
+        row_status = j.get("status", "completed")
+        distinct_repos.add(row_repo)
+        if row_branch: distinct_branches.add(row_branch)
+        if row_arch: distinct_arches.add(row_arch)
+        if repo and row_repo != repo: continue
+        if arch and row_arch != arch: continue
+        if branch and row_branch != branch: continue
+        if status and row_status != status: continue
+        # Trigger inference: nightly if id matches, else dashboard/webhook
+        nightly_id = j.get("nightly_run_id", "")
+        trigger = j.get("trigger") or (
+            "nightly" if nightly_id.startswith("nightly-")
+            else ("manual" if nightly_id.startswith("manual") else "")
+        ) or "webhook"
+        rows.append({
+            "job_id": j.get("job_id", ""),
+            "repo": row_repo,
+            "arch": row_arch,
+            "branch": row_branch,
+            "status": row_status,
+            "passed": bool(result.get("passed")),
+            "duration": int(result.get("duration_seconds", 0)),
+            "exit_code": result.get("exit_code"),
+            "started_at": j.get("timestamp"),
+            "finished_at": j.get("finished_at"),
+            "trigger": trigger,
+            "nightly_run_id": nightly_id,
+            "worker_id": j.get("worker_id", "master"),
+        })
+        if len(rows) >= limit: break
+    return {
+        "rows": rows,
+        "total_returned": len(rows),
+        "filters": {
+            "repos": sorted(distinct_repos),
+            "arches": sorted(distinct_arches),
+            "branches": sorted(distinct_branches),
+        },
+    }
+
+
 @app.get("/api/nightly/latest")
 async def api_nightly_latest():
     """Latest nightly run results."""
