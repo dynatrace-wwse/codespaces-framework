@@ -178,18 +178,42 @@ async def api_builds_running():
 
     running = []
     async for key in pool.scan_iter(match="job:running:*"):
-        meta = await pool.hgetall(key)
-        if not meta or not meta.get("repo"):
-            continue
-        running.append({
-            "repo": meta.get("repo"),
-            "arch": meta.get("arch"),
-            "branch": meta.get("branch"),
-            "job_id": meta.get("job_id"),
-            "ref": meta.get("ref"),
-            "started_at": meta.get("started_at"),
-            "worker_id": meta.get("worker_id"),
-        })
+        # Tolerate the legacy STRING shape until all workers are on the
+        # post-lock-fix code. New shape is HASH at job:running:{run_id};
+        # legacy is STRING at job:running:{repo}:{arch}.
+        key_type = await pool.type(key)
+        if key_type == "hash":
+            meta = await pool.hgetall(key)
+            if not meta or not meta.get("repo"):
+                continue
+            running.append({
+                "repo": meta.get("repo"),
+                "arch": meta.get("arch"),
+                "branch": meta.get("branch"),
+                "job_id": meta.get("job_id"),
+                "ref": meta.get("ref"),
+                "started_at": meta.get("started_at"),
+                "worker_id": meta.get("worker_id"),
+            })
+        elif key_type == "string":
+            parts = key.split(":", 3)
+            if len(parts) < 4:
+                continue
+            repo, arch = parts[2], parts[3]
+            raw = await pool.get(key)
+            try:
+                meta = json.loads(raw) if raw else {}
+            except Exception:
+                meta = {}
+            running.append({
+                "repo": repo,
+                "arch": arch,
+                "branch": meta.get("ref"),
+                "job_id": meta.get("job_id"),
+                "ref": meta.get("ref"),
+                "started_at": meta.get("started_at"),
+                "worker_id": meta.get("worker_id"),
+            })
 
     # Surface deferred jobs so the dashboard can show "queued behind a running test"
     deferred = []
