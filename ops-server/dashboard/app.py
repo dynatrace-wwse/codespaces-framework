@@ -165,9 +165,10 @@ async def api_workers():
 async def api_builds_running():
     """Currently executing tests, plus pending queue depths.
 
-    Workers write a ``job:running:<repo>:<arch>`` key when they pick a job up
-    and delete it when done. Used by the dashboard to render a spinner on the
-    matching repo row.
+    Workers write a ``job:running:<run_id>`` HASH when they pick up a job and
+    delete it when done. Concurrency per (repo, branch, arch) is enforced via
+    ``running:lock:<triple>`` STRING keys (see workers/manager.py and
+    worker-agent/agent.py).
     """
     queues = {}
     for arch in ("arm64", "amd64"):
@@ -177,26 +178,28 @@ async def api_builds_running():
 
     running = []
     async for key in pool.scan_iter(match="job:running:*"):
-        # key shape: job:running:<owner>/<name>:<arch>
-        parts = key.split(":", 3)
-        if len(parts) < 4:
+        meta = await pool.hgetall(key)
+        if not meta or not meta.get("repo"):
             continue
-        repo, arch = parts[2], parts[3]
-        raw = await pool.get(key)
-        try:
-            meta = json.loads(raw) if raw else {}
-        except Exception:
-            meta = {}
         running.append({
-            "repo": repo,
-            "arch": arch,
+            "repo": meta.get("repo"),
+            "arch": meta.get("arch"),
+            "branch": meta.get("branch"),
             "job_id": meta.get("job_id"),
             "ref": meta.get("ref"),
             "started_at": meta.get("started_at"),
             "worker_id": meta.get("worker_id"),
         })
 
-    return {"queues": queues, "running": running}
+    # Surface deferred jobs so the dashboard can show "queued behind a running test"
+    deferred = []
+    async for key in pool.scan_iter(match="deferred:*"):
+        triple = key.split(":", 1)[1]
+        depth = await pool.llen(key)
+        if depth:
+            deferred.append({"triple": triple, "depth": depth})
+
+    return {"queues": queues, "running": running, "deferred": deferred}
 
 
 @app.get("/api/jobs/{job_id}/livelog")

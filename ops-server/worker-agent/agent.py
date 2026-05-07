@@ -19,6 +19,17 @@ from .config import (
 )
 from .executor import execute_integration_test
 
+# Keep in sync with workers/manager.py — see ops-server/design/2026-05-07-triage-queue.md
+LOCK_TTL_SECONDS = 7200
+
+
+def _branch_of(job: dict) -> str:
+    return job.get("ref") or job.get("head_branch") or "main"
+
+
+def _triple_of(job: dict, default_arch: str) -> str:
+    return f"{job['repo']}:{_branch_of(job)}:{job.get('arch', default_arch)}"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -126,15 +137,31 @@ class WorkerAgent:
             self.active_jobs[job_id] = job
             log.info("Starting: %s (%s)", job_id, job["repo"])
 
-            # Mark this (repo, arch) as running so the dashboard can show a
-            # spinner. TTL of 1h is safety net in case we crash before clear.
-            running_key = f"job:running:{job['repo']}:{job.get('arch', WORKER_ARCH)}"
-            await self.pool.set(running_key, json.dumps({
+            # Pickup-time concurrency lock per (repo, branch, arch). If held,
+            # defer this job; the holder drains the deferred list on completion.
+            arch = job.get("arch", WORKER_ARCH)
+            triple = _triple_of(job, WORKER_ARCH)
+            lock_key = f"running:lock:{triple}"
+            acquired = await self.pool.set(
+                lock_key, job_id, nx=True, ex=LOCK_TTL_SECONDS
+            )
+            if not acquired:
+                log.info("Lock held for %s — deferring job %s", triple, job_id)
+                await self.pool.rpush(f"deferred:{triple}", json.dumps(job))
+                self.active_jobs.pop(job_id, None)
+                return
+
+            running_key = f"job:running:{job_id}"
+            await self.pool.hset(running_key, mapping={
                 "job_id": job_id,
-                "ref": job.get("ref") or job.get("head_branch") or "main",
+                "repo": job["repo"],
+                "branch": _branch_of(job),
+                "arch": arch,
+                "ref": _branch_of(job),
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "worker_id": WORKER_ID,
-            }), ex=3600)
+            })
+            await self.pool.expire(running_key, LOCK_TTL_SECONDS)
 
             try:
                 result = await execute_integration_test(job, redis_pool=self.pool)
@@ -150,6 +177,23 @@ class WorkerAgent:
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 await self.pool.ltrim("jobs:completed", -500, -1)
                 await self.pool.delete(running_key)
+                await self.pool.delete(lock_key)
+                # Drain anything deferred for this triple back into the queue.
+                deferred_key = f"deferred:{triple}"
+                while True:
+                    item = await self.pool.lpop(deferred_key)
+                    if item is None:
+                        break
+                    try:
+                        d_job = json.loads(item)
+                        await self.pool.rpush(
+                            f"queue:test:{d_job.get('arch', arch)}", item
+                        )
+                    except Exception as e:
+                        log.warning(
+                            "Could not re-queue deferred job for %s: %s",
+                            triple, e,
+                        )
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished: %s → %s", job_id, job["status"])
 

@@ -23,6 +23,18 @@ from webhook.config import (
     DT_INGEST_TOKEN,
 )
 
+# 2h: longer than any expected build. If a worker crashes mid-job, the lock
+# auto-expires and the next enqueue for the same triple proceeds.
+LOCK_TTL_SECONDS = 7200
+
+
+def _branch_of(job: dict) -> str:
+    return job.get("ref") or job.get("head_branch") or "main"
+
+
+def _triple_of(job: dict) -> str:
+    return f"{job['repo']}:{_branch_of(job)}:{job.get('arch', 'arm64')}"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,6 +61,8 @@ class WorkerManager:
             MAX_PARALLEL_AGENTS,
         )
 
+        await self._recover_orphaned_deferred()
+
         await asyncio.gather(
             self._consume_queue("agent", self.agent_semaphore),
             self._consume_queue("sync", self.agent_semaphore),
@@ -57,6 +71,38 @@ class WorkerManager:
             # Legacy queue for backwards compatibility
             self._consume_queue("test", self.test_semaphore),
         )
+
+    async def _recover_orphaned_deferred(self):
+        """Drain ``deferred:{triple}`` lists whose lock has expired.
+
+        Worker crashes between acquiring ``running:lock:{triple}`` and draining
+        its deferred list leave deferred jobs stuck. The lock auto-expires
+        after LOCK_TTL_SECONDS; on next worker startup we drain anything
+        whose lock is gone.
+        """
+        recovered = 0
+        async for key in self.pool.scan_iter(match="deferred:*"):
+            triple = key.split(":", 1)[1]
+            lock_key = f"running:lock:{triple}"
+            if await self.pool.exists(lock_key):
+                continue  # an active job still holds the lock
+            while True:
+                item = await self.pool.lpop(key)
+                if item is None:
+                    break
+                try:
+                    d_job = json.loads(item)
+                    await self.pool.rpush(
+                        f"queue:test:{d_job.get('arch', 'arm64')}", item
+                    )
+                    recovered += 1
+                except Exception as e:
+                    log.warning(
+                        "Could not re-queue orphaned deferred for %s: %s",
+                        triple, e,
+                    )
+        if recovered:
+            log.info("Recovered %d orphaned deferred jobs at startup", recovered)
 
     async def _consume_queue(self, queue_name: str, semaphore: asyncio.Semaphore):
         """Consume jobs from a single queue with concurrency limiting."""
@@ -97,15 +143,37 @@ class WorkerManager:
             log.info("Starting job: %s (%s on %s)", job_id, job["type"], job["repo"])
 
             # Track running state for the dashboard (only meaningful for tests).
+            # Pickup-time concurrency lock per (repo, branch, arch). If held by
+            # another job, defer this one and return; the holder drains the
+            # deferred list on completion. See ops-server/design/2026-05-07-triage-queue.md.
             running_key = None
+            lock_key = None
+            triple = None
+            arch = job.get("arch", "arm64")
             if job.get("type") == "integration-test":
-                running_key = f"job:running:{job['repo']}:{job.get('arch', 'arm64')}"
-                await self.pool.set(running_key, json.dumps({
+                triple = _triple_of(job)
+                lock_key = f"running:lock:{triple}"
+                acquired = await self.pool.set(
+                    lock_key, job_id, nx=True, ex=LOCK_TTL_SECONDS
+                )
+                if not acquired:
+                    log.info(
+                        "Lock held for %s — deferring job %s", triple, job_id
+                    )
+                    await self.pool.rpush(f"deferred:{triple}", json.dumps(job))
+                    self.active_jobs.pop(job_id, None)
+                    return
+                running_key = f"job:running:{job_id}"
+                await self.pool.hset(running_key, mapping={
                     "job_id": job_id,
-                    "ref": job.get("ref") or job.get("head_branch") or "main",
+                    "repo": job["repo"],
+                    "branch": _branch_of(job),
+                    "arch": arch,
+                    "ref": _branch_of(job),
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "worker_id": "master",
-                }), ex=3600)
+                })
+                await self.pool.expire(running_key, LOCK_TTL_SECONDS)
 
             try:
                 result = await self._dispatch(job)
@@ -122,6 +190,24 @@ class WorkerManager:
                 await self.pool.ltrim("jobs:completed", -500, -1)
                 if running_key:
                     await self.pool.delete(running_key)
+                if lock_key:
+                    await self.pool.delete(lock_key)
+                    # Drain anything deferred for this triple back into the queue.
+                    deferred_key = f"deferred:{triple}"
+                    while True:
+                        item = await self.pool.lpop(deferred_key)
+                        if item is None:
+                            break
+                        try:
+                            d_job = json.loads(item)
+                            await self.pool.rpush(
+                                f"queue:test:{d_job.get('arch', arch)}", item
+                            )
+                        except Exception as e:
+                            log.warning(
+                                "Could not re-queue deferred job for %s: %s",
+                                triple, e,
+                            )
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished job: %s → %s", job_id, job["status"])
 
