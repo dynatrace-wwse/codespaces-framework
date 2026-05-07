@@ -65,9 +65,18 @@ async def shutdown():
 async def _resolve_role(user: str) -> dict:
     """Return {role, org_role} for a GitHub username.
 
-    role:     'writer'  — org member (admin or member), can execute actions
-              'guest'   — not in the org, read-only
-    org_role: 'admin' | 'member' | '' (empty means not in org)
+    Trust model: oauth2-proxy is configured with ``github_org = <GH_ORG>``,
+    which means a valid session cookie already guarantees the caller is an
+    active org member. nginx only sets ``X-Auth-User`` after that check
+    succeeds, so by the time we see a username here the caller is already
+    a member — they are a 'writer'.
+
+    We additionally try ``/orgs/{org}/memberships/{user}`` to enrich the
+    response with org_role (admin/member). The lookup needs a token with
+    'Members: read' on the org; if the token lacks that scope (403/404)
+    we still return writer because oauth2-proxy did the authoritative
+    check already. role is only 'guest' when there is no authenticated
+    user (empty username).
     """
     if not user:
         return {"role": "guest", "org_role": "", "user": ""}
@@ -95,12 +104,21 @@ async def _resolve_role(user: str) -> dict:
                     data = resp.json()
                     if data.get("state") == "active":
                         org_role = data.get("role", "member")
+                elif resp.status_code in (403, 404):
+                    # Token lacks Members:read scope, or user not found.
+                    # Don't downgrade to guest — oauth2-proxy already vouched.
+                    log.info(
+                        "org-role enrich for %s skipped (HTTP %d) — "
+                        "trusting oauth2-proxy session",
+                        user, resp.status_code,
+                    )
         except Exception as e:
             log.warning("org-role lookup for %s failed: %s", user, e)
 
     payload = {
-        "role": "writer" if org_role else "guest",
-        "org_role": org_role,
+        # Authenticated via oauth2-proxy ⇒ org member ⇒ writer.
+        "role": "writer",
+        "org_role": org_role or "member",
         "user": user,
     }
     try:
