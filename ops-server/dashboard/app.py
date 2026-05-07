@@ -213,15 +213,13 @@ async def api_repos():
             "source": "local",
         }
 
-    # Pull latest_tag from the cached sync status summary (free if already cached).
+    # Pull latest_tag from fleet:release-tags (24 h TTL, populated by the
+    # status-summary endpoint on each run so it survives the 5-min status cache).
     release_map: dict[str, str] = {}
     try:
-        cached_status = await pool.get("sync:status-summary")
-        if cached_status:
-            for row in json.loads(cached_status).get("rows", []):
-                tag = row.get("latest_tag") or row.get("framework_version") or ""
-                if tag and row.get("repo"):
-                    release_map[row["repo"]] = tag
+        cached_tags = await pool.get("fleet:release-tags")
+        if cached_tags:
+            release_map = json.loads(cached_tags)
     except Exception:
         pass
 
@@ -911,7 +909,17 @@ async def api_sync_status_summary():
     cache_key = "sync:status-summary"
     cached = await pool.get(cache_key)
     if cached:
-        return json.loads(cached)
+        payload = json.loads(cached)
+        # Back-fill fleet:release-tags if it's missing (e.g. after a restart).
+        if not await pool.exists("fleet:release-tags"):
+            release_tags = {
+                row["repo"]: row.get("latest_tag", "")
+                for row in payload.get("rows", [])
+                if row.get("repo") and row.get("latest_tag")
+            }
+            if release_tags:
+                await pool.set("fleet:release-tags", json.dumps(release_tags), ex=86400)
+        return payload
 
     sync_dir = FRAMEWORK_DIR
     proc = await asyncio.create_subprocess_exec(
@@ -939,6 +947,15 @@ async def api_sync_status_summary():
     rows = data if isinstance(data, list) else data.get("repos", data.get("rows", []))
     payload = {"rows": rows, "cached_at": datetime.now(timezone.utc).isoformat()}
     await pool.set(cache_key, json.dumps(payload), ex=300)
+    # Also persist a long-lived repo→tag map used by /api/repos (survives the
+    # 5-min status cache so the fleet page always shows release tags).
+    release_tags = {
+        row["repo"]: row.get("latest_tag", "")
+        for row in rows
+        if row.get("repo") and row.get("latest_tag")
+    }
+    if release_tags:
+        await pool.set("fleet:release-tags", json.dumps(release_tags), ex=86400)
     return payload
 
 
