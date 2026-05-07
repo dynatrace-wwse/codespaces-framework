@@ -237,7 +237,9 @@ async def _post_to_tracker(payload: dict):
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Basic {TRACKER_TOKEN}",
+        # Tracker expects the raw base64 token, NOT "Basic <token>".
+        # Matches the framework's postCodespacesTracker in functions.sh.
+        "Authorization": TRACKER_TOKEN,
     }
 
     try:
