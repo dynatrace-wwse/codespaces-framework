@@ -3,178 +3,216 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enablement Ops — Multi-Arch Dashboard</title>
+    <title>Autonomous Enablement Ops Platform · Dynatrace</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
+    <meta name="theme-color" content="#080c14">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <header>
-        <h1>Enablement Ops Platform</h1>
-        <div class="header-right">
-            <div id="health-status" class="health-badge">checking...</div>
-            <div id="auth-status" class="auth-status">
-                <a href="/oauth2/sign_in" class="btn btn-auth" id="sign-in-btn" hidden>Sign in with GitHub</a>
-                <span id="user-info" class="user-info" hidden>
-                    <span id="user-name"></span>
-                    <a href="/oauth2/sign_out?rd=/" class="btn btn-small btn-secondary">Sign out</a>
-                </span>
+        <div class="topbar-inner">
+            <a class="brand" href="/">
+                <img src="/static/images/dynatrace-logo.png" alt="Dynatrace">
+                <div class="brand-text">
+                    <span class="title">Autonomous Enablement Ops Platform</span>
+                    <span class="sub">WWSE · Multi-Arch CI/CD</span>
+                </div>
+            </a>
+            <div class="spacer"></div>
+            <div class="header-right">
+                <div id="health-status" class="health-badge">checking…</div>
+                <div id="auth-status" class="auth-status">
+                    <a href="/oauth2/sign_in" class="btn-auth" id="sign-in-btn" hidden>Sign in with GitHub</a>
+                    <span id="user-info" class="user-info" hidden>
+                        <span id="user-name" class="user-name"></span>
+                        <a href="/oauth2/sign_out?rd=/" class="btn btn-small btn-secondary">Sign out</a>
+                    </span>
+                </div>
             </div>
         </div>
     </header>
 
     <nav>
-        <button class="tab active" data-view="fleet">Fleet</button>
-        <button class="tab" data-view="running">Running</button>
-        <button class="tab" data-view="history">History</button>
-        <button class="tab" data-view="workers">Workers</button>
-        <button class="tab" data-view="nightly">Nightly</button>
+        <div class="nav-inner">
+            <button class="tab active" data-view="fleet">Fleet</button>
+            <button class="tab" data-view="running">Running</button>
+            <button class="tab" data-view="history">History</button>
+            <button class="tab" data-view="sync">Synchronizer</button>
+            <button class="tab" data-view="workers">Workers</button>
+            <button class="tab" data-view="nightly">Nightly</button>
+        </div>
     </nav>
 
-    <!-- Fleet View -->
-    <section id="view-fleet" class="view active">
-        <div class="controls">
-            <input type="text" id="repo-filter" placeholder="Filter repos...">
-            <select id="arch-filter">
-                <option value="all">All architectures</option>
-                <option value="arm64">ARM only</option>
-                <option value="amd64">AMD only</option>
-                <option value="both">Both</option>
-            </select>
+    <main>
+        <!-- Fleet View -->
+        <section id="view-fleet" class="view active">
+            <div class="controls">
+                <input type="text" id="repo-filter" placeholder="Filter repos...">
+                <select id="arch-filter">
+                    <option value="all">All architectures</option>
+                    <option value="arm64">ARM only</option>
+                    <option value="amd64">AMD only</option>
+                    <option value="both">Both</option>
+                </select>
+            </div>
+
+            <table id="fleet-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Arch</th>
+                        <th>ARM64</th>
+                        <th>AMD64</th>
+                        <th>Branch</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="fleet-body">
+                    <tr><td colspan="6" class="loading">Loading repos…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Running Jobs View -->
+        <section id="view-running" class="view">
+            <div id="running-summary" class="nightly-header"></div>
+            <table id="running-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Worker</th>
+                        <th>Started</th>
+                        <th>Elapsed</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="running-body">
+                    <tr><td colspan="7" class="loading">Loading running jobs…</td></tr>
+                </tbody>
+            </table>
+            <h3 style="margin-top: 24px;">Deferred · queued behind a held lock</h3>
+            <table id="deferred-table">
+                <thead>
+                    <tr>
+                        <th>Triple (repo : branch : arch)</th>
+                        <th>Depth</th>
+                    </tr>
+                </thead>
+                <tbody id="deferred-body">
+                    <tr><td colspan="2" class="loading">—</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- History View -->
+        <section id="view-history" class="view">
+            <div class="controls">
+                <select id="history-repo"><option value="">All repos</option></select>
+                <select id="history-arch">
+                    <option value="">All arches</option>
+                    <option value="arm64">arm64</option>
+                    <option value="amd64">amd64</option>
+                </select>
+                <select id="history-branch"><option value="">All branches</option></select>
+                <select id="history-status">
+                    <option value="">All statuses</option>
+                    <option value="completed">completed</option>
+                    <option value="failed">failed</option>
+                    <option value="terminated">terminated</option>
+                </select>
+                <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
+                <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
+            </div>
+            <table id="history-table">
+                <thead>
+                    <tr>
+                        <th>Started</th>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                        <th>Trigger</th>
+                        <th>Worker</th>
+                        <th>Log</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body">
+                    <tr><td colspan="9" class="loading">Loading history…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Synchronizer View -->
+        <section id="view-sync" class="view">
+            <div id="sync-cards" class="sync-grid"></div>
+            <h3>Recent runs</h3>
+            <table id="sync-history-table">
+                <thead>
+                    <tr>
+                        <th>Started</th>
+                        <th>Command</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                        <th>Triggered by</th>
+                        <th>Log</th>
+                    </tr>
+                </thead>
+                <tbody id="sync-history-body">
+                    <tr><td colspan="6" class="loading">Loading sync history…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Live log overlay -->
+        <div id="livelog-modal" class="modal" hidden>
+            <div class="modal-inner">
+                <header class="modal-header">
+                    <h3 id="livelog-title">Live log</h3>
+                    <div class="modal-actions">
+                        <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
+                           target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
+                        <button id="livelog-terminate" class="btn btn-small btn-danger"
+                                title="Kill this job"
+                                hidden>■ Terminate</button>
+                        <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+                    </div>
+                </header>
+                <pre id="livelog-pre"></pre>
+            </div>
         </div>
 
-        <table id="fleet-table">
-            <thead>
-                <tr>
-                    <th>Repository</th>
-                    <th>Arch</th>
-                    <th>ARM64</th>
-                    <th>AMD64</th>
-                    <th>Branch</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody id="fleet-body">
-                <tr><td colspan="6" class="loading">Loading repos...</td></tr>
-            </tbody>
-        </table>
-    </section>
+        <!-- Workers View -->
+        <section id="view-workers" class="view">
+            <div class="worker-grid" id="worker-grid">
+                <p class="loading">Loading workers…</p>
+            </div>
+            <h3>Queue Depths</h3>
+            <div id="queue-status" class="queue-grid"></div>
+        </section>
 
-    <!-- Live log overlay -->
-    <div id="livelog-modal" class="modal" hidden>
-        <div class="modal-inner">
-            <header class="modal-header">
-                <h3 id="livelog-title">Live log</h3>
-                <div class="modal-actions">
-                    <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
-                       target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
-                    <button id="livelog-terminate" class="btn btn-small btn-danger"
-                            title="Kill this job — sends SIGTERM-equivalent to the worker"
-                            hidden>■ Terminate</button>
-                    <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
-                </div>
-            </header>
-            <pre id="livelog-pre"></pre>
-        </div>
-    </div>
-
-    <!-- Running Jobs View -->
-    <section id="view-running" class="view">
-        <div id="running-summary" class="nightly-header"></div>
-        <table id="running-table">
-            <thead>
-                <tr>
-                    <th>Repository</th>
-                    <th>Branch</th>
-                    <th>Arch</th>
-                    <th>Worker</th>
-                    <th>Started</th>
-                    <th>Elapsed</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody id="running-body">
-                <tr><td colspan="7" class="loading">Loading running jobs…</td></tr>
-            </tbody>
-        </table>
-        <h3 style="margin-top: 24px;">Deferred (queued behind a running test)</h3>
-        <table id="deferred-table">
-            <thead>
-                <tr>
-                    <th>Triple (repo:branch:arch)</th>
-                    <th>Depth</th>
-                </tr>
-            </thead>
-            <tbody id="deferred-body">
-                <tr><td colspan="2" class="loading">—</td></tr>
-            </tbody>
-        </table>
-    </section>
-
-    <!-- History View -->
-    <section id="view-history" class="view">
-        <div class="controls">
-            <select id="history-repo"><option value="">All repos</option></select>
-            <select id="history-arch">
-                <option value="">All arches</option>
-                <option value="arm64">arm64</option>
-                <option value="amd64">amd64</option>
-            </select>
-            <select id="history-branch"><option value="">All branches</option></select>
-            <select id="history-status">
-                <option value="">All statuses</option>
-                <option value="completed">completed</option>
-                <option value="failed">failed</option>
-                <option value="terminated">terminated</option>
-            </select>
-            <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
-            <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
-        </div>
-        <table id="history-table">
-            <thead>
-                <tr>
-                    <th>Started</th>
-                    <th>Repository</th>
-                    <th>Branch</th>
-                    <th>Arch</th>
-                    <th>Duration</th>
-                    <th>Status</th>
-                    <th>Trigger</th>
-                    <th>Worker</th>
-                    <th>Log</th>
-                </tr>
-            </thead>
-            <tbody id="history-body">
-                <tr><td colspan="9" class="loading">Loading history…</td></tr>
-            </tbody>
-        </table>
-    </section>
-
-    <!-- Workers View -->
-    <section id="view-workers" class="view">
-        <div class="worker-grid" id="worker-grid">
-            <p class="loading">Loading workers...</p>
-        </div>
-        <h3>Queue Depths</h3>
-        <div id="queue-status" class="queue-grid"></div>
-    </section>
-
-    <!-- Nightly View -->
-    <section id="view-nightly" class="view">
-        <div id="nightly-summary" class="nightly-header"></div>
-        <table id="nightly-table">
-            <thead>
-                <tr>
-                    <th>Repository</th>
-                    <th>Arch</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                    <th>Finished</th>
-                </tr>
-            </thead>
-            <tbody id="nightly-body">
-                <tr><td colspan="5" class="loading">Loading nightly results...</td></tr>
-            </tbody>
-        </table>
-    </section>
+        <!-- Nightly View -->
+        <section id="view-nightly" class="view">
+            <div id="nightly-summary" class="nightly-header"></div>
+            <table id="nightly-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Arch</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Finished</th>
+                    </tr>
+                </thead>
+                <tbody id="nightly-body">
+                    <tr><td colspan="5" class="loading">Loading nightly results…</td></tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
 
     <script src="/static/app.js"></script>
 </body>

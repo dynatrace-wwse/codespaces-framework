@@ -366,6 +366,188 @@ async def api_job_status(job_id: str):
     return {"job_id": job_id, "status": "unknown"}
 
 
+# Curated catalog of sync CLI commands surfaced in the Synchronizer tab.
+# Destructive commands (tag, release, push-update) are listed but flagged for
+# extra confirmation in the UI.
+SYNC_COMMANDS = [
+    {
+        "id": "status",
+        "label": "Status",
+        "description": "Show framework-version drift across the fleet.",
+        "args": ["status", "--json"],
+        "destructive": False,
+        "icon": "📊",
+    },
+    {
+        "id": "list",
+        "label": "List repos",
+        "description": "List all registered repos (CI status, framework version pin).",
+        "args": ["list"],
+        "destructive": False,
+        "icon": "📋",
+    },
+    {
+        "id": "list-ci-enabled",
+        "label": "List CI-enabled",
+        "description": "Only repos with ci: true.",
+        "args": ["list", "--ci-enabled"],
+        "destructive": False,
+        "icon": "✓",
+    },
+    {
+        "id": "list-pr",
+        "label": "Open PRs",
+        "description": "List open framework-update PRs across the fleet.",
+        "args": ["list-pr"],
+        "destructive": False,
+        "icon": "🔀",
+    },
+    {
+        "id": "ci-status",
+        "label": "CI status",
+        "description": "Roll-up of CI run status per repo.",
+        "args": ["ci-status"],
+        "destructive": False,
+        "icon": "🟢",
+    },
+    {
+        "id": "validate",
+        "label": "Validate",
+        "description": "Validate repos.yaml and local repo state.",
+        "args": ["validate"],
+        "destructive": False,
+        "icon": "✔️",
+    },
+    {
+        "id": "diff",
+        "label": "Diff (preview push-update)",
+        "description": "Preview what push-update would change for the next version.",
+        "args": ["diff"],
+        "destructive": False,
+        "icon": "🔍",
+    },
+    {
+        "id": "list-issues",
+        "label": "List issues",
+        "description": "Open issues across repos with label filtering.",
+        "args": ["list-issues"],
+        "destructive": False,
+        "icon": "🐛",
+    },
+    {
+        "id": "clone",
+        "label": "Clone all repos",
+        "description": "Clone (or pull) every sync-managed repo locally.",
+        "args": ["clone"],
+        "destructive": False,
+        "icon": "⬇️",
+    },
+]
+
+
+@app.get("/api/sync/commands")
+async def api_sync_commands():
+    """List curated sync commands available in the UI."""
+    return {"commands": SYNC_COMMANDS}
+
+
+@app.post("/api/sync/run")
+async def api_sync_run(request: Request):
+    """Enqueue a sync command for execution.
+
+    Body: {"command": "<id>"} where id matches one of SYNC_COMMANDS.
+    Enqueues a sync-command job into queue:sync; the worker streams output
+    to job:livelog:{job_id} and persists final log to job:log:{job_id}.
+    """
+    body = await request.json()
+    cmd_id = body.get("command", "")
+    spec = next((c for c in SYNC_COMMANDS if c["id"] == cmd_id), None)
+    if spec is None:
+        raise HTTPException(400, f"Unknown sync command: {cmd_id}")
+
+    requested_by = request.headers.get("x-auth-user", "dashboard")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    import uuid
+    job_id = f"sync-{spec['id']}-{int(datetime.now(timezone.utc).timestamp() * 1000)}-{uuid.uuid4().hex[:6]}"
+
+    job = {
+        "type": "sync-command",
+        "command_id": spec["id"],
+        "command_label": spec["label"],
+        "args": spec["args"],
+        "queue": "sync",
+        "timestamp": timestamp,
+        "requested_by": requested_by,
+        "repo": "dynatrace-wwse/codespaces-framework",  # synthetic for telemetry
+        "job_id": job_id,
+    }
+    await pool.rpush("queue:sync", json.dumps(job))
+    return {"status": "queued", "command": spec["id"], "job_id": job_id}
+
+
+@app.get("/api/sync/history")
+async def api_sync_history(limit: int = 50):
+    """Past sync command runs from jobs:completed."""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    rows = []
+    for raw in reversed(completed_raw):
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        if j.get("type") != "sync-command":
+            continue
+        result = j.get("result", {}) or {}
+        rows.append({
+            "job_id": j.get("job_id", ""),
+            "command_id": j.get("command_id", ""),
+            "command_label": j.get("command_label", ""),
+            "status": j.get("status", "completed"),
+            "exit_code": result.get("exit_code"),
+            "duration": int(result.get("duration_seconds", 0)),
+            "started_at": j.get("timestamp"),
+            "finished_at": j.get("finished_at"),
+            "requested_by": j.get("requested_by", ""),
+        })
+        if len(rows) >= limit: break
+    return {"rows": rows}
+
+
+@app.get("/api/repos/{owner}/{repo}/branches")
+async def api_repo_branches(owner: str, repo: str):
+    """List remote branches for a repo via gh api.
+
+    Cached briefly (10 min) in Redis under ``repo:branches:{owner}/{repo}``
+    to avoid hammering the GH API on every dashboard click.
+    """
+    import asyncio
+    cache_key = f"repo:branches:{owner}/{repo}"
+    cached = await pool.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "api", f"/repos/{owner}/{repo}/branches", "--paginate",
+        "--jq", "[.[] | .name]",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return {"branches": ["main"], "error": stderr.decode(errors="replace")[:200]}
+    try:
+        branches = json.loads(stdout.decode())
+    except Exception:
+        branches = ["main"]
+    # Sort: main first, then development branches, then alphabetical
+    main_first = [b for b in branches if b == "main"]
+    others = sorted([b for b in branches if b != "main"])
+    branches = main_first + others
+    payload = {"branches": branches}
+    await pool.set(cache_key, json.dumps(payload), ex=600)
+    return payload
+
+
 @app.get("/api/builds/history")
 async def api_builds_history(
     repo: str | None = None,

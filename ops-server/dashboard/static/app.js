@@ -46,6 +46,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
         if (tab.dataset.view === 'history') loadHistory();
         if (tab.dataset.view === 'running') loadRunningDetail();
+        if (tab.dataset.view === 'sync') loadSyncTab();
     });
 });
 
@@ -122,11 +123,13 @@ async function loadFleet() {
             <td data-arch="arm64">${buildCell(arm)}</td>
             <td data-arch="amd64">${buildCell(amd)}</td>
             <td>
-                <input class="branch-input" id="branch-${safeRepo}"
-                       type="text" value="main" placeholder="main"
-                       size="10" autocomplete="off">
+                <select class="branch-select" id="branch-${safeRepo}"
+                        data-repo="${repo.repo}" data-loaded="0">
+                    <option value="main" selected>main</option>
+                </select>
             </td>
             <td>
+                <div class="trigger-form">
                 <select class="arch-select" id="arch-${safeRepo}" ${disabled}>
                     <option value="both">both</option>
                     <option value="arm64">arm64</option>
@@ -136,6 +139,7 @@ async function loadFleet() {
                         onclick="triggerBuildFromRow('${repo.repo}', '${safeRepo}', this)">
                     Trigger
                 </button>
+                </div>
             </td>
         </tr>`;
     }).join('');
@@ -149,8 +153,34 @@ async function loadFleet() {
         });
     };
 
+    // Lazy-load branches when a branch dropdown is opened
+    tbody.querySelectorAll('.branch-select').forEach(sel => {
+        sel.addEventListener('mousedown', loadBranchesForSelect, { once: true });
+        sel.addEventListener('focus',     loadBranchesForSelect, { once: true });
+    });
+
     // Wire spinners that already exist on first paint
     await loadRunning();
+}
+
+async function loadBranchesForSelect(e) {
+    const sel = e.currentTarget || e.target;
+    if (sel.dataset.loaded === '1') return;
+    const repo = sel.dataset.repo;
+    if (!repo) return;
+    sel.dataset.loaded = '1';
+    try {
+        const res = await fetch(`${API}/api/repos/${repo}/branches`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const current = sel.value;
+        sel.innerHTML = data.branches.map(b =>
+            `<option value="${escapeHtml(b)}"${b === current ? ' selected' : ''}>${escapeHtml(b)}</option>`
+        ).join('');
+    } catch {
+        // Keep the existing main option, mark for retry next time
+        sel.dataset.loaded = '0';
+    }
 }
 
 function buildCell(build) {
@@ -611,6 +641,91 @@ document.addEventListener('click', async e => {
     } finally {
         btn.disabled = false; btn.textContent = '■ Terminate';
         loadRunningDetail();
+    }
+});
+
+// ── Synchronizer tab ────────────────────────────────────────────────────────
+
+let syncCommandsCache = null;
+
+async function loadSyncTab() {
+    if (!syncCommandsCache) {
+        try {
+            const res = await fetch(`${API}/api/sync/commands`);
+            syncCommandsCache = (await res.json()).commands;
+        } catch (e) {
+            syncCommandsCache = [];
+        }
+    }
+    const grid = document.getElementById('sync-cards');
+    grid.innerHTML = syncCommandsCache.map(c => `
+        <div class="sync-card" data-cmd-id="${escapeHtml(c.id)}">
+            <h4>${c.icon || '⚙'} ${escapeHtml(c.label)}${c.destructive ? ' <span style="color:var(--red);font-size:0.7rem">⚠ DESTRUCTIVE</span>' : ''}</h4>
+            <p>${escapeHtml(c.description)}</p>
+            <span class="cmd">sync ${c.args.join(' ')}</span>
+        </div>
+    `).join('');
+    loadSyncHistory();
+}
+
+async function loadSyncHistory() {
+    const tbody = document.getElementById('sync-history-body');
+    try {
+        const res = await fetch(`${API}/api/sync/history?limit=30`);
+        const data = await res.json();
+        if (!data.rows.length) {
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">No sync runs yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = data.rows.map(r => {
+            const passed = r.exit_code === 0;
+            const cls = r.status === 'terminated' ? 'status-terminated' : (passed ? 'status-pass' : 'status-fail');
+            const label = r.status === 'terminated' ? 'TERM' : (passed ? 'OK' : 'FAIL');
+            const log = r.job_id ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}">log</a>
+                                    · <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener">⤢</a>` : '—';
+            return `<tr>
+                <td>${formatTime(r.started_at)}</td>
+                <td><strong>${escapeHtml(r.command_label || r.command_id)}</strong>
+                    <div style="font-size:0.7rem;color:var(--text-3);font-family:ui-monospace,monospace">${escapeHtml(r.command_id)}</div>
+                </td>
+                <td>${formatDuration(r.duration)}</td>
+                <td><span class="${cls}">${label}</span></td>
+                <td><span style="font-size:0.78rem;color:var(--text-2)">${escapeHtml(r.requested_by || '')}</span></td>
+                <td>${log}</td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+document.addEventListener('click', async e => {
+    const card = e.target.closest('.sync-card');
+    if (!card) return;
+    const cmdId = card.dataset.cmdId;
+    const spec = (syncCommandsCache || []).find(c => c.id === cmdId);
+    if (!spec) return;
+    if (spec.destructive && !confirm(`This is a destructive command:\n\nsync ${spec.args.join(' ')}\n\nProceed?`)) return;
+    if (!authState.signedIn) {
+        if (!confirm('You are not signed in — the sync command will be attributed to "anonymous". Continue?')) return;
+    }
+    card.style.opacity = '0.5';
+    try {
+        const res = await fetch(`${API}/api/sync/run`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ command: cmdId }),
+        });
+        if (!res.ok) {
+            alert(`Sync command failed to enqueue: ${res.status}`);
+            return;
+        }
+        const data = await res.json();
+        // Open the live-log modal immediately to tail output
+        openLiveLog(data.job_id, `sync ${spec.args.join(' ')}`);
+        setTimeout(loadSyncHistory, 1500);
+    } finally {
+        card.style.opacity = '1';
     }
 });
 

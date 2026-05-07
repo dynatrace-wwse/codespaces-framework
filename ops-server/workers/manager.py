@@ -397,6 +397,9 @@ class WorkerManager:
         elif job_type == "validate-after-push":
             return await self._run_sync(job, "validate")
 
+        elif job_type == "sync-command":
+            return await self._run_sync_command(job)
+
         elif job_type == "integration-test":
             return await self._run_integration_test(job)
 
@@ -822,6 +825,82 @@ class WorkerManager:
             "command": command,
             "exit_code": proc.returncode,
             "output": stdout.decode()[-2000:],  # Last 2000 chars
+        }
+
+    async def _run_sync_command(self, job: dict) -> dict:
+        """Run a sync CLI subcommand from the dashboard's curated catalog.
+
+        Streams output to ``job:livelog:{job_id}`` so the dashboard can tail
+        in the same modal/fullscreen viewer used for integration tests.
+        Persists the final log under ``job:log:{job_id}`` (7-day TTL) and
+        captures duration/exit_code into the result.
+        """
+        job_id = job["job_id"]
+        args = job.get("args") or []
+        sync_dir = Path.home() / "enablement-framework" / "codespaces-framework"
+        log_file = LOGS_DIR / f"{job_id}.log"
+        livelog_key = f"job:livelog:{job_id}"
+        await self.pool.set(livelog_key, "", ex=3600)
+        header = (
+            f"=== sync.cli {' '.join(args)} ===\n"
+            f"requested_by: {job.get('requested_by', '?')}\n"
+            f"started: {datetime.now(timezone.utc).isoformat()}\n\n"
+        )
+        await self.pool.append(livelog_key, header)
+
+        cmd = ["python3", "-u", "-m", "sync.cli", *args]
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(sync_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "PYTHONPATH": str(sync_dir), "PYTHONUNBUFFERED": "1"},
+        )
+
+        out_buf = []
+        try:
+            with open(log_file, "w") as logf:
+                logf.write(header)
+                logf.flush()
+                while True:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=600,
+                    )
+                    if not line:
+                        break
+                    text = line.decode(errors="replace")
+                    out_buf.append(text)
+                    try:
+                        await self.pool.append(livelog_key, text)
+                    except Exception:
+                        pass
+                    logf.write(text)
+                    logf.flush()
+        except asyncio.TimeoutError:
+            proc.kill()
+            await self.pool.append(livelog_key, "\n[TIMEOUT — killed after 10m]\n")
+        rc = await proc.wait()
+        duration = int(time.time() - start)
+        footer = f"\n=== exit_code={rc} duration={duration}s ===\n"
+        await self.pool.append(livelog_key, footer)
+
+        # Persist full log to job:log:{job_id} for the History view
+        try:
+            content = "".join(out_buf) + footer
+            max_bytes = 256 * 1024
+            if len(content.encode()) > max_bytes:
+                content = "... (truncated) ...\n\n" + content[-max_bytes:]
+            await self.pool.set(f"job:log:{job_id}", content, ex=86400 * 7)
+        except Exception as e:
+            log.warning("Could not publish sync log for %s: %s", job_id, e)
+
+        return {
+            "command": " ".join(args),
+            "exit_code": rc,
+            "duration_seconds": duration,
+            "passed": rc == 0,
+            "log_file": str(log_file),
         }
 
     async def _make_world_writable(self, repo_dir: Path):
