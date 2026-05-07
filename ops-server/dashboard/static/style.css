@@ -531,3 +531,131 @@ h3 {
     main { padding: 16px 12px 32px; }
     .controls input[type="text"] { min-width: 0; flex: 1; }
 }
+
+/* ─── Role badges (writer/guest, master/agent) ───────────────── */
+.role-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 99px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    margin-left: 4px;
+    border: 1px solid transparent;
+    line-height: 1.4;
+}
+.role-badge.writer  { background: rgba(74,222,128,.14); color: var(--green); border-color: rgba(74,222,128,.35); }
+.role-badge.guest   { background: rgba(148,163,184,.14); color: var(--text-2); border-color: rgba(148,163,184,.3); }
+.role-badge.master  { background: rgba(0,180,222,.16); color: var(--accent); border-color: rgba(0,180,222,.4); }
+.role-badge.agent   { background: rgba(167,139,250,.14); color: var(--purple); border-color: rgba(167,139,250,.32); }
+
+.worker-card.is-master {
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(180deg, rgba(0,180,222,.05) 0%, var(--surface) 60%);
+}
+
+/* Guests: every action surface is dimmed and unclickable. */
+body.role-guest [data-action] {
+    opacity: 0.45;
+    pointer-events: none;
+    cursor: not-allowed;
+}
+
+/* ─── Fleet trigger panel ────────────────────────────────────── */
+.fleet-trigger {
+    background: linear-gradient(135deg, rgba(0,180,222,.07), rgba(167,139,250,.04));
+    border: 1px solid rgba(0,180,222,.22);
+    border-radius: var(--r);
+    padding: 14px 18px;
+    margin-bottom: 18px;
+}
+.fleet-trigger-head {
+    display: flex; align-items: baseline; gap: .8rem;
+    margin-bottom: 10px; flex-wrap: wrap;
+}
+.fleet-trigger-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.01em;
+}
+.fleet-trigger-help {
+    font-size: 0.78rem;
+    color: var(--text-2);
+}
+.fleet-trigger-row {
+    display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
+}
+.fleet-trigger-row select { min-width: 220px; }
+.fleet-target-count { font-size: 0.78rem; color: var(--text-2); }
+
+/* ─── Modal search bar + wrap toggle ─────────────────────────── */
+.modal-search {
+    display: flex; align-items: center; gap: 4px;
+    flex-shrink: 0;
+}
+.modal-search input[type="search"] {
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    color: var(--text);
+    padding: 5px 10px;
+    border-radius: var(--r-sm);
+    font-size: 0.78rem;
+    width: 200px;
+}
+.modal-search input[type="search"]:focus {
+    outline: none;
+    border-color: rgba(0,180,222,.5);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.search-nav {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-soft);
+    color: var(--text-2);
+    border-radius: var(--r-sm);
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: all .14s var(--ease);
+}
+.search-nav:hover { background: var(--surface-3); color: var(--text); }
+.search-count {
+    font-size: 0.7rem;
+    color: var(--text-3);
+    min-width: 50px;
+    font-family: ui-monospace, monospace;
+    padding: 0 4px;
+}
+
+mark.log-match {
+    background: rgba(251,191,36,.32);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0;
+}
+mark.log-match.current {
+    background: var(--accent);
+    color: #06121b;
+    box-shadow: 0 0 0 2px rgba(0,180,222,.5);
+}
+
+.modal-inner pre.nowrap {
+    white-space: pre;
+    word-break: normal;
+    overflow-x: auto;
+}
+
+/* Tighten the modal header so search bar fits alongside actions */
+.modal-header {
+    flex-wrap: wrap;
+    row-gap: 8px;
+}
+.modal-header h3 { min-width: 180px; }
+
+@media (max-width: 768px) {
+    .modal-search input[type="search"] { width: 130px; }
+    .fleet-trigger-row select { min-width: 0; flex: 1; }
+}

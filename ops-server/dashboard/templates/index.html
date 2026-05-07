@@ -47,6 +47,28 @@
     <main>
         <!-- Fleet View -->
         <section id="view-fleet" class="view active">
+            <!-- Cross-repo branch trigger: pick a branch, push it across all
+                 repos that have it. Useful for validating a feature branch is
+                 mergeable across the fleet (e.g. "fix/badges-and-rum-ids"). -->
+            <div class="fleet-trigger" id="fleet-trigger-panel" hidden>
+                <div class="fleet-trigger-head">
+                    <span class="fleet-trigger-title">⚡ Trigger across fleet</span>
+                    <span class="fleet-trigger-help">Run integration tests on every repo that has the chosen branch.</span>
+                </div>
+                <div class="fleet-trigger-row">
+                    <select id="fleet-branch" class="fleet-branch-select">
+                        <option value="">Select a branch…</option>
+                    </select>
+                    <select id="fleet-arch" class="fleet-arch-select">
+                        <option value="both">both arches</option>
+                        <option value="arm64">arm64 only</option>
+                        <option value="amd64">amd64 only</option>
+                    </select>
+                    <span id="fleet-target-count" class="fleet-target-count"></span>
+                    <button class="btn" id="fleet-trigger-btn" disabled>Trigger fleet build</button>
+                </div>
+            </div>
+
             <div class="controls">
                 <input type="text" id="repo-filter" placeholder="Filter repos...">
                 <select id="arch-filter">
@@ -54,6 +76,16 @@
                     <option value="arm64">ARM only</option>
                     <option value="amd64">AMD only</option>
                     <option value="both">Both</option>
+                </select>
+                <select id="fleet-status-filter">
+                    <option value="all">All statuses</option>
+                    <option value="passed">Passed only</option>
+                    <option value="failed">Failed only</option>
+                    <option value="terminated">Terminated</option>
+                    <option value="never-run">Never run</option>
+                </select>
+                <select id="fleet-branch-filter">
+                    <option value="">All branches (selected)</option>
                 </select>
             </div>
 
@@ -172,6 +204,17 @@
             <div class="modal-inner">
                 <header class="modal-header">
                     <h3 id="livelog-title">Live log</h3>
+                    <div class="modal-search">
+                        <input type="search" id="livelog-search" placeholder="Search…"
+                               autocomplete="off" spellcheck="false">
+                        <button class="search-nav" id="livelog-search-prev"
+                                title="Previous match (Shift+Enter)">◀</button>
+                        <button class="search-nav" id="livelog-search-next"
+                                title="Next match (Enter)">▶</button>
+                        <span class="search-count" id="livelog-search-count"></span>
+                        <button class="btn btn-small btn-secondary" id="livelog-wrap-toggle"
+                                title="Toggle line wrapping (W)">↩ Wrap</button>
+                    </div>
                     <div class="modal-actions">
                         <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
                            target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>

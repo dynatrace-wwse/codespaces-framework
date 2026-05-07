@@ -84,6 +84,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     sections = []
     rc = 0
     timed_out = False
+    failed_step = None
     deadline = start_time + TEST_TIMEOUT
 
     try:
@@ -149,8 +150,19 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         #    fails with EACCES on docker.sock.
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
-        # 6. Run each step via nested docker exec, streaming output to Redis
+        # 6. Run each step via nested docker exec, streaming output to Redis.
+        # Stage 1 (BATS) runs first — fast structural validation that lets us
+        # fail before spinning up k3d if the framework code is broken. Skipped
+        # if the repo has no .bats files. Mirrors workers/manager.py.
+        bats_script = (
+            "if ls .devcontainer/test/unit/*.bats >/dev/null 2>&1; then "
+            "  command -v bats >/dev/null 2>&1 || "
+            "    { apt-get update -qq && apt-get install -y -qq bats; }; "
+            "  cd .devcontainer && bats test/unit/; "
+            "else echo '(no .devcontainer/test/unit/*.bats found — skipping Stage 1)'; fi"
+        )
         steps = [
+            ("bats",              bats_script),
             ("postCreateCommand", "./.devcontainer/post-create.sh"),
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
             ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
@@ -185,6 +197,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
                 sections.append(step_out)
                 if proc.returncode != 0:
                     rc = proc.returncode
+                    failed_step = label
                     msg = f"\n=== {label} exited with rc={rc} — stopping ===\n"
                     sections.append(msg)
                     if livelog_key:
@@ -199,6 +212,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
                     pass
                 sections.append(f"\n=== {label} timed out ===\n")
                 rc = 124
+                failed_step = label
                 timed_out = True
                 break
     except Exception as e:
@@ -238,6 +252,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         "duration_seconds": duration,
         "passed": rc == 0,
         "timed_out": timed_out,
+        "failed_step": failed_step or "",
         "log_file": str(log_file),
     }
 

@@ -2,9 +2,18 @@
 
 const API = '';
 
-// Auth state — checked on load via oauth2-proxy /oauth2/userinfo.
-// authState.signedIn determines whether trigger buttons are enabled.
-const authState = { signedIn: false, user: null };
+// Auth state — combines oauth2-proxy /oauth2/userinfo (am I signed in?) with
+// the dashboard's /api/auth/role (am I a writer or guest?). Only writers can
+// execute actions; guests are read-only across the whole UI including the
+// Synchronizer tab.
+const authState = {
+    signedIn: false,
+    user: null,
+    role: 'guest',     // 'writer' | 'guest'
+    orgRole: '',       // 'admin' | 'member' | ''
+};
+
+function isWriter() { return authState.role === 'writer'; }
 
 async function loadAuthState() {
     try {
@@ -19,7 +28,20 @@ async function loadAuthState() {
     } catch {
         authState.signedIn = false;
     }
+    // Resolve role separately — even a signed-in user could fail the org check.
+    try {
+        const res = await fetch('/api/auth/role', { credentials: 'same-origin' });
+        if (res.ok) {
+            const data = await res.json();
+            authState.role = data.role || 'guest';
+            authState.orgRole = data.org_role || '';
+            if (data.user) authState.user = data.user;
+        }
+    } catch {
+        authState.role = 'guest';
+    }
     renderAuthHeader();
+    applyRoleGating();
 }
 
 function renderAuthHeader() {
@@ -29,11 +51,31 @@ function renderAuthHeader() {
     if (authState.signedIn) {
         signInBtn.hidden = true;
         userInfo.hidden = false;
-        userName.textContent = authState.user;
+        const roleLabel = isWriter()
+            ? `<span class="role-badge writer" title="Org member — actions enabled">writer</span>`
+            : `<span class="role-badge guest" title="Read-only — sign in as an org member to execute actions">guest</span>`;
+        userName.innerHTML = escapeHtml(authState.user) + ' ' + roleLabel;
     } else {
         signInBtn.hidden = false;
         userInfo.hidden = true;
     }
+}
+
+// Disable every action surface for guests. Re-applied after every dynamic
+// render so DOM mutations don't smuggle a clickable button past the gate.
+function applyRoleGating() {
+    const writer = isWriter();
+    document.body.classList.toggle('role-guest', !writer);
+    document.body.classList.toggle('role-writer', writer);
+    document.querySelectorAll('[data-action]').forEach(el => {
+        if (writer) {
+            el.removeAttribute('disabled');
+            el.removeAttribute('title');
+        } else {
+            el.setAttribute('disabled', 'disabled');
+            el.setAttribute('title', 'Sign in as an org member to use this action.');
+        }
+    });
 }
 
 // ── Tab Navigation ──────────────────────────────────────────────────────────
@@ -107,13 +149,19 @@ async function loadRunning() {
     } catch {}
 }
 
+// Cache of latest fleet rows for client-side filtering. Keyed by repo, holds
+// the {arm, amd} build objects so we can apply status/branch filters without
+// refetching.
+let fleetRowsByRepo = {};
+
 async function loadFleet() {
     const res = await fetch(`${API}/api/repos`);
     const data = await res.json();
     const tbody = document.getElementById('fleet-body');
 
-    const disabled = authState.signedIn ? '' : 'disabled title="Sign in with GitHub to trigger builds"';
+    fleetRowsByRepo = {};
     tbody.innerHTML = data.repos.map(repo => {
+        fleetRowsByRepo[repo.repo] = repo;
         const arm = repo.builds.arm64;
         const amd = repo.builds.amd64;
         const safeRepo = repo.repo.replace(/[^a-z0-9-]/gi, '_');
@@ -130,12 +178,12 @@ async function loadFleet() {
             </td>
             <td>
                 <div class="trigger-form">
-                <select class="arch-select" id="arch-${safeRepo}" ${disabled}>
+                <select class="arch-select" id="arch-${safeRepo}" data-action>
                     <option value="both">both</option>
                     <option value="arm64">arm64</option>
                     <option value="amd64">amd64</option>
                 </select>
-                <button class="btn btn-small" ${disabled}
+                <button class="btn btn-small" data-action
                         onclick="triggerBuildFromRow('${repo.repo}', '${safeRepo}', this)">
                     Trigger
                 </button>
@@ -146,12 +194,7 @@ async function loadFleet() {
 
     // Filter handlers
     const filt = document.getElementById('repo-filter');
-    filt.oninput = e => {
-        const filter = e.target.value.toLowerCase();
-        tbody.querySelectorAll('tr').forEach(row => {
-            row.style.display = row.textContent.toLowerCase().includes(filter) ? '' : 'none';
-        });
-    };
+    filt.oninput = applyFleetFilters;
 
     // Lazy-load branches when a branch dropdown is opened
     tbody.querySelectorAll('.branch-select').forEach(sel => {
@@ -159,8 +202,143 @@ async function loadFleet() {
         sel.addEventListener('focus',     loadBranchesForSelect, { once: true });
     });
 
+    // Re-apply gating now that buttons exist
+    applyRoleGating();
+    applyFleetFilters();
+
     // Wire spinners that already exist on first paint
     await loadRunning();
+}
+
+// ── Fleet filters (status, branch, repo, arch) ──────────────────────────────
+function applyFleetFilters() {
+    const repoFilter   = (document.getElementById('repo-filter')?.value || '').toLowerCase();
+    const archFilter   = document.getElementById('arch-filter')?.value || 'all';
+    const statusFilter = document.getElementById('fleet-status-filter')?.value || 'all';
+    const branchFilter = document.getElementById('fleet-branch-filter')?.value || '';
+
+    document.querySelectorAll('#fleet-body tr[data-repo]').forEach(row => {
+        const repoFull = row.dataset.repo;
+        const meta = fleetRowsByRepo[repoFull];
+        if (!meta) { row.style.display = ''; return; }
+
+        const arm = meta.builds.arm64, amd = meta.builds.amd64;
+        const arches = [];
+        if (arm) arches.push(arm);
+        if (amd) arches.push(amd);
+
+        // Repo text match
+        if (repoFilter && !row.textContent.toLowerCase().includes(repoFilter)) {
+            row.style.display = 'none'; return;
+        }
+        // Arch toggle: meta.arch is the configured arches ('arm64'|'amd64'|'both')
+        if (archFilter !== 'all' && meta.arch !== archFilter) {
+            row.style.display = 'none'; return;
+        }
+        // Status filter — applies to "best" recent build across both arches
+        if (statusFilter !== 'all') {
+            if (statusFilter === 'never-run') {
+                if (arches.length) { row.style.display = 'none'; return; }
+            } else if (statusFilter === 'passed') {
+                if (!arches.some(b => b.passed && (b.status || 'completed') !== 'terminated')) {
+                    row.style.display = 'none'; return;
+                }
+            } else if (statusFilter === 'failed') {
+                // anyone failed (and not terminated)
+                if (!arches.some(b => !b.passed && (b.status || 'completed') !== 'terminated')) {
+                    row.style.display = 'none'; return;
+                }
+            } else if (statusFilter === 'terminated') {
+                if (!arches.some(b => b.status === 'terminated')) {
+                    row.style.display = 'none'; return;
+                }
+            }
+        }
+        // Branch filter — branch is set per row's branch dropdown
+        if (branchFilter) {
+            const sel = row.querySelector('.branch-select');
+            const cur = sel ? sel.value : 'main';
+            if (cur !== branchFilter) { row.style.display = 'none'; return; }
+        }
+        row.style.display = '';
+    });
+}
+
+// ── Cross-repo branch trigger ───────────────────────────────────────────────
+// Pulls the union of branches across active repos and lets a writer push a
+// build for that branch to every repo that has it. Most useful for fan-out
+// validation of feature branches like "fix/badges-and-rum-ids" that span the
+// fleet.
+let branchesAggCache = null;
+
+async function loadFleetTriggerPanel() {
+    const panel = document.getElementById('fleet-trigger-panel');
+    if (!panel) return;
+    panel.hidden = false;
+    try {
+        const res = await fetch(`${API}/api/branches/all`);
+        if (!res.ok) return;
+        const data = await res.json();
+        branchesAggCache = data;
+        const sel = document.getElementById('fleet-branch');
+        const filterSel = document.getElementById('fleet-branch-filter');
+        // Populate cross-repo trigger dropdown — annotate with repo count
+        sel.innerHTML = `<option value="">Select a branch…</option>` +
+            data.branches.map(b =>
+                `<option value="${escapeHtml(b.name)}">${escapeHtml(b.name)} · ${b.count} repo${b.count === 1 ? '' : 's'}</option>`
+            ).join('');
+        // Populate fleet branch filter (no repo count — just names)
+        const seenBranches = data.branches.map(b => b.name);
+        filterSel.innerHTML = `<option value="">All branches (selected)</option>` +
+            seenBranches.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
+    } catch {}
+}
+
+async function triggerFleetBuild() {
+    if (!isWriter()) {
+        if (!authState.signedIn) {
+            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        } else {
+            alert('Only org members can trigger fleet builds.');
+        }
+        return;
+    }
+    const branch = document.getElementById('fleet-branch').value;
+    const arch = document.getElementById('fleet-arch').value;
+    if (!branch) { alert('Select a branch first.'); return; }
+    const meta = (branchesAggCache?.branches || []).find(b => b.name === branch);
+    const count = meta?.count || 0;
+    if (!confirm(`Trigger an integration test for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'} (${arch})?\n\nEach repo will be queued; per-(repo,branch,arch) locks still apply.`)) return;
+
+    const btn = document.getElementById('fleet-trigger-btn');
+    btn.disabled = true; btn.textContent = 'Queueing…';
+    try {
+        const res = await fetch(`${API}/api/builds/trigger-fleet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ branch, arch }),
+        });
+        if (res.status === 401) {
+            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            return;
+        }
+        if (!res.ok) {
+            const body = await res.text();
+            alert(`Fleet trigger failed (${res.status}): ${body}`);
+            return;
+        }
+        const data = await res.json();
+        const skipped = (data.skipped_no_branch || []).length;
+        alert(
+            `Queued ${data.queued.length} job(s) for branch ${data.branch}.` +
+            (skipped ? `\n${skipped} repo(s) skipped (branch not present).` : '')
+        );
+        loadRunning();
+    } finally {
+        btn.disabled = false; btn.textContent = 'Trigger fleet build';
+        applyRoleGating();
+    }
 }
 
 async function loadBranchesForSelect(e) {
@@ -209,6 +387,10 @@ function buildCell(build) {
 async function triggerBuildFromRow(repo, safeRepo, btn) {
     if (!authState.signedIn) {
         window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        return;
+    }
+    if (!isWriter()) {
+        alert('Only org members can trigger builds. You are signed in as a guest.');
         return;
     }
     const branch = document.getElementById(`branch-${safeRepo}`).value.trim() || 'main';
@@ -312,14 +494,43 @@ function ansiToHtml(text) {
 let livelogPoll = null;
 let currentJobId = null;
 let currentJobIsLive = false;
+// Most-recent rendered raw text (after ANSI processing). The search bar
+// re-highlights against this whenever the log refreshes or the query
+// changes, so search-state survives polling without losing position.
+let currentLogText = '';
+let currentLogHtml = '';
+let currentSearchTerm = '';
+let currentSearchIdx = -1;
+let currentSearchTotal = 0;
+const WRAP_KEY = 'livelog-wrap';
+
+function getWrapPref() {
+    return localStorage.getItem(WRAP_KEY) !== '0'; // default: wrap on
+}
+
+function applyWrapPref() {
+    const pre = document.getElementById('livelog-pre');
+    if (!pre) return;
+    const wrap = getWrapPref();
+    pre.classList.toggle('nowrap', !wrap);
+    const btn = document.getElementById('livelog-wrap-toggle');
+    if (btn) btn.textContent = wrap ? '↩ Wrap' : '→ NoWrap';
+}
 
 function openLiveLog(jobId, title) {
     currentJobId = jobId;
     currentJobIsLive = false;
+    currentSearchTerm = '';
+    currentSearchIdx = -1;
+    currentSearchTotal = 0;
+    const searchInput = document.getElementById('livelog-search');
+    if (searchInput) searchInput.value = '';
+    document.getElementById('livelog-search-count').textContent = '';
     document.getElementById('livelog-title').textContent = title;
     const pre = document.getElementById('livelog-pre');
     pre.innerHTML = '<em style="color:var(--text-muted)">Loading…</em>';
     document.getElementById('livelog-modal').hidden = false;
+    applyWrapPref();
 
     // Wire fullscreen + terminate buttons for this job
     const fsBtn = document.getElementById('livelog-fullscreen');
@@ -340,18 +551,111 @@ function openLiveLog(jobId, title) {
                 if (termBtn) termBtn.hidden = true;
             } else if (res.ok) {
                 currentJobIsLive = true;
-                if (termBtn) termBtn.hidden = false;
+                if (termBtn) termBtn.hidden = !isWriter();
             }
             if (res.ok) {
                 const text = await res.text();
                 const wasAtBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-                pre.innerHTML = ansiToHtml(text);
-                if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
+                currentLogText = text;
+                currentLogHtml = ansiToHtml(text);
+                renderLogWithSearch();
+                if (wasAtBottom && !currentSearchTerm) pre.scrollTop = pre.scrollHeight;
             }
         } catch {}
     };
     fetchOnce();
     livelogPoll = setInterval(fetchOnce, 2000);
+}
+
+function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function renderLogWithSearch(scrollToMatch = false) {
+    const pre = document.getElementById('livelog-pre');
+    if (!pre) return;
+    if (!currentSearchTerm) {
+        pre.innerHTML = currentLogHtml;
+        currentSearchTotal = 0;
+        currentSearchIdx = -1;
+        document.getElementById('livelog-search-count').textContent = '';
+        return;
+    }
+    // Highlight matches against the rendered HTML's text content. Build
+    // text→HTML by re-running ANSI rendering with case-insensitive markers
+    // around matches in the source text, then re-rendering. Simpler: run
+    // ANSI→HTML, then walk text nodes inserting <mark>.
+    const tmp = document.createElement('div');
+    tmp.innerHTML = currentLogHtml;
+    const re = new RegExp(escapeRegex(currentSearchTerm), 'gi');
+    let total = 0;
+    function walk(node) {
+        if (node.nodeType === 3) { // Text
+            const t = node.nodeValue;
+            if (!re.test(t)) return;
+            re.lastIndex = 0;
+            const frag = document.createDocumentFragment();
+            let last = 0, m;
+            while ((m = re.exec(t)) !== null) {
+                if (m.index > last) frag.appendChild(document.createTextNode(t.slice(last, m.index)));
+                const mark = document.createElement('mark');
+                mark.className = 'log-match';
+                mark.textContent = m[0];
+                mark.dataset.matchIdx = String(total);
+                frag.appendChild(mark);
+                total += 1;
+                last = m.index + m[0].length;
+                if (m[0].length === 0) re.lastIndex++; // safety
+            }
+            if (last < t.length) frag.appendChild(document.createTextNode(t.slice(last)));
+            node.parentNode.replaceChild(frag, node);
+        } else {
+            // Walk children (snapshot first because we mutate)
+            const kids = Array.from(node.childNodes);
+            kids.forEach(walk);
+        }
+    }
+    walk(tmp);
+    pre.innerHTML = '';
+    while (tmp.firstChild) pre.appendChild(tmp.firstChild);
+    currentSearchTotal = total;
+    if (total === 0) {
+        currentSearchIdx = -1;
+        document.getElementById('livelog-search-count').textContent = '0 / 0';
+        return;
+    }
+    if (currentSearchIdx < 0 || currentSearchIdx >= total) currentSearchIdx = 0;
+    highlightCurrentSearchMatch(scrollToMatch);
+}
+
+function highlightCurrentSearchMatch(scroll = true) {
+    const marks = document.querySelectorAll('#livelog-pre mark.log-match');
+    marks.forEach(m => m.classList.remove('current'));
+    document.getElementById('livelog-search-count').textContent =
+        currentSearchTotal ? `${currentSearchIdx + 1} / ${currentSearchTotal}` : '0 / 0';
+    if (!marks.length) return;
+    const cur = marks[currentSearchIdx];
+    if (!cur) return;
+    cur.classList.add('current');
+    if (scroll) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function moveSearch(delta) {
+    if (!currentSearchTotal) return;
+    currentSearchIdx = (currentSearchIdx + delta + currentSearchTotal) % currentSearchTotal;
+    highlightCurrentSearchMatch(true);
+}
+
+function onSearchInput(e) {
+    currentSearchTerm = e.target.value;
+    currentSearchIdx = 0;
+    renderLogWithSearch(true);
+}
+
+function toggleWrap() {
+    const cur = getWrapPref();
+    localStorage.setItem(WRAP_KEY, cur ? '0' : '1');
+    applyWrapPref();
 }
 
 function closeLiveLog() {
@@ -363,6 +667,10 @@ function closeLiveLog() {
 
 async function terminateCurrentJob() {
     if (!currentJobId || !currentJobIsLive) return;
+    if (!isWriter()) {
+        alert('Only org members can terminate jobs.');
+        return;
+    }
     if (!confirm(`Terminate job ${currentJobId}?\n\nThis kills the test container and marks the job as 'terminated'.`)) return;
     const termBtn = document.getElementById('livelog-terminate');
     if (termBtn) { termBtn.disabled = true; termBtn.textContent = 'Terminating…'; }
@@ -382,6 +690,10 @@ async function terminateCurrentJob() {
 document.addEventListener('click', e => {
     if (e.target.id === 'livelog-close') { closeLiveLog(); return; }
     if (e.target.id === 'livelog-terminate') { terminateCurrentJob(); return; }
+    if (e.target.id === 'livelog-wrap-toggle') { toggleWrap(); return; }
+    if (e.target.id === 'livelog-search-prev') { moveSearch(-1); return; }
+    if (e.target.id === 'livelog-search-next') { moveSearch(1); return; }
+    if (e.target.id === 'fleet-trigger-btn') { triggerFleetBuild(); return; }
 
     // Spinner (running test) → open live-tailing modal
     const spin = e.target.closest('a.spinner');
@@ -409,39 +721,92 @@ document.addEventListener('click', e => {
     if (e.target.id === 'livelog-modal') closeLiveLog();
 });
 
-// ESC closes the live-log modal
+// ESC closes the live-log modal; Enter/Shift+Enter walk search matches when
+// focus is in the search box; "/" focuses the search bar; "w" toggles wrap.
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
-        const modal = document.getElementById('livelog-modal');
-        if (modal && !modal.hidden) closeLiveLog();
+    const modal = document.getElementById('livelog-modal');
+    if (!modal || modal.hidden) return;
+    if (e.key === 'Escape') { closeLiveLog(); return; }
+    const inSearch = e.target && e.target.id === 'livelog-search';
+    if (inSearch && e.key === 'Enter') {
+        e.preventDefault();
+        moveSearch(e.shiftKey ? -1 : 1);
+        return;
+    }
+    if (!inSearch && e.key === '/') {
+        e.preventDefault();
+        const inp = document.getElementById('livelog-search');
+        if (inp) inp.focus();
+        return;
+    }
+    if (!inSearch && (e.key === 'w' || e.key === 'W')) {
+        e.preventDefault();
+        toggleWrap();
+        return;
+    }
+});
+
+document.addEventListener('input', e => {
+    if (e.target && e.target.id === 'livelog-search') onSearchInput(e);
+});
+
+// Fleet filter change handlers — re-apply on every dropdown change.
+document.addEventListener('change', e => {
+    if (['repo-filter', 'arch-filter', 'fleet-status-filter', 'fleet-branch-filter']
+            .includes(e.target.id)) {
+        applyFleetFilters();
+    }
+    // When a per-row branch dropdown changes and a branch filter is active,
+    // re-apply so the row hides if it no longer matches.
+    if (e.target.classList && e.target.classList.contains('branch-select')) {
+        applyFleetFilters();
     }
 });
 
 // ── Workers View ────────────────────────────────────────────────────────────
 
 async function loadWorkers() {
-    const [workersRes, buildsRes] = await Promise.all([
+    const [workersRes, buildsRes, healthRes] = await Promise.all([
         fetch(`${API}/api/workers`),
         fetch(`${API}/api/builds/running`),
+        fetch(`${API}/api/health`),
     ]);
     const workersData = await workersRes.json();
     const buildsData = await buildsRes.json();
+    let healthData = null;
+    try { healthData = await healthRes.json(); } catch {}
 
     const grid = document.getElementById('worker-grid');
     if (workersData.workers.length === 0) {
         grid.innerHTML = '<p class="loading">No workers registered</p>';
     } else {
-        grid.innerHTML = workersData.workers.map(w => `
-            <div class="worker-card ${w.status}">
-                <h4>${w.worker_id}</h4>
-                <div class="meta">
-                    <div>Arch: <strong>${w.arch}</strong></div>
-                    <div>Active: ${w.active_jobs} / ${w.capacity}</div>
-                    <div>Status: ${w.status}</div>
-                    <div>Last heartbeat: ${formatTime(w.last_heartbeat)}</div>
+        const now = Date.now();
+        grid.innerHTML = workersData.workers.map(w => {
+            const isMaster = w.role === 'master';
+            const ageSec = w.last_heartbeat
+                ? Math.round((now - new Date(w.last_heartbeat).getTime()) / 1000)
+                : -1;
+            const stale = ageSec >= 0 && ageSec > 60;
+            const badge = isMaster
+                ? '<span class="role-badge master" title="Master ARM worker (this host)">master</span>'
+                : '<span class="role-badge agent" title="Remote worker agent">agent</span>';
+            const masterExtras = isMaster && healthData ? `
+                <div>Redis: <strong style="color:${healthData.redis === 'connected' ? 'var(--green)' : 'var(--red)'}">${escapeHtml(healthData.redis || '?')}</strong></div>
+                <div>Total registered: ${workersData.total}</div>
+            ` : '';
+            return `
+                <div class="worker-card ${stale ? 'offline' : w.status} ${isMaster ? 'is-master' : ''}">
+                    <h4>${escapeHtml(w.worker_id)} ${badge}</h4>
+                    <div class="meta">
+                        <div>Arch: <strong>${escapeHtml(w.arch || '')}</strong></div>
+                        <div>Active: ${escapeHtml(String(w.active_jobs || '0'))} / ${escapeHtml(String(w.capacity || '?'))}</div>
+                        <div>Status: ${stale ? `<span style="color:var(--red)">stale (${ageSec}s)</span>` : escapeHtml(w.status || '?')}</div>
+                        <div>Last heartbeat: ${formatTime(w.last_heartbeat)}</div>
+                        ${masterExtras}
+                    </div>
                 </div>
-            </div>
-        `).join('');
+            `;
+        }).join('');
     }
 
     const queueGrid = document.getElementById('queue-status');
@@ -632,6 +997,10 @@ document.addEventListener('click', async e => {
     const btn = e.target.closest('.row-terminate');
     if (!btn) return;
     e.preventDefault();
+    if (!isWriter()) {
+        alert('Only org members can terminate jobs.');
+        return;
+    }
     const jobId = btn.dataset.jobId;
     if (!confirm(`Terminate job ${jobId}?`)) return;
     btn.disabled = true; btn.textContent = '…';
@@ -705,10 +1074,17 @@ document.addEventListener('click', async e => {
     const cmdId = card.dataset.cmdId;
     const spec = (syncCommandsCache || []).find(c => c.id === cmdId);
     if (!spec) return;
-    if (spec.destructive && !confirm(`This is a destructive command:\n\nsync ${spec.args.join(' ')}\n\nProceed?`)) return;
     if (!authState.signedIn) {
-        if (!confirm('You are not signed in — the sync command will be attributed to "anonymous". Continue?')) return;
+        if (confirm('Sign in to run sync commands?')) {
+            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        }
+        return;
     }
+    if (!isWriter()) {
+        alert('Only org members can run sync commands. You are signed in as a guest.');
+        return;
+    }
+    if (spec.destructive && !confirm(`This is a destructive command:\n\nsync ${spec.args.join(' ')}\n\nProceed?`)) return;
     card.style.opacity = '0.5';
     try {
         const res = await fetch(`${API}/api/sync/run`, {
@@ -756,9 +1132,10 @@ function formatTime(iso) {
 // ── Init ────────────────────────────────────────────────────────────────────
 
 (async () => {
-    await loadAuthState();   // sets authState.signedIn before fleet renders
+    await loadAuthState();   // resolves signedIn + role before fleet renders
     checkHealth();
     loadFleet();
+    loadFleetTriggerPanel();
     loadWorkers();
     loadNightly();
 })();

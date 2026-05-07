@@ -72,6 +72,7 @@ class WorkerManager:
             MAX_PARALLEL_AGENTS,
         )
 
+        await self._register_master()
         await self._recover_orphaned_deferred()
 
         # Install SIGTERM/SIGINT handlers for graceful shutdown — kills our
@@ -93,7 +94,43 @@ class WorkerManager:
             # Legacy queue for backwards compatibility
             self._consume_queue("test", self.test_semaphore),
             self._terminate_listener(),
+            self._master_heartbeat_loop(),
         )
+
+    async def _register_master(self):
+        """Write the master worker record so it shows up in the Workers tab.
+
+        AMD agents register themselves to ``worker:{WORKER_ID}``; the master
+        does the same here so the dashboard's /api/workers lists both.
+        """
+        await self.pool.hset("worker:master-arm64", mapping={
+            "arch": "arm64",
+            "role": "master",
+            "capacity": str(MAX_PARALLEL_WORKERS),
+            "active_jobs": "0",
+            "status": "ready",
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+        })
+        await self.pool.expire("worker:master-arm64", 60)
+        log.info("Registered master worker as worker:master-arm64")
+
+    async def _master_heartbeat_loop(self):
+        """Refresh the master's worker record every 15s so it never expires."""
+        while not self._shutdown:
+            try:
+                await self.pool.hset("worker:master-arm64", mapping={
+                    "active_jobs": str(len(self.active_jobs)),
+                    "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                    "status": (
+                        "ready" if len(self.active_jobs) < MAX_PARALLEL_WORKERS
+                        else "busy"
+                    ),
+                })
+                await self.pool.expire("worker:master-arm64", 60)
+            except Exception as e:
+                log.warning("master heartbeat failed: %s", e)
+            await asyncio.sleep(15)
 
     async def _terminate_listener(self):
         """Subscribe to ``ops:terminate`` and kill matching active jobs.
@@ -350,6 +387,7 @@ class WorkerManager:
                             worker_id="master",
                             job_id=job_id,
                             status=job.get("status", "completed"),
+                            failed_step=str(result.get("failed_step", "") or ""),
                         )
                     except Exception as e:
                         log.warning("telemetry report_test_result failed: %s", e)
@@ -504,6 +542,7 @@ class WorkerManager:
         sections: list[str] = []
         rc = 0
         timed_out = False
+        failed_step = None
         TEST_TIMEOUT = 1800
         start_time = time.time()
         deadline = start_time + TEST_TIMEOUT
@@ -567,7 +606,18 @@ class WorkerManager:
             # 5. Wait for vscode inside dt-enablement to have docker access
             await self._wait_for_inner_dt_ready(sb_name, inner_name)
 
+            # Stage 1: BATS unit tests (fast, structural). Fails the pipeline
+            # before we spin up k3d if the framework code is broken. Skipped if
+            # the repo has no .bats files.
+            bats_script = (
+                "if ls .devcontainer/test/unit/*.bats >/dev/null 2>&1; then "
+                "  command -v bats >/dev/null 2>&1 || "
+                "    { apt-get update -qq && apt-get install -y -qq bats; }; "
+                "  cd .devcontainer && bats test/unit/; "
+                "else echo '(no .devcontainer/test/unit/*.bats found — skipping Stage 1)'; fi"
+            )
             steps = [
+                ("bats",              bats_script),
                 ("postCreateCommand", "./.devcontainer/post-create.sh"),
                 ("postStartCommand",  "./.devcontainer/post-start.sh"),
                 ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
@@ -598,6 +648,7 @@ class WorkerManager:
                     sections.append(step_out)
                     if proc.returncode != 0:
                         rc = proc.returncode
+                        failed_step = label
                         msg = f"\n=== {label} exited with rc={rc} — stopping ===\n"
                         sections.append(msg)
                         await self.pool.append(livelog_key, msg)
@@ -606,6 +657,7 @@ class WorkerManager:
                     proc.kill()
                     sections.append(f"\n=== {label} timed out ===\n")
                     rc = 124
+                    failed_step = label
                     timed_out = True
                     break
         except Exception as e:
@@ -644,6 +696,7 @@ class WorkerManager:
             "duration_seconds": duration,
             "passed": rc == 0,
             "timed_out": timed_out,
+            "failed_step": failed_step or "",
             "log_file": str(log_file),
         }
 
