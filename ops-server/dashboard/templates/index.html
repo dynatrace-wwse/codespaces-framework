@@ -61,7 +61,14 @@
         <div class="modal-inner">
             <header class="modal-header">
                 <h3 id="livelog-title">Live log</h3>
-                <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+                <div class="modal-actions">
+                    <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
+                       target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
+                    <button id="livelog-terminate" class="btn btn-small btn-danger"
+                            title="Kill this job — sends SIGTERM-equivalent to the worker"
+                            hidden>■ Terminate</button>
+                    <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+                </div>
             </header>
             <pre id="livelog-pre"></pre>
         </div>

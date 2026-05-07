@@ -153,13 +153,19 @@ async function loadFleet() {
 
 function buildCell(build) {
     if (!build) return '<span class="status-none">—</span>';
-    const cls = build.passed ? 'status-pass' : 'status-fail';
-    const icon = build.passed ? 'PASS' : 'FAIL';
+    let cls, icon;
+    if (build.status === 'terminated') {
+        cls = 'status-terminated'; icon = 'TERM';
+    } else if (build.passed) {
+        cls = 'status-pass'; icon = 'PASS';
+    } else {
+        cls = 'status-fail'; icon = 'FAIL';
+    }
     if (build.job_id) {
         // Open in the same modal as live runs (reuses ANSI rendering + auto-tail)
         return `<a href="#" class="${cls} log-link"
                    data-final-job="${build.job_id}"
-                   title="View worker log">${icon}</a>`;
+                   title="View worker log (status: ${build.status || (build.passed ? 'completed' : 'failed')})">${icon}</a>`;
     }
     if (build.run_url) {
         // GitHub Actions logs live on github.com — keep external link
@@ -272,12 +278,23 @@ function ansiToHtml(text) {
 // ── Live log modal ──────────────────────────────────────────────────────────
 
 let livelogPoll = null;
+let currentJobId = null;
+let currentJobIsLive = false;
 
 function openLiveLog(jobId, title) {
+    currentJobId = jobId;
+    currentJobIsLive = false;
     document.getElementById('livelog-title').textContent = title;
     const pre = document.getElementById('livelog-pre');
     pre.innerHTML = '<em style="color:var(--text-muted)">Loading…</em>';
     document.getElementById('livelog-modal').hidden = false;
+
+    // Wire fullscreen + terminate buttons for this job
+    const fsBtn = document.getElementById('livelog-fullscreen');
+    if (fsBtn) fsBtn.href = `/log/${jobId}`;
+    const termBtn = document.getElementById('livelog-terminate');
+    if (termBtn) termBtn.hidden = true;  // unhide once we confirm livelog (running)
+
     if (livelogPoll) clearInterval(livelogPoll);
 
     const fetchOnce = async () => {
@@ -287,6 +304,11 @@ function openLiveLog(jobId, title) {
             if (res.status === 404) {
                 res = await fetch(`/api/jobs/${jobId}/log`);
                 if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+                currentJobIsLive = false;
+                if (termBtn) termBtn.hidden = true;
+            } else if (res.ok) {
+                currentJobIsLive = true;
+                if (termBtn) termBtn.hidden = false;
             }
             if (res.ok) {
                 const text = await res.text();
@@ -303,10 +325,31 @@ function openLiveLog(jobId, title) {
 function closeLiveLog() {
     document.getElementById('livelog-modal').hidden = true;
     if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+    currentJobId = null;
+    currentJobIsLive = false;
+}
+
+async function terminateCurrentJob() {
+    if (!currentJobId || !currentJobIsLive) return;
+    if (!confirm(`Terminate job ${currentJobId}?\n\nThis kills the test container and marks the job as 'terminated'.`)) return;
+    const termBtn = document.getElementById('livelog-terminate');
+    if (termBtn) { termBtn.disabled = true; termBtn.textContent = 'Terminating…'; }
+    try {
+        const res = await fetch(`/api/jobs/${currentJobId}/terminate`, { method: 'POST' });
+        if (!res.ok) {
+            const body = await res.text();
+            alert(`Termination failed (${res.status}): ${body}`);
+        }
+    } catch (e) {
+        alert('Network error requesting termination: ' + e);
+    } finally {
+        if (termBtn) { termBtn.disabled = false; termBtn.textContent = '■ Terminate'; }
+    }
 }
 
 document.addEventListener('click', e => {
     if (e.target.id === 'livelog-close') { closeLiveLog(); return; }
+    if (e.target.id === 'livelog-terminate') { terminateCurrentJob(); return; }
 
     // Spinner (running test) → open live-tailing modal
     const spin = e.target.closest('a.spinner');

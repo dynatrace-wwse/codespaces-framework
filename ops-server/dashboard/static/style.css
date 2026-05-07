@@ -250,6 +250,13 @@ td.running { background: rgba(88, 166, 255, 0.08); }
 
 .btn:hover { opacity: 0.85; }
 .btn-small { padding: 3px 8px; font-size: 0.75rem; }
+.btn-danger { background: #da3633; color: #fff; }
+.btn-danger:hover { background: #b62a26; opacity: 1; }
+.modal-actions { display: flex; gap: 6px; align-items: center; }
+.modal-actions a.btn { text-decoration: none; display: inline-block; line-height: 1; }
+.status-pill.terminated { background: #d2932922; color: #d29922; border-color: #d29922; }
+a.status-terminated, .status-terminated { color: #d29922; font-weight: 600; }
+a.status-terminated:hover { color: #f3a832; }
 
 .worker-grid {
     display: grid;

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import signal
 import time
 from datetime import datetime, timezone
 
@@ -46,6 +47,10 @@ class WorkerAgent:
         self.active_jobs: dict[str, dict] = {}
         self.semaphore = asyncio.Semaphore(WORKER_CAPACITY)
         self._running = True
+        # Job IDs whose owners requested termination (via ops:terminate pub/sub
+        # or local SIGTERM). The job's finally block sets status='terminated'.
+        self._terminated_jobs: set[str] = set()
+        self._shutdown = False
 
     async def start(self):
         """Connect to master Redis, register, and start consuming."""
@@ -64,11 +69,79 @@ class WorkerAgent:
 
         await self._register()
 
-        # Run consumer and heartbeat concurrently
+        # Install SIGTERM/SIGINT handlers for graceful shutdown.
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(
+                    sig, lambda s=sig: asyncio.create_task(self._handle_shutdown(s))
+                )
+            except NotImplementedError:
+                pass
+
+        # Run consumer, heartbeat, and termination listener concurrently
         await asyncio.gather(
             self._consume_queue(),
             self._heartbeat_loop(),
+            self._terminate_listener(),
         )
+
+    async def _terminate_listener(self):
+        """Subscribe to ``ops:terminate`` and kill matching active jobs."""
+        pubsub = self.pool.pubsub()
+        await pubsub.subscribe("ops:terminate")
+        log.info("Subscribed to ops:terminate channel")
+        async for msg in pubsub.listen():
+            if msg.get("type") != "message":
+                continue
+            data = msg.get("data")
+            job_id = data if isinstance(data, str) else (
+                data.decode() if isinstance(data, bytes) else ""
+            )
+            if not job_id or job_id not in self.active_jobs:
+                continue
+            log.info("Termination request received for %s — killing container", job_id)
+            await self._kill_job_container(job_id)
+
+    async def _kill_job_container(self, job_id: str):
+        """Mark a job as terminated and force-remove its Sysbox container."""
+        self._terminated_jobs.add(job_id)
+        sb_name = f"sb-{job_id[-32:]}"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", sb_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                log.warning(
+                    "docker rm -f %s rc=%s: %s",
+                    sb_name, proc.returncode, err.decode(errors="replace")[:200],
+                )
+        except Exception as e:
+            log.warning("Failed to kill %s: %s", sb_name, e)
+
+    async def _handle_shutdown(self, sig):
+        """Graceful shutdown: kill active job containers, then exit."""
+        if self._shutdown:
+            return
+        self._shutdown = True
+        self._running = False
+        log.info(
+            "Received %s — terminating %d active job(s)", sig.name, len(self.active_jobs)
+        )
+        ids = list(self.active_jobs.keys())
+        await asyncio.gather(
+            *(self._kill_job_container(jid) for jid in ids),
+            return_exceptions=True,
+        )
+        for _ in range(30):
+            if not self.active_jobs:
+                break
+            await asyncio.sleep(1)
+        log.info("Shutdown cleanup complete (active=%d)", len(self.active_jobs))
+        loop = asyncio.get_running_loop()
+        loop.stop()
 
     async def _register(self):
         """Register this worker with the master."""
@@ -172,6 +245,11 @@ class WorkerAgent:
                 job["result"] = {"error": str(e)}
                 job["status"] = "failed"
             finally:
+                if job_id in self._terminated_jobs:
+                    job["status"] = "terminated"
+                    job["result"] = job.get("result") or {}
+                    job["result"]["terminated"] = True
+                    self._terminated_jobs.discard(job_id)
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
                 await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))

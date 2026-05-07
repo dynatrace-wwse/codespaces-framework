@@ -87,6 +87,7 @@ async def api_repos():
         result = job.get("result", {}) or {}
         local_matrix.setdefault(repo, {})[arch] = {
             "passed": bool(result.get("passed")),
+            "status": job.get("status", "completed"),
             "duration": int(result.get("duration_seconds", 0)),
             "finished_at": job.get("finished_at", ""),
             "job_id": job.get("job_id", ""),
@@ -234,6 +235,135 @@ async def api_job_livelog(job_id: str):
     if content is None:
         return PlainTextResponse("(no livelog — job may have finished)", status_code=404)
     return PlainTextResponse(content)
+
+
+@app.post("/api/jobs/{job_id}/terminate")
+async def api_terminate_job(job_id: str, request: Request):
+    """Request termination of a running job.
+
+    Publishes the job_id on the ``ops:terminate`` pub/sub channel; whichever
+    worker owns the job kills its Sysbox container, marks status='terminated',
+    and runs the normal cleanup path (DEL running:lock, DEL job:running, drain
+    deferred). Returns 404 if the job is not currently running.
+    """
+    if not await pool.exists(f"job:running:{job_id}"):
+        raise HTTPException(404, f"Job {job_id} is not currently running")
+    requested_by = request.headers.get("x-auth-user", "dashboard")
+    await pool.publish("ops:terminate", job_id)
+    log.info("Termination requested for %s by %s", job_id, requested_by)
+    return {"status": "termination_requested", "job_id": job_id, "requested_by": requested_by}
+
+
+@app.get("/log/{job_id}", response_class=HTMLResponse)
+async def view_log_fullscreen(job_id: str):
+    """Standalone fullscreen log viewer for a single job.
+
+    Polls /api/jobs/{job_id}/livelog every 2s; falls back to /log on 404.
+    Same ANSI-rendering pipeline as the in-dashboard modal, but its own page
+    so users can pop logs out into a separate window/tab and tail at scale.
+    """
+    return HTMLResponse("""<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>log: """ + job_id + """</title>
+<style>
+  body { margin:0; background:#0d1117; color:#c9d1d9; font:13px/1.5 ui-monospace,monospace; }
+  header { padding:8px 14px; background:#161b22; border-bottom:1px solid #30363d;
+           display:flex; align-items:center; gap:14px; }
+  header h1 { margin:0; font-size:14px; font-weight:600; flex:1;
+              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  header .status { padding:2px 8px; border-radius:10px; font-size:11px;
+                   background:#1f6feb22; color:#58a6ff; }
+  header .status.done { background:#23863622; color:#3fb950; }
+  header .status.failed { background:#da363322; color:#f85149; }
+  header .status.terminated { background:#d2932922; color:#d29922; }
+  pre { margin:0; padding:14px; white-space:pre-wrap; word-break:break-word;
+        height:calc(100vh - 41px); overflow:auto; }
+  .ansi-bold { font-weight:bold; }
+  .ansi-red { color:#f85149; } .ansi-green { color:#3fb950; }
+  .ansi-yellow { color:#d29922; } .ansi-blue { color:#58a6ff; }
+  .ansi-magenta { color:#bc8cff; } .ansi-cyan { color:#39c5cf; }
+  .ansi-white { color:#c9d1d9; } .ansi-gray { color:#8b949e; }
+</style>
+</head><body>
+<header><h1>""" + job_id + """</h1><span class="status" id="status">running</span></header>
+<pre id="log">Loading…</pre>
+<script>
+const JOB_ID = """ + json.dumps(job_id) + """;
+const ANSI_RE = /\\x1b\\[([0-9;]*)m/g;
+const COLORS = {30:'gray',31:'red',32:'green',33:'yellow',34:'blue',35:'magenta',36:'cyan',37:'white',
+                90:'gray',91:'red',92:'green',93:'yellow',94:'blue',95:'magenta',96:'cyan',97:'white'};
+function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function ansiToHtml(text){
+  let out='', open=0, last=0;
+  text.replace(ANSI_RE,(m,codes,i)=>{
+    out += escapeHtml(text.slice(last,i));
+    last = i + m.length;
+    const parts = codes ? codes.split(';').map(Number) : [0];
+    for(const c of parts){
+      if(c===0){ while(open-->0) out+='</span>'; open=0; }
+      else if(c===1){ out+='<span class="ansi-bold">'; open++; }
+      else if(COLORS[c]){ out+='<span class="ansi-'+COLORS[c]+'">'; open++; }
+    }
+    return m;
+  });
+  out += escapeHtml(text.slice(last));
+  while(open-->0) out+='</span>';
+  return out;
+}
+const pre = document.getElementById('log');
+const statusEl = document.getElementById('status');
+let poll = null;
+async function tick(){
+  try {
+    let res = await fetch('/api/jobs/'+JOB_ID+'/livelog');
+    let live = true;
+    if(res.status===404){
+      res = await fetch('/api/jobs/'+JOB_ID+'/log');
+      live = false;
+      if(poll){ clearInterval(poll); poll=null; }
+      const term = await fetch('/api/jobs/'+JOB_ID+'/status').catch(()=>null);
+      if(term && term.ok){
+        const j = await term.json();
+        statusEl.textContent = j.status || 'finished';
+        statusEl.className = 'status ' + (j.status||'done');
+      } else {
+        statusEl.textContent = 'finished';
+        statusEl.className = 'status done';
+      }
+    }
+    if(res.ok){
+      const text = await res.text();
+      const wasAtBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+      pre.innerHTML = ansiToHtml(text);
+      if(wasAtBottom) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch(e){}
+}
+tick();
+poll = setInterval(tick, 2000);
+</script>
+</body></html>""")
+
+
+@app.get("/api/jobs/{job_id}/status")
+async def api_job_status(job_id: str):
+    """Resolve the final status of a job for the fullscreen viewer header.
+
+    Returns the most recent record from jobs:completed matching this id, or
+    ``running`` if it's still in flight.
+    """
+    if await pool.exists(f"job:running:{job_id}"):
+        return {"job_id": job_id, "status": "running"}
+    completed = await pool.lrange("jobs:completed", -200, -1)
+    for raw in reversed(completed):
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        if j.get("job_id") == job_id:
+            return {"job_id": job_id, "status": j.get("status", "completed")}
+    return {"job_id": job_id, "status": "unknown"}
 
 
 @app.get("/api/nightly/latest")
