@@ -204,14 +204,16 @@ class WorkerManager:
 
                 _, job_json = result
                 job = json.loads(job_json)
-                # Use ms precision + 6-char random suffix so 3+ jobs picked up
-                # within the same second can't collide on workdir / container name.
-                import uuid
-                job_id = (
-                    f"{job['type']}-{job['repo'].split('/')[-1]}"
-                    f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
-                )
-                job["job_id"] = job_id
+                # Honor a pre-set job_id (e.g. from /api/sync/run); otherwise
+                # generate one with ms precision + 6-char random suffix so 3+
+                # jobs picked up within the same second can't collide.
+                if not job.get("job_id"):
+                    import uuid
+                    job_id = (
+                        f"{job['type']}-{job['repo'].split('/')[-1]}"
+                        f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+                    )
+                    job["job_id"] = job_id
 
                 # Acquire semaphore slot before dispatching
                 asyncio.create_task(self._run_with_semaphore(semaphore, job))
