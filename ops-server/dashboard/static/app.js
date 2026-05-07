@@ -161,11 +161,9 @@ async function loadFleet() {
         const repoUrl = `https://github.com/${repo.repo}`;
         const ghPagesUrl = `https://${repo.repo.split('/')[0]}.github.io/${repo.repo.split('/')[1]}/`;
         const repoShort = repo.repo.split('/').pop();
-        const releaseBadge =
-            `<img class="release-badge"
-                  src="https://img.shields.io/github/v/release/${repo.repo}?label=release&style=flat-square&color=00b4de&labelColor=16202f"
-                  alt="release"
-                  loading="lazy">`;
+        const tag = repo.latest_tag || '';
+        const releaseLabel = tag ? escapeHtml(tag) : 'no releases';
+        const releaseClass = tag ? 'repo-action repo-action-release' : 'repo-action repo-action-release repo-action-norelease';
         return `<tr data-repo="${repo.repo}">
             <td class="fleet-repo-cell">
                 <a class="fleet-repo-link" href="${repoUrl}" target="_blank" rel="noopener"
@@ -174,21 +172,11 @@ async function loadFleet() {
                     <span class="fleet-repo-org">${escapeHtml(repo.repo)}</span>
                 </a>
                 <div class="fleet-repo-actions">
-                    <a class="repo-action" href="${repoUrl}/issues" target="_blank" rel="noopener" title="Open issues">
-                        <span>🐛</span> Issues
-                    </a>
-                    <a class="repo-action" href="${repoUrl}/pulls" target="_blank" rel="noopener" title="Open pull requests">
-                        <span>🔀</span> PRs
-                    </a>
-                    <a class="repo-action" href="${repoUrl}/actions" target="_blank" rel="noopener" title="GitHub Actions">
-                        <span>⚙️</span> Actions
-                    </a>
-                    <a class="repo-action" href="${ghPagesUrl}" target="_blank" rel="noopener" title="GitHub Pages docs">
-                        <span>📖</span> Docs
-                    </a>
-                    <a class="repo-action repo-action-badge" href="${repoUrl}/releases" target="_blank" rel="noopener" title="Latest release">
-                        ${releaseBadge}
-                    </a>
+                    <a class="repo-action" href="${repoUrl}/issues" target="_blank" rel="noopener" title="Open issues">Issues</a>
+                    <a class="repo-action" href="${repoUrl}/pulls" target="_blank" rel="noopener" title="Open pull requests">PRs</a>
+                    <a class="repo-action" href="${repoUrl}/actions" target="_blank" rel="noopener" title="GitHub Actions">Actions</a>
+                    <a class="repo-action" href="${ghPagesUrl}" target="_blank" rel="noopener" title="GitHub Pages docs">Docs</a>
+                    <a class="${releaseClass}" href="${repoUrl}/releases" target="_blank" rel="noopener" title="Releases">${releaseLabel}</a>
                 </div>
             </td>
             <td><span class="arch-badge">${repo.arch}</span></td>

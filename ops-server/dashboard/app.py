@@ -213,6 +213,18 @@ async def api_repos():
             "source": "local",
         }
 
+    # Pull latest_tag from the cached sync status summary (free if already cached).
+    release_map: dict[str, str] = {}
+    try:
+        cached_status = await pool.get("sync:status-summary")
+        if cached_status:
+            for row in json.loads(cached_status).get("rows", []):
+                tag = row.get("latest_tag") or row.get("framework_version") or ""
+                if tag and row.get("repo"):
+                    release_map[row["repo"]] = tag
+    except Exception:
+        pass
+
     repos_out = []
     for r in data.get("repos", []):
         if r.get("status") != "active":
@@ -244,6 +256,7 @@ async def api_repos():
             "duration": r.get("duration", "1h"),
             "ci": r.get("ci", True),
             "builds": builds,
+            "latest_tag": release_map.get(repo_full, ""),
         })
 
     return {"repos": repos_out, "total": len(repos_out)}
