@@ -60,6 +60,9 @@ apt-get install -y -qq \
 # ── Enable Docker ────────────────────────────────────────────────────────────
 systemctl enable --now docker
 usermod -aG docker "${OPS_USER}"
+# ubuntu user also needs docker access: the master's ops-dashboard SSHes in as
+# ubuntu to run 'docker exec' into Sysbox containers for the shell PTY bridge.
+usermod -aG docker ubuntu 2>/dev/null || true
 
 # ── Install GitHub CLI ───────────────────────────────────────────────────────
 if ! command -v gh &>/dev/null; then

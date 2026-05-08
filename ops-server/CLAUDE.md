@@ -136,6 +136,39 @@ Workers call `_register()` on startup, writing a hash to `worker:{WORKER_ID}`:
 
 ---
 
+## One-time setup — shell PTY bridge prerequisites
+
+The shell bridge SSHes from the master's `ops` user into the workers as `ubuntu`.
+Two manual steps are required after initial provisioning:
+
+**1. Give `ops` on the master its SSH config and key:**
+```bash
+sudo mkdir -p /home/ops/.ssh
+sudo cp /home/ubuntu/.ssh/emea-eu-west-2.pem /home/ops/.ssh/
+sudo bash -c 'cat >> /home/ops/.ssh/config << EOF
+Host autonomous-enablements-worker
+  HostName ec2-35-176-167-153.eu-west-2.compute.amazonaws.com
+  User ubuntu
+  IdentityFile /home/ops/.ssh/emea-eu-west-2.pem
+  StrictHostKeyChecking no
+EOF'
+sudo chown -R ops:ops /home/ops/.ssh
+sudo chmod 700 /home/ops/.ssh && sudo chmod 600 /home/ops/.ssh/*
+```
+
+**2. `ubuntu` on the worker must be in the docker group** (setup-worker.sh does
+this automatically now, but if the worker was provisioned before this fix):
+```bash
+ssh autonomous-enablements-worker 'sudo usermod -aG docker ubuntu'
+```
+
+Test both from the master:
+```bash
+sudo -u ops ssh autonomous-enablements-worker "groups && docker ps"
+```
+
+---
+
 ## Deploying changes
 
 ```bash
