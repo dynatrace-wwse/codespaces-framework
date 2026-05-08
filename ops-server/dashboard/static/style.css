@@ -1,3 +1,25 @@
+/* MesloLGS NF — required for powerlevel10k Nerd Font icons in the shell terminal */
+@font-face {
+    font-family: 'MesloLGS NF';
+    src: url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Regular.ttf') format('truetype');
+    font-weight: normal; font-style: normal;
+}
+@font-face {
+    font-family: 'MesloLGS NF';
+    src: url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Bold.ttf') format('truetype');
+    font-weight: bold; font-style: normal;
+}
+@font-face {
+    font-family: 'MesloLGS NF';
+    src: url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Italic.ttf') format('truetype');
+    font-weight: normal; font-style: italic;
+}
+@font-face {
+    font-family: 'MesloLGS NF';
+    src: url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Bold%20Italic.ttf') format('truetype');
+    font-weight: bold; font-style: italic;
+}
+
 /* ─── Tokens — aligned with dynatrace-wwse.github.io ──────────── */
 :root {
     --bg:          #080c14;
@@ -814,6 +836,37 @@ mark.log-match.current {
 #shell-terminal .xterm,
 #shell-terminal .xterm-viewport,
 #shell-terminal .xterm-screen { width: 100% !important; }
+
+/* Fullscreen mode — terminal covers the entire viewport */
+.shell-modal-inner:fullscreen,
+.shell-modal-inner:-webkit-full-screen {
+    width: 100vw !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    border-radius: 0;
+    background: #000;
+    padding: 0;
+    position: relative;
+}
+.shell-modal-inner:fullscreen .modal-header,
+.shell-modal-inner:-webkit-full-screen .modal-header {
+    display: none;
+}
+.shell-modal-inner:fullscreen #shell-terminal,
+.shell-modal-inner:-webkit-full-screen #shell-terminal {
+    position: absolute;
+    inset: 0;
+    min-height: unset;
+    border-radius: 0;
+    padding: 0;
+}
+/* xterm internals must fill the terminal div so fitAddon measures correctly */
+#shell-terminal .xterm,
+#shell-terminal .xterm-viewport,
+#shell-terminal .xterm-screen {
+    width: 100% !important;
+    height: 100% !important;
+}
 
 /* ── Agentic View ─────────────────────────────────────────────────────────── */
 

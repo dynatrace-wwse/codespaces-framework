@@ -85,7 +85,7 @@ pty.openpty()                      │  PTY pair
 os.read(master_fd) via add_reader  │
      │                        ─────┘
      ▼
-subprocess: ssh -t {worker} docker exec -it sb-{id} docker exec -it -w /workspaces/{repo} dt bash
+subprocess: ssh -t {worker} docker exec -it sb-{id} docker exec -it -w /workspaces/{repo} dt zsh
 ```
 
 - Uses `loop.add_reader(master_fd, callback)` + asyncio Queue for non-blocking
@@ -102,12 +102,37 @@ The Sysbox outer container is always named `sb-{job_id[-32:]}` (last 32 chars
 of job_id). The inner DinD container is always named `dt`. Full exec chain:
 
 ```
-docker exec -it sb-{id} docker exec -it -w /workspaces/{repo} dt bash
+docker exec -it sb-{id} docker exec -it -w /workspaces/{repo} dt zsh
 ```
 
 For **remote workers** (AMD): `job:running:{id}` has `worker_id` starting with
 `worker-`. FastAPI looks up `worker:{worker_id}` in Redis to get `ssh_host`,
 then prepends `ssh -t -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host}`.
+
+---
+
+## Job types
+
+| Type | Handler | Sysbox | Locks | Shell | Description |
+|------|---------|--------|-------|-------|-------------|
+| `integration-test` | `_run_integration_test` | yes | per-triple | yes (while running) | Full CI: postCreate + postStart + integration.sh |
+| `daemon` | `_run_daemon` | yes | none | yes (indefinitely) | postCreate + postStart, then blocks until terminated — for training sessions |
+| `fix-ci` / `fix-issue` / etc. | `_run_agent` | no | none | no | Claude Code agents |
+| `sync-command` | `_run_sync_command` | no | none | no | Sync CLI commands |
+
+**Important:** shell sessions into `integration-test` jobs disconnect when the test finishes and the container is torn down.  Use `daemon` jobs for interactive training sessions — the container stays alive until manually terminated.
+
+### Two-repo deployment note
+
+The dashboard/worker services run as the `ops` user from `/home/ops/enablement-framework/...`.
+Edits are made in `/home/ubuntu/enablement-framework/...` (separate git clone).
+After any change, sync with:
+```bash
+sudo cp /home/ubuntu/.../ops-server/workers/manager.py /home/ops/.../ops-server/workers/manager.py
+sudo cp /home/ubuntu/.../ops-server/dashboard/app.py   /home/ops/.../ops-server/dashboard/app.py
+# ... static files, templates, etc.
+sudo systemctl restart ops-dashboard ops-worker
+```
 
 ---
 

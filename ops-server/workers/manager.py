@@ -72,6 +72,7 @@ class WorkerManager:
             MAX_PARALLEL_AGENTS,
         )
 
+        self._sync_claude_credentials()
         await self._register_master()
         await self._recover_orphaned_deferred()
 
@@ -96,6 +97,21 @@ class WorkerManager:
             self._terminate_listener(),
             self._master_heartbeat_loop(),
         )
+
+    def _sync_claude_credentials(self):
+        """Copy ubuntu's Claude.ai OAuth credentials to ops user on startup."""
+        import shutil
+        src = Path("/home/ubuntu/.claude/.credentials.json")
+        dst = Path("/home/ops/.claude/.credentials.json")
+        try:
+            if src.exists():
+                shutil.copy2(src, dst)
+                dst.chmod(0o600)
+                log.info("Synced Claude credentials from ubuntu to ops")
+            else:
+                log.warning("Claude credentials source not found: %s", src)
+        except Exception as e:
+            log.warning("Could not sync Claude credentials: %s", e)
 
     async def _register_master(self):
         """Write the master worker record so it shows up in the Workers tab.
@@ -128,6 +144,13 @@ class WorkerManager:
                     ),
                 })
                 await self.pool.expire("worker:master-arm64", 60)
+                # Refresh daemon job:running keys so they don't expire mid-session.
+                for jid, j in list(self.active_jobs.items()):
+                    if j.get("type") == "daemon":
+                        try:
+                            await self.pool.expire(f"job:running:{jid}", 86400)
+                        except Exception:
+                            pass
             except Exception as e:
                 log.warning("master heartbeat failed: %s", e)
             await asyncio.sleep(15)
@@ -312,7 +335,22 @@ class WorkerManager:
                     "type": "integration-test",
                 })
                 await self.pool.expire(running_key, LOCK_TTL_SECONDS)
-            elif job.get("type") in ("fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab"):
+            elif job.get("type") == "daemon":
+                # Daemon jobs set running_key (no lock — multiple daemons can coexist)
+                # and use a 24h TTL since they run indefinitely until terminated.
+                running_key = f"job:running:{job_id}"
+                await self.pool.hset(running_key, mapping={
+                    "job_id":     job_id,
+                    "repo":       job["repo"],
+                    "branch":     _branch_of(job),
+                    "arch":       arch,
+                    "ref":        _branch_of(job),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "worker_id":  "master",
+                    "type":       "daemon",
+                })
+                await self.pool.expire(running_key, 86400)
+            elif job.get("type") in ("fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab", "deploy-ghpages"):
                 running_key = f"job:running:{job_id}"
                 await self.pool.hset(running_key, mapping={
                     "job_id":     job_id,
@@ -457,9 +495,119 @@ class WorkerManager:
         elif job_type == "integration-test":
             return await self._run_integration_test(job)
 
+        elif job_type == "daemon":
+            return await self._run_daemon(job)
+
+        elif job_type == "deploy-ghpages":
+            return await self._run_deploy_ghpages(job)
+
         else:
             log.warning("Unknown job type: %s", job_type)
             return {"error": f"Unknown job type: {job_type}"}
+
+    async def _run_deploy_ghpages(self, job: dict) -> dict:
+        """Run the deploy-ghpages workflow steps locally, mirroring deploy-ghpages.yaml."""
+        import shutil as _shutil
+        repo      = job["repo"]
+        repo_name = repo.split("/")[-1]
+        job_id    = job["job_id"]
+        branch    = job.get("ref") or job.get("branch") or "main"
+
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        livelog_key = f"job:livelog:{job_id}"
+        header = f"=== deploy-ghpages for {repo} @ {branch} ===\n"
+        await self.pool.set(livelog_key, header, ex=7200)
+
+        log_file   = LOGS_DIR / f"{job_id}.log"
+        start_time = time.time()
+
+        # GH_DEPLOY_TOKEN must have repo/contents:write scope for pushing.
+        # GH_TOKEN (org-read only) cannot push — fall back gracefully but it
+        # will still fail at git push if only GH_TOKEN is available.
+        gh_token = (
+            os.environ.get("GH_DEPLOY_TOKEN")
+            or os.environ.get("GH_TOKEN")
+            or os.environ.get("GITHUB_TOKEN", "")
+        )
+        if not os.environ.get("GH_DEPLOY_TOKEN"):
+            log.warning(
+                "GH_DEPLOY_TOKEN not set — falling back to GH_TOKEN which likely "
+                "lacks repo write scope. Set GH_DEPLOY_TOKEN in /home/ops/.env."
+            )
+        auth_url = (
+            f"https://{gh_token}@github.com/{repo}.git"
+            if gh_token else f"https://github.com/{repo}.git"
+        )
+
+        # Use a raw string + env vars to avoid f-string escaping issues with
+        # bash special chars like ${VAR} and regex character classes [^}"].
+        script = r"""
+set -euo pipefail
+
+# Ensure pip-installed scripts (mkdocs, ghp-import, etc.) are on PATH
+export PATH="/home/ops/.local/bin:$PATH"
+
+echo "--- Cloning $REPO @ $BRANCH ---"
+git clone --branch "$BRANCH" "https://github.com/$REPO.git" "$REPO_DIR"
+cd "$REPO_DIR"
+
+git remote set-url origin "$AUTH_URL"
+git config user.email "ops-bot@enablement"
+git config user.name "Enablement Ops"
+
+echo "--- Fetching framework version ---"
+FRAMEWORK_VERSION=$(grep -oP ':-\K[^}"]+' .devcontainer/util/source_framework.sh 2>/dev/null | head -1 || true)
+if [ -n "$FRAMEWORK_VERSION" ]; then
+    echo "Framework version: $FRAMEWORK_VERSION"
+    BASE_URL="https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework"
+    curl -fsSL "${BASE_URL}/${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o mkdocs-base.yaml \
+        || curl -fsSL "${BASE_URL}/v${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o mkdocs-base.yaml \
+        || echo "Warning: mkdocs-base.yaml not found at tag ${FRAMEWORK_VERSION}, using repo config"
+else
+    echo "No framework version found in source_framework.sh, skipping mkdocs-base.yaml fetch"
+fi
+
+echo "--- Installing mkdocs requirements ---"
+pip install --break-system-packages -q -r docs/requirements/requirements-mkdocs.txt
+
+echo "--- Fetching gh-pages branch ---"
+git fetch origin gh-pages:gh-pages || true
+
+echo "--- Building and deploying ---"
+mkdocs build
+mkdocs gh-deploy --force
+
+echo "--- Done ---"
+"""
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env={
+                **os.environ,
+                "REPO":     repo,
+                "BRANCH":   branch,
+                "REPO_DIR": str(repo_dir),
+                "AUTH_URL": auth_url,
+            },
+        )
+        output   = await self._stream_to_redis(proc, livelog_key, timeout_s=300)
+        duration = int(time.time() - start_time)
+        log_file.write_text(self._mask_secrets(header + output))
+
+        if work_dir.exists():
+            _shutil.rmtree(work_dir, ignore_errors=True)
+
+        return {
+            "job_type":         "deploy-ghpages",
+            "exit_code":        proc.returncode,
+            "duration_seconds": duration,
+            "passed":           proc.returncode == 0,
+            "log_file":         str(log_file),
+        }
 
     async def _run_agent(self, job: dict, agent_type: str) -> dict:
         """Run a Claude Code agent for the given job, streaming output to Redis livelog."""
@@ -720,6 +868,199 @@ class WorkerManager:
             "log_file": str(log_file),
         }
 
+    async def _run_daemon(self, job: dict) -> dict:
+        """Start a devcontainer environment and keep it alive until terminated.
+
+        Runs postCreate + postStart (same setup as integration-test) then blocks
+        on ``docker wait sb_name`` indefinitely.  The terminate action in the
+        dashboard does ``docker rm -f sb_name``, which causes ``docker wait`` to
+        return, ending the job cleanly.  Termination is not a failure.
+        """
+        import shutil
+
+        repo      = job["repo"]
+        head_repo = job.get("head_repo") or repo
+        ref       = job.get("ref") or job.get("head_branch") or "main"
+        repo_name = repo.split("/")[-1]
+        job_id    = job["job_id"]
+        log_file  = LOGS_DIR / f"{job_id}.log"
+
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
+        await self._git_clone(head_repo, ref, repo_dir)
+        await self._make_world_writable(repo_dir)
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
+
+        workspace  = f"/workspaces/{repo_name}"
+        env_file_inside = f"{workspace}/.devcontainer/.env"
+        sb_name    = f"sb-{job_id[-32:]}"
+        inner_name = "dt"
+
+        sections: list[str] = []
+        rc = 0
+        failed_step = None
+        start_time = time.time()
+        # postCreate + postStart share a 30-minute setup budget.
+        SETUP_TIMEOUT = 1800
+        deadline = start_time + SETUP_TIMEOUT
+
+        log.info("Starting daemon environment for %s (ref=%s)", repo_name, ref)
+        try:
+            # 1. Outer Sysbox container
+            run_cmd = [
+                "docker", "run", "-d",
+                "--runtime=sysbox-runc",
+                "--name", sb_name,
+                "-v", f"{repo_dir}:{workspace}",
+                "docker:25-dind",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("sysbox container start failed")
+
+            # 2. Wait for inner dockerd
+            await self._wait_for_inner_docker(sb_name)
+
+            # 3. Pull dt-enablement inside the Sysbox
+            pull = await asyncio.create_subprocess_exec(
+                "docker", "exec", sb_name,
+                "docker", "pull", "shinojosa/dt-enablement:v1.2",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await pull.wait()
+
+            # 4. Start dt-enablement detached inside the Sysbox
+            inner_run = [
+                "docker", "exec", sb_name,
+                "docker", "run", "-d",
+                "--init", "--privileged", "--network=host",
+                "--name", inner_name,
+                "--env-file", env_file_inside,
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", f"{workspace}:{workspace}",
+                "-w", workspace,
+                "-e", "GIT_CONFIG_COUNT=1",
+                "-e", "GIT_CONFIG_KEY_0=safe.directory",
+                "-e", "GIT_CONFIG_VALUE_0=*",
+                "shinojosa/dt-enablement:v1.2",
+                "sleep", "infinity",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *inner_run, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== inner docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("inner container start failed")
+
+            # 5. Wait for vscode inside dt-enablement to have docker access
+            await self._wait_for_inner_dt_ready(sb_name, inner_name)
+
+            # 6. Run postCreate + postStart (no integration test)
+            setup_steps = [
+                ("postCreateCommand", "./.devcontainer/post-create.sh"),
+                ("postStartCommand",  "./.devcontainer/post-start.sh"),
+            ]
+            livelog_key = f"job:livelog:{job_id}"
+            header_msg = f"=== daemon environment starting for {repo_name}@{ref} ===\n"
+            await self.pool.set(livelog_key, header_msg, ex=86400)
+            sections.append(header_msg)
+
+            for label, script in setup_steps:
+                step_header = f"\n=== {label} ===\n"
+                sections.append(step_header)
+                await self.pool.append(livelog_key, step_header)
+                remaining = max(60, int(deadline - time.time()))
+                exec_cmd = [
+                    "docker", "exec", sb_name,
+                    "docker", "exec", "-w", workspace, inner_name,
+                    "bash", "-lc", script,
+                ]
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *exec_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    step_out = await self._stream_to_redis(proc, livelog_key, remaining)
+                    sections.append(step_out)
+                    if proc.returncode != 0:
+                        rc = proc.returncode
+                        failed_step = label
+                        msg = f"\n=== {label} exited with rc={rc} — daemon setup incomplete ===\n"
+                        sections.append(msg)
+                        await self.pool.append(livelog_key, msg)
+                        break
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    sections.append(f"\n=== {label} timed out ===\n")
+                    rc = 124
+                    failed_step = label
+                    break
+
+            if rc == 0:
+                ready_msg = (
+                    f"\n=== environment ready — daemon is running ===\n"
+                    f"=== use the Shell button to connect ===\n"
+                    f"=== terminate the job to stop the environment ===\n"
+                )
+                sections.append(ready_msg)
+                await self.pool.append(livelog_key, ready_msg)
+
+                # Block until the container exits (terminated by dashboard or user).
+                wait_proc = await asyncio.create_subprocess_exec(
+                    "docker", "wait", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await wait_proc.wait()
+                log.info("Daemon container exited: %s", sb_name)
+
+        except Exception as e:
+            sections.append(f"\n=== daemon error: {e} ===\n")
+            if rc == 0:
+                rc = 1
+        finally:
+            try:
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(kill_proc.wait(), timeout=60)
+            except Exception:
+                pass
+
+        duration = int(time.time() - start_time)
+        log_header = (
+            f"=== JOB: {job_id} ===\n"
+            f"=== REPO: {head_repo}@{ref} | TYPE: daemon ===\n"
+            f"=== DURATION: {duration}s | EXIT: {rc} ===\n"
+        )
+        log_file.write_text(self._mask_secrets(log_header + "".join(sections)))
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+        return {
+            "test": "daemon",
+            "arch": "arm64",
+            "ref": ref,
+            "exit_code": rc,
+            "duration_seconds": duration,
+            "passed": True,   # termination is normal; setup failure sets rc != 0 but still not a test failure
+            "failed_step": failed_step or "",
+            "log_file": str(log_file),
+        }
+
     async def _stream_to_redis(self, proc, livelog_key: str, timeout_s: int) -> str:
         """Stream proc.stdout to ``livelog_key`` (~1s flush) for the dashboard."""
         full = []
@@ -796,9 +1137,14 @@ class WorkerManager:
         raise RuntimeError(f"vscode never got docker access in {sb_name}/{inner_name}")
 
     def _mask_secrets(self, content: str) -> str:
-        """Redact known DT tokens before writing the log."""
+        """Redact known tokens before writing the log."""
         import re
-        for secret in (DT_OPERATOR_TOKEN, DT_INGEST_TOKEN):
+        gh_token = (
+            os.environ.get("GH_DEPLOY_TOKEN")
+            or os.environ.get("GH_TOKEN")
+            or os.environ.get("GITHUB_TOKEN", "")
+        )
+        for secret in (DT_OPERATOR_TOKEN, DT_INGEST_TOKEN, gh_token):
             if secret and len(secret) > 12:
                 content = content.replace(secret, secret[:14] + "***REDACTED***")
         # Catch-all for any dt0* token shape

@@ -433,10 +433,10 @@ async def api_trigger_fleet(request: Request):
 
 @app.post("/api/ghpages/trigger")
 async def api_trigger_ghpages(request: Request):
-    """Dispatch deploy-ghpages.yaml for a single repo+branch via GitHub Actions.
+    """Queue a local deploy-ghpages job for a single repo+branch.
 
     Body: ``{repo: "owner/name", ref: "<branch>"}``
-    Returns 204 from GitHub on success (no job_id — runs on GHA, not local workers).
+    Runs the same steps as deploy-ghpages.yaml on the local worker.
     """
     role = await _require_writer(request)
     body = await request.json()
@@ -444,39 +444,30 @@ async def api_trigger_ghpages(request: Request):
     ref  = (body.get("ref") or "main").strip()
     if not repo:
         raise HTTPException(400, "repo is required")
-    if not GH_TOKEN:
-        raise HTTPException(500, "GH_TOKEN not configured — cannot dispatch GitHub Actions")
 
-    owner, repo_name = repo.split("/", 1)
-    workflow = "deploy-ghpages.yaml"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(
-            f"{GH_API}/repos/{owner}/{repo_name}/actions/workflows/{workflow}/dispatches",
-            headers={
-                "Authorization": f"Bearer {GH_TOKEN}",
-                "Accept": "application/vnd.github+json",
-            },
-            json={"ref": ref},
-        )
-    if resp.status_code == 204:
-        log.info("GH Pages dispatch: %s @ %s by %s", repo, ref, role["user"])
-        return {
-            "status": "dispatched",
-            "repo": repo,
-            "ref": ref,
-            "workflow": workflow,
-            "requested_by": role["user"],
-        }
-    detail = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
-    raise HTTPException(resp.status_code, detail)
+    ts     = int(time.time() * 1000)
+    job_id = f"deploy-ghpages-{repo.split('/')[-1]}-{ts}"
+    job    = {
+        "job_id":       job_id,
+        "type":         "deploy-ghpages",
+        "repo":         repo,
+        "ref":          ref,
+        "branch":       ref,
+        "trigger":      "dashboard",
+        "requested_by": role["user"],
+        "timestamp":    datetime.utcnow().isoformat(),
+    }
+    await pool.rpush("queue:agent", json.dumps(job))
+    log.info("GH Pages queued: %s @ %s by %s (job_id=%s)", repo, ref, role["user"], job_id)
+    return {"status": "queued", "job_id": job_id, "repo": repo, "ref": ref}
 
 
 @app.post("/api/ghpages/trigger-fleet")
 async def api_trigger_ghpages_fleet(request: Request):
-    """Dispatch deploy-ghpages.yaml across every fleet repo that has the chosen branch.
+    """Queue local deploy-ghpages jobs for every fleet repo that has the chosen branch.
 
     Body: ``{branch: "<name>", repos?: [...]}``
-    Dispatches in parallel; returns per-repo success/error lists.
+    Each repo gets its own job queued to queue:agent.
     """
     role = await _require_writer(request)
     body = await request.json()
@@ -484,8 +475,6 @@ async def api_trigger_ghpages_fleet(request: Request):
     explicit = body.get("repos") or []
     if not branch:
         raise HTTPException(400, "branch is required")
-    if not GH_TOKEN:
-        raise HTTPException(500, "GH_TOKEN not configured — cannot dispatch GitHub Actions")
 
     aggregate = await api_all_branches()
     by_branch = {b["name"]: b["repos"] for b in aggregate["branches"]}
@@ -494,48 +483,35 @@ async def api_trigger_ghpages_fleet(request: Request):
     targets    = [r for r in candidates if r in has_branch]
     skipped    = [r for r in candidates if r not in has_branch]
 
-    workflow   = "deploy-ghpages.yaml"
-    dispatched: list[str] = []
-    errors:     list[dict] = []
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        async def dispatch_one(repo_full: str) -> None:
-            owner, repo_name = repo_full.split("/", 1)
-            try:
-                resp = await client.post(
-                    f"{GH_API}/repos/{owner}/{repo_name}/actions/workflows/{workflow}/dispatches",
-                    headers={
-                        "Authorization": f"Bearer {GH_TOKEN}",
-                        "Accept": "application/vnd.github+json",
-                    },
-                    json={"ref": branch},
-                )
-                if resp.status_code == 204:
-                    dispatched.append(repo_full)
-                else:
-                    errors.append({
-                        "repo": repo_full,
-                        "status": resp.status_code,
-                        "detail": resp.text[:200],
-                    })
-            except Exception as exc:
-                errors.append({"repo": repo_full, "detail": str(exc)})
-
-        await asyncio.gather(*(dispatch_one(r) for r in targets))
+    queued: list[str] = []
+    ts = int(time.time() * 1000)
+    for repo_full in targets:
+        job_id = f"deploy-ghpages-{repo_full.split('/')[-1]}-{ts}"
+        job    = {
+            "job_id":       job_id,
+            "type":         "deploy-ghpages",
+            "repo":         repo_full,
+            "ref":          branch,
+            "branch":       branch,
+            "trigger":      "dashboard",
+            "requested_by": role["user"],
+            "timestamp":    datetime.utcnow().isoformat(),
+        }
+        await pool.rpush("queue:agent", json.dumps(job))
+        queued.append(repo_full)
 
     log.info(
-        "GH Pages fleet dispatch: branch=%s dispatched=%d errors=%d by=%s",
-        branch, len(dispatched), len(errors), role["user"],
+        "GH Pages fleet queued: branch=%s queued=%d skipped=%d by=%s",
+        branch, len(queued), len(skipped), role["user"],
     )
     return {
-        "status": "dispatched",
-        "branch": branch,
-        "workflow": workflow,
-        "dispatched": dispatched,
-        "dispatched_count": len(dispatched),
-        "errors": errors,
-        "skipped_no_branch": skipped,
-        "requested_by": role["user"],
+        "status":              "queued",
+        "branch":              branch,
+        "dispatched":          queued,
+        "dispatched_count":    len(queued),
+        "errors":              [],
+        "skipped_no_branch":   skipped,
+        "requested_by":        role["user"],
     }
 
 
@@ -1229,29 +1205,24 @@ async def api_builds_history(
 ):
     """Past runs from ``jobs:completed``, filterable.
 
-    By default returns integration-test jobs only (for backwards compat).
-    Pass ``type=all`` to include agent/sync jobs, or ``type=fix-ci`` etc.
-    for a specific type.
+    No type param (or type=all) returns all job types.
+    Pass ``type=integration-test``, ``type=deploy-ghpages``, etc. to filter.
+    ``repo`` is a substring match (case-insensitive) so the search bar works.
     """
     completed_raw = await pool.lrange("jobs:completed", -500, -1)
     rows = []
     distinct_repos: set[str] = set()
     distinct_branches: set[str] = set()
     distinct_arches: set[str] = set()
+    repo_lower = repo.lower() if repo else ""
     for raw in reversed(completed_raw):  # newest first
         try:
             j = json.loads(raw)
         except Exception:
             continue
         job_type = j.get("type", "integration-test")
-        if type == "all":
-            pass  # no type filter
-        elif type:
-            if job_type != type:
-                continue
-        else:
-            if job_type != "integration-test":
-                continue
+        if type and type != "all" and job_type != type:
+            continue
         result = j.get("result", {}) or {}
         row_repo = j.get("repo", "")
         row_arch = j.get("arch") or result.get("arch") or j.get("worker_arch", "") or "unknown"
@@ -1260,14 +1231,17 @@ async def api_builds_history(
         distinct_repos.add(row_repo)
         if row_branch: distinct_branches.add(row_branch)
         if row_arch: distinct_arches.add(row_arch)
-        if repo and row_repo != repo: continue
+        if repo_lower and repo_lower not in row_repo.lower(): continue
         if arch and row_arch != arch: continue
         if branch and row_branch != branch: continue
         if status == 'failed':
-            # "failed" means any job displayed as FAIL: crashed jobs OR
-            # completed jobs whose tests didn't pass.
+            # FAIL = non-terminated jobs whose tests didn't pass
             if row_status == 'terminated': continue
             if result.get('passed'): continue
+        elif status == 'passed':
+            # PASS = completed jobs whose tests passed
+            if row_status == 'terminated': continue
+            if not result.get('passed'): continue
         elif status and row_status != status:
             continue
         # Trigger inference: nightly if id matches, else dashboard/webhook
@@ -1395,7 +1369,7 @@ async def api_shell_token(job_id: str, request: Request):
 
 
 @app.websocket("/ws/jobs/{job_id}/shell")
-async def job_shell_ws(ws: WebSocket, job_id: str, token: str = ""):
+async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 24, cols: int = 220):
     """PTY bridge: browser xterm.js ↔ docker exec inside the Sysbox container.
 
     Auth is via a single-use shell token (issued by /api/jobs/{id}/shell-token
@@ -1431,7 +1405,9 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = ""):
     sb_name = f"sb-{job_id[-32:]}"
     inner_exec = [
         "docker", "exec", "-it", sb_name,
-        "docker", "exec", "-it", "-w", workspace,
+        "docker", "exec", "-it",
+        "-e", "TERM=xterm-256color",
+        "-w", workspace,
         "dt", "zsh",
     ]
 
@@ -1449,12 +1425,12 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = ""):
     else:
         cmd = inner_exec
 
-    log.info("Shell open: job=%s worker=%s sb=%s", job_id, worker_id or "local", sb_name)
-    await _pty_bridge(ws, cmd)
+    log.info("Shell open: job=%s worker=%s sb=%s rows=%s cols=%s", job_id, worker_id or "local", sb_name, rows, cols)
+    await _pty_bridge(ws, cmd, rows=rows, cols=cols)
     log.info("Shell closed: job=%s", job_id)
 
 
-async def _pty_bridge(ws: WebSocket, cmd: list[str]):
+async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int = 220):
     """Create a PTY subprocess and bridge its I/O to the WebSocket.
 
     Uses loop.add_reader for non-blocking PTY output so the reader task is
@@ -1463,10 +1439,18 @@ async def _pty_bridge(ws: WebSocket, cmd: list[str]):
     os.read blocks in a thread that can't be interrupted.
     """
     master_fd, slave_fd = pty.openpty()
+    # Set PTY size before starting the subprocess so applications (k9s, kubectl
+    # completions, etc.) see the correct dimensions from the very first ioctl.
+    try:
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", max(1, rows), max(1, cols), 0, 0))
+    except OSError:
+        pass
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            env={**os.environ, "TERM": "xterm-256color"},
         )
         os.close(slave_fd)  # parent doesn't need the slave end
     except Exception as exc:
@@ -1517,16 +1501,22 @@ async def _pty_bridge(ws: WebSocket, cmd: list[str]):
             if msg["type"] == "websocket.disconnect":
                 break
             if msg.get("text"):
+                text = msg["text"]
                 try:
-                    ev = json.loads(msg["text"])
-                    if ev.get("type") == "resize":
+                    ev = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    ev = None
+                if isinstance(ev, dict) and ev.get("type") == "resize":
+                    try:
                         rows = max(1, int(ev.get("rows", 24)))
                         cols = max(1, int(ev.get("cols", 80)))
                         fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
                                     struct.pack("HHHH", rows, cols, 0, 0))
-                except (json.JSONDecodeError, ValueError, OSError):
+                    except (ValueError, OSError):
+                        pass
+                else:
                     try:
-                        os.write(master_fd, msg["text"].encode())
+                        os.write(master_fd, text.encode())
                     except OSError:
                         break
             elif msg.get("bytes"):

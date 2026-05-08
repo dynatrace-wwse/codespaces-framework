@@ -351,13 +351,13 @@ async function triggerFleetBuild() {
     const count = meta?.count || 0;
     const isDeployPages = action === 'deploy-ghpages';
     const confirmMsg = isDeployPages
-        ? `Dispatch deploy-ghpages.yaml for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'}?\n\nThis triggers GitHub Actions in each repo.`
+        ? `Queue deploy-ghpages for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'}?\n\nEach repo will run mkdocs build + gh-deploy locally.`
         : `Trigger an integration test for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'} (${arch})?\n\nEach repo will be queued; per-(repo,branch,arch) locks still apply.`;
     if (!confirm(confirmMsg)) return;
 
     const btn = document.getElementById('fleet-trigger-btn');
     btn.disabled = true;
-    btn.textContent = isDeployPages ? 'Dispatching…' : 'Queueing…';
+    btn.textContent = 'Queueing…';
     try {
         if (isDeployPages) {
             const res = await fetch(`${API}/api/ghpages/trigger-fleet`, {
@@ -379,8 +379,8 @@ async function triggerFleetBuild() {
             const errCount = (data.errors || []).length;
             const skipCount = (data.skipped_no_branch || []).length;
             alert(
-                `Dispatched deploy-ghpages.yaml on ${data.dispatched_count} repo(s) for branch "${data.branch}".` +
-                (errCount  ? `\n${errCount} error(s) — check the GitHub Actions tab per repo.` : '') +
+                `Queued deploy-ghpages on ${data.dispatched_count} repo(s) for branch "${data.branch}".` +
+                (errCount  ? `\n${errCount} error(s).` : '') +
                 (skipCount ? `\n${skipCount} repo(s) skipped (branch not present).` : '')
             );
         } else {
@@ -638,7 +638,7 @@ function openLiveLog(jobId, title) {
     document.getElementById('livelog-search-count').textContent = '';
     document.getElementById('livelog-title').textContent = title;
     const pre = document.getElementById('livelog-pre');
-    pre.innerHTML = '<em style="color:var(--text-muted)">Loading…</em>';
+    pre.innerHTML = '<em style="color:var(--text-muted)">Initializing isolation container…</em>';
     document.getElementById('livelog-modal').hidden = false;
     applyWrapPref();
 
@@ -983,14 +983,16 @@ let historyDistinct = { repos: [], arches: [], branches: [] };
 
 async function loadHistory() {
     const params = new URLSearchParams();
-    const repo = document.getElementById('history-repo').value;
-    const arch = document.getElementById('history-arch').value;
+    const repo   = document.getElementById('history-repo').value.trim();
+    const arch   = document.getElementById('history-arch').value;
     const branch = document.getElementById('history-branch').value;
     const status = document.getElementById('history-status').value;
-    if (repo) params.set('repo', repo);
-    if (arch) params.set('arch', arch);
+    const type   = document.getElementById('history-type')?.value || '';
+    if (repo)   params.set('repo', repo);
+    if (arch)   params.set('arch', arch);
     if (branch) params.set('branch', branch);
     if (status) params.set('status', status);
+    if (type)   params.set('type', type);
     params.set('limit', '200');
 
     const tbody = document.getElementById('history-body');
@@ -998,25 +1000,20 @@ async function loadHistory() {
     try {
         const res = await fetch(`${API}/api/builds/history?` + params.toString());
         const data = await res.json();
-        // Update distinct dropdowns once (don't blow away the user's current selection)
-        if (JSON.stringify(data.filters.repos) !== JSON.stringify(historyDistinct.repos)) {
+        // Populate branch dropdown from returned distinct values
+        if (JSON.stringify(data.filters.branches) !== JSON.stringify(historyDistinct.branches)) {
             historyDistinct = data.filters;
-            const fillSelect = (id, values, current) => {
-                const sel = document.getElementById(id);
-                const all = sel.querySelector('option[value=""]');
-                const allHtml = all ? all.outerHTML : '';
-                sel.innerHTML = allHtml + values.map(v =>
-                    `<option value="${escapeHtml(v)}"${v === current ? ' selected' : ''}>${escapeHtml(v)}</option>`
+            const branchSel = document.getElementById('history-branch');
+            const cur = branchSel.value;
+            branchSel.innerHTML = `<option value="">All branches</option>` +
+                data.filters.branches.map(v =>
+                    `<option value="${escapeHtml(v)}"${v === cur ? ' selected' : ''}>${escapeHtml(v)}</option>`
                 ).join('');
-            };
-            fillSelect('history-repo', data.filters.repos, repo);
-            fillSelect('history-branch', data.filters.branches, branch);
         }
-        document.getElementById('history-count').textContent =
-            `${data.total_returned} runs`;
+        document.getElementById('history-count').textContent = `${data.total_returned} runs`;
 
         if (!data.rows.length) {
-            tbody.innerHTML = '<tr><td colspan="9" class="loading">No matching runs.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" class="loading">No matching runs.</td></tr>';
             return;
         }
         tbody.innerHTML = data.rows.map(r => {
@@ -1049,7 +1046,15 @@ async function loadHistory() {
     }
 }
 
-['history-repo', 'history-arch', 'history-branch', 'history-status'].forEach(id => {
+// Debounce the search bar, instant for selects
+let _historySearchTimer;
+document.addEventListener('input', e => {
+    if (e.target.id === 'history-repo') {
+        clearTimeout(_historySearchTimer);
+        _historySearchTimer = setTimeout(loadHistory, 300);
+    }
+});
+['history-arch', 'history-branch', 'history-status', 'history-type'].forEach(id => {
     document.addEventListener('change', e => {
         if (e.target.id === id) loadHistory();
     });
@@ -1435,6 +1440,7 @@ function formatJobType(type) {
     if (!type || type === 'integration-test') return 'Integration test';
     if (type === 'daemon') return 'Daemon';
     if (type === 'sync-command') return 'Sync';
+    if (type === 'deploy-ghpages') return 'Deploy Pages';
     if (['fix-issue','fix-ci','review-pr','migrate-gen3','scaffold-lab','validate-after-push'].includes(type)) return 'Agent';
     return type;
 }
@@ -1460,8 +1466,10 @@ function formatTime(iso) {
 let shellTerm = null;
 let shellFitAddon = null;
 let shellWs = null;
+let shellJobId = null;   // job ID for the current shell session (≠ currentJobId which is livelog)
 
 async function openShell(jobId, title) {
+    shellJobId = jobId;
     if (!isWriter()) {
         alert('Only org members can open a shell.');
         return;
@@ -1476,16 +1484,22 @@ async function openShell(jobId, title) {
 
     const term = new Terminal({
         cursorBlink: true,
-        fontFamily: 'ui-monospace, "Cascadia Code", Menlo, monospace',
+        fontFamily: '"MesloLGS NF", "Cascadia Code NF", "Hack Nerd Font", ui-monospace, Menlo, monospace',
         fontSize: 13,
         theme: { background: '#000000', foreground: '#e2e8f2', cursor: '#00b4de' },
     });
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(document.getElementById('shell-terminal'));
+    // Wait for MesloLGS NF to load before fitting — otherwise xterm measures
+    // character width with the fallback font and gets the wrong column count,
+    // causing lines to wrap / go blank at the wrong position.
+    await document.fonts.load('13px "MesloLGS NF"').catch(() => {});
     fitAddon.fit();
     shellTerm = term;
     shellFitAddon = fitAddon;
+
+    term.write('\x1b[36m◈  Connecting to isolation container…\x1b[0m\r\n');
 
     // auth_request is incompatible with WebSocket upgrade in nginx, so we
     // obtain a short-lived token via a regular (auth-gated) HTTP request first.
@@ -1503,11 +1517,18 @@ async function openShell(jobId, title) {
     }
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws/jobs/${jobId}/shell?token=${token}`);
+    // Pass the current terminal dimensions so the server sets the PTY size
+    // before starting the subprocess — TUI apps (k9s, kubectl completions)
+    // query the terminal size at startup and won't re-query after SIGWINCH.
+    const ws = new WebSocket(
+        `${proto}://${location.host}/ws/jobs/${jobId}/shell` +
+        `?token=${token}&rows=${term.rows}&cols=${term.cols}`
+    );
     ws.binaryType = 'arraybuffer';
     shellWs = ws;
 
     ws.onopen = () => {
+        term.write('\x1b[32m◈  Tunnel established — spawning shell\x1b[0m\r\n\r\n');
         ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
     };
     ws.onmessage = e => {
@@ -1525,7 +1546,9 @@ async function openShell(jobId, title) {
     };
 
     term.onData(data => {
-        if (shellWs && shellWs.readyState === WebSocket.OPEN) shellWs.send(data);
+        if (shellWs && shellWs.readyState === WebSocket.OPEN) {
+            shellWs.send(new TextEncoder().encode(data));
+        }
     });
     term.onResize(({ rows, cols }) => {
         if (shellWs && shellWs.readyState === WebSocket.OPEN) {
@@ -1538,6 +1561,7 @@ function closeShell() {
     document.getElementById('shell-modal').hidden = true;
     if (shellWs) { try { shellWs.close(); } catch {} shellWs = null; }
     if (shellTerm) { shellTerm.dispose(); shellTerm = null; }
+    shellJobId = null;
 }
 
 // Fit terminal on window resize
@@ -1547,8 +1571,98 @@ window.addEventListener('resize', () => {
     }
 });
 
+function shellPopupHtml(jobId, title) {
+    // Self-contained terminal page written into a popup window.
+    // Shares cookies with the parent page so token fetch is authenticated.
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>${title.replace(/</g,'&lt;')}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+@font-face{font-family:'MesloLGS NF';src:url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Regular.ttf') format('truetype');font-weight:normal;font-style:normal}
+@font-face{font-family:'MesloLGS NF';src:url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Bold.ttf') format('truetype');font-weight:bold;font-style:normal}
+html,body{margin:0;padding:0;background:#000;width:100%;height:100vh;overflow:hidden}
+#t{width:100%;height:100vh;padding:4px;box-sizing:border-box}
+</style>
+</head>
+<body>
+<div id="t"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"><\/script>
+<script>
+(async()=>{
+  const jobId=${JSON.stringify(jobId)};
+  const term=new Terminal({cursorBlink:true,fontFamily:'"MesloLGS NF","Cascadia Code NF",ui-monospace,monospace',fontSize:13,theme:{background:'#000000',foreground:'#e2e8f2',cursor:'#00b4de'}});
+  const fit=new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('t'));
+  await document.fonts.load('13px "MesloLGS NF"').catch(()=>{});
+  fit.fit();
+  term.write('\\x1b[36m◈  Connecting to isolation container…\\x1b[0m\\r\\n');
+  let token='';
+  try{
+    const r=await fetch('/api/jobs/'+jobId+'/shell-token',{method:'POST',credentials:'include'});
+    if(!r.ok){term.write('\\r\\n\\x1b[31mFailed to get shell token ('+r.status+')\\x1b[0m\\r\\n');return;}
+    ({token}=await r.json());
+  }catch(err){term.write('\\r\\n\\x1b[31mError: '+err+'\\x1b[0m\\r\\n');return;}
+  const proto=location.protocol==='https:'?'wss':'ws';
+  const ws=new WebSocket(proto+'://'+location.host+'/ws/jobs/'+jobId+'/shell?token='+token+'&rows='+term.rows+'&cols='+term.cols);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{term.write('\\x1b[32m◈  Tunnel established — spawning shell\\x1b[0m\\r\\n\\r\\n');ws.send(JSON.stringify({type:'resize',rows:term.rows,cols:term.cols}));};
+  ws.onmessage=e=>{term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data);};
+  ws.onclose=()=>term.write('\\r\\n\\x1b[90m[connection closed]\\x1b[0m\\r\\n');
+  ws.onerror=()=>term.write('\\r\\n\\x1b[31m[WebSocket error]\\x1b[0m\\r\\n');
+  term.onData(d=>{if(ws.readyState===WebSocket.OPEN)ws.send(new TextEncoder().encode(d));});
+  term.onResize(({rows,cols})=>{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'resize',rows,cols}));});
+  window.addEventListener('resize',()=>fit.fit());
+})();
+<\/script>
+</body>
+</html>`;
+}
+
+document.addEventListener('fullscreenchange', () => {
+    const btn = document.getElementById('shell-fullscreen');
+    if (!btn) return;
+    btn.textContent = document.fullscreenElement ? '⛶ Exit Full' : '⛶ Fullscreen';
+    // The fullscreen transition and CSS reflow take longer than two paint frames.
+    // Wait 300ms so the browser has fully applied the new layout before we
+    // measure the container and send the resize to the PTY.
+    setTimeout(() => {
+        if (!shellFitAddon || !shellTerm) return;
+        shellFitAddon.fit();
+        // Explicitly push the new size to the server so TUI apps like k9s
+        // receive SIGWINCH even if onResize didn't fire (e.g. same row/col count).
+        if (shellWs && shellWs.readyState === WebSocket.OPEN) {
+            shellWs.send(JSON.stringify({ type: 'resize', rows: shellTerm.rows, cols: shellTerm.cols }));
+        }
+    }, 300);
+});
+
 document.addEventListener('click', e => {
     if (e.target.id === 'shell-close') { closeShell(); return; }
+    if (e.target.id === 'shell-fullscreen') {
+        const inner = document.querySelector('.shell-modal-inner');
+        if (!document.fullscreenElement) {
+            inner.requestFullscreen().catch(() => {});
+        } else {
+            document.exitFullscreen().catch(() => {});
+        }
+        return;
+    }
+    if (e.target.id === 'shell-newwin') {
+        if (!shellJobId) return;
+        // Open blank popup immediately (sync with click → bypasses popup blocker)
+        const popup = window.open('', '_blank',
+            'width=1280,height=800,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes');
+        if (!popup) return;
+        const winTitle = document.getElementById('shell-modal-title')?.textContent || 'Shell';
+        popup.document.write(shellPopupHtml(shellJobId, winTitle));
+        popup.document.close();
+        return;
+    }
     if (e.target.id === 'shell-modal') { closeShell(); return; }
 
     const btn = e.target.closest('.row-shell');
@@ -1567,16 +1681,17 @@ document.addEventListener('keydown', e => {
 
 // ── Agentic View ────────────────────────────────────────────────────────────
 
-const AGENT_TYPES = new Set(['fix-ci', 'fix-issue', 'review-pr', 'migrate-gen3', 'scaffold-lab', 'validate-after-push']);
+const AGENT_TYPES = new Set(['fix-ci', 'fix-issue', 'review-pr', 'migrate-gen3', 'scaffold-lab', 'validate-after-push', 'deploy-ghpages']);
 
 function agentTypeLabel(type) {
     const map = {
-        'fix-ci':           'Fix CI',
-        'fix-issue':        'Fix Issue',
-        'review-pr':        'Review PR',
-        'migrate-gen3':     'Migrate Gen3',
-        'scaffold-lab':     'Scaffold Lab',
+        'fix-ci':              'Fix CI',
+        'fix-issue':           'Fix Issue',
+        'review-pr':           'Review PR',
+        'migrate-gen3':        'Migrate Gen3',
+        'scaffold-lab':        'Scaffold Lab',
         'validate-after-push': 'Validate Push',
+        'deploy-ghpages':      'Deploy Pages',
     };
     return map[type] || type;
 }
@@ -1628,7 +1743,7 @@ async function loadAgenticFailed() {
         const res  = await fetch(`${API}/api/builds/history?type=integration-test&limit=200`);
         const data = await res.json();
         const rows = data.rows || data;
-        let failed = rows.filter(r => r.type === 'integration-test' && (r.status === 'failed' || r.status === 'terminated'));
+        let failed = rows.filter(r => r.type === 'integration-test' && !r.passed);
 
         // Populate repo filter options
         const repoSel = document.getElementById('agentic-repo-filter');

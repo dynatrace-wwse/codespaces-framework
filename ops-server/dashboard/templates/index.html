@@ -150,7 +150,7 @@
         <!-- History View -->
         <section id="view-history" class="view">
             <div class="controls">
-                <select id="history-repo"><option value="">All repos</option></select>
+                <input type="text" id="history-repo" placeholder="Filter repo…" style="width:160px">
                 <select id="history-arch">
                     <option value="">All arches</option>
                     <option value="arm64">arm64</option>
@@ -159,9 +159,16 @@
                 <select id="history-branch"><option value="">All branches</option></select>
                 <select id="history-status">
                     <option value="">All statuses</option>
-                    <option value="completed">completed</option>
-                    <option value="failed">failed</option>
-                    <option value="terminated">terminated</option>
+                    <option value="passed">PASS</option>
+                    <option value="failed">FAIL</option>
+                    <option value="terminated">TERM</option>
+                </select>
+                <select id="history-type">
+                    <option value="">All types</option>
+                    <option value="integration-test">Integration test</option>
+                    <option value="deploy-ghpages">Deploy Pages</option>
+                    <option value="fix-ci">Fix CI</option>
+                    <option value="fix-issue">Fix Issue</option>
                 </select>
                 <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
                 <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
@@ -438,7 +445,11 @@
         <div class="modal-inner shell-modal-inner">
             <div class="modal-header">
                 <h3 id="shell-modal-title">Shell</h3>
-                <button id="shell-close" class="btn btn-small btn-secondary">✕ Close</button>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <button id="shell-newwin" class="btn btn-small btn-secondary" title="Open in separate popup window">⧉ New Window</button>
+                    <button id="shell-fullscreen" class="btn btn-small btn-secondary" title="Fullscreen">⛶ Fullscreen</button>
+                    <button id="shell-close" class="btn btn-small btn-secondary">✕ Close</button>
+                </div>
             </div>
             <div id="shell-terminal"></div>
         </div>
@@ -446,6 +457,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=8"></script>
+    <script src="/static/app.js?v=12"></script>
 </body>
 </html>
