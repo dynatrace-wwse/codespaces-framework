@@ -1626,7 +1626,7 @@ async function loadAgenticFailed() {
         const res  = await fetch(`${API}/api/builds/history?type=integration-test&limit=200`);
         const data = await res.json();
         const rows = data.rows || data;
-        let failed = rows.filter(r => r.type === 'integration-test' && r.status === 'failed');
+        let failed = rows.filter(r => r.type === 'integration-test' && (r.status === 'failed' || r.status === 'terminated'));
 
         // Populate repo filter options
         const repoSel = document.getElementById('agentic-repo-filter');
@@ -1652,7 +1652,7 @@ async function loadAgenticFailed() {
         failed = deduped.slice(0, 50);
 
         if (!failed.length) {
-            tbody.innerHTML = `<tr><td colspan="8" class="loading">No recent failures</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="9" class="loading">No recent failures</td></tr>`;
             return;
         }
         tbody.innerHTML = failed.map(r => {
@@ -1669,11 +1669,14 @@ async function loadAgenticFailed() {
             const safeBranch   = escapeHtml(r.branch || '');
             const safeArch     = escapeHtml(r.arch || '');
             const safeStep     = escapeHtml(failedStep);
+            const statusCls = r.status === 'terminated' ? 'status-terminated' : 'status-fail';
+            const statusLabel = r.status === 'terminated' ? 'TERM' : 'FAIL';
             return `<tr id="agentic-row-${safeJobId}">
                 <td title="${safeRepo}">${escapeHtml(repoShort)}</td>
                 <td><code>${safeBranch}</code></td>
                 <td><span class="arch-badge">${safeArch}</span></td>
                 <td style="font-size:0.8rem">${safeStep}</td>
+                <td><span class="${statusCls}">${statusLabel}</span></td>
                 <td title="${escapeHtml(r.finished_at || '')}">${formatTime(r.finished_at)}</td>
                 <td>${dur}</td>
                 <td>${logLink}</td>
@@ -1683,7 +1686,7 @@ async function loadAgenticFailed() {
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="8" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
     }
 }
 
@@ -1700,8 +1703,10 @@ async function loadAgenticHistory() {
         }
         tbody.innerHTML = agents.map(r => {
             const repoShort = r.repo.split('/').pop();
-            const statusCls = r.status === 'completed' ? 'status-passed'
-                : r.status === 'failed' ? 'status-failed' : 'status-terminated';
+            const statusCls = r.status === 'terminated' ? 'status-terminated'
+                : r.status === 'failed' ? 'status-fail' : 'status-pass';
+            const statusLabel = r.status === 'terminated' ? 'TERM'
+                : r.status === 'failed' ? 'FAIL' : 'OK';
             const dur = r.result?.duration_seconds != null
                 ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
                 : '—';
@@ -1713,7 +1718,7 @@ async function loadAgenticHistory() {
                 <td title="${escapeHtml(r.repo)}">${escapeHtml(repoShort)}</td>
                 <td><code>${escapeHtml(r.branch || r.ref || '')}</code></td>
                 <td><span class="agent-type-badge">${escapeHtml(agentTypeLabel(r.type))}</span></td>
-                <td><span class="${statusCls}">${escapeHtml(r.status)}</span></td>
+                <td><span class="${statusCls}">${statusLabel}</span></td>
                 <td>${dur}</td>
                 <td>${logLink}</td>
             </tr>`;

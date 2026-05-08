@@ -1263,7 +1263,13 @@ async def api_builds_history(
         if repo and row_repo != repo: continue
         if arch and row_arch != arch: continue
         if branch and row_branch != branch: continue
-        if status and row_status != status: continue
+        if status == 'failed':
+            # "failed" means any job displayed as FAIL: crashed jobs OR
+            # completed jobs whose tests didn't pass.
+            if row_status == 'terminated': continue
+            if result.get('passed'): continue
+        elif status and row_status != status:
+            continue
         # Trigger inference: nightly if id matches, else dashboard/webhook
         nightly_id = j.get("nightly_run_id", "")
         trigger = j.get("trigger") or (
