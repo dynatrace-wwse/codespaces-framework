@@ -1127,6 +1127,10 @@ printError<span class="w"> </span><span class="s2">&quot;Deployment failed — c
 <td>Installs Powerlevel10k, sources framework functions, and adds aliases to <code>.zshrc</code></td>
 </tr>
 <tr>
+<td><code>setUpHostTerminal</code></td>
+<td>Converts a plain Ubuntu server to Zsh + Oh My Zsh + Powerlevel10k with aliases — no framework functions bound to the shell</td>
+</tr>
+<tr>
 <td><code>bindFunctionsInShell</code></td>
 <td>Appends the <code>source_framework.sh</code> loader and greeting call to <code>.zshrc</code></td>
 </tr>
@@ -1136,7 +1140,12 @@ printError<span class="w"> </span><span class="s2">&quot;Deployment failed — c
 </tr>
 </tbody>
 </table>
-<p><code>setUpTerminal</code> is called once during container creation. Aliases added by <code>setupAliases</code>:</p>
+<p><code>setUpTerminal</code> is called once during container creation. <code>setUpHostTerminal</code> is for standalone Ubuntu servers — run it once after cloning the framework:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">source</span><span class="w"> </span>.devcontainer/util/source_framework.sh<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>setUpHostTerminal
+<span class="nb">exec</span><span class="w"> </span>zsh<span class="w">   </span><span class="c1"># or log out and back in</span>
+</code></pre></div>
+<p><code>setUpHostTerminal</code> installs zsh and Oh My Zsh if missing, clones the Powerlevel10k theme, deploys the framework's <code>.zshrc</code> and <code>.p10k.zsh</code> configs, and appends aliases. It does <strong>not</strong> bind framework functions into the shell. Type <code>p10k configure</code> inside zsh to reconfigure the prompt.</p>
+<p>Aliases added by <code>setupAliases</code>:</p>
 <div class="highlight"><pre><span></span><code>las     → ls -las          c       → clear
 hg      → history | grep   h       → history
 gita    → git add -A        gitc    → git commit -s -m
