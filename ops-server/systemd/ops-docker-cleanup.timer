@@ -1,0 +1,12 @@
+[Unit]
+Description=Docker host-level cleanup — runs every 6 hours
+Requires=ops-docker-cleanup.service
+
+[Timer]
+# Lightweight pass every 6h; escalates to image prune only when disk >threshold.
+OnCalendar=*-*-* 00,06,12,18:30:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

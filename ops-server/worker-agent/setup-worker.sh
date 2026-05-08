@@ -100,7 +100,7 @@ if [[ ! -d "${AGENT_DIR}" ]]; then
         https://github.com/dynatrace-wwse/codespaces-framework.git \
         "${OPS_HOME}/codespaces-framework"
     cd "${OPS_HOME}/codespaces-framework"
-    sudo -u "${OPS_USER}" git sparse-checkout set ops-server/worker-agent ops-server/requirements.txt
+    sudo -u "${OPS_USER}" git sparse-checkout set ops-server/worker-agent ops-server/requirements.txt ops-server/systemd ops-server/ops-docker-cleanup.sh
     ln -sf "${OPS_HOME}/codespaces-framework/ops-server/worker-agent" "${AGENT_DIR}"
 fi
 
@@ -141,8 +141,16 @@ SyslogIdentifier=ops-worker-agent
 WantedBy=multi-user.target
 UNIT
 
+cp "${OPS_HOME}/codespaces-framework/ops-server/ops-docker-cleanup.sh" \
+    /usr/local/bin/ops-docker-cleanup
+chmod +x /usr/local/bin/ops-docker-cleanup
+cp "${OPS_HOME}/codespaces-framework/ops-server/systemd/ops-docker-cleanup.service" \
+    /etc/systemd/system/
+cp "${OPS_HOME}/codespaces-framework/ops-server/systemd/ops-docker-cleanup.timer" \
+    /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable ops-worker-agent.service
+systemctl enable --now ops-docker-cleanup.timer
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 info "=========================================="

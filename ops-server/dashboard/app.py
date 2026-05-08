@@ -4,11 +4,18 @@ import asyncio
 import json
 import logging
 import os
+import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fcntl
+import pty
+import struct
+import termios
+
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -424,6 +431,161 @@ async def api_trigger_fleet(request: Request):
     }
 
 
+@app.post("/api/ghpages/trigger")
+async def api_trigger_ghpages(request: Request):
+    """Dispatch deploy-ghpages.yaml for a single repo+branch via GitHub Actions.
+
+    Body: ``{repo: "owner/name", ref: "<branch>"}``
+    Returns 204 from GitHub on success (no job_id — runs on GHA, not local workers).
+    """
+    role = await _require_writer(request)
+    body = await request.json()
+    repo = (body.get("repo") or "").strip()
+    ref  = (body.get("ref") or "main").strip()
+    if not repo:
+        raise HTTPException(400, "repo is required")
+    if not GH_TOKEN:
+        raise HTTPException(500, "GH_TOKEN not configured — cannot dispatch GitHub Actions")
+
+    owner, repo_name = repo.split("/", 1)
+    workflow = "deploy-ghpages.yaml"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{GH_API}/repos/{owner}/{repo_name}/actions/workflows/{workflow}/dispatches",
+            headers={
+                "Authorization": f"Bearer {GH_TOKEN}",
+                "Accept": "application/vnd.github+json",
+            },
+            json={"ref": ref},
+        )
+    if resp.status_code == 204:
+        log.info("GH Pages dispatch: %s @ %s by %s", repo, ref, role["user"])
+        return {
+            "status": "dispatched",
+            "repo": repo,
+            "ref": ref,
+            "workflow": workflow,
+            "requested_by": role["user"],
+        }
+    detail = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+    raise HTTPException(resp.status_code, detail)
+
+
+@app.post("/api/ghpages/trigger-fleet")
+async def api_trigger_ghpages_fleet(request: Request):
+    """Dispatch deploy-ghpages.yaml across every fleet repo that has the chosen branch.
+
+    Body: ``{branch: "<name>", repos?: [...]}``
+    Dispatches in parallel; returns per-repo success/error lists.
+    """
+    role = await _require_writer(request)
+    body = await request.json()
+    branch   = (body.get("branch") or "").strip()
+    explicit = body.get("repos") or []
+    if not branch:
+        raise HTTPException(400, "branch is required")
+    if not GH_TOKEN:
+        raise HTTPException(500, "GH_TOKEN not configured — cannot dispatch GitHub Actions")
+
+    aggregate = await api_all_branches()
+    by_branch = {b["name"]: b["repos"] for b in aggregate["branches"]}
+    candidates = explicit or by_branch.get(branch, [])
+    has_branch = set(by_branch.get(branch, []))
+    targets    = [r for r in candidates if r in has_branch]
+    skipped    = [r for r in candidates if r not in has_branch]
+
+    workflow   = "deploy-ghpages.yaml"
+    dispatched: list[str] = []
+    errors:     list[dict] = []
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        async def dispatch_one(repo_full: str) -> None:
+            owner, repo_name = repo_full.split("/", 1)
+            try:
+                resp = await client.post(
+                    f"{GH_API}/repos/{owner}/{repo_name}/actions/workflows/{workflow}/dispatches",
+                    headers={
+                        "Authorization": f"Bearer {GH_TOKEN}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                    json={"ref": branch},
+                )
+                if resp.status_code == 204:
+                    dispatched.append(repo_full)
+                else:
+                    errors.append({
+                        "repo": repo_full,
+                        "status": resp.status_code,
+                        "detail": resp.text[:200],
+                    })
+            except Exception as exc:
+                errors.append({"repo": repo_full, "detail": str(exc)})
+
+        await asyncio.gather(*(dispatch_one(r) for r in targets))
+
+    log.info(
+        "GH Pages fleet dispatch: branch=%s dispatched=%d errors=%d by=%s",
+        branch, len(dispatched), len(errors), role["user"],
+    )
+    return {
+        "status": "dispatched",
+        "branch": branch,
+        "workflow": workflow,
+        "dispatched": dispatched,
+        "dispatched_count": len(dispatched),
+        "errors": errors,
+        "skipped_no_branch": skipped,
+        "requested_by": role["user"],
+    }
+
+
+@app.post("/api/agent/fix-ci")
+async def api_agent_fix_ci(request: Request):
+    """Queue a fix-ci agent job for a failed integration test."""
+    role = await _require_writer(request)
+    body = await request.json()
+    repo        = (body.get("repo") or "").strip()
+    branch      = (body.get("branch") or "main").strip()
+    arch        = (body.get("arch") or "arm64").strip()
+    failed_job_id = (body.get("failed_job_id") or "").strip()
+    failed_step   = (body.get("failed_step") or "").strip()
+
+    if not repo:
+        raise HTTPException(400, "repo is required")
+
+    # Fetch the failed log from Redis for the agent to analyze
+    failed_log = ""
+    if failed_job_id:
+        raw = await pool.get(f"job:log:{failed_job_id}")
+        if raw:
+            # Cap at 12KB — enough context, won't blow up the prompt
+            failed_log = raw[-12288:] if len(raw) > 12288 else raw
+
+    import uuid as _uuid
+    ts = int(time.time() * 1000)
+    repo_name = repo.split("/")[-1]
+    job_id = f"fix-ci-{repo_name}-{ts}-{_uuid.uuid4().hex[:6]}"
+
+    job = {
+        "job_id":        job_id,
+        "type":          "fix-ci",
+        "repo":          repo,
+        "ref":           branch,
+        "branch":        branch,
+        "arch":          arch,
+        "trigger":       "dashboard",
+        "requested_by":  role["user"],
+        "timestamp":     datetime.utcnow().isoformat(),
+        "failed_job_id": failed_job_id,
+        "failed_log":    failed_log,
+        "failed_step":   failed_step,
+    }
+
+    await pool.rpush("queue:agent", json.dumps(job))
+    log.info("Queued fix-ci agent job %s for %s@%s by %s", job_id, repo, branch, role["user"])
+    return {"job_id": job_id, "status": "queued", "repo": repo, "branch": branch}
+
+
 @app.get("/api/builds/running")
 async def api_builds_running():
     """Currently executing tests, plus pending queue depths.
@@ -457,6 +619,7 @@ async def api_builds_running():
                 "ref": meta.get("ref"),
                 "started_at": meta.get("started_at"),
                 "worker_id": meta.get("worker_id"),
+                "type": meta.get("type", "integration-test"),
             })
         elif key_type == "string":
             parts = key.split(":", 3)
@@ -476,6 +639,7 @@ async def api_builds_running():
                 "ref": meta.get("ref"),
                 "started_at": meta.get("started_at"),
                 "worker_id": meta.get("worker_id"),
+                "type": meta.get("type", "integration-test"),
             })
 
     # Surface deferred jobs so the dashboard can show "queued behind a running test"
@@ -491,8 +655,15 @@ async def api_builds_running():
 
 @app.get("/api/jobs/{job_id}/livelog")
 async def api_job_livelog(job_id: str):
-    """Plain-text live log for an in-flight test (updated ~1s by the worker)."""
+    """Plain-text live log for an in-flight test (updated ~1s by the worker).
+
+    Returns 404 if the job is no longer in the running set — even if the
+    livelog Redis key hasn't expired yet — so the dashboard correctly falls
+    back to the final stored log and hides the Terminate button.
+    """
     from fastapi.responses import PlainTextResponse
+    if not await pool.exists(f"job:running:{job_id}"):
+        return PlainTextResponse("(no livelog — job may have finished)", status_code=404)
     content = await pool.get(f"job:livelog:{job_id}")
     if content is None:
         return PlainTextResponse("(no livelog — job may have finished)", status_code=404)
@@ -511,7 +682,14 @@ async def api_terminate_job(job_id: str, request: Request):
     """
     role = await _require_writer(request)
     if not await pool.exists(f"job:running:{job_id}"):
-        raise HTTPException(404, f"Job {job_id} is not currently running")
+        # Check if it completed — gives a friendlier message than a bare 404.
+        in_completed = await pool.exists(f"job:log:{job_id}")
+        detail = (
+            f"Job {job_id} has already completed — check the History tab for results."
+            if in_completed else
+            f"Job {job_id} is not running (it may have completed or never started)."
+        )
+        raise HTTPException(404, detail)
     requested_by = role["user"]
     await pool.publish("ops:terminate", job_id)
     log.info("Termination requested for %s by %s", job_id, requested_by)
@@ -1046,13 +1224,14 @@ async def api_builds_history(
     arch: str | None = None,
     branch: str | None = None,
     status: str | None = None,
+    type: str | None = None,
     limit: int = 200,
 ):
-    """Past integration-test runs from ``jobs:completed``, filterable.
+    """Past runs from ``jobs:completed``, filterable.
 
-    Source of truth is the trimmed ``jobs:completed`` LIST (last 500). When
-    Phase 2 of the design doc lands, this should switch to ``builds:by_time``
-    ZSET for richer time-range queries.
+    By default returns integration-test jobs only (for backwards compat).
+    Pass ``type=all`` to include agent/sync jobs, or ``type=fix-ci`` etc.
+    for a specific type.
     """
     completed_raw = await pool.lrange("jobs:completed", -500, -1)
     rows = []
@@ -1064,8 +1243,15 @@ async def api_builds_history(
             j = json.loads(raw)
         except Exception:
             continue
-        if j.get("type") != "integration-test":
-            continue
+        job_type = j.get("type", "integration-test")
+        if type == "all":
+            pass  # no type filter
+        elif type:
+            if job_type != type:
+                continue
+        else:
+            if job_type != "integration-test":
+                continue
         result = j.get("result", {}) or {}
         row_repo = j.get("repo", "")
         row_arch = j.get("arch") or result.get("arch") or j.get("worker_arch", "") or "unknown"
@@ -1098,6 +1284,8 @@ async def api_builds_history(
             "trigger": trigger,
             "nightly_run_id": nightly_id,
             "worker_id": j.get("worker_id", "master"),
+            "type": j.get("type", "integration-test"),
+            "result": result,
         })
         if len(rows) >= limit: break
     return {
@@ -1177,6 +1365,191 @@ async def api_trigger_build(request: Request):
         queued.append({"arch": a, "queue": f"queue:test:{a}"})
 
     return {"status": "queued", "repo": repo, "ref": ref, "requested_by": requested_by, "jobs": queued}
+
+
+@app.post("/api/jobs/{job_id}/shell-token")
+async def api_shell_token(job_id: str, request: Request):
+    """Issue a single-use, 60-second shell token for a running job.
+
+    nginx guards this endpoint with auth_request (writer only).  The token
+    is then passed as a query param to the WebSocket endpoint, which has no
+    auth_request so nginx doesn't strip the Upgrade header.
+    """
+    await _require_writer(request)
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        raise HTTPException(status_code=404, detail="job not running")
+    token = secrets.token_hex(16)
+    await pool.set(f"shell:token:{token}", job_id, ex=60)
+    return {"token": token}
+
+
+@app.websocket("/ws/jobs/{job_id}/shell")
+async def job_shell_ws(ws: WebSocket, job_id: str, token: str = ""):
+    """PTY bridge: browser xterm.js ↔ docker exec inside the Sysbox container.
+
+    Auth is via a single-use shell token (issued by /api/jobs/{id}/shell-token
+    which is nginx-auth-gated).  The WebSocket location in nginx has no
+    auth_request because that module is incompatible with WebSocket upgrades.
+    """
+    await ws.accept()
+
+    # Validate single-use token atomically: delete it on first use.
+    pipe = pool.pipeline(transaction=True)
+    pipe.get(f"shell:token:{token}")
+    pipe.delete(f"shell:token:{token}")
+    stored_id, _ = await pipe.execute()
+    if not stored_id or stored_id != job_id:
+        await ws.send_bytes(b"\r\n\x1b[31mInvalid or expired shell token.\x1b[0m\r\n")
+        await ws.close()
+        return
+
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        await ws.send_bytes(
+            f"\r\n\x1b[31mJob {job_id} is not running or has already completed.\x1b[0m\r\n".encode()
+        )
+        await ws.close()
+        return
+
+    worker_id = meta.get("worker_id", "")
+    repo = meta.get("repo", "")
+    repo_name = repo.split("/")[-1] if "/" in repo else repo or "workspace"
+    workspace = f"/workspaces/{repo_name}"
+
+    # Sysbox container name mirrors executor.py: sb-{last 32 chars of job_id}
+    sb_name = f"sb-{job_id[-32:]}"
+    inner_exec = [
+        "docker", "exec", "-it", sb_name,
+        "docker", "exec", "-it", "-w", workspace,
+        "dt", "bash",
+    ]
+
+    if worker_id.startswith("worker-"):
+        worker_hash = await pool.hgetall(f"worker:{worker_id}")
+        ssh_host = worker_hash.get("ssh_host", "autonomous-enablements-worker")
+        cmd = [
+            "ssh", "-t",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=10",
+            ssh_host,
+        ] + inner_exec
+    else:
+        cmd = inner_exec
+
+    log.info("Shell open: job=%s worker=%s sb=%s", job_id, worker_id or "local", sb_name)
+    await _pty_bridge(ws, cmd)
+    log.info("Shell closed: job=%s", job_id)
+
+
+async def _pty_bridge(ws: WebSocket, cmd: list[str]):
+    """Create a PTY subprocess and bridge its I/O to the WebSocket.
+
+    Uses loop.add_reader for non-blocking PTY output so the reader task is
+    a proper asyncio coroutine that CAN be cancelled when the WebSocket
+    disconnects — avoiding the deadlock that run_in_executor causes when
+    os.read blocks in a thread that can't be interrupted.
+    """
+    master_fd, slave_fd = pty.openpty()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+        )
+        os.close(slave_fd)  # parent doesn't need the slave end
+    except Exception as exc:
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        await ws.send_bytes(f"\r\n\x1b[31mFailed to start shell: {exc}\x1b[0m\r\n".encode())
+        return
+
+    loop = asyncio.get_running_loop()
+    pty_out: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    def _on_pty_readable():
+        try:
+            data = os.read(master_fd, 4096)
+            pty_out.put_nowait(data)
+        except OSError:
+            # PTY EOF — subprocess exited or fd was closed
+            pty_out.put_nowait(None)
+            try:
+                loop.remove_reader(master_fd)
+            except Exception:
+                pass
+
+    loop.add_reader(master_fd, _on_pty_readable)
+
+    async def _pty_to_ws():
+        while True:
+            chunk = await pty_out.get()
+            if chunk is None:
+                break
+            try:
+                await ws.send_bytes(chunk)
+            except Exception:
+                break
+
+    async def _ws_to_pty():
+        while True:
+            try:
+                msg = await ws.receive()
+            except (WebSocketDisconnect, Exception):
+                break
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("text"):
+                try:
+                    ev = json.loads(msg["text"])
+                    if ev.get("type") == "resize":
+                        rows = max(1, int(ev.get("rows", 24)))
+                        cols = max(1, int(ev.get("cols", 80)))
+                        fcntl.ioctl(master_fd, termios.TIOCSWINSZ,
+                                    struct.pack("HHHH", rows, cols, 0, 0))
+                except (json.JSONDecodeError, ValueError, OSError):
+                    try:
+                        os.write(master_fd, msg["text"].encode())
+                    except OSError:
+                        break
+            elif msg.get("bytes"):
+                try:
+                    os.write(master_fd, msg["bytes"])
+                except OSError:
+                    break
+
+    t_out = asyncio.create_task(_pty_to_ws())
+    t_in = asyncio.create_task(_ws_to_pty())
+    try:
+        await asyncio.wait({t_out, t_in}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        t_out.cancel()
+        t_in.cancel()
+        try:
+            await asyncio.gather(t_out, t_in, return_exceptions=True)
+        except Exception:
+            pass
+        try:
+            loop.remove_reader(master_fd)
+        except Exception:
+            pass
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except (asyncio.TimeoutError, Exception):
+            pass
 
 
 @app.get("/api/health")

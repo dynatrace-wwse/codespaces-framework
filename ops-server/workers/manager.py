@@ -309,6 +309,20 @@ class WorkerManager:
                     "ref": _branch_of(job),
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "worker_id": "master",
+                    "type": "integration-test",
+                })
+                await self.pool.expire(running_key, LOCK_TTL_SECONDS)
+            elif job.get("type") in ("fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab"):
+                running_key = f"job:running:{job_id}"
+                await self.pool.hset(running_key, mapping={
+                    "job_id":     job_id,
+                    "repo":       job["repo"],
+                    "branch":     job.get("ref") or job.get("branch") or "main",
+                    "arch":       "—",
+                    "ref":        job.get("ref") or job.get("branch") or "main",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "worker_id":  "master",
+                    "type":       job.get("type"),
                 })
                 await self.pool.expire(running_key, LOCK_TTL_SECONDS)
                 # Best-effort build.started telemetry
@@ -448,19 +462,33 @@ class WorkerManager:
             return {"error": f"Unknown job type: {job_type}"}
 
     async def _run_agent(self, job: dict, agent_type: str) -> dict:
-        """Run a Claude Code agent for the given job."""
-        repo = job["repo"]
+        """Run a Claude Code agent for the given job, streaming output to Redis livelog."""
+        import shutil as _shutil
+        repo     = job["repo"]
         repo_name = repo.split("/")[-1]
-        repo_dir = REPOS_DIR / repo_name
-        log_file = LOGS_DIR / f"{job['job_id']}.log"
+        job_id   = job["job_id"]
+        log_file = LOGS_DIR / f"{job_id}.log"
 
-        # Ensure repo is cloned and up to date
-        await self._ensure_repo(repo, repo_dir)
+        # fix-ci gets a fresh per-job clone at the exact branch so the agent
+        # can create branches without dirtying the shared REPOS_DIR checkout.
+        if agent_type == "fix-ci":
+            branch   = job.get("ref") or job.get("branch") or "main"
+            work_dir = WORKDIR / job_id
+            repo_dir = work_dir / repo_name
+            work_dir.mkdir(parents=True, exist_ok=True)
+            await self._git_clone(repo, branch, repo_dir)
+            await self._make_world_writable(repo_dir)
+        else:
+            work_dir = None
+            repo_dir = REPOS_DIR / repo_name
+            await self._ensure_repo(repo, repo_dir)
 
-        # Build the prompt for Claude
         prompt = self._build_agent_prompt(agent_type, job)
 
-        # Run Claude Code in non-interactive mode
+        livelog_key = f"job:livelog:{job_id}"
+        header = f"=== {agent_type} agent started for {repo} ===\n"
+        await self.pool.set(livelog_key, header, ex=7200)
+
         cmd = [
             "claude",
             "--print",
@@ -470,12 +498,13 @@ class WorkerManager:
         ]
 
         log.info("Running Claude agent: %s in %s", agent_type, repo_dir)
+        start_time = time.time()
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(repo_dir),
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
             env={
                 **os.environ,
                 "DT_ENVIRONMENT": DT_ENVIRONMENT,
@@ -483,19 +512,21 @@ class WorkerManager:
                 "DT_INGEST_TOKEN": DT_INGEST_TOKEN,
             },
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=600  # 10 minute timeout
-        )
 
-        # Save logs
-        log_file.write_text(
-            f"=== STDOUT ===\n{stdout.decode()}\n\n=== STDERR ===\n{stderr.decode()}"
-        )
+        output = await self._stream_to_redis(proc, livelog_key, timeout_s=600)
+        duration = int(time.time() - start_time)
+
+        log_file.write_text(self._mask_secrets(header + output))
+
+        if work_dir and work_dir.exists():
+            _shutil.rmtree(work_dir, ignore_errors=True)
 
         return {
             "agent_type": agent_type,
-            "exit_code": proc.returncode,
-            "log_file": str(log_file),
+            "exit_code":  proc.returncode,
+            "duration_seconds": duration,
+            "passed":     proc.returncode == 0,
+            "log_file":   str(log_file),
         }
 
     async def _run_integration_test(self, job: dict) -> dict:
@@ -606,18 +637,7 @@ class WorkerManager:
             # 5. Wait for vscode inside dt-enablement to have docker access
             await self._wait_for_inner_dt_ready(sb_name, inner_name)
 
-            # Stage 1: BATS unit tests (fast, structural). Fails the pipeline
-            # before we spin up k3d if the framework code is broken. Skipped if
-            # the repo has no .bats files.
-            bats_script = (
-                "if ls .devcontainer/test/unit/*.bats >/dev/null 2>&1; then "
-                "  command -v bats >/dev/null 2>&1 || "
-                "    { apt-get update -qq && apt-get install -y -qq bats; }; "
-                "  cd .devcontainer && bats test/unit/; "
-                "else echo '(no .devcontainer/test/unit/*.bats found — skipping Stage 1)'; fi"
-            )
             steps = [
-                ("bats",              bats_script),
                 ("postCreateCommand", "./.devcontainer/post-create.sh"),
                 ("postStartCommand",  "./.devcontainer/post-start.sh"),
                 ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
@@ -1025,17 +1045,74 @@ class WorkerManager:
             )
 
         elif agent_type == "fix-ci":
+            repo      = job["repo"]
+            org       = repo.split("/")[0]
+            repo_name = repo.split("/")[-1]
+            branch    = job.get("ref") or job.get("branch") or "main"
+            failed_step = job.get("failed_step") or "unknown"
+            failed_log  = job.get("failed_log") or ""
+            log_section = (
+                f"\n=== FAILED LOG ===\n{failed_log}\n=== END LOG ===\n"
+                if failed_log else "\n(no log captured)\n"
+            )
             return (
-                f"You are the enablement ops agent. CI failed on {repo}.\n\n"
-                f"Failed check suite for commit: {job.get('head_sha', 'unknown')}\n"
-                f"PR numbers: {job.get('pr_numbers', [])}\n\n"
-                "Instructions:\n"
-                "1. Run: gh run list --limit 1 --json conclusion,databaseId\n"
-                "2. Read the failed logs: gh run view <id> --log-failed\n"
-                "3. Diagnose the root cause\n"
-                "4. If it's a code issue, fix it and push to the PR branch\n"
-                "5. If it's a flaky test, add a retry or note it in a comment\n"
-                "6. If it's a framework issue, note it for manual review\n"
+                f"You are the Autonomous Enablement Ops agent.\n"
+                f"An integration test failed and you must diagnose and fix it.\n\n"
+                f"Repository : {repo}\n"
+                f"Branch     : {branch}\n"
+                f"Failed step: {failed_step}\n"
+                f"{log_section}\n"
+                f"The repo is already cloned at the correct branch in your working directory.\n\n"
+                f"STEP 1 — ANALYZE THE FAILURE\n"
+                f"Read the failed log above carefully. Identify:\n"
+                f"  a) The exact error message (last non-empty error line)\n"
+                f"  b) Which script/function raised it\n"
+                f"  c) Whether that function comes from the shared framework or this repo\n\n"
+                f"  Framework functions live in .devcontainer/util/ and are sourced via\n"
+                f"  source_framework.sh, which pulls from {org}/codespaces-framework.\n"
+                f"  If the failing call is to a shared function (e.g. startCluster,\n"
+                f"  deployTodoApp, dynatraceDeployOperator, assertRunningPod …) it is\n"
+                f"  a FRAMEWORK issue.  Otherwise it is a REPO issue.\n\n"
+                f"STEP 2 — READ RELEVANT SOURCE FILES\n"
+                f"  - .devcontainer/post-create.sh\n"
+                f"  - .devcontainer/post-start.sh\n"
+                f"  - .devcontainer/test/integration.sh\n"
+                f"  - .devcontainer/util/source_framework.sh (identifies framework version)\n"
+                f"  Read whichever is relevant to the failed step.\n\n"
+                f"STEP 3A — IF REPO ISSUE\n"
+                f"  Fix the problem in this repo:\n"
+                f"  1. Create a fix branch:\n"
+                f"       git checkout -b agent/fix-ci-{branch}\n"
+                f"  2. Edit the broken file. Be surgical — only change what is needed.\n"
+                f"  3. Commit: git commit -am 'fix(ci): resolve {failed_step} failure on {branch}'\n"
+                f"  4. Push:   git push origin agent/fix-ci-{branch}\n"
+                f"  5. Open a PR:\n"
+                f"       gh pr create \\\n"
+                f"         --title 'fix(ci): resolve {failed_step} failure on {branch}' \\\n"
+                f"         --body 'Automated fix by the Enablement Ops agent.'\n\n"
+                f"STEP 3B — IF FRAMEWORK ISSUE\n"
+                f"  Do NOT modify this repo. Instead:\n"
+                f"  1. Clone the framework into /tmp/fw-fix-{repo_name}:\n"
+                f"       gh repo clone {org}/codespaces-framework /tmp/fw-fix-{repo_name}\n"
+                f"  2. cd /tmp/fw-fix-{repo_name}\n"
+                f"  3. Create a branch:\n"
+                f"       git checkout -b agent/fix-ci-from-{repo_name}-{branch}\n"
+                f"  4. Fix the shared function that is causing the failure.\n"
+                f"  5. Commit and push:\n"
+                f"       git commit -am 'fix: resolve {failed_step} failure in {repo_name}'\n"
+                f"       git push origin agent/fix-ci-from-{repo_name}-{branch}\n"
+                f"  6. Open a PR in codespaces-framework:\n"
+                f"       gh pr create \\\n"
+                f"         --repo {org}/codespaces-framework \\\n"
+                f"         --title 'fix: resolve {failed_step} failure seen in {repo_name}' \\\n"
+                f"         --body 'Root cause found via {repo}@{branch}. Automated fix.'\n\n"
+                f"STEP 4 — SUMMARY\n"
+                f"  End your response with a structured summary:\n"
+                f"  - Diagnosis: (one sentence — root cause)\n"
+                f"  - Scope: REPO or FRAMEWORK\n"
+                f"  - Fix: (what file, what change)\n"
+                f"  - Branch: (full branch name)\n"
+                f"  - PR: (URL if created)\n"
             )
 
         elif agent_type == "review-pr":

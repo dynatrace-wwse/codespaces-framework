@@ -8,6 +8,7 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
     <header>
@@ -39,6 +40,7 @@
             <button class="tab" data-view="running">Running</button>
             <button class="tab" data-view="history">History</button>
             <button class="tab" data-view="sync">Synchronizer</button>
+            <button class="tab" data-view="agentic">Agentic</button>
             <button class="tab" data-view="workers">Workers</button>
             <button class="tab" data-view="nightly">Nightly</button>
         </div>
@@ -53,11 +55,15 @@
             <div class="fleet-trigger" id="fleet-trigger-panel" hidden>
                 <div class="fleet-trigger-head">
                     <span class="fleet-trigger-title">⚡ Trigger across fleet</span>
-                    <span class="fleet-trigger-help">Run integration tests on every repo that has the chosen branch.</span>
+                    <span class="fleet-trigger-help" id="fleet-trigger-help">Run integration tests on every repo that has the chosen branch.</span>
                 </div>
                 <div class="fleet-trigger-row">
                     <select id="fleet-branch" class="fleet-branch-select">
                         <option value="">Select a branch…</option>
+                    </select>
+                    <select id="fleet-action" class="fleet-action-select">
+                        <option value="integration-test">Integration test</option>
+                        <option value="deploy-ghpages">Deploy GitHub Pages</option>
                     </select>
                     <select id="fleet-arch" class="fleet-arch-select">
                         <option value="both">both arches</option>
@@ -115,6 +121,7 @@
                         <th>Repository</th>
                         <th>Branch</th>
                         <th>Arch</th>
+                        <th>Action</th>
                         <th>Worker</th>
                         <th>Started</th>
                         <th>Elapsed</th>
@@ -122,7 +129,7 @@
                     </tr>
                 </thead>
                 <tbody id="running-body">
-                    <tr><td colspan="7" class="loading">Loading running jobs…</td></tr>
+                    <tr><td colspan="8" class="loading">Loading running jobs…</td></tr>
                 </tbody>
             </table>
             <h3 style="margin-top: 24px;">Deferred · queued behind a held lock</h3>
@@ -167,13 +174,14 @@
                         <th>Arch</th>
                         <th>Duration</th>
                         <th>Status</th>
+                        <th>Action</th>
                         <th>Trigger</th>
                         <th>Worker</th>
                         <th>Log</th>
                     </tr>
                 </thead>
                 <tbody id="history-body">
-                    <tr><td colspan="9" class="loading">Loading history…</td></tr>
+                    <tr><td colspan="10" class="loading">Loading history…</td></tr>
                 </tbody>
             </table>
         </section>
@@ -303,6 +311,9 @@
                     <div class="modal-actions">
                         <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
                            target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
+                        <button id="livelog-shell" class="btn btn-small btn-secondary"
+                                data-action title="Open interactive shell in this container"
+                                hidden>⌨ Shell</button>
                         <button id="livelog-terminate" class="btn btn-small btn-danger"
                                 data-action title="Kill this job"
                                 hidden>■ Terminate</button>
@@ -312,6 +323,84 @@
                 <pre id="livelog-pre"></pre>
             </div>
         </div>
+
+        <!-- Agentic View -->
+        <section id="view-agentic" class="view">
+            <div class="agentic-header">
+                <p class="agentic-intro">
+                    Claude analyzes failed integration tests, determines whether the root cause is in the
+                    repo or the shared framework, then creates a fix branch and opens a PR.
+                </p>
+            </div>
+
+            <!-- Running agents -->
+            <div id="agentic-running-section">
+                <h3 class="agentic-section-title">Running Agents <span id="agentic-running-count" class="count-badge"></span></h3>
+                <table id="agentic-running-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>Branch</th>
+                            <th>Type</th>
+                            <th>Started</th>
+                            <th>Elapsed</th>
+                            <th>Log</th>
+                        </tr>
+                    </thead>
+                    <tbody id="agentic-running-body">
+                        <tr><td colspan="6" class="loading">—</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Failed integration tests -->
+            <h3 class="agentic-section-title" style="margin-top:28px">Failed Integration Tests</h3>
+            <div class="controls">
+                <select id="agentic-repo-filter"><option value="">All repos</option></select>
+                <select id="agentic-arch-filter">
+                    <option value="">All arches</option>
+                    <option value="arm64">arm64</option>
+                    <option value="amd64">amd64</option>
+                </select>
+                <button class="btn btn-small btn-secondary" id="agentic-refresh">↻ Refresh</button>
+            </div>
+            <table id="agentic-failed-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Failed step</th>
+                        <th>Failed at</th>
+                        <th>Duration</th>
+                        <th>Log</th>
+                        <th>Fix</th>
+                    </tr>
+                </thead>
+                <tbody id="agentic-failed-body">
+                    <tr><td colspan="8" class="loading">Loading…</td></tr>
+                </tbody>
+            </table>
+
+            <!-- Agent run history -->
+            <h3 class="agentic-section-title" style="margin-top:28px">Agent Run History</h3>
+            <table id="agentic-history-table">
+                <thead>
+                    <tr>
+                        <th>Started</th>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Log</th>
+                    </tr>
+                </thead>
+                <tbody id="agentic-history-body">
+                    <tr><td colspan="7" class="loading">Loading…</td></tr>
+                </tbody>
+            </table>
+        </section>
 
         <!-- Workers View -->
         <section id="view-workers" class="view">
@@ -342,6 +431,19 @@
         </section>
     </main>
 
-    <script src="/static/app.js"></script>
+    <!-- Shell modal — xterm.js PTY terminal into a running test container -->
+    <div id="shell-modal" class="modal" hidden>
+        <div class="modal-inner shell-modal-inner">
+            <div class="modal-header">
+                <h3 id="shell-modal-title">Shell</h3>
+                <button id="shell-close" class="btn btn-small btn-secondary">✕ Close</button>
+            </div>
+            <div id="shell-terminal"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>

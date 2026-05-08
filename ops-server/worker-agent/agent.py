@@ -13,6 +13,8 @@ from .config import (
     WORKER_ID,
     WORKER_ARCH,
     WORKER_CAPACITY,
+    WORKER_HOST,
+    WORKER_SSH_HOST,
     MASTER_REDIS_URL,
     MASTER_REDIS_PASSWORD,
     HEARTBEAT_INTERVAL,
@@ -109,7 +111,7 @@ class WorkerAgent:
         sb_name = f"sb-{job_id[-32:]}"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", sb_name,
+                "docker", "rm", "-fv", sb_name,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
             _, err = await proc.communicate()
@@ -146,14 +148,17 @@ class WorkerAgent:
     async def _register(self):
         """Register this worker with the master."""
         worker_key = f"worker:{WORKER_ID}"
-        await self.pool.hset(worker_key, mapping={
+        fields = {
             "arch": WORKER_ARCH,
             "capacity": str(WORKER_CAPACITY),
             "active_jobs": "0",
             "status": "ready",
+            "host": WORKER_HOST,
+            "ssh_host": WORKER_SSH_HOST or WORKER_HOST,
             "registered_at": datetime.now(timezone.utc).isoformat(),
             "last_heartbeat": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        await self.pool.hset(worker_key, mapping=fields)
         await self.pool.expire(worker_key, REGISTRATION_TTL)
         log.info("Registered as %s", worker_key)
 
@@ -173,12 +178,22 @@ class WorkerAgent:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def _consume_queue(self):
-        """Pull jobs from the arch-specific test queue."""
+        """Pull jobs from the arch-specific test queue.
+
+        Only dequeues when a slot is available so jobs stay visible in Redis
+        (and the dashboard queue counter stays accurate) until the worker is
+        actually ready to run them.
+        """
         queue_key = f"queue:test:{WORKER_ARCH}"
         log.info("Consuming from %s", queue_key)
 
         while self._running:
             try:
+                # Back-pressure: leave the job in Redis until we have capacity.
+                if len(self.active_jobs) >= WORKER_CAPACITY:
+                    await asyncio.sleep(1)
+                    continue
+
                 result = await self.pool.blpop(queue_key, timeout=5)
                 if result is None:
                     continue

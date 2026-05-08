@@ -556,6 +556,8 @@ td.running { background: rgba(0,180,222,.06); }
 }
 
 .trigger-form .branch-select { min-width: 130px; }
+.trigger-form .action-select { min-width: 140px; }
+.trigger-form .arch-select   { min-width: 90px; }
 
 /* ─── Misc ───────────────────────────────────────────────────── */
 .loading {
@@ -638,6 +640,7 @@ body.role-guest [data-action] {
     display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
 }
 .fleet-trigger-row select { min-width: 220px; }
+.fleet-trigger-row .fleet-action-select { min-width: 200px; }
 .fleet-target-count { font-size: 0.78rem; color: var(--text-2); }
 
 /* ─── Modal search bar + wrap toggle ─────────────────────────── */
@@ -787,4 +790,81 @@ mark.log-match.current {
     color: var(--text-2);
     border-color: var(--border);
     background: var(--surface-2);
+}
+
+/* ── Shell modal ──────────────────────────────────────────────────────────── */
+.shell-modal-inner {
+    width: min(1100px, 96vw);
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#shell-terminal {
+    flex: 1;
+    min-height: 400px;
+    background: #000;
+    border-radius: 0 0 var(--r) var(--r);
+    overflow: hidden;
+    /* xterm.js injects its own canvas; padding handled inside */
+    padding: 4px;
+}
+
+/* Make xterm fill the container */
+#shell-terminal .xterm,
+#shell-terminal .xterm-viewport,
+#shell-terminal .xterm-screen { width: 100% !important; }
+
+/* ── Agentic View ─────────────────────────────────────────────────────────── */
+
+.agentic-header {
+    margin-bottom: 16px;
+}
+.agentic-intro {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin: 0;
+    max-width: 760px;
+}
+.agentic-section-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-2);
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.count-badge {
+    font-size: 0.78rem;
+    font-weight: 400;
+    color: var(--text-muted);
+}
+.agent-type-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: #1a2744;
+    color: #7eb8f7;
+    border: 1px solid #2a3d60;
+    white-space: nowrap;
+}
+.btn-agent {
+    background: linear-gradient(135deg, #1e3a5f, #2a5298);
+    color: #c8deff;
+    border: 1px solid #3a6bc0;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.btn-agent:hover {
+    background: linear-gradient(135deg, #254a7a, #3362b8);
+    color: #e0eeff;
+}
+.btn-success {
+    background: #0e3320 !important;
+    color: #4ade80 !important;
+    border-color: #166534 !important;
+    cursor: default;
 }

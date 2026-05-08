@@ -82,6 +82,7 @@ document.querySelectorAll('.tab').forEach(tab => {
         if (tab.dataset.view === 'history') loadHistory();
         if (tab.dataset.view === 'running') loadRunningDetail();
         if (tab.dataset.view === 'sync') loadSyncTab();
+        if (tab.dataset.view === 'agentic') loadAgentic();
     });
 });
 
@@ -190,6 +191,11 @@ async function loadFleet() {
             </td>
             <td>
                 <div class="trigger-form">
+                <select class="action-select" id="action-${safeRepo}"
+                        onchange="onRowActionChange('${safeRepo}')">
+                    <option value="integration-test">Integration test</option>
+                    <option value="deploy-ghpages">Deploy pages</option>
+                </select>
                 <select class="arch-select" id="arch-${safeRepo}" data-action>
                     <option value="both">both</option>
                     <option value="arm64">arm64</option>
@@ -304,6 +310,26 @@ async function loadFleetTriggerPanel() {
         filterSel.innerHTML = `<option value="">All branches (selected)</option>` +
             seenBranches.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
     } catch {}
+
+    // Wire action dropdown to toggle arch visibility and update help/button text
+    const actionSel = document.getElementById('fleet-action');
+    if (actionSel) actionSel.addEventListener('change', onFleetActionChange);
+}
+
+function onFleetActionChange() {
+    const action  = document.getElementById('fleet-action')?.value || 'integration-test';
+    const archSel = document.getElementById('fleet-arch');
+    const helpEl  = document.getElementById('fleet-trigger-help');
+    const btn     = document.getElementById('fleet-trigger-btn');
+    if (action === 'deploy-ghpages') {
+        if (archSel) archSel.hidden = true;
+        if (helpEl)  helpEl.textContent = 'Dispatch the deploy-ghpages.yaml workflow on every repo that has the chosen branch.';
+        if (btn)     btn.textContent    = 'Deploy fleet pages';
+    } else {
+        if (archSel) archSel.hidden = false;
+        if (helpEl)  helpEl.textContent = 'Run integration tests on every repo that has the chosen branch.';
+        if (btn)     btn.textContent    = 'Trigger fleet build';
+    }
 }
 
 async function triggerFleetBuild() {
@@ -316,39 +342,74 @@ async function triggerFleetBuild() {
         return;
     }
     const branch = document.getElementById('fleet-branch').value;
-    const arch = document.getElementById('fleet-arch').value;
+    const arch   = document.getElementById('fleet-arch').value;
+    const action = document.getElementById('fleet-action')?.value || 'integration-test';
     if (!branch) { alert('Select a branch first.'); return; }
-    const meta = (branchesAggCache?.branches || []).find(b => b.name === branch);
+
+    const meta  = (branchesAggCache?.branches || []).find(b => b.name === branch);
     const count = meta?.count || 0;
-    if (!confirm(`Trigger an integration test for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'} (${arch})?\n\nEach repo will be queued; per-(repo,branch,arch) locks still apply.`)) return;
+    const isDeployPages = action === 'deploy-ghpages';
+    const confirmMsg = isDeployPages
+        ? `Dispatch deploy-ghpages.yaml for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'}?\n\nThis triggers GitHub Actions in each repo.`
+        : `Trigger an integration test for branch "${branch}" on ${count} repo${count === 1 ? '' : 's'} (${arch})?\n\nEach repo will be queued; per-(repo,branch,arch) locks still apply.`;
+    if (!confirm(confirmMsg)) return;
 
     const btn = document.getElementById('fleet-trigger-btn');
-    btn.disabled = true; btn.textContent = 'Queueing…';
+    btn.disabled = true;
+    btn.textContent = isDeployPages ? 'Dispatching…' : 'Queueing…';
     try {
-        const res = await fetch(`${API}/api/builds/trigger-fleet`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ branch, arch }),
-        });
-        if (res.status === 401) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
-            return;
+        if (isDeployPages) {
+            const res = await fetch(`${API}/api/ghpages/trigger-fleet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ branch }),
+            });
+            if (res.status === 401) {
+                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                return;
+            }
+            if (!res.ok) {
+                const body = await res.text();
+                alert(`Fleet deploy failed (${res.status}): ${body}`);
+                return;
+            }
+            const data = await res.json();
+            const errCount = (data.errors || []).length;
+            const skipCount = (data.skipped_no_branch || []).length;
+            alert(
+                `Dispatched deploy-ghpages.yaml on ${data.dispatched_count} repo(s) for branch "${data.branch}".` +
+                (errCount  ? `\n${errCount} error(s) — check the GitHub Actions tab per repo.` : '') +
+                (skipCount ? `\n${skipCount} repo(s) skipped (branch not present).` : '')
+            );
+        } else {
+            const res = await fetch(`${API}/api/builds/trigger-fleet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ branch, arch }),
+            });
+            if (res.status === 401) {
+                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                return;
+            }
+            if (!res.ok) {
+                const body = await res.text();
+                alert(`Fleet trigger failed (${res.status}): ${body}`);
+                return;
+            }
+            const data = await res.json();
+            const skipped = (data.skipped_no_branch || []).length;
+            alert(
+                `Queued ${data.queued.length} job(s) for branch ${data.branch}.` +
+                (skipped ? `\n${skipped} repo(s) skipped (branch not present).` : '')
+            );
+            loadRunning();
         }
-        if (!res.ok) {
-            const body = await res.text();
-            alert(`Fleet trigger failed (${res.status}): ${body}`);
-            return;
-        }
-        const data = await res.json();
-        const skipped = (data.skipped_no_branch || []).length;
-        alert(
-            `Queued ${data.queued.length} job(s) for branch ${data.branch}.` +
-            (skipped ? `\n${skipped} repo(s) skipped (branch not present).` : '')
-        );
-        loadRunning();
     } finally {
-        btn.disabled = false; btn.textContent = 'Trigger fleet build';
+        btn.disabled = false;
+        // Restore label based on current action selection (user may not have changed it)
+        onFleetActionChange();
         applyRoleGating();
     }
 }
@@ -396,6 +457,12 @@ function buildCell(build) {
     return `<span class="${cls}">${icon}</span>`;
 }
 
+function onRowActionChange(safeRepo) {
+    const action  = document.getElementById(`action-${safeRepo}`)?.value || 'integration-test';
+    const archSel = document.getElementById(`arch-${safeRepo}`);
+    if (archSel) archSel.hidden = action === 'deploy-ghpages';
+}
+
 async function triggerBuildFromRow(repo, safeRepo, btn) {
     if (!authState.signedIn) {
         window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
@@ -406,25 +473,53 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
         return;
     }
     const branch = document.getElementById(`branch-${safeRepo}`).value.trim() || 'main';
-    const arch = document.getElementById(`arch-${safeRepo}`).value;
+    const arch   = document.getElementById(`arch-${safeRepo}`)?.value || 'both';
+    const action = document.getElementById(`action-${safeRepo}`)?.value || 'integration-test';
     btn.disabled = true; btn.textContent = '…';
-    try {
-        const res = await fetch(`${API}/api/builds/trigger`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ repo, arch, ref: branch, requested_by: 'dashboard' }),
-        });
-        if (res.status === 401) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
-            return;
+
+    if (action === 'deploy-ghpages') {
+        try {
+            const res = await fetch(`${API}/api/ghpages/trigger`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ repo, ref: branch }),
+            });
+            if (res.status === 401) {
+                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                return;
+            }
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                alert(`Deploy Pages failed: ${body.detail || 'HTTP ' + res.status}`);
+                btn.disabled = false; btn.textContent = 'Trigger';
+            } else {
+                btn.textContent = '✓ Sent';
+                setTimeout(() => { btn.disabled = false; btn.textContent = 'Trigger'; }, 2000);
+            }
+        } catch (e) {
+            btn.disabled = false; btn.textContent = 'Trigger';
+            alert('Network error: ' + e);
         }
-        if (!res.ok) {
-            alert('Trigger failed: HTTP ' + res.status);
+    } else {
+        try {
+            const res = await fetch(`${API}/api/builds/trigger`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ repo, arch, ref: branch, requested_by: 'dashboard' }),
+            });
+            if (res.status === 401) {
+                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                return;
+            }
+            if (!res.ok) {
+                alert('Trigger failed: HTTP ' + res.status);
+            }
+        } finally {
+            btn.disabled = false; btn.textContent = 'Trigger';
+            await loadRunning();
         }
-    } finally {
-        btn.disabled = false; btn.textContent = 'Trigger';
-        await loadRunning();
     }
 }
 
@@ -546,11 +641,13 @@ function openLiveLog(jobId, title) {
     document.getElementById('livelog-modal').hidden = false;
     applyWrapPref();
 
-    // Wire fullscreen + terminate buttons for this job
+    // Wire fullscreen + terminate + shell buttons for this job
     const fsBtn = document.getElementById('livelog-fullscreen');
     if (fsBtn) fsBtn.href = `/log/${jobId}`;
     const termBtn = document.getElementById('livelog-terminate');
     if (termBtn) termBtn.hidden = true;  // unhide once we confirm livelog (running)
+    const shellBtn = document.getElementById('livelog-shell');
+    if (shellBtn) shellBtn.hidden = true;  // unhide once we confirm livelog (running)
 
     if (livelogPoll) clearInterval(livelogPoll);
 
@@ -563,9 +660,11 @@ function openLiveLog(jobId, title) {
                 if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
                 currentJobIsLive = false;
                 if (termBtn) termBtn.hidden = true;
+                if (shellBtn) shellBtn.hidden = true;
             } else if (res.ok) {
                 currentJobIsLive = true;
                 if (termBtn) termBtn.hidden = !isWriter();
+                if (shellBtn) shellBtn.hidden = !isWriter();
             }
             if (res.ok) {
                 const text = await res.text();
@@ -704,6 +803,10 @@ async function terminateCurrentJob() {
 document.addEventListener('click', e => {
     if (e.target.id === 'livelog-close') { closeLiveLog(); return; }
     if (e.target.id === 'livelog-terminate') { terminateCurrentJob(); return; }
+    if (e.target.id === 'livelog-shell') {
+        if (currentJobId) openShell(currentJobId, document.getElementById('livelog-title').textContent);
+        return;
+    }
     if (e.target.id === 'livelog-wrap-toggle') { toggleWrap(); return; }
     if (e.target.id === 'livelog-search-prev') { moveSearch(-1); return; }
     if (e.target.id === 'livelog-search-next') { moveSearch(1); return; }
@@ -724,10 +827,12 @@ document.addEventListener('click', e => {
     if (finalLink) {
         e.preventDefault();
         const row = finalLink.closest('tr');
-        const repo = row ? row.dataset.repo : '';
-        const arch = finalLink.closest('td')?.dataset.arch || '';
-        openLiveLog(finalLink.dataset.finalJob,
-                    `${repo}${arch ? ' (' + arch + ')' : ''}`);
+        const repo = (row && row.dataset.repo) || '';
+        const arch = (finalLink.closest('td')?.dataset.arch) || '';
+        const title = repo
+            ? `${repo}${arch ? ' (' + arch + ')' : ''}`
+            : finalLink.dataset.finalJob;
+        openLiveLog(finalLink.dataset.finalJob, title);
         return;
     }
 
@@ -888,7 +993,7 @@ async function loadHistory() {
     params.set('limit', '200');
 
     const tbody = document.getElementById('history-body');
-    tbody.innerHTML = '<tr><td colspan="9" class="loading">Loading history…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="loading">Loading history…</td></tr>';
     try {
         const res = await fetch(`${API}/api/builds/history?` + params.toString());
         const data = await res.json();
@@ -932,13 +1037,14 @@ async function loadHistory() {
                 <td><span class="arch-badge">${escapeHtml(r.arch)}</span></td>
                 <td>${dur}</td>
                 <td><span class="${statusCls}">${statusLabel}</span></td>
+                <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(r.type))}</td>
                 <td>${escapeHtml(r.trigger || '')}</td>
                 <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
                 <td>${logLink}</td>
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="9" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
     }
 }
 
@@ -970,7 +1076,7 @@ async function loadRunningDetail() {
         `;
 
         if (!data.running.length) {
-            tbody.innerHTML = '<tr><td colspan="7" class="loading">No jobs running.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="loading">No jobs running.</td></tr>';
         } else {
             tbody.innerHTML = data.running.map(r => {
                 const elapsed = r.started_at ? Math.round((now - new Date(r.started_at).getTime()) / 1000) : 0;
@@ -980,6 +1086,7 @@ async function loadRunningDetail() {
                     : '—';
                 const termBtn = r.job_id
                     ? `<button class="btn btn-small btn-danger row-terminate" data-action data-job-id="${escapeHtml(r.job_id)}" title="Terminate this job">■ Terminate</button>
+                       <button class="btn btn-small btn-secondary row-shell" data-action data-job-id="${escapeHtml(r.job_id)}" data-title="${escapeHtml((r.repo || '').split('/').pop() + ' · ' + (r.arch || ''))}" title="Open shell in test container">⌨ Shell</button>
                        <a href="#" class="btn btn-small btn-secondary log-link" data-final-job="${escapeHtml(r.job_id)}" title="View live log">log</a>
                        <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener" class="btn btn-small btn-secondary" title="Fullscreen">⤢</a>`
                     : '—';
@@ -987,6 +1094,7 @@ async function loadRunningDetail() {
                     <td>${repoLink}</td>
                     <td>${escapeHtml(r.branch || r.ref || '')}</td>
                     <td><span class="arch-badge">${escapeHtml(r.arch || '')}</span></td>
+                    <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(r.type))}</td>
                     <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
                     <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
                     <td>${formatDuration(elapsed)}</td>
@@ -1322,6 +1430,13 @@ function escapeHtml(s) {
     }[c]));
 }
 
+function formatJobType(type) {
+    if (!type || type === 'integration-test') return 'Integration test';
+    if (type === 'sync-command') return 'Sync';
+    if (['fix-issue','fix-ci','review-pr','migrate-gen3','scaffold-lab','validate-after-push'].includes(type)) return 'Agent';
+    return type;
+}
+
 function formatDuration(seconds) {
     if (!seconds || seconds < 0) return '—';
     if (seconds < 60) return `${seconds}s`;
@@ -1338,6 +1453,318 @@ function formatTime(iso) {
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// ── Shell terminal ──────────────────────────────────────────────────────────
+
+let shellTerm = null;
+let shellFitAddon = null;
+let shellWs = null;
+
+async function openShell(jobId, title) {
+    if (!isWriter()) {
+        alert('Only org members can open a shell.');
+        return;
+    }
+    document.getElementById('shell-modal-title').textContent = `Shell · ${title}`;
+    document.getElementById('shell-modal').hidden = false;
+
+    // Tear down any previous session
+    if (shellWs) { try { shellWs.close(); } catch {} shellWs = null; }
+    if (shellTerm) { shellTerm.dispose(); shellTerm = null; }
+    document.getElementById('shell-terminal').innerHTML = '';
+
+    const term = new Terminal({
+        cursorBlink: true,
+        fontFamily: 'ui-monospace, "Cascadia Code", Menlo, monospace',
+        fontSize: 13,
+        theme: { background: '#000000', foreground: '#e2e8f2', cursor: '#00b4de' },
+    });
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('shell-terminal'));
+    fitAddon.fit();
+    shellTerm = term;
+    shellFitAddon = fitAddon;
+
+    // auth_request is incompatible with WebSocket upgrade in nginx, so we
+    // obtain a short-lived token via a regular (auth-gated) HTTP request first.
+    let token = '';
+    try {
+        const res = await fetch(`/api/jobs/${jobId}/shell-token`, { method: 'POST' });
+        if (!res.ok) {
+            term.write(`\r\n\x1b[31mFailed to get shell token (${res.status}) — is the job still running?\x1b[0m\r\n`);
+            return;
+        }
+        ({ token } = await res.json());
+    } catch (err) {
+        term.write(`\r\n\x1b[31mFailed to get shell token: ${err}\x1b[0m\r\n`);
+        return;
+    }
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/jobs/${jobId}/shell?token=${token}`);
+    ws.binaryType = 'arraybuffer';
+    shellWs = ws;
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
+    };
+    ws.onmessage = e => {
+        if (e.data instanceof ArrayBuffer) {
+            term.write(new Uint8Array(e.data));
+        } else {
+            term.write(e.data);
+        }
+    };
+    ws.onclose = () => {
+        term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+    };
+    ws.onerror = () => {
+        term.write('\r\n\x1b[31m[WebSocket error — check that the job is still running]\x1b[0m\r\n');
+    };
+
+    term.onData(data => {
+        if (shellWs && shellWs.readyState === WebSocket.OPEN) shellWs.send(data);
+    });
+    term.onResize(({ rows, cols }) => {
+        if (shellWs && shellWs.readyState === WebSocket.OPEN) {
+            shellWs.send(JSON.stringify({ type: 'resize', rows, cols }));
+        }
+    });
+}
+
+function closeShell() {
+    document.getElementById('shell-modal').hidden = true;
+    if (shellWs) { try { shellWs.close(); } catch {} shellWs = null; }
+    if (shellTerm) { shellTerm.dispose(); shellTerm = null; }
+}
+
+// Fit terminal on window resize
+window.addEventListener('resize', () => {
+    if (shellFitAddon && shellTerm && !document.getElementById('shell-modal').hidden) {
+        shellFitAddon.fit();
+    }
+});
+
+document.addEventListener('click', e => {
+    if (e.target.id === 'shell-close') { closeShell(); return; }
+    if (e.target.id === 'shell-modal') { closeShell(); return; }
+
+    const btn = e.target.closest('.row-shell');
+    if (btn) {
+        e.preventDefault();
+        openShell(btn.dataset.jobId, btn.dataset.title || btn.dataset.jobId);
+    }
+});
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !document.getElementById('shell-modal').hidden) {
+        // Only close shell if the livelog modal isn't also open
+        if (document.getElementById('livelog-modal').hidden) closeShell();
+    }
+});
+
+// ── Agentic View ────────────────────────────────────────────────────────────
+
+const AGENT_TYPES = new Set(['fix-ci', 'fix-issue', 'review-pr', 'migrate-gen3', 'scaffold-lab', 'validate-after-push']);
+
+function agentTypeLabel(type) {
+    const map = {
+        'fix-ci':           'Fix CI',
+        'fix-issue':        'Fix Issue',
+        'review-pr':        'Review PR',
+        'migrate-gen3':     'Migrate Gen3',
+        'scaffold-lab':     'Scaffold Lab',
+        'validate-after-push': 'Validate Push',
+    };
+    return map[type] || type;
+}
+
+async function loadAgentic() {
+    await Promise.all([loadAgenticRunning(), loadAgenticFailed(), loadAgenticHistory()]);
+}
+
+async function loadAgenticRunning() {
+    const body = document.getElementById('agentic-running-body');
+    const countEl = document.getElementById('agentic-running-count');
+    try {
+        const res  = await fetch(`${API}/api/builds/running`);
+        const data = await res.json();
+        const agents = (data.running || []).filter(r => AGENT_TYPES.has(r.type));
+        if (countEl) countEl.textContent = agents.length ? `(${agents.length})` : '';
+        if (!agents.length) {
+            body.innerHTML = `<tr><td colspan="6" class="loading">No agents running</td></tr>`;
+            return;
+        }
+        const now = Date.now();
+        body.innerHTML = agents.map(r => {
+            const elapsed = r.started_at
+                ? Math.round((now - new Date(r.started_at).getTime()) / 1000)
+                : 0;
+            const elStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed/60)}m ${elapsed%60}s`;
+            const logLink = r.job_id
+                ? `<a href="#" class="log-link" data-job-id="${escapeHtml(r.job_id)}" title="View live log">live log</a>`
+                : '—';
+            return `<tr>
+                <td>${escapeHtml(r.repo)}</td>
+                <td><code>${escapeHtml(r.branch || r.ref || '')}</code></td>
+                <td><span class="agent-type-badge">${escapeHtml(agentTypeLabel(r.type))}</span></td>
+                <td>${formatTime(r.started_at)}</td>
+                <td>${elStr}</td>
+                <td>${logLink}</td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="6" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+async function loadAgenticFailed() {
+    const tbody = document.getElementById('agentic-failed-body');
+    const repoFilter = document.getElementById('agentic-repo-filter')?.value || '';
+    const archFilter = document.getElementById('agentic-arch-filter')?.value || '';
+    try {
+        const res  = await fetch(`${API}/api/builds/history?type=integration-test&limit=200`);
+        const data = await res.json();
+        const rows = data.rows || data;
+        let failed = rows.filter(r => r.type === 'integration-test' && r.status === 'failed');
+
+        // Populate repo filter options
+        const repoSel = document.getElementById('agentic-repo-filter');
+        if (repoSel && repoSel.options.length <= 1) {
+            const repos = [...new Set(failed.map(r => r.repo))].sort();
+            repos.forEach(rp => {
+                const opt = document.createElement('option');
+                opt.value = rp; opt.textContent = rp.split('/').pop();
+                repoSel.appendChild(opt);
+            });
+        }
+
+        if (repoFilter) failed = failed.filter(r => r.repo === repoFilter);
+        if (archFilter) failed = failed.filter(r => r.arch === archFilter);
+
+        // Deduplicate: keep only the most recent failure per (repo, branch, arch)
+        const seen = new Set();
+        const deduped = [];
+        for (const r of failed) {
+            const key = `${r.repo}|${r.branch}|${r.arch}`;
+            if (!seen.has(key)) { seen.add(key); deduped.push(r); }
+        }
+        failed = deduped.slice(0, 50);
+
+        if (!failed.length) {
+            tbody.innerHTML = `<tr><td colspan="8" class="loading">No recent failures</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = failed.map(r => {
+            const repoShort = r.repo.split('/').pop();
+            const failedStep = r.result?.failed_step || r.failed_step || '—';
+            const dur = r.result?.duration_seconds != null
+                ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
+                : '—';
+            const logLink = r.job_id
+                ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>`
+                : '—';
+            const safeJobId    = escapeHtml(r.job_id || '');
+            const safeRepo     = escapeHtml(r.repo);
+            const safeBranch   = escapeHtml(r.branch || '');
+            const safeArch     = escapeHtml(r.arch || '');
+            const safeStep     = escapeHtml(failedStep);
+            return `<tr id="agentic-row-${safeJobId}">
+                <td title="${safeRepo}">${escapeHtml(repoShort)}</td>
+                <td><code>${safeBranch}</code></td>
+                <td><span class="arch-badge">${safeArch}</span></td>
+                <td style="font-size:0.8rem">${safeStep}</td>
+                <td title="${escapeHtml(r.finished_at || '')}">${formatTime(r.finished_at)}</td>
+                <td>${dur}</td>
+                <td>${logLink}</td>
+                <td><button class="btn btn-small btn-agent" data-action
+                    onclick="triggerAgentFixCI('${safeJobId}','${safeRepo}','${safeBranch}','${safeArch}','${safeStep}',this)"
+                    title="Ask Claude to analyse and fix this failure">Fix with AI</button></td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="8" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+async function loadAgenticHistory() {
+    const tbody = document.getElementById('agentic-history-body');
+    try {
+        const res  = await fetch(`${API}/api/builds/history?type=all&limit=200`);
+        const data = await res.json();
+        const rows = data.rows || data;
+        const agents = rows.filter(r => AGENT_TYPES.has(r.type)).slice(0, 30);
+        if (!agents.length) {
+            tbody.innerHTML = `<tr><td colspan="7" class="loading">No agent runs yet</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = agents.map(r => {
+            const repoShort = r.repo.split('/').pop();
+            const statusCls = r.status === 'completed' ? 'status-passed'
+                : r.status === 'failed' ? 'status-failed' : 'status-terminated';
+            const dur = r.result?.duration_seconds != null
+                ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
+                : '—';
+            const logLink = r.job_id
+                ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>`
+                : '—';
+            return `<tr>
+                <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
+                <td title="${escapeHtml(r.repo)}">${escapeHtml(repoShort)}</td>
+                <td><code>${escapeHtml(r.branch || r.ref || '')}</code></td>
+                <td><span class="agent-type-badge">${escapeHtml(agentTypeLabel(r.type))}</span></td>
+                <td><span class="${statusCls}">${escapeHtml(r.status)}</span></td>
+                <td>${dur}</td>
+                <td>${logLink}</td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+}
+
+async function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
+    if (!isWriter()) { alert('Sign in as a writer to trigger agent runs.'); return; }
+    btnEl.disabled = true;
+    btnEl.textContent = 'Queuing…';
+    try {
+        const res = await fetch(`${API}/api/agent/fix-ci`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                failed_job_id: failedJobId,
+                repo, branch, arch,
+                failed_step: failedStep,
+            }),
+        });
+        if (!res.ok) {
+            const txt = await res.text();
+            btnEl.disabled = false;
+            btnEl.textContent = 'Fix with AI';
+            alert(`Error ${res.status}: ${txt}`);
+            return;
+        }
+        const data = await res.json();
+        btnEl.textContent = '✓ Queued';
+        btnEl.classList.add('btn-success');
+        // Show a link to the live log next to the button
+        const td = btnEl.closest('td');
+        if (td) {
+            td.insertAdjacentHTML('beforeend',
+                ` <a href="#" class="log-link" data-job-id="${escapeHtml(data.job_id)}" title="View live log">live log</a>`);
+        }
+        // Refresh running agents section
+        setTimeout(loadAgenticRunning, 1500);
+    } catch (e) {
+        btnEl.disabled = false;
+        btnEl.textContent = 'Fix with AI';
+        alert(`Error: ${e}`);
+    }
+}
+
+// Refresh agentic running section when that tab is active
+document.getElementById('agentic-refresh')?.addEventListener('click', loadAgentic);
+
 // ── Init ────────────────────────────────────────────────────────────────────
 
 (async () => {
@@ -1353,9 +1780,9 @@ function formatTime(iso) {
 setInterval(() => { checkHealth(); loadWorkers(); }, 30000);
 setInterval(loadRunning, 5000);    // spinner liveness
 setInterval(loadFleet, 120000);
-// Refresh active tabs when they're showing
+// Refresh running detail when that tab is active
 setInterval(() => {
     const active = document.querySelector('.tab.active')?.dataset.view;
     if (active === 'running') loadRunningDetail();
-    if (active === 'history') loadHistory();
+    if (active === 'agentic') loadAgenticRunning();
 }, 5000);

@@ -3,6 +3,7 @@ run-name: ${{ github.event.head_commit.message }}  - deploy github pages
 permissions:
   contents: write
 on:
+  workflow_dispatch:
   push:
     branches:
       - main

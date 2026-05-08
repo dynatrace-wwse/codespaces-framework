@@ -142,11 +142,15 @@ sudo -u "${OPS_USER}" "${VENV_DIR}/bin/pip" install -q \
 info "Installing systemd services..."
 cp "${OPS_DIR}/codespaces-framework/ops-server/systemd/"*.service /etc/systemd/system/
 cp "${OPS_DIR}/codespaces-framework/ops-server/systemd/"*.timer /etc/systemd/system/
+cp "${OPS_DIR}/codespaces-framework/ops-server/ops-docker-cleanup.sh" \
+    /usr/local/bin/ops-docker-cleanup
+chmod +x /usr/local/bin/ops-docker-cleanup
 systemctl daemon-reload
 systemctl enable ops-webhook.service
 systemctl enable ops-dashboard.service
 systemctl enable ops-nightly.timer
 systemctl enable ops-sync-daemon.service
+systemctl enable --now ops-docker-cleanup.timer
 
 # ── Configure Redis for remote workers ──────────────────────────────────────
 info "Configuring Redis for remote worker access..."

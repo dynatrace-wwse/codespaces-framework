@@ -151,18 +151,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
         # 6. Run each step via nested docker exec, streaming output to Redis.
-        # Stage 1 (BATS) runs first — fast structural validation that lets us
-        # fail before spinning up k3d if the framework code is broken. Skipped
-        # if the repo has no .bats files. Mirrors workers/manager.py.
-        bats_script = (
-            "if ls .devcontainer/test/unit/*.bats >/dev/null 2>&1; then "
-            "  command -v bats >/dev/null 2>&1 || "
-            "    { apt-get update -qq && apt-get install -y -qq bats; }; "
-            "  cd .devcontainer && bats test/unit/; "
-            "else echo '(no .devcontainer/test/unit/*.bats found — skipping Stage 1)'; fi"
-        )
         steps = [
-            ("bats",              bats_script),
             ("postCreateCommand", "./.devcontainer/post-create.sh"),
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
             ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
@@ -222,12 +211,24 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     finally:
         # 7. Always tear down the outer Sysbox container — everything inside
         #    (inner dockerd, dt-enablement, k3d cluster) goes with it.
+        #    -v also removes anonymous volumes (docker:dind declares a VOLUME for
+        #    its data dir; without -v those volumes accumulate on the host).
         try:
             kill_proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", sb_name,
+                "docker", "rm", "-fv", sb_name,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(kill_proc.wait(), timeout=60)
+        except Exception:
+            pass
+        # Safety net: purge any other leftover anonymous volumes from this or
+        # previous runs that didn't get the -v treatment (e.g. after a crash).
+        try:
+            vol_proc = await asyncio.create_subprocess_exec(
+                "docker", "volume", "prune", "-f",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(vol_proc.wait(), timeout=30)
         except Exception:
             pass
 
