@@ -1352,12 +1352,16 @@ async def api_trigger_build(request: Request):
     ref  = body.get("ref", "main")
     requested_by = role["user"]
 
+    job_type = body.get("type", "integration-test")
+    if job_type not in ("integration-test", "daemon"):
+        raise HTTPException(400, "type must be integration-test or daemon")
+
     arches = ["arm64", "amd64"] if arch == "both" else [arch]
     timestamp = datetime.now(timezone.utc).isoformat()
     queued = []
     for a in arches:
         job = {
-            "type": "integration-test",
+            "type": job_type,
             "repo": repo,
             "arch": a,
             "queue": f"test:{a}",
@@ -1370,7 +1374,7 @@ async def api_trigger_build(request: Request):
         await pool.rpush(f"queue:test:{a}", json.dumps(job))
         queued.append({"arch": a, "queue": f"queue:test:{a}"})
 
-    return {"status": "queued", "repo": repo, "ref": ref, "requested_by": requested_by, "jobs": queued}
+    return {"status": "queued", "repo": repo, "ref": ref, "type": job_type, "requested_by": requested_by, "jobs": queued}
 
 
 @app.post("/api/jobs/{job_id}/shell-token")
@@ -1428,7 +1432,7 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = ""):
     inner_exec = [
         "docker", "exec", "-it", sb_name,
         "docker", "exec", "-it", "-w", workspace,
-        "dt", "bash",
+        "dt", "zsh",
     ]
 
     if worker_id.startswith("worker-"):
@@ -1438,6 +1442,8 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = ""):
             "ssh", "-t",
             "-o", "StrictHostKeyChecking=no",
             "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
             ssh_host,
         ] + inner_exec
     else:

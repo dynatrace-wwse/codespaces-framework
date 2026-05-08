@@ -258,6 +258,177 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     }
 
 
+async def execute_daemon(job: dict, redis_pool=None) -> dict:
+    """Start the devcontainer environment and keep it alive until terminated.
+
+    Mirrors execute_integration_test setup (clone → Sysbox → dt → postCreate →
+    postStart) but skips the integration test and blocks on ``docker wait``
+    instead, giving users an interactive shell for training / exploration.
+    """
+    repo      = job["repo"]
+    head_repo = job.get("head_repo") or repo
+    ref       = job.get("ref") or job.get("head_branch") or "main"
+    repo_name = repo.split("/")[-1]
+    job_id    = job["job_id"]
+    log_file  = LOGS_DIR / f"{job_id}.log"
+
+    work_dir = WORKDIR / job_id
+    repo_dir = work_dir / repo_name
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
+    await _git_clone(head_repo, ref, repo_dir)
+    await _make_world_writable(repo_dir)
+    _write_env_file(repo_dir / ".devcontainer" / ".env")
+
+    start_time = time.time()
+    workspace = f"/workspaces/{repo_name}"
+    env_file_inside = f"{workspace}/.devcontainer/.env"
+    sb_name = f"sb-{job_id[-32:]}"
+    inner_name = "dt"
+
+    sections = []
+    rc = 0
+    livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
+
+    try:
+        # 1. Outer Sysbox container
+        run_cmd = [
+            "docker", "run", "-d",
+            "--runtime=sysbox-runc",
+            "--name", sb_name,
+            "-v", f"{repo_dir}:{workspace}",
+            "docker:25-dind",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+            raise RuntimeError("sysbox container start failed")
+
+        await _wait_for_inner_docker(sb_name)
+
+        # 2. Pull + start dt container
+        pull = await asyncio.create_subprocess_exec(
+            "docker", "exec", sb_name, "docker", "pull", TEST_IMAGE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await pull.wait()
+
+        inner_run = [
+            "docker", "exec", sb_name,
+            "docker", "run", "-d",
+            "--init", "--privileged", "--network=host",
+            "--name", inner_name,
+            "--env-file", env_file_inside,
+            "-v", "/var/run/docker.sock:/var/run/docker.sock",
+            "-v", f"{workspace}:{workspace}",
+            "-w", workspace,
+            "-e", "GIT_CONFIG_COUNT=1",
+            "-e", "GIT_CONFIG_KEY_0=safe.directory",
+            "-e", "GIT_CONFIG_VALUE_0=*",
+            TEST_IMAGE, "sleep", "infinity",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *inner_run, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            sections.append(f"=== inner docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+            raise RuntimeError("inner container start failed")
+
+        await _wait_for_inner_dt_ready(sb_name, inner_name)
+
+        # 3. postCreate + postStart (set up cluster and apps)
+        if livelog_key:
+            await redis_pool.set(livelog_key, "", ex=86400)
+
+        for label, script in [
+            ("postCreateCommand", "./.devcontainer/post-create.sh"),
+            ("postStartCommand",  "./.devcontainer/post-start.sh"),
+        ]:
+            header = f"\n=== {label} ===\n"
+            sections.append(header)
+            if livelog_key:
+                await redis_pool.append(livelog_key, header)
+            exec_cmd = [
+                "docker", "exec", sb_name,
+                "docker", "exec", "-w", workspace, inner_name,
+                "bash", "-lc", script,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *exec_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            step_out = await _stream_to_redis(proc, redis_pool, livelog_key, timeout_s=1800)
+            sections.append(step_out)
+            if proc.returncode != 0:
+                rc = proc.returncode
+                msg = f"\n=== {label} failed (rc={rc}) — daemon environment may be incomplete ===\n"
+                sections.append(msg)
+                if livelog_key:
+                    await redis_pool.append(livelog_key, msg)
+
+        # 4. Signal readiness then block until the container is terminated
+        ready_msg = (
+            "\n=== Daemon ready — environment is up ===\n"
+            "=== Connect via the Shell button. Terminate when done. ===\n"
+        )
+        sections.append(ready_msg)
+        if livelog_key:
+            await redis_pool.append(livelog_key, ready_msg)
+            await redis_pool.expire(livelog_key, 86400)
+
+        log.info("Daemon %s ready — waiting for termination", job_id)
+        wait_proc = await asyncio.create_subprocess_exec(
+            "docker", "wait", sb_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await wait_proc.wait()
+
+    except Exception as e:
+        sections.append(f"\n=== daemon error: {e} ===\n")
+        if rc == 0:
+            rc = 1
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        try:
+            kill_proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-fv", sb_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(kill_proc.wait(), timeout=60)
+        except Exception:
+            pass
+
+    duration = int(time.time() - start_time)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        f"=== DAEMON: {job_id} ===\n"
+        f"=== REPO: {head_repo}@{ref} | ARCH: {WORKER_ARCH} ===\n"
+        f"=== DURATION: {duration}s ===\n"
+    )
+    log_file.write_text(_mask_secrets(header + "".join(sections)))
+
+    return {
+        "test": "daemon",
+        "arch": WORKER_ARCH,
+        "ref": ref,
+        "exit_code": rc,
+        "duration_seconds": duration,
+        "passed": True,   # termination is expected/normal
+        "timed_out": False,
+        "failed_step": "",
+        "log_file": str(log_file),
+    }
+
+
 async def _stream_to_redis(proc, redis_pool, livelog_key, timeout_s: int) -> str:
     """Read proc.stdout line-by-line and append to ``livelog_key`` every ~1s.
 

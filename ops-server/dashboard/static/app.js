@@ -195,6 +195,7 @@ async function loadFleet() {
                         onchange="onRowActionChange('${safeRepo}')">
                     <option value="integration-test">Integration test</option>
                     <option value="deploy-ghpages">Deploy pages</option>
+                    <option value="daemon">Daemon</option>
                 </select>
                 <select class="arch-select" id="arch-${safeRepo}" data-action>
                     <option value="both">both</option>
@@ -507,7 +508,7 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
-                body: JSON.stringify({ repo, arch, ref: branch, requested_by: 'dashboard' }),
+                body: JSON.stringify({ repo, arch, ref: branch, type: action, requested_by: 'dashboard' }),
             });
             if (res.status === 401) {
                 window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
@@ -1432,6 +1433,7 @@ function escapeHtml(s) {
 
 function formatJobType(type) {
     if (!type || type === 'integration-test') return 'Integration test';
+    if (type === 'daemon') return 'Daemon';
     if (type === 'sync-command') return 'Sync';
     if (['fix-issue','fix-ci','review-pr','migrate-gen3','scaffold-lab','validate-after-push'].includes(type)) return 'Agent';
     return type;

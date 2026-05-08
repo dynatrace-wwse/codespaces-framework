@@ -20,7 +20,7 @@ from .config import (
     HEARTBEAT_INTERVAL,
     REGISTRATION_TTL,
 )
-from .executor import execute_integration_test
+from .executor import execute_integration_test, execute_daemon
 
 # Keep in sync with workers/manager.py — see ops-server/design/2026-05-07-triage-queue.md
 LOCK_TTL_SECONDS = 7200
@@ -252,7 +252,10 @@ class WorkerAgent:
             await self.pool.expire(running_key, LOCK_TTL_SECONDS)
 
             try:
-                result = await execute_integration_test(job, redis_pool=self.pool)
+                if job.get("type") == "daemon":
+                    result = await execute_daemon(job, redis_pool=self.pool)
+                else:
+                    result = await execute_integration_test(job, redis_pool=self.pool)
                 job["result"] = result
                 job["status"] = "completed"
             except Exception as e:
