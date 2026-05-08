@@ -17,6 +17,7 @@ nav:
   - "12. Versioning Policy": versioning.md
   - "13. Resources": resources.md
   - "14. Repositories": enablements.md
-  - "15. What's next?": whats-next.md
+  - "15. Orbital — Ops Platform": ops-platform.md
+  - "16. What's next?": whats-next.md
 extra:
   rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/ff78563295ff1e42_complete.js"
