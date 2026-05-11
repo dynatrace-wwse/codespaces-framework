@@ -1539,12 +1539,9 @@ ${oa_image_line:+      ${oa_image_line}}
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
           operator: Exists
-      args:
-        - --set-host-id-source=hostname
       # In nested-container environments (Sysbox+Kind), the bootstrapper cannot
       # find /dev/root in /proc/self/mountinfo (overlayfs has no real block device).
       # Disabling host volume storage skips the partition detection check entirely.
-      storageHostPath: /tmp/dynatrace-oneagent
       env:
         - name: ONEAGENT_ENABLE_VOLUME_STORAGE
           value: "false"
