@@ -729,6 +729,44 @@ mark.log-match.current {
 }
 .modal-header h3 { min-width: 180px; }
 
+/* Livelog two-row header: title line + toolbar line */
+.livelog-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 10px 18px 8px;
+}
+.livelog-title-row {
+    display: flex;
+    align-items: center;
+}
+.livelog-title-row #livelog-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-3);
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.livelog-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+.livelog-toolbar .modal-search { flex-shrink: 0; }
+.livelog-toolbar #livelog-app-tabs {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+}
+.livelog-toolbar .modal-actions { margin-left: auto; flex-shrink: 0; }
+
 @media (max-width: 768px) {
     .modal-search input[type="search"] { width: 130px; }
     .fleet-trigger-row select { min-width: 0; flex: 1; }
@@ -899,12 +937,6 @@ mark.log-match.current {
 }
 
 /* App tab buttons in the livelog modal header */
-#livelog-app-tabs {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    align-items: center;
-}
 #livelog-app-tabs .livelog-tab-btn.active {
     background: var(--accent, #00b4de);
     color: #fff;

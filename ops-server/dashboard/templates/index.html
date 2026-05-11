@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=18">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -303,32 +303,34 @@
         <!-- Live log overlay -->
         <div id="livelog-modal" class="modal" hidden>
             <div class="modal-inner livelog-modal-inner">
-                <header class="modal-header">
-                    <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1">
-                        <h3 id="livelog-title" style="white-space:nowrap;flex:none">Live log</h3>
-                        <div id="livelog-app-tabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+                <header class="modal-header livelog-header">
+                    <div class="livelog-title-row">
+                        <span id="livelog-title">Live log</span>
                     </div>
-                    <div class="modal-search">
-                        <input type="search" id="livelog-search" placeholder="Search…"
-                               autocomplete="off" spellcheck="false">
-                        <button class="search-nav" id="livelog-search-prev"
-                                title="Previous match (Shift+Enter)">◀</button>
-                        <button class="search-nav" id="livelog-search-next"
-                                title="Next match (Enter)">▶</button>
-                        <span class="search-count" id="livelog-search-count"></span>
-                        <button class="btn btn-small btn-secondary" id="livelog-wrap-toggle"
-                                title="Toggle line wrapping (W)">↩ Wrap</button>
-                    </div>
-                    <div class="modal-actions">
-                        <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
-                           target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
-                        <button id="livelog-shell" class="btn btn-small btn-secondary"
-                                data-action title="Open interactive shell in this container"
-                                hidden>⌨ Shell</button>
-                        <button id="livelog-terminate" class="btn btn-small btn-danger"
-                                data-action title="Kill this job"
-                                hidden>■ Terminate</button>
-                        <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+                    <div class="livelog-toolbar">
+                        <div class="modal-search">
+                            <input type="search" id="livelog-search" placeholder="Search…"
+                                   autocomplete="off" spellcheck="false">
+                            <button class="search-nav" id="livelog-search-prev"
+                                    title="Previous match (Shift+Enter)">◀</button>
+                            <button class="search-nav" id="livelog-search-next"
+                                    title="Next match (Enter)">▶</button>
+                            <span class="search-count" id="livelog-search-count"></span>
+                            <button class="btn btn-small btn-secondary" id="livelog-wrap-toggle"
+                                    title="Toggle line wrapping (W)">↩ Wrap</button>
+                        </div>
+                        <div id="livelog-app-tabs"></div>
+                        <div class="modal-actions">
+                            <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
+                               target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
+                            <button id="livelog-shell" class="btn btn-small btn-secondary"
+                                    data-action title="Open interactive shell in this container"
+                                    hidden>⌨ Shell</button>
+                            <button id="livelog-terminate" class="btn btn-small btn-danger"
+                                    data-action title="Kill this job"
+                                    hidden>■ Terminate</button>
+                            <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+                        </div>
                     </div>
                 </header>
                 <pre id="livelog-pre"></pre>
@@ -468,6 +470,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=17"></script>
+    <script src="/static/app.js?v=18"></script>
 </body>
 </html>
