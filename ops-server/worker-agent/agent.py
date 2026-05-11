@@ -262,6 +262,7 @@ class WorkerAgent:
                 "ref": _branch_of(job),
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "worker_id": WORKER_ID,
+                "type": job.get("type", "integration-test"),
             })
             await self.pool.expire(running_key, LOCK_TTL_SECONDS)
 
