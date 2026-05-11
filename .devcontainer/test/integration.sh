@@ -13,12 +13,15 @@ assertRunningPod dynatrace operator
 
 assertRunningPod dynatrace activegate
 
-#assertRunningPod dynatrace oneagent
+# CloudNativeFullStack: assert OneAgent DaemonSet pod is running
+assertRunningPod dynatrace oneagent
 
 assertRunningPod todoapp todoapp
 
-# Test app is reachable via nginx ingress + magic DNS (sslip.io)
-assertRunningApp todoapp
+# Kind has no bound NodePort for ingress — skip HTTP reachability check
+if [[ "${CLUSTER_ENGINE:-k3d}" != "kind" ]]; then
+  assertRunningApp todoapp
+fi
 
 
 printInfoSection "Integration tests completed for $RepositoryName"
