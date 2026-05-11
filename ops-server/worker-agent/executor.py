@@ -31,9 +31,35 @@ from .config import (
     TEST_TIMEOUT,
     TEST_IMAGE,
     WORKER_ARCH,
+    WORKER_ID,
+    APP_PROXY_PORT_START,
+    APP_PROXY_PORT_COUNT,
+    K3D_LB_HTTP_PORT,
 )
 
 log = logging.getLogger("ops-worker-agent")
+
+
+async def _alloc_app_port(redis_pool) -> int | None:
+    """Pop a free app proxy port from this worker's pool in Redis."""
+    if redis_pool is None:
+        return None
+    try:
+        port = await redis_pool.lpop(f"worker:{WORKER_ID}:app_ports_free")
+        return int(port) if port else None
+    except Exception as e:
+        log.warning("Failed to allocate app proxy port: %s", e)
+        return None
+
+
+async def _free_app_port(redis_pool, port: int | None) -> None:
+    """Return an app proxy port to the worker's free pool."""
+    if redis_pool is None or port is None:
+        return
+    try:
+        await redis_pool.rpush(f"worker:{WORKER_ID}:app_ports_free", str(port))
+    except Exception as e:
+        log.warning("Failed to free app proxy port %s: %s", port, e)
 
 
 async def execute_integration_test(job: dict, redis_pool=None) -> dict:
@@ -86,17 +112,21 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     timed_out = False
     failed_step = None
     deadline = start_time + TEST_TIMEOUT
+    app_port: int | None = None
 
     try:
         # 1. Start outer Sysbox container running docker:25-dind
+        app_port = await _alloc_app_port(redis_pool)
         run_cmd = [
             "docker", "run",
             "-d",
             "--runtime=sysbox-runc",
             "--name", sb_name,
             "-v", f"{repo_dir}:{workspace}",
-            "docker:25-dind",
         ]
+        if app_port:
+            run_cmd += ["-p", f"{app_port}:{K3D_LB_HTTP_PORT}"]
+        run_cmd.append("docker:25-dind")
         proc = await asyncio.create_subprocess_exec(
             *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -105,6 +135,9 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
             rc = proc.returncode
             raise RuntimeError("sysbox container start failed")
+
+        if app_port and redis_pool:
+            await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
         # 2. Wait for the Sysbox's inner dockerd to be ready
         await _wait_for_inner_docker(sb_name)
@@ -209,6 +242,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         if rc == 0:
             rc = 1
     finally:
+        await _free_app_port(redis_pool, app_port)
         # 7. Always tear down the outer Sysbox container — everything inside
         #    (inner dockerd, dt-enablement, k3d cluster) goes with it.
         #    -v also removes anonymous volumes (docker:dind declares a VOLUME for
@@ -292,16 +326,20 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
     sections = []
     rc = 0
     livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
+    app_port: int | None = None
 
     try:
         # 1. Outer Sysbox container
+        app_port = await _alloc_app_port(redis_pool)
         run_cmd = [
             "docker", "run", "-d",
             "--runtime=sysbox-runc",
             "--name", sb_name,
             "-v", f"{repo_dir}:{workspace}",
-            "docker:25-dind",
         ]
+        if app_port:
+            run_cmd += ["-p", f"{app_port}:{K3D_LB_HTTP_PORT}"]
+        run_cmd.append("docker:25-dind")
         proc = await asyncio.create_subprocess_exec(
             *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -309,6 +347,9 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
         if proc.returncode != 0:
             sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
             raise RuntimeError("sysbox container start failed")
+
+        if app_port and redis_pool:
+            await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
         await _wait_for_inner_docker(sb_name)
 
@@ -397,6 +438,7 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
         if rc == 0:
             rc = 1
     finally:
+        await _free_app_port(redis_pool, app_port)
         shutil.rmtree(work_dir, ignore_errors=True)
         try:
             kill_proc = await asyncio.create_subprocess_exec(

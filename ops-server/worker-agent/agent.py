@@ -19,6 +19,8 @@ from .config import (
     MASTER_REDIS_PASSWORD,
     HEARTBEAT_INTERVAL,
     REGISTRATION_TTL,
+    APP_PROXY_PORT_START,
+    APP_PROXY_PORT_COUNT,
 )
 from .executor import execute_integration_test, execute_daemon
 
@@ -161,6 +163,18 @@ class WorkerAgent:
         await self.pool.hset(worker_key, mapping=fields)
         await self.pool.expire(worker_key, REGISTRATION_TTL)
         log.info("Registered as %s", worker_key)
+
+        # (Re)initialise the app proxy port pool. Always recreate on startup so
+        # stale entries from a previous run don't accumulate; graceful shutdown
+        # kills all Sysbox containers first so no ports are in use at this point.
+        port_pool_key = f"worker:{WORKER_ID}:app_ports_free"
+        await self.pool.delete(port_pool_key)
+        ports = list(range(APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT))
+        await self.pool.rpush(port_pool_key, *[str(p) for p in ports])
+        log.info(
+            "App proxy port pool initialised: %s (ports %d–%d)",
+            port_pool_key, APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT - 1,
+        )
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to master."""

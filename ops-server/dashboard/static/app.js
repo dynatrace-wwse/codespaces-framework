@@ -195,7 +195,7 @@ async function loadFleet() {
                         onchange="onRowActionChange('${safeRepo}')">
                     <option value="integration-test">Integration test</option>
                     <option value="deploy-ghpages">Deploy pages</option>
-                    <option value="daemon">Daemon</option>
+                    <option value="daemon">Training</option>
                 </select>
                 <select class="arch-select" id="arch-${safeRepo}" data-action>
                     <option value="both">both</option>
@@ -602,6 +602,8 @@ function ansiToHtml(text) {
 let livelogPoll = null;
 let currentJobId = null;
 let currentJobIsLive = false;
+let livelogAppTabsLoaded = false;
+let livelogPollCount = 0;
 // Most-recent rendered raw text (after ANSI processing). The search bar
 // re-highlights against this whenever the log refreshes or the query
 // changes, so search-state survives polling without losing position.
@@ -630,6 +632,8 @@ function applyWrapPref() {
 function openLiveLog(jobId, title) {
     currentJobId = jobId;
     currentJobIsLive = false;
+    livelogAppTabsLoaded = false;
+    livelogPollCount = 0;
     currentSearchTerm = '';
     currentSearchIdx = -1;
     currentSearchTotal = 0;
@@ -637,7 +641,12 @@ function openLiveLog(jobId, title) {
     if (searchInput) searchInput.value = '';
     document.getElementById('livelog-search-count').textContent = '';
     document.getElementById('livelog-title').textContent = title;
+    document.getElementById('livelog-app-tabs').innerHTML = '';
+    const livelogFrame = document.getElementById('livelog-app-frame');
+    livelogFrame.style.display = 'none';
+    livelogFrame.src = '';
     const pre = document.getElementById('livelog-pre');
+    pre.style.display = '';
     pre.innerHTML = '<em style="color:var(--text-muted)">Initializing isolation container…</em>';
     document.getElementById('livelog-modal').hidden = false;
     applyWrapPref();
@@ -666,6 +675,12 @@ function openLiveLog(jobId, title) {
                 currentJobIsLive = true;
                 if (termBtn) termBtn.hidden = !isWriter();
                 if (shellBtn) shellBtn.hidden = !isWriter();
+                livelogPollCount++;
+                // Load on first live poll; refresh every ~30 s (15 × 2 s) to pick up new apps.
+                if (!livelogAppTabsLoaded || livelogPollCount % 15 === 0) {
+                    livelogAppTabsLoaded = true;
+                    _loadLivelogAppTabs(jobId);
+                }
             }
             if (res.ok) {
                 const text = await res.text();
@@ -775,8 +790,16 @@ function toggleWrap() {
 function closeLiveLog() {
     document.getElementById('livelog-modal').hidden = true;
     if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+    document.getElementById('livelog-app-tabs').innerHTML = '';
+    const livelogFrame = document.getElementById('livelog-app-frame');
+    livelogFrame.style.display = 'none';
+    livelogFrame.src = '';
+    document.getElementById('livelog-app-empty').style.display = 'none';
+    document.getElementById('livelog-pre').style.display = '';
     currentJobId = null;
     currentJobIsLive = false;
+    livelogAppTabsLoaded = false;
+    livelogPollCount = 0;
 }
 
 async function terminateCurrentJob() {
@@ -1438,7 +1461,7 @@ function escapeHtml(s) {
 
 function formatJobType(type) {
     if (!type || type === 'integration-test') return 'Integration test';
-    if (type === 'daemon') return 'Daemon';
+    if (type === 'daemon') return 'Training';
     if (type === 'sync-command') return 'Sync';
     if (type === 'deploy-ghpages') return 'Deploy Pages';
     if (['fix-issue','fix-ci','review-pr','migrate-gen3','scaffold-lab','validate-after-push'].includes(type)) return 'Agent';
@@ -1467,6 +1490,7 @@ let shellTerm = null;
 let shellFitAddon = null;
 let shellWs = null;
 let shellJobId = null;   // job ID for the current shell session (≠ currentJobId which is livelog)
+let shellActiveTab = 'terminal'; // 'terminal' or an app name
 
 async function openShell(jobId, title) {
     shellJobId = jobId;
@@ -1481,6 +1505,13 @@ async function openShell(jobId, title) {
     if (shellWs) { try { shellWs.close(); } catch {} shellWs = null; }
     if (shellTerm) { shellTerm.dispose(); shellTerm = null; }
     document.getElementById('shell-terminal').innerHTML = '';
+    document.getElementById('shell-app-tabs').innerHTML = '';
+    document.getElementById('shell-app-frame').style.display = 'none';
+    document.getElementById('shell-app-frame').src = '';
+    shellActiveTab = 'terminal';
+
+    // Fetch registered apps in the background and render tabs when ready
+    _loadShellAppTabs(jobId);
 
     const term = new Terminal({
         cursorBlink: true,
@@ -1561,7 +1592,89 @@ function closeShell() {
     document.getElementById('shell-modal').hidden = true;
     if (shellWs) { try { shellWs.close(); } catch {} shellWs = null; }
     if (shellTerm) { shellTerm.dispose(); shellTerm = null; }
+    document.getElementById('shell-app-tabs').innerHTML = '';
+    document.getElementById('shell-app-frame').src = '';
+    document.getElementById('shell-app-frame').style.display = 'none';
+    document.getElementById('shell-app-empty').style.display = 'none';
+    document.getElementById('shell-terminal').style.display = '';
     shellJobId = null;
+    shellActiveTab = 'terminal';
+}
+
+async function _loadShellAppTabs(jobId) {
+    if (shellJobId !== jobId) return;
+    let apps = [];
+    try {
+        const res = await fetch(`/api/jobs/${jobId}/apps`);
+        if (res.ok) apps = (await res.json()).apps || [];
+    } catch {}
+    if (shellJobId !== jobId) return;
+
+    const tabBar = document.getElementById('shell-app-tabs');
+    tabBar.innerHTML = '';
+
+    const termBtn = document.createElement('button');
+    termBtn.className = 'btn btn-small btn-secondary shell-tab-btn active';
+    termBtn.dataset.tab = 'terminal';
+    termBtn.textContent = '⌨ Terminal';
+    tabBar.appendChild(termBtn);
+
+    if (apps.length === 0) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-small btn-secondary shell-tab-btn';
+        btn.dataset.tab = '__empty__';
+        btn.textContent = '⬡ Apps';
+        tabBar.appendChild(btn);
+    } else {
+        for (const app of apps) {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-small btn-secondary shell-tab-btn';
+            btn.dataset.tab = app.name;
+            btn.dataset.proxyUrl = app.proxy_url;
+            btn.textContent = `⬡ ${app.name}`;
+            tabBar.appendChild(btn);
+        }
+    }
+
+    tabBar.addEventListener('click', e => {
+        const btn = e.target.closest('.shell-tab-btn');
+        if (!btn) return;
+        _switchShellTab(btn.dataset.tab, btn.dataset.proxyUrl || '');
+    });
+}
+
+function _switchShellTab(tab, proxyUrl) {
+    shellActiveTab = tab;
+    const terminal = document.getElementById('shell-terminal');
+    const frame = document.getElementById('shell-app-frame');
+    const empty = document.getElementById('shell-app-empty');
+
+    document.querySelectorAll('.shell-tab-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.tab === tab);
+    });
+
+    if (tab === 'terminal') {
+        terminal.style.display = '';
+        frame.style.display = 'none';
+        frame.src = '';
+        empty.style.display = 'none';
+        if (shellFitAddon && shellTerm) {
+            requestAnimationFrame(() => shellFitAddon.fit());
+        }
+    } else if (tab === '__empty__') {
+        terminal.style.display = 'none';
+        frame.style.display = 'none';
+        frame.src = '';
+        empty.style.display = '';
+        empty.innerHTML = '<h4>No apps deployed</h4><p>Deploy a Kubernetes app inside the cluster, then register it:</p><code>registerApp &lt;name&gt; &lt;namespace&gt; &lt;service&gt; &lt;port&gt;</code>';
+    } else {
+        terminal.style.display = 'none';
+        empty.style.display = 'none';
+        frame.style.display = '';
+        if (frame.src !== location.origin + proxyUrl) {
+            frame.src = proxyUrl;
+        }
+    }
 }
 
 // Fit terminal on window resize
@@ -1570,6 +1683,84 @@ window.addEventListener('resize', () => {
         shellFitAddon.fit();
     }
 });
+
+async function _loadLivelogAppTabs(jobId) {
+    if (currentJobId !== jobId) return;
+    let apps = [];
+    try {
+        const res = await fetch(`/api/jobs/${jobId}/apps`);
+        if (res.ok) apps = (await res.json()).apps || [];
+    } catch {}
+    if (currentJobId !== jobId) return;
+
+    const tabBar = document.getElementById('livelog-app-tabs');
+    // Preserve active tab across refreshes
+    const activeTab = tabBar.querySelector('.livelog-tab-btn.active')?.dataset.tab || 'log';
+    tabBar.innerHTML = '';
+
+    const logBtn = document.createElement('button');
+    logBtn.className = 'btn btn-small btn-secondary livelog-tab-btn';
+    logBtn.dataset.tab = 'log';
+    logBtn.textContent = '📋 Log';
+    tabBar.appendChild(logBtn);
+
+    if (apps.length === 0) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-small btn-secondary livelog-tab-btn';
+        btn.dataset.tab = '__empty__';
+        btn.textContent = '⬡ Apps';
+        tabBar.appendChild(btn);
+    } else {
+        for (const app of apps) {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-small btn-secondary livelog-tab-btn';
+            btn.dataset.tab = app.name;
+            btn.dataset.proxyUrl = app.proxy_url;
+            btn.textContent = `⬡ ${app.name}`;
+            tabBar.appendChild(btn);
+        }
+    }
+
+    // Re-activate the previously active tab (or log if it disappeared)
+    const tabToActivate = tabBar.querySelector(`[data-tab="${activeTab}"]`) || logBtn;
+    tabToActivate.classList.add('active');
+
+    tabBar.addEventListener('click', e => {
+        const btn = e.target.closest('.livelog-tab-btn');
+        if (!btn) return;
+        _switchLivelogTab(btn.dataset.tab, btn.dataset.proxyUrl || '');
+    });
+}
+
+function _switchLivelogTab(tab, proxyUrl) {
+    const pre = document.getElementById('livelog-pre');
+    const frame = document.getElementById('livelog-app-frame');
+    const empty = document.getElementById('livelog-app-empty');
+
+    document.querySelectorAll('.livelog-tab-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.tab === tab);
+    });
+
+    if (tab === 'log') {
+        pre.style.display = '';
+        frame.style.display = 'none';
+        frame.src = '';
+        empty.style.display = 'none';
+    } else if (tab === '__empty__') {
+        pre.style.display = 'none';
+        frame.style.display = 'none';
+        frame.src = '';
+        empty.style.display = '';
+        empty.innerHTML = '<h4>No apps deployed</h4><p>Deploy a Kubernetes app inside the cluster, then register it:</p><code>registerApp &lt;name&gt; &lt;namespace&gt; &lt;service&gt; &lt;port&gt;</code>';
+    } else {
+        pre.style.display = 'none';
+        empty.style.display = 'none';
+        frame.style.display = '';
+        if (frame.src !== location.origin + proxyUrl) {
+            frame.src = proxyUrl;
+        }
+    }
+}
 
 function shellPopupHtml(jobId, title) {
     // Self-contained terminal page written into a popup window.

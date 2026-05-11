@@ -64,7 +64,7 @@
                     <select id="fleet-action" class="fleet-action-select">
                         <option value="integration-test">Integration test</option>
                         <option value="deploy-ghpages">Deploy GitHub Pages</option>
-                        <option value="daemon">Daemon</option>
+                        <option value="daemon">Training</option>
                     </select>
                     <select id="fleet-arch" class="fleet-arch-select">
                         <option value="both">both arches</option>
@@ -302,9 +302,12 @@
 
         <!-- Live log overlay -->
         <div id="livelog-modal" class="modal" hidden>
-            <div class="modal-inner">
+            <div class="modal-inner livelog-modal-inner">
                 <header class="modal-header">
-                    <h3 id="livelog-title">Live log</h3>
+                    <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1">
+                        <h3 id="livelog-title" style="white-space:nowrap;flex:none">Live log</h3>
+                        <div id="livelog-app-tabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+                    </div>
                     <div class="modal-search">
                         <input type="search" id="livelog-search" placeholder="Search…"
                                autocomplete="off" spellcheck="false">
@@ -329,6 +332,9 @@
                     </div>
                 </header>
                 <pre id="livelog-pre"></pre>
+                <iframe id="livelog-app-frame" style="display:none;width:100%;flex:1;border:none;background:#fff"
+                        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+                <div id="livelog-app-empty" style="display:none"></div>
             </div>
         </div>
 
@@ -440,23 +446,28 @@
         </section>
     </main>
 
-    <!-- Shell modal — xterm.js PTY terminal into a running test container -->
+    <!-- Shell modal — xterm.js PTY terminal + app preview tabs -->
     <div id="shell-modal" class="modal" hidden>
         <div class="modal-inner shell-modal-inner">
             <div class="modal-header">
-                <h3 id="shell-modal-title">Shell</h3>
-                <div style="display:flex;gap:8px;align-items:center">
+                <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1">
+                    <h3 id="shell-modal-title" style="white-space:nowrap">Shell</h3>
+                    <div id="shell-app-tabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
                     <button id="shell-newwin" class="btn btn-small btn-secondary" title="Open in separate popup window">⧉ New Window</button>
                     <button id="shell-fullscreen" class="btn btn-small btn-secondary" title="Fullscreen">⛶ Fullscreen</button>
                     <button id="shell-close" class="btn btn-small btn-secondary">✕ Close</button>
                 </div>
             </div>
             <div id="shell-terminal"></div>
+            <iframe id="shell-app-frame" style="display:none;width:100%;flex:1;border:none;background:#fff" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+            <div id="shell-app-empty" style="display:none"></div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=12"></script>
+    <script src="/static/app.js?v=16"></script>
 </body>
 </html>

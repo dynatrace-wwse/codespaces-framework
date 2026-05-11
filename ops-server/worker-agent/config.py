@@ -45,5 +45,14 @@ TEST_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "900"))  # 15 min
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "30"))  # seconds
 REGISTRATION_TTL = int(os.environ.get("REGISTRATION_TTL", "120"))  # seconds
 
+# App proxy port pool — each Sysbox container publishes one port in this range
+# so the ops-server dashboard can reverse-proxy to the k3d LB without an SSH tunnel.
+# The corresponding SG rule on the worker must allow TCP 32000-32099 from the master.
+APP_PROXY_PORT_START = int(os.environ.get("APP_PROXY_PORT_START", "32000"))
+APP_PROXY_PORT_COUNT = int(os.environ.get("APP_PROXY_PORT_COUNT", "100"))
+# k3d LB port inside the Sysbox. Workers default to 80 (framework default when
+# K3D_LB_HTTP_PORT is unset); master overrides to 30080 to avoid nginx collision.
+K3D_LB_HTTP_PORT = int(os.environ.get("K3D_LB_HTTP_PORT", "80"))
+
 # Docker image for integration tests
 TEST_IMAGE = os.environ.get("TEST_IMAGE", "shinojosa/dt-enablement:v1.2")

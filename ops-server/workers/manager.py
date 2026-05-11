@@ -34,6 +34,13 @@ from telemetry.reporter import (
 # auto-expires and the next enqueue for the same triple proceeds.
 LOCK_TTL_SECONDS = 7200
 
+# App proxy port pool — master Sysbox containers publish one port in this range
+# so the dashboard can reverse-proxy to k3d LB apps without SSH tunnelling.
+APP_PROXY_PORT_START = int(os.environ.get("APP_PROXY_PORT_START", "32000"))
+APP_PROXY_PORT_COUNT = int(os.environ.get("APP_PROXY_PORT_COUNT", "100"))
+# Master uses 30080 to avoid conflicting with the host nginx on port 80.
+_MASTER_K3D_LB_PORT = 30080
+
 
 def _branch_of(job: dict) -> str:
     return job.get("ref") or job.get("head_branch") or "main"
@@ -130,6 +137,35 @@ class WorkerManager:
         })
         await self.pool.expire("worker:master-arm64", 60)
         log.info("Registered master worker as worker:master-arm64")
+
+        # (Re)initialise the master app proxy port pool. worker_id for master
+        # jobs is always "master", so the pool key uses that same identifier.
+        port_pool_key = "worker:master:app_ports_free"
+        await self.pool.delete(port_pool_key)
+        ports = list(range(APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT))
+        await self.pool.rpush(port_pool_key, *[str(p) for p in ports])
+        log.info(
+            "Master app proxy port pool initialised (ports %d–%d)",
+            APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT - 1,
+        )
+
+    async def _alloc_app_port(self) -> int | None:
+        """Pop a free app proxy port from the master's pool."""
+        try:
+            port = await self.pool.lpop("worker:master:app_ports_free")
+            return int(port) if port else None
+        except Exception as e:
+            log.warning("Failed to allocate master app proxy port: %s", e)
+            return None
+
+    async def _free_app_port(self, port: int | None) -> None:
+        """Return an app proxy port to the master's free pool."""
+        if port is None:
+            return
+        try:
+            await self.pool.rpush("worker:master:app_ports_free", str(port))
+        except Exception as e:
+            log.warning("Failed to free master app proxy port %s: %s", port, e)
 
     async def _master_heartbeat_loop(self):
         """Refresh the master's worker record every 15s so it never expires."""
@@ -736,18 +772,22 @@ echo "--- Done ---"
         TEST_TIMEOUT = 1800
         start_time = time.time()
         deadline = start_time + TEST_TIMEOUT
+        app_port: int | None = None
 
         log.info("Running integration test for %s (arch=arm64, ref=%s)", repo_name, ref)
         try:
             # 1. Outer Sysbox container running docker:25-dind
+            app_port = await self._alloc_app_port()
             run_cmd = [
                 "docker", "run",
                 "-d",
                 "--runtime=sysbox-runc",
                 "--name", sb_name,
                 "-v", f"{repo_dir}:{workspace}",
-                "docker:25-dind",
             ]
+            if app_port:
+                run_cmd += ["-p", f"{app_port}:{_MASTER_K3D_LB_PORT}"]
+            run_cmd.append("docker:25-dind")
             proc = await asyncio.create_subprocess_exec(
                 *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -756,6 +796,9 @@ echo "--- Done ---"
                 sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
                 rc = proc.returncode
                 raise RuntimeError("sysbox container start failed")
+
+            if app_port:
+                await self.pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
             # 2. Wait for inner dockerd
             await self._wait_for_inner_docker(sb_name)
@@ -844,6 +887,7 @@ echo "--- Done ---"
             if rc == 0:
                 rc = 1
         finally:
+            await self._free_app_port(app_port)
             # Removing the outer Sysbox container takes the inner dockerd,
             # dt-enablement, and k3d cluster down with it.
             try:
@@ -919,17 +963,21 @@ echo "--- Done ---"
         # postCreate + postStart share a 30-minute setup budget.
         SETUP_TIMEOUT = 1800
         deadline = start_time + SETUP_TIMEOUT
+        app_port: int | None = None
 
         log.info("Starting daemon environment for %s (ref=%s)", repo_name, ref)
         try:
             # 1. Outer Sysbox container
+            app_port = await self._alloc_app_port()
             run_cmd = [
                 "docker", "run", "-d",
                 "--runtime=sysbox-runc",
                 "--name", sb_name,
                 "-v", f"{repo_dir}:{workspace}",
-                "docker:25-dind",
             ]
+            if app_port:
+                run_cmd += ["-p", f"{app_port}:{_MASTER_K3D_LB_PORT}"]
+            run_cmd.append("docker:25-dind")
             proc = await asyncio.create_subprocess_exec(
                 *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -938,6 +986,9 @@ echo "--- Done ---"
                 sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
                 rc = proc.returncode
                 raise RuntimeError("sysbox container start failed")
+
+            if app_port:
+                await self.pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
             # 2. Wait for inner dockerd
             await self._wait_for_inner_docker(sb_name)
@@ -1043,6 +1094,7 @@ echo "--- Done ---"
             if rc == 0:
                 rc = 1
         finally:
+            await self._free_app_port(app_port)
             try:
                 kill_proc = await asyncio.create_subprocess_exec(
                     "docker", "rm", "-f", sb_name,

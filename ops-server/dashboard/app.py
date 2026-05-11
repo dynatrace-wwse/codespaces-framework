@@ -16,7 +16,7 @@ import termios
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import redis.asyncio as redis
@@ -230,6 +230,32 @@ async def api_repos():
     except Exception:
         pass
 
+    # Fallback: fetch latest releases directly from GitHub when the cache is empty.
+    if not release_map and GH_TOKEN:
+        import asyncio as _asyncio
+        active_repos = [r["repo"] for r in data.get("repos", []) if r.get("status") == "active"]
+
+        async def _fetch_latest_tag(repo_full: str) -> tuple[str, str]:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    r = await client.get(
+                        f"https://api.github.com/repos/{repo_full}/releases/latest",
+                        headers={"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json"},
+                    )
+                    if r.is_success:
+                        return repo_full, r.json().get("tag_name", "")
+            except Exception:
+                pass
+            return repo_full, ""
+
+        results = await _asyncio.gather(*[_fetch_latest_tag(r) for r in active_repos])
+        release_map = {repo: tag for repo, tag in results if tag}
+        if release_map:
+            try:
+                await pool.set("fleet:release-tags", json.dumps(release_map), ex=86400)
+            except Exception:
+                pass
+
     repos_out = []
     for r in data.get("repos", []):
         if r.get("status") != "active":
@@ -292,11 +318,18 @@ async def api_workers():
     """
     worker_keys = []
     async for key in pool.scan_iter("worker:*"):
+        # Skip port-pool lists (worker:<id>:app_ports_free) — they are Redis
+        # lists, not hashes, and would cause a WRONGTYPE error on hgetall.
+        if key.endswith(":app_ports_free"):
+            continue
         worker_keys.append(key)
 
     workers = []
     for key in worker_keys:
-        data = await pool.hgetall(key)
+        try:
+            data = await pool.hgetall(key)
+        except Exception:
+            continue
         if data:
             data["worker_id"] = key.replace("worker:", "")
             data.setdefault("role", "agent")
@@ -1161,31 +1194,42 @@ async def api_sync_issues_invalidate(request: Request):
 
 @app.get("/api/repos/{owner}/{repo}/branches")
 async def api_repo_branches(owner: str, repo: str):
-    """List remote branches for a repo via gh api.
+    """List remote branches for a repo via GitHub API.
 
     Cached briefly (10 min) in Redis under ``repo:branches:{owner}/{repo}``
     to avoid hammering the GH API on every dashboard click.
     """
-    import asyncio
     cache_key = f"repo:branches:{owner}/{repo}"
     cached = await pool.get(cache_key)
     if cached:
         return json.loads(cached)
 
-    proc = await asyncio.create_subprocess_exec(
-        "gh", "api", f"/repos/{owner}/{repo}/branches", "--paginate",
-        "--jq", "[.[] | .name]",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env={**os.environ},
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        return {"branches": ["main"], "error": stderr.decode(errors="replace")[:200]}
-    try:
-        branches = json.loads(stdout.decode())
-    except Exception:
+    branches: list[str] = []
+    if GH_TOKEN:
+        try:
+            headers = {"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json"}
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                page, per_page = 1, 100
+                while True:
+                    r = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}/branches",
+                        headers=headers,
+                        params={"per_page": per_page, "page": page},
+                    )
+                    if not r.is_success:
+                        break
+                    batch = [b["name"] for b in r.json()]
+                    branches.extend(batch)
+                    if len(batch) < per_page:
+                        break
+                    page += 1
+        except Exception:
+            pass
+
+    if not branches:
         branches = ["main"]
-    # Sort: main first, then development branches, then alphabetical
+
+    # Sort: main first, then alphabetical
     main_first = [b for b in branches if b == "main"]
     others = sorted([b for b in branches if b != "main"])
     branches = main_first + others
@@ -1554,16 +1598,193 @@ async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int =
             pass
 
 
+async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
+    """Read the .app-registry file from inside the running job's dt container.
+
+    Uses the same SSH + docker exec chain as the shell bridge. Results are
+    cached in Redis for 60 s to avoid exec overhead on every proxy request.
+    """
+    cache_key = f"job:apps:{job_id}"
+    cached = await pool.get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+
+    worker_id = meta.get("worker_id", "")
+    sb_name = f"sb-{job_id[-32:]}"
+    # App registry is written by the framework's registerApp() helper to
+    # ${HOME}/.cache/dt-framework/app-registry (HOME=/home/vscode inside dt).
+    registry_path = "/home/vscode/.cache/dt-framework/app-registry"
+
+    cmd = ["docker", "exec", sb_name, "docker", "exec", "dt", "cat", registry_path]
+    if worker_id.startswith("worker-"):
+        worker_hash = await pool.hgetall(f"worker:{worker_id}")
+        ssh_host = worker_hash.get("ssh_host", "")
+        if ssh_host:
+            cmd = [
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=5",
+                "-o", "BatchMode=yes",
+                ssh_host,
+            ] + cmd
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except Exception:
+        return []
+
+    apps = []
+    for line in stdout.decode().strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) >= 5:
+            apps.append({
+                "name": parts[0],
+                "namespace": parts[1],
+                "service": parts[2],
+                "port": parts[3],
+                "ingress_host": parts[4],
+            })
+
+    await pool.set(cache_key, json.dumps(apps), ex=60)
+    return apps
+
+
+@app.get("/api/jobs/{job_id}/apps")
+async def api_job_apps(job_id: str):
+    """List apps registered in the job's .app-registry with their proxy URLs."""
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        raise HTTPException(status_code=404, detail="job not running")
+
+    apps = await _read_app_registry(job_id, meta)
+    return {
+        "apps": [
+            {**a, "proxy_url": f"/apps/{job_id}/{a['name']}/"}
+            for a in apps
+        ]
+    }
+
+
+@app.api_route(
+    "/apps/{job_id}/{app_name}/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+@app.api_route(
+    "/apps/{job_id}/{app_name}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str = ""):
+    """Reverse-proxy to an app running inside a job's k3d cluster.
+
+    Connects directly to the Sysbox's published port (allocated at job start)
+    on the worker host, setting the Host header so nginx ingress can route
+    to the right service.  No SSH tunnel required — the master's private IP
+    is allowed inbound on the port range via the worker security group.
+    """
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        raise HTTPException(status_code=404, detail="job not running")
+
+    app_proxy_port = meta.get("app_proxy_port")
+    if not app_proxy_port:
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(
+            "<html><body style='font-family:sans-serif;padding:32px;background:#050810;color:#d0d7de'>"
+            "<h3 style='color:#f0b429'>App proxy not available</h3>"
+            "<p>This job was started before app port forwarding was added, or the worker agent "
+            "needs to be updated.</p>"
+            "<p>Terminate this job and start a new Training session to enable app preview.</p>"
+            "</body></html>",
+            status_code=503,
+        )
+
+    apps = await _read_app_registry(job_id, meta)
+    app_info = next((a for a in apps if a["name"] == app_name), None)
+    if not app_info:
+        raise HTTPException(status_code=404, detail=f"app '{app_name}' not found in registry")
+
+    worker_id = meta.get("worker_id", "")
+    if worker_id.startswith("worker-"):
+        worker_hash = await pool.hgetall(f"worker:{worker_id}")
+        target_ip = worker_hash.get("host", "127.0.0.1")
+    else:
+        target_ip = "127.0.0.1"
+
+    target_url = f"http://{target_ip}:{app_proxy_port}/{path}"
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    # Forward a minimal set of headers; always override Host for ingress routing.
+    forward_headers = {
+        "Host": app_info["ingress_host"],
+    }
+    for h in ("accept", "accept-language", "accept-encoding", "cookie",
+               "content-type", "cache-control", "x-requested-with"):
+        if h in request.headers:
+            forward_headers[h] = request.headers[h]
+
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            upstream = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                content=body,
+            )
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="could not connect to app — is the cluster ready?")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="upstream app timed out")
+
+    # Strip hop-by-hop headers and security headers that must not be forwarded.
+    # x-frame-options is stripped here so nginx's SAMEORIGIN (set in the
+    # /apps/ location block) is the only value the browser sees.
+    skip = {"transfer-encoding", "connection", "keep-alive", "upgrade",
+            "proxy-authenticate", "proxy-authorization", "te", "trailers",
+            "x-frame-options", "content-security-policy",
+            "content-security-policy-report-only"}
+    resp_headers = {
+        k: v for k, v in upstream.headers.items()
+        if k.lower() not in skip
+    }
+
+    # Rewrite Location redirects so the browser stays within the proxy.
+    location = resp_headers.get("location", "")
+    if location and (location.startswith("http://") or location.startswith("https://")):
+        resp_headers["location"] = f"/apps/{job_id}/{app_name}/"
+
+    return StreamingResponse(
+        iter([upstream.content]),
+        status_code=upstream.status_code,
+        headers=resp_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
 @app.get("/api/health")
 async def api_health():
     """Platform health overview."""
     try:
         await pool.ping()
 
-        # Worker count
+        # Worker count (skip port-pool list keys)
         worker_count = 0
-        async for _ in pool.scan_iter("worker:*"):
-            worker_count += 1
+        async for key in pool.scan_iter("worker:*"):
+            if not key.endswith(":app_ports_free"):
+                worker_count += 1
 
         # Queue depths
         queues = {
