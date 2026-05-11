@@ -2310,6 +2310,7 @@ deployAstroshop(){
     printInfo "Astroshop deployed and available via NodePort=$PORT"
   else
     # Astroshop needs custom ingress: otel-collector paths + frontend-proxy catch-all
+    waitForAllReadyPods "$NAMESPACE"
     registerAstroshopIngress "$NAMESPACE"
   fi
 }
@@ -2485,6 +2486,7 @@ deployOpentelemetryDemo(){
     printInfo "OpenTelemetry Demo available via NodePort=$PORT"
   else
     # Same multi-path ingress pattern as astroshop — otel-collector + frontend-proxy
+    waitForAllReadyPods "$NAMESPACE"
     registerOpentelemetryDemoIngress "$NAMESPACE"
   fi
 }
