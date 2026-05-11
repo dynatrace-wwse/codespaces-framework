@@ -133,31 +133,48 @@ Defines the development container for VS Code and Codespaces.
 
 This directory contains the application code and sample apps. Each app has its own subfolder inside `apps/` in the framework cache.
 
-### Port Allocation and NodePort Strategy
+### Nginx Ingress + sslip.io Magic DNS
 
-When deploying applications, the framework automatically allocates ports using the NodePort strategy. The `getNextFreeAppPort` function selects an available port from the defined range:
+Apps are published through **nginx ingress-nginx** rather than raw NodePorts. Each app gets two ingress hosts automatically so it is reachable in every instantiation type:
 
-```bash
-PORTS=("30100" "30200" "30300")
+| Host | Example | Used for |
+|------|---------|---------|
+| `<app>.<public-ip>.sslip.io` | `todoapp.18.134.158.252.sslip.io` | Codespace tunnels, remote VMs, CI workers |
+| `<app>.<hostname>` | `todoapp.codespace-abc123` | Local / VS Code / Host-header curl in CI |
+
+[sslip.io](https://sslip.io) is a wildcard DNS service that resolves `<anything>.<ip>.sslip.io` directly to `<ip>`. No DNS record management is needed — the IP is embedded in the hostname itself.
+
+```
+Browser → http://todoapp.18.134.158.252.sslip.io
+              DNS resolves to 18.134.158.252
+              Nginx ingress routes by Host header → todoapp service:80
 ```
 
-### Managing Apps with `deployApps`
+The IP is detected at deploy time by `detectIP()`:
 
-The `deployApps` function deploys and undeploys applications to your Kubernetes cluster:
+- If `$EXTERNAL_IP` is set → use it
+- If running in GitHub Codespaces → `127.0.0.1` (tunnel handles routing)
+- Otherwise → public IP via `ifconfig.me`, fallback to `hostname -I`
+
+Apps are registered with `registerApp <name> <namespace> <service> <port>` which creates the Ingress resource and writes to the **app registry** (`~/.cache/dt-framework/app-registry`). The registry persists across shell sessions so `deployApp` can show status even after a restart.
+
+### Managing Apps with `deployApp`
+
+The `deployApp` function deploys and undeploys applications to your Kubernetes cluster:
 
 ![deployApps](img/deployApps.png){ align=center ; } 
 
 #### To deploy an app
 ```sh
-deployApps 2        # by number
-deployApps b        # by character
-deployApps astroshop # by name
+deployApp 2          # by number
+deployApp b          # by character
+deployApp astroshop  # by name
 ```
 
 #### To undeploy an app
 ```sh
-deployApps 2 -d
-deployApps astroshop -d 
+deployApp 2 -d
+deployApp astroshop -d
 ```
 
 ---
@@ -210,7 +227,9 @@ printInfoSection "Running integration Tests for $RepositoryName"
 assertRunningPod dynatrace operator
 assertRunningPod dynatrace activegate
 assertRunningPod dynatrace oneagent
-assertRunningApp 30100
+
+# App is reachable via nginx ingress + sslip.io magic DNS
+assertRunningApp todoapp
 ```
 
 These assertions check that required pods are running and the application is accessible. If any assertion fails, the PR is blocked from merging.
@@ -220,19 +239,81 @@ These assertions check that required pods are running and the application is acc
 
 ## 🟫 Kubernetes Cluster
 
-The Kubernetes cluster is defined in `yaml/kind/kind-cluster.yml`. [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker) spins up a local cluster using the Docker-in-socket strategy.
+The framework supports two Kubernetes engines, selected by the `CLUSTER_ENGINE` variable. **K3d is the default** for all new labs.
 
-### Managing the Kind Cluster
+| Engine | Variable | Strengths | When to use |
+|--------|----------|-----------|-------------|
+| **K3d** (default) | `CLUSTER_ENGINE=k3d` | Fast startup, built-in LB, native ingress on ports 80/443, multi-worker | All new labs, CI/CD |
+| **Kind** | `CLUSTER_ENGINE=kind` | Real Linux kernel features in nodes | CloudNativeFullStack OneAgent (requires kernel namespaces) |
+
+### K3d Cluster (Default)
+
+[K3d](https://k3d.io) runs [K3s](https://k3s.io/) (lightweight Kubernetes) inside Docker. It ships with a built-in LoadBalancer that maps host ports `80` and `443` directly to the nginx ingress controller — no NodePort tricks needed.
+
+```bash
+# K3d cluster created with:
+k3d cluster create enablement \
+  -p "80:80@loadbalancer" \
+  -p "443:443@loadbalancer" \
+  --k3s-arg "--disable=traefik@server:0"   # traefik replaced by nginx ingress
+```
+
+Configurable env vars (override before calling `startK3dCluster`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `K3D_CLUSTER_NAME` | `enablement` | Cluster name |
+| `K3D_LB_HTTP_PORT` | `80` | Host port → ingress HTTP |
+| `K3D_LB_HTTPS_PORT` | `443` | Host port → ingress HTTPS |
+| `K3D_API_PORT` | `6443` | Host port → k8s API server |
+| `K3D_NODEPORT_BASE` | `30100` | Base NodePort for legacy services |
+
+!!! tip "Ops server overrides"
+    On the CI/CD ops server where nginx already owns ports 80/443, each test gets its own K3d cluster with non-default ports: `K3D_LB_HTTP_PORT=30080 K3D_LB_HTTPS_PORT=30443 K3D_API_PORT=6444`. The `assertRunningApp` function automatically uses `K3D_LB_HTTP_PORT` for its Host-header probe.
+
+#### K3d Cluster Functions
+
+| Function | Description |
+|----------|-------------|
+| `startK3dCluster` | Start, attach to, or create the K3d cluster |
+| `createK3dCluster` | Create cluster from env config, install nginx ingress |
+| `attachK3dCluster` | Merge kubeconfig and switch context to `k3d-enablement` |
+| `stopK3dCluster` | Stop the K3d cluster |
+| `deleteK3dCluster` | Delete the cluster and all resources |
+
+Aliases: `startK3sCluster`, `createK3sCluster`, `attachK3sCluster`, etc. map to the same functions for backward compatibility.
+
+### Kind Cluster (Alternative)
+
+[Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker) creates Kubernetes nodes as Docker containers. Kind nodes have full Linux kernel access inside Sysbox containers, which enables OneAgent CloudNativeFullStack mode.
+
+```bash
+CLUSTER_ENGINE=kind startCluster
+```
+
+The Kind cluster config is at `yaml/kind/kind-cluster.yml`.
+
+#### Kind Cluster Functions
 
 | Function | Description |
 |----------|-------------|
 | `startKindCluster` | Start, attach, or create the Kind cluster |
-| `attachKindCluster` | Attach to a running cluster (configure kubeconfig) |
-| `createKindCluster` | Create a new cluster from `yaml/kind/kind-cluster.yml` |
-| `stopKindCluster` | Stop the Kind cluster container |
-| `deleteKindCluster` | Delete the cluster and all resources |
+| `createKindCluster` | Create cluster from `yaml/kind/kind-cluster.yml` |
+| `attachKindCluster` | Configure kubeconfig for `kind-kind` context |
+| `stopKindCluster` | Stop the Kind container |
+| `deleteKindCluster` | Delete the cluster |
 
-The `kubectl` client, `helm`, and `k9s` are automatically configured to work with the Kind cluster.
+### Unified Cluster API
+
+Use these regardless of engine — they route based on `CLUSTER_ENGINE`:
+
+| Function | Description |
+|----------|-------------|
+| `startCluster` | Start the cluster (K3d or Kind based on `CLUSTER_ENGINE`) |
+| `stopCluster` | Stop the cluster |
+| `deleteCluster` | Delete the cluster |
+
+The `kubectl` client, `helm`, and `k9s` are automatically configured after `startCluster`.
 
 
 ---
@@ -290,12 +371,67 @@ Reusable shell functions loaded into every shell session:
 - **greeting.sh**: Welcome message with environment info. Call `printGreeting` or open a new terminal.
 - **variables.sh**: Central variables (image versions, port ranges, ENV_FILE path).
 
+### Key variables (`variables.sh`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FRAMEWORK_VERSION` | pinned per repo | Framework tag to pull from cache |
+| `MAGIC_DOMAIN` | `sslip.io` | Wildcard DNS for app ingress hosts |
+| `K3D_CLUSTER_NAME` | `enablement` | K3d cluster name |
+| `K3D_LB_HTTP_PORT` | `80` | K3d load balancer → ingress HTTP |
+| `K3D_LB_HTTPS_PORT` | `443` | K3d load balancer → ingress HTTPS |
+| `APP_REGISTRY` | `~/.cache/dt-framework/app-registry` | Persisted ingress registrations |
+| `CLUSTER_ENGINE` | `k3d` | Cluster engine (`k3d` or `kind`) |
+| `ENV_FILE` | `.devcontainer/.env` | Secrets file path |
+
 ---
 
 
-## 🟫 Custom Functions
+## 🟫 Custom Functions (`my_functions.sh`)
 
-- **my_functions.sh**: Define repository-specific functions here. Loaded after the core framework, allowing you to override or extend any behavior. Call custom functions from `post-create.sh`.
+`my_functions.sh` is the per-repo extension point — it is sourced **after** `functions.sh`, so it can override any framework function or add entirely new ones. Custom functions are called from `post-create.sh` and `post-start.sh`.
+
+```bash title=".devcontainer/util/my_functions.sh" linenums="1"
+#!/bin/bash
+# Repository-specific functions. Sourced after functions.sh.
+
+deployMyApp() {
+  printInfoSection "Deploying My Custom App"
+
+  kubectl create ns myapp 2>/dev/null || true
+  kubectl apply -n myapp -f "$REPO_PATH/manifests/myapp.yaml"
+
+  waitForAllReadyPods myapp
+
+  # Register with the app registry so assertRunningApp and deployApp work
+  registerApp "myapp" "myapp" "myapp-svc" 8080
+}
+```
+
+### Common patterns
+
+| Pattern | How to implement |
+|---------|-----------------|
+| Deploy a custom app and register it | `registerApp <name> <namespace> <service> <port>` |
+| Override a framework function | Redefine it in `my_functions.sh` (sourced last, wins) |
+| Add DT credentials to a K8s secret | `dynatraceEvalReadSaveCredentials` then `kubectl create secret ...` |
+| Wait for pods to stabilize | `waitForAllReadyPods <namespace>` |
+| Deploy via Helm | Standard `helm install` inside the function |
+| Use repo path | `$REPO_PATH` is exported by `source_framework.sh` |
+
+!!! warning "Don't hardcode NodePort numbers"
+    Older repos in the fleet use `kubectl patch service ... nodePort: 30100`. With K3d and nginx ingress, ports 80/443 are the only necessary host ports. Use `registerApp` to create an Ingress instead, then assert the app with `assertRunningApp <name>`.
+
+```bash
+# Old pattern (broken on K3d + ingress)
+kubectl patch service frontend --type='json' \
+  --patch='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30100}]'
+
+# New pattern
+registerApp "myapp" "myapp" "frontend" 80
+# Then in integration.sh:
+assertRunningApp "myapp"
+```
 
 ---
 

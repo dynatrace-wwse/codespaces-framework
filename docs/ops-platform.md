@@ -68,7 +68,8 @@ The name _Orbital_ captures how the platform works: worker nodes orbit a central
 | **Nginx** | nginx 1.24 | TLS termination, reverse proxy, auth gating |
 | **Dashboard** | FastAPI + uvicorn | Web UI, REST API, WebSocket PTY bridge |
 | **Webhook Server** | FastAPI | Receives GitHub org-level webhooks, routes to Redis |
-| **Worker Manager** | Python asyncio | Consumes job queues, dispatches to local + remote workers |
+| **Worker Manager** | `workers/manager.py` — Python asyncio | Co-located ARM worker (capacity 4); also dispatches agent/sync jobs to the master node |
+| **Worker Agent** | `worker-agent/agent.py` — Python asyncio | Remote AMD worker (capacity 2); pulls from `queue:test:amd64`, reports logs back to master Redis |
 | **Nightly Scheduler** | systemd timer | Staggered nightly build orchestration at 02:00 UTC |
 | **Sync Daemon** | systemd timer | Hourly framework-version drift detection |
 | **Gen2 Scanner** | systemd timer | Daily Gen2→Gen3 documentation drift scan |
@@ -147,11 +148,25 @@ repos.yaml entry:
   arch: amd64         # AMD only (Codespaces parity)
 
 Redis queues:
-  queue:test:arm64    ──▶  ARM Worker   (co-located on master)
-  queue:test:amd64    ──▶  AMD Worker   (remote c5.2xlarge)
+  queue:test:arm64    ──▶  manager.py   (ARM, co-located on master, capacity 4)
+  queue:test:amd64    ──▶  agent.py     (AMD, remote c5.2xlarge, capacity 2)
 ```
 
 When a repo is configured with `arch: both`, a single trigger fans out to **both** queues simultaneously. The build matrix in the dashboard shows ARM ✓/✗ and AMD ✓/✗ independently.
+
+For manual test runs, split work proportional to worker capacity to use both machines efficiently:
+
+- **~15 repos** → `arm64` queue (ARM capacity 4, 2× parallelism headroom)
+- **~8 repos** → `amd64` queue (AMD capacity 2, smaller batch avoids a long tail)
+
+### Two worker implementations
+
+| Implementation | File | Runs on | Queue | Capacity | Extra responsibilities |
+|----------------|------|---------|-------|----------|------------------------|
+| **Worker Manager** | `ops-server/workers/manager.py` | Master (ARM) | `queue:test:arm64` | 4 | Also dispatches `queue:agent` and `queue:sync` jobs |
+| **Worker Agent** | `ops-server/worker-agent/agent.py` | Remote (AMD) | `queue:test:amd64` | 2 | Integration tests and daemon jobs only |
+
+Both use the same `semaphore.locked()` back-pressure pattern and publish job logs to master Redis under `job:log:{job_id}` so the dashboard can serve them from a single location regardless of where the job ran.
 
 ### Adding a new worker node
 
@@ -164,7 +179,7 @@ sudo bash ops-server/worker-agent/setup-worker.sh
 # 2. Configure it to reach the master Redis
 echo "MASTER_REDIS_URL=redis://:password@master-ip:6379" >> ~/.env
 echo "WORKER_ARCH=arm64"    >> ~/.env   # or amd64
-echo "WORKER_CAPACITY=6"    >> ~/.env
+echo "WORKER_CAPACITY=4"    >> ~/.env   # 4 for ARM (c7g.2xlarge), 2 for AMD (c5.2xlarge)
 
 # 3. Start the worker agent
 sudo systemctl start ops-worker-agent
@@ -177,17 +192,42 @@ The worker auto-registers in Redis, begins sending heartbeats, and immediately s
 Every worker publishes a `worker:{worker_id}` hash to Redis on startup, refreshing every 30 seconds:
 
 ```
-arch:          arm64
-capacity:      6
-active_jobs:   2
-status:        ready
-host:          ip-10-0-1-42
-ssh_host:      ec2-hostname.compute.amazonaws.com
+arch:           arm64
+capacity:       4        # 4 for ARM manager.py, 2 for AMD agent.py
+active_jobs:    2
+status:         ready
+host:           ip-10-0-1-42
+ssh_host:       ec2-hostname.compute.amazonaws.com
 last_heartbeat: 2026-05-08T02:14:30Z
-TTL:           120s (auto-expires if heartbeat stops)
+TTL:            120s (auto-expires if heartbeat stops)
 ```
 
 If a worker node goes down, its Redis key expires in 120 seconds. Any jobs it was running are detected as orphaned during the next worker startup and re-queued automatically.
+
+### Queue back-pressure and dashboard visibility
+
+A critical design requirement is that queued jobs **stay visible in Redis** until a worker slot is actually free. Without this, the dashboard's queue counter (`llen queue:test:{arch}`) drops to zero immediately — even though 20 jobs are waiting as in-memory asyncio tasks.
+
+Both `manager.py` and `agent.py` implement back-pressure using an asyncio `Semaphore`:
+
+```python
+async def _consume_queue(self, ...):
+    while True:
+        # Back-pressure: leave jobs in Redis until a slot is free.
+        # semaphore.locked() is True when all capacity slots are taken.
+        if self.semaphore.locked():
+            await asyncio.sleep(1)
+            continue
+
+        result = await self.pool.blpop(queue_key, timeout=5)
+        ...
+        asyncio.create_task(self._run_with_semaphore(semaphore, job))
+        # Yield to the event loop so the task acquires the semaphore
+        # BEFORE we check semaphore.locked() again on the next iteration.
+        await asyncio.sleep(0)
+```
+
+The `await asyncio.sleep(0)` after `create_task` is essential: without it, the event loop doesn't run the new task before the consumer re-enters the loop. The task hasn't acquired the semaphore yet, so `semaphore.locked()` falsely reports a free slot and the consumer drains the entire queue into in-memory tasks in microseconds. After the fix, at capacity-4 the ARM worker holds exactly 4 jobs in memory and the remaining items stay in `queue:test:arm64` — correctly reflected in the dashboard queue counter.
 
 ---
 
@@ -472,11 +512,11 @@ To add an ARM worker for higher parallelism:
 ```bash
 # On the new node:
 sudo bash ops-server/worker-agent/setup-worker.sh
-# Set MASTER_REDIS_URL, WORKER_ARCH=arm64, WORKER_CAPACITY=6 in ~/.env
+# Set MASTER_REDIS_URL, WORKER_ARCH=arm64, WORKER_CAPACITY=4 in ~/.env
 sudo systemctl start ops-worker-agent
 ```
 
-To add an AMD worker for x86_64 parity testing — same script, `WORKER_ARCH=amd64`.
+To add an AMD worker for x86_64 parity testing — same script, `WORKER_ARCH=amd64`, `WORKER_CAPACITY=2`.
 
 Future scaling options:
 - **Spot instance workers**: workers are stateless and disposable; spot termination causes job re-queue, not data loss
