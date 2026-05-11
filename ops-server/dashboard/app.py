@@ -1734,7 +1734,13 @@ def _rewrite_proxy_body(content: bytes, base_path: str, content_type: str) -> by
                     return base_path + path_part
             return val
 
-        for attr in ("src", "href", "action", "data-src"):
+        # Rewrite resource-loading attributes on all tags.
+        # Deliberately excludes href — <a href> must NOT be rewritten because
+        # Next.js/React reads those values to determine client-side routes; if we
+        # prefix them the router navigates to the wrong path and renders a blank
+        # page.  href on <link> tags (stylesheets, icons, preloads) is handled
+        # separately below.
+        for attr in ("src", "action", "data-src"):
             text = _re.sub(
                 rf'{attr}="([^"]*)"',
                 lambda m, a=attr: f'{a}="{_rewrite_attr_value(m.group(1))}"',
@@ -1745,6 +1751,21 @@ def _rewrite_proxy_body(content: bytes, base_path: str, content_type: str) -> by
                 lambda m, a=attr: f"{a}='{_rewrite_attr_value(m.group(1))}'",
                 text,
             )
+
+        # Rewrite href only on <link> tags (CSS, icons, preloads, canonical).
+        # Single-line tag assumption holds for all known SSR frameworks.
+        text = _re.sub(
+            r'(<link\b[^>]*?\bhref=")([^"]*?)(")',
+            lambda m: m.group(1) + _rewrite_attr_value(m.group(2)) + m.group(3),
+            text,
+            flags=_re.IGNORECASE,
+        )
+        text = _re.sub(
+            r"(<link\b[^>]*?\bhref=')([^']*?)(')",
+            lambda m: m.group(1) + _rewrite_attr_value(m.group(2)) + m.group(3),
+            text,
+            flags=_re.IGNORECASE,
+        )
 
         # srcset has comma-separated "URL [descriptor]" pairs — rewrite each URL.
         def _rewrite_srcset(m: "_re.Match") -> str:
