@@ -1539,9 +1539,25 @@ ${oa_image_line:+      ${oa_image_line}}
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
           operator: Exists
+      args:
+        - --set-host-id-source=hostname
       env:
         - name: ONEAGENT_ENABLE_VOLUME_STORAGE
           value: "true"
+        # Mount the node's root at /host so the bootstrapper can read
+        # /host/proc/self/mountinfo for partition detection inside Sysbox.
+        # Without this, the bootstrapper only sees the pod's own overlayfs
+        # view and cannot find /dev/root — causing CrashLoopBackOff.
+        - name: DT_HOST_ROOT
+          value: "/host"
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+          readOnly: true
 CNFSEOF
   elif [[ "$mode" == "apponly" ]]; then
     cat >> "$gen_file" <<AOEOF
