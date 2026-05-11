@@ -549,14 +549,24 @@ set -euo pipefail
 
 # Ensure pip-installed scripts (mkdocs, ghp-import, etc.) are on PATH
 export PATH="/home/ops/.local/bin:$PATH"
+export GIT_TERMINAL_PROMPT=0
 
 echo "--- Cloning $REPO @ $BRANCH ---"
 git clone --branch "$BRANCH" "https://github.com/$REPO.git" "$REPO_DIR"
 cd "$REPO_DIR"
 
-git remote set-url origin "$AUTH_URL"
 git config user.email "ops-bot@enablement"
 git config user.name "Enablement Ops"
+
+# Add a named remote with the token embedded so ghp_import's git push
+# uses the URL directly without going through any credential helper.
+# mkdocs gh-deploy --remote-name deploy passes this name to ghp_import.
+if [ -n "$AUTH_URL" ]; then
+    git remote add deploy "$AUTH_URL"
+    REMOTE_FLAG="--remote-name deploy"
+else
+    REMOTE_FLAG=""
+fi
 
 echo "--- Fetching framework version ---"
 FRAMEWORK_VERSION=$(grep -oP ':-\K[^}"]+' .devcontainer/util/source_framework.sh 2>/dev/null | head -1 || true)
@@ -578,7 +588,7 @@ git fetch origin gh-pages:gh-pages || true
 
 echo "--- Building and deploying ---"
 mkdocs build
-mkdocs gh-deploy --force
+mkdocs gh-deploy --force $REMOTE_FLAG
 
 echo "--- Done ---"
 """
@@ -588,10 +598,11 @@ echo "--- Done ---"
             stderr=asyncio.subprocess.STDOUT,
             env={
                 **os.environ,
-                "REPO":     repo,
-                "BRANCH":   branch,
-                "REPO_DIR": str(repo_dir),
-                "AUTH_URL": auth_url,
+                "REPO":        repo,
+                "BRANCH":      branch,
+                "REPO_DIR":    str(repo_dir),
+                "AUTH_URL":    auth_url,
+                "GH_TOKEN_VAL": gh_token,
             },
         )
         output   = await self._stream_to_redis(proc, livelog_key, timeout_s=300)
