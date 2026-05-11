@@ -7,15 +7,8 @@
 
 
 # VARIABLES DECLARATION
-# Active Gate Version - https://gallery.ecr.aws/dynatrace/dynatrace-activegate
-AG_IMAGE="public.ecr.aws/dynatrace/dynatrace-activegate:1.327.28.20251118-083113"
-export AG_IMAGE=$AG_IMAGE
-# OneAgent Version - https://gallery.ecr.aws/dynatrace/dynatrace-oneagent
-OA_IMAGE="public.ecr.aws/dynatrace/dynatrace-oneagent:1.325.66.20251118-131645"
-export OA_IMAGE=$OA_IMAGE
-# Operator Version - https://github.com/Dynatrace/dynatrace-operator/releases
-DT_OPERATOR_VERSION="1.8.1"
-export DT_OPERATOR_VERSION=$DT_OPERATOR_VERSION
+# Dynatrace versions (operator, AG, OA images) are defined in dynakube-defaults.yaml
+# and resolved dynamically from ECR at Dynakube generation time (getLatestEcrTag).
 
 ENDPOINT_CODESPACES_TRACKER=https://codespaces-tracker.whydevslovedynatrace.com/api/receive
 CODESPACES_TRACKER_TOKEN_STRING="ilovedynatrace"
@@ -100,10 +93,25 @@ fi
 ARCH=$(arch)
 export ARCH=$ARCH
 
+# Cluster engine: k3d (default, lightweight K3s-in-Docker) or kind (full K8s for CloudNativeFullStack)
+export CLUSTER_ENGINE="${CLUSTER_ENGINE:-k3d}"
+
+# Kind configuration (used when CLUSTER_ENGINE=kind)
 export KINDIMAGE="kind-control-plane"
-#get Kind status
-KIND_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
-export KIND_STATUS=$KIND_STATUS
+
+# Detect cluster status based on engine
+if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+  CLUSTER_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
+  CLUSTER_TYPE="Kind"
+else
+  # K3d: check if the enablement cluster node is running
+  CLUSTER_STATUS=$(docker inspect -f '{{.State.Status}}' k3d-enablement-server-0 2>/dev/null)
+  CLUSTER_TYPE="K3d (K3s)"
+fi
+export CLUSTER_STATUS=$CLUSTER_STATUS
+export CLUSTER_TYPE=$CLUSTER_TYPE
+# Legacy variable for backward compatibility
+export KIND_STATUS=$CLUSTER_STATUS
 
 CODESPACES_TRACKER_TOKEN=$(echo -n $CODESPACES_TRACKER_TOKEN_STRING | base64)
 export CODESPACES_TRACKER_TOKEN=$CODESPACES_TRACKER_TOKEN

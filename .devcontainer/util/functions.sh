@@ -70,22 +70,34 @@ printError() {
 }
 
 postCodespaceTracker(){
-  
+
   printInfo "Sending bizevent for $RepositoryName with $ERROR_COUNT issues built in $DURATION seconds"
 
-  curl -X POST $ENDPOINT_CODESPACES_TRACKER \
+  # Sanitize error detail for JSON (escape quotes, newlines)
+  local error_detail=""
+  if [[ -n "$CODESPACE_ERRORS" ]]; then
+    error_detail=$(printf '%s' "$CODESPACE_ERRORS" | tr '\n' ' ' | sed 's/"/\\"/g' | head -c 500)
+  fi
+
+  # Unique app ID for RUM monitoring: dynatrace-wwse-{repo-name}
+  local app_id="dynatrace-wwse-${RepositoryName}"
+
+  curl -s -X POST "$ENDPOINT_CODESPACES_TRACKER" \
   -H "Content-Type: application/json" \
   -H "Authorization: $CODESPACES_TRACKER_TOKEN" \
   -d "{
   \"repository\": \"$GITHUB_REPOSITORY\",
   \"repository.name\": \"$RepositoryName\",
   \"codespace.errors\": \"$ERROR_COUNT\",
+  \"codespace.errors_detail\": \"$error_detail\",
   \"codespace.creation\": \"$DURATION\",
   \"codespace.type\": \"$INSTANTIATION_TYPE\",
   \"codespace.arch\": \"$ARCH\",
   \"codespace.name\": \"$CODESPACE_NAME\",
+  \"codespace.app_id\": \"$app_id\",
   \"environment\": \"$DT_ENVIRONMENT\",
-  \"tenant\": \"$DT_TENANT\"
+  \"tenant\": \"$DT_TENANT\",
+  \"framework.version\": \"$FRAMEWORK_VERSION\"
   }"
 }
 
@@ -338,6 +350,73 @@ setUpTerminal(){
   # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
 }
+
+
+setUpHostTerminal() {
+  printInfoSection "Setting up Zsh + Oh My Zsh + Powerlevel10k on host Ubuntu server for user $USER"
+  printInfo "Usage: source .devcontainer/util/source_framework.sh && setUpHostTerminal"
+
+  if ! grep -qi ubuntu /etc/os-release 2>/dev/null; then
+    printWarn "This function is designed for Ubuntu. Proceeding anyway but results may vary."
+  fi
+
+  local P10K_DIR
+  P10K_DIR="${FRAMEWORK_CACHE:+${FRAMEWORK_CACHE}/.devcontainer/p10k}"
+  P10K_DIR="${P10K_DIR:-$REPO_PATH/.devcontainer/p10k}"
+
+  if [ ! -d "$P10K_DIR" ]; then
+    printError "Powerlevel10k config directory not found at $P10K_DIR"
+    return 1
+  fi
+
+  # Install zsh
+  if ! command -v zsh >/dev/null 2>&1; then
+    printInfo "Installing zsh..."
+    sudo apt-get update -y && sudo apt-get install -y zsh
+  else
+    printInfo "✅ zsh already installed: $(zsh --version)"
+  fi
+
+  # Install Oh My Zsh (non-interactive, do not switch shell yet, do not run zsh)
+  if [ ! -d "$HOME/.oh-my-zsh" ]; then
+    printInfo "Installing Oh My Zsh..."
+    RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+  else
+    printInfo "✅ Oh My Zsh already installed"
+  fi
+
+  # Clone Powerlevel10k theme
+  local P10K_THEME_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
+  if [ ! -d "$P10K_THEME_DIR" ]; then
+    printInfo "Cloning Powerlevel10k theme..."
+    git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_THEME_DIR"
+  else
+    printInfo "✅ Powerlevel10k theme already present"
+  fi
+
+  # Deploy framework p10k config and zshrc template
+  printInfo "Copying Powerlevel10k configuration from $P10K_DIR"
+  cp "$P10K_DIR/.p10k.zsh" "$HOME/.p10k.zsh"
+  cp "$P10K_DIR/.zshrc" "$HOME/.zshrc"
+
+  # Add aliases only — no framework functions bound to the shell
+  setupAliases
+
+  # Set zsh as default shell
+  local ZSH_BIN
+  ZSH_BIN="$(command -v zsh)"
+  if [ "$(getent passwd "$USER" | cut -d: -f7)" != "$ZSH_BIN" ]; then
+    printInfo "Changing default shell to zsh for $USER..."
+    sudo chsh -s "$ZSH_BIN" "$USER"
+  else
+    printInfo "✅ Default shell is already zsh"
+  fi
+
+  printInfoSection "✅ Host terminal setup complete for $USER"
+  printInfo "Run 'exec zsh' to start your new shell, or log out and back in."
+  printInfo "Type 'p10k configure' inside zsh to customize your prompt."
+}
+
 
 enableMCP(){
   # Generates .vscode/mcp.json so VS Code connects to the Dynatrace MCP Server.
@@ -620,6 +699,178 @@ deleteKindCluster() {
   printInfoSection "Deleting Kubernetes Cluster (Kind)"
   kind delete cluster --name kind
   printInfo "Kind cluster deleted successfully."
+}
+
+# ======================================================================
+#          ------- K3d Cluster Functions -------                         #
+#  Lightweight Kubernetes via K3d (K3s in Docker). Default engine.       #
+# ======================================================================
+
+startK3dCluster(){
+  printInfoSection "Starting Kubernetes Cluster (K3d)"
+
+  installK3d
+
+  # Check if K3d cluster exists
+  if k3d cluster list 2>/dev/null | grep -q "enablement"; then
+    local status
+    status=$(k3d cluster list -o json 2>/dev/null | python3 -c "
+import sys, json
+clusters = json.load(sys.stdin)
+for c in clusters:
+    if 'enablement' in c.get('name',''):
+        nodes = c.get('nodes',[])
+        running = sum(1 for n in nodes if n.get('state',{}).get('running',False))
+        print('running' if running > 0 else 'stopped')
+        break
+" 2>/dev/null)
+
+    if [[ "$status" == "running" ]]; then
+      printWarn "K3d cluster already running, attaching..."
+      attachK3dCluster
+    else
+      printInfo "K3d cluster exists but stopped, starting..."
+      k3d cluster start enablement
+      attachK3dCluster
+    fi
+  else
+    printInfo "No K3d cluster found, creating a new one..."
+    createK3dCluster
+  fi
+
+  # Install ingress controller
+  if [[ "$USE_LEGACY_PORTS" != "true" ]]; then
+    installIngressController
+  fi
+
+  printInfo "K3d cluster reachable under:"
+  kubectl cluster-info
+  printInfo "-----"
+  printInfo "Available functions: startK3dCluster stopK3dCluster deleteK3dCluster"
+  printInfo "-----"
+  kubectl config set-context --current --namespace=kube-system
+}
+# Backward compatibility aliases
+startK3sCluster() { startK3dCluster "$@"; }
+
+installK3d() {
+  # Installs K3d if not already present
+  if command -v k3d &>/dev/null; then
+    return 0
+  fi
+  printInfo "Installing K3d..."
+  curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  k3d version
+}
+
+createK3dCluster() {
+  # Configurable via env vars so multiple clusters can coexist on one host.
+  # Defaults match prior behavior (single dev cluster owns 80/443).
+  #
+  #   K3D_CLUSTER_NAME      cluster name              (default: enablement)
+  #   K3D_LB_HTTP_PORT      host port for ingress :80 (default: 80)
+  #   K3D_LB_HTTPS_PORT     host port for ingress :443 (default: 443)
+  #   K3D_API_PORT          host port for k8s API     (default: 6443)
+  #   K3D_NODEPORT_BASE     first NodePort exposed    (default: 30100)
+  #
+  # On the ops server (where 80/443 are nginx's), set:
+  #   export K3D_LB_HTTP_PORT=30080 K3D_LB_HTTPS_PORT=30443 K3D_API_PORT=6444
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  : "${K3D_LB_HTTP_PORT:=80}"
+  : "${K3D_LB_HTTPS_PORT:=443}"
+  : "${K3D_API_PORT:=6443}"
+  : "${K3D_NODEPORT_BASE:=30100}"
+
+  printInfoSection "Creating K3d cluster ($K3D_CLUSTER_NAME)"
+  printInfo "Ports — http:$K3D_LB_HTTP_PORT  https:$K3D_LB_HTTPS_PORT  api:$K3D_API_PORT  nodeports:$K3D_NODEPORT_BASE..+200"
+
+  installK3d
+
+  local NP1=$K3D_NODEPORT_BASE
+  local NP2=$((K3D_NODEPORT_BASE + 100))
+  local NP3=$((K3D_NODEPORT_BASE + 200))
+
+  k3d cluster create "$K3D_CLUSTER_NAME" \
+    --api-port "$K3D_API_PORT" \
+    -p "${K3D_LB_HTTP_PORT}:80@loadbalancer" \
+    -p "${K3D_LB_HTTPS_PORT}:443@loadbalancer" \
+    -p "${NP1}:${NP1}@server:0" \
+    -p "${NP2}:${NP2}@server:0" \
+    -p "${NP3}:${NP3}@server:0" \
+    --k3s-arg "--disable=traefik@server:0" \
+    --wait
+
+  if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME} "; then
+    printInfo "K3d cluster '$K3D_CLUSTER_NAME' created — reach ingress at http://localhost:${K3D_LB_HTTP_PORT}/"
+    attachK3dCluster
+  else
+    printError "K3d cluster '$K3D_CLUSTER_NAME' failed to start"
+    return 1
+  fi
+}
+createK3sCluster() { createK3dCluster "$@"; }
+
+attachK3dCluster(){
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  printInfoSection "Attaching to K3d cluster ($K3D_CLUSTER_NAME)"
+  local KUBEDIR="$HOME/.kube"
+  mkdir -p "$KUBEDIR"
+
+  k3d kubeconfig merge "$K3D_CLUSTER_NAME" --kubeconfig-merge-default 2>/dev/null
+  kubectl config use-context "k3d-${K3D_CLUSTER_NAME}" 2>/dev/null
+
+  if kubectl get nodes &>/dev/null; then
+    printInfo "Connected to K3d cluster '$K3D_CLUSTER_NAME'"
+  else
+    printWarn "Could not connect to K3d cluster '$K3D_CLUSTER_NAME'"
+  fi
+}
+attachK3sCluster() { attachK3dCluster "$@"; }
+
+stopK3dCluster(){
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  printInfoSection "Stopping K3d cluster ($K3D_CLUSTER_NAME)"
+  k3d cluster stop "$K3D_CLUSTER_NAME" 2>/dev/null
+  printInfo "K3d cluster '$K3D_CLUSTER_NAME' stopped."
+}
+stopK3sCluster() { stopK3dCluster "$@"; }
+
+deleteK3dCluster(){
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  printInfoSection "Deleting K3d cluster ($K3D_CLUSTER_NAME)"
+  k3d cluster delete "$K3D_CLUSTER_NAME" 2>/dev/null
+  printInfo "K3d cluster '$K3D_CLUSTER_NAME' deleted."
+}
+deleteK3sCluster() { deleteK3dCluster "$@"; }
+
+# ======================================================================
+#          ------- Unified Cluster Functions -------                     #
+#  Routes to K3d or Kind based on CLUSTER_ENGINE variable.              #
+# ======================================================================
+
+startCluster(){
+  # Starts the Kubernetes cluster based on CLUSTER_ENGINE (k3d or kind)
+  if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+    startKindCluster
+  else
+    startK3dCluster
+  fi
+}
+
+stopCluster(){
+  if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+    stopKindCluster
+  else
+    stopK3dCluster
+  fi
+}
+
+deleteCluster(){
+  if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
+    deleteKindCluster
+  else
+    deleteK3dCluster
+  fi
 }
 
 certmanagerInstall() {
@@ -946,46 +1197,76 @@ printSecrets(){
 }
 
 deployCloudNative() {
-  dynatraceEvalReadSaveCredentials "$@"
-
-  printInfoSection "Deploying Dynatrace in CloudNativeFullStack mode for $DT_ENVIRONMENT"
-  if [ -n "${DT_TENANT}" ]; then
-    # Check if the Webhook has been created and is ready
-    kubectl -n dynatrace wait pod --for=condition=ready --selector=app.kubernetes.io/name=dynatrace-operator,app.kubernetes.io/component=webhook --timeout=300s
-
-    kubectl -n dynatrace apply -f $REPO_PATH/.devcontainer/yaml/gen/dynakube-cloudnative.yaml
-
-    printInfo "Log capturing will be handled by the Host agent."
-    
-    # we wait for the AG to be scheduled
-    waitForPod dynatrace activegate
-    
-    waitForAllReadyPods dynatrace
-  else
-    printInfo "Not deploying the Dynatrace Operator, no credentials found"
+  # Warn if running on k3d — OneAgent DaemonSet will CrashLoopBackOff on container-based nodes
+  if [[ "${CLUSTER_ENGINE:-k3d}" != "kind" ]]; then
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+    printWarn " CloudNativeFullStack on K3d: OneAgent DaemonSet will NOT start properly."
+    printWarn " K3d nodes are Docker containers — OneAgent host init fails inside them."
+    printWarn " Application monitoring (code injection) will still work via CSI driver."
+    printWarn ""
+    printWarn " To get full OneAgent host monitoring, switch to Kind:"
+    printWarn "   export CLUSTER_ENGINE=kind"
+    printWarn "   # then re-create the cluster and redeploy:"
+    printWarn "   deleteCluster && startCluster && dynatraceDeployOperator && deployCloudNative"
+    printWarn ""
+    printWarn " Or use application-only mode (no CrashLoopBackOff, full app observability):"
+    printWarn "   deployApplicationMonitoring"
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
   fi
+  deployDynatrace cloudnative "$@"
 }
 
-deployApplicationMonitoring() { 
+deployApplicationMonitoring() {
+  # Convenience wrapper — deploys DT in ApplicationMonitoring mode
+  deployDynatrace apponly "$@"
+}
+
+deployDynatrace() {
+  # Unified Dynatrace deployment function.
+  # Usage: deployDynatrace [mode] [DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN]
+  #   mode: cloudnative (default) | apponly | k8s-only
+  local mode="${1:-cloudnative}"
+  shift 2>/dev/null
 
   dynatraceEvalReadSaveCredentials "$@"
 
-  printInfoSection "Deploying Dynatrace in ApplicationMonitoring mode for $DT_ENVIRONMENT"
-  if [ -n "${DT_TENANT}" ]; then
-    # Check if the Webhook has been created and is ready
-    kubectl -n dynatrace wait pod --for=condition=ready --selector=app.kubernetes.io/name=dynatrace-operator,app.kubernetes.io/component=webhook --timeout=300s
-
-    kubectl -n dynatrace apply -f $REPO_PATH/.devcontainer/yaml/gen/dynakube-apponly.yaml
-    
-    # we wait for the AG to be scheduled
-    waitForPod dynatrace activegate
-
-    #FIXME: When deploying in AppOnly we need to capture the logs, either with log module or FluentBit
-    #FIXME: Get log module "latest" is it possible for prod and sprint? verify
-    waitForAllReadyPods dynatrace
-  else
-    printInfo "Not deploying the Dynatrace Operator, no credentials found"
+  if [ -z "${DT_TENANT}" ]; then
+    printWarn "Not deploying Dynatrace — no credentials found"
+    return 1
   fi
+
+  # Generate the Dynakube YAML from config
+  generateDynakube "$mode"
+
+  # Wait for the webhook to be ready (operator must be deployed first)
+  kubectl -n dynatrace wait pod --for=condition=ready \
+    --selector=app.kubernetes.io/name=dynatrace-operator,app.kubernetes.io/component=webhook \
+    --timeout=300s
+
+  # Apply the generated Dynakube
+  local gen_file="$REPO_PATH/.devcontainer/yaml/gen/dynakube.yaml"
+  if [ ! -f "$gen_file" ]; then
+    printError "Generated Dynakube not found at $gen_file"
+    return 1
+  fi
+
+  kubectl -n dynatrace apply -f "$gen_file"
+
+  # Wait for ActiveGate to be ready (the critical component for cluster monitoring)
+  waitForPod dynatrace activegate
+
+  # CloudNativeFullStack OneAgent DaemonSet may crash on container-based nodes (Kind, K3d)
+  # because the host init procedure fails inside Docker containers.
+  # Application monitoring via CSI code injection still works regardless.
+  if [[ "$mode" == "cloudnative" ]]; then
+    printInfo "Waiting for ActiveGate to be ready (OneAgent may take longer on container nodes)..."
+    # Don't block on OneAgent — it may CrashLoop on container nodes
+    sleep 10
+  else
+    waitForAllReadyPods dynatrace
+  fi
+
+  printInfo "Dynatrace deployed in $mode mode"
 }
 
 undeployDynakubes() {
@@ -1009,128 +1290,382 @@ uninstallDynatrace() {
 
 # shellcheck disable=SC2120
 dynatraceDeployOperator() {
+  # Deploys the Dynatrace Operator via Helm and generates the Dynakube.
+  # Usage: dynatraceDeployOperator [DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN]
 
-  printInfoSection "Deploying Dynatrace Operator"
-  # posssibility to load functions.sh and call dynatraceDeployOperator A B C to save credentials and override
-  # or just run in normal deployment
-  #TODO: Evaluate also Tokens and not deploy if not found.
+  # Load operator version from dynakube config
+  loadDynakubeConfig
+  local operator_version="${DK_OPERATOR_VERSION:-1.8.1}"
+
+  printInfoSection "Deploying Dynatrace Operator v${operator_version}"
+
   dynatraceEvalReadSaveCredentials "$@"
-  # new lines, needed for workflow-k8s-playground, cluster in dt needs to have the name k8s-playground-{requestuser} to be able to spin up multiple instances per tenant
 
-  if [ -n "${DT_TENANT}" ]; then
-    # Deploy Operator
+  if [ -z "${DT_TENANT}" ]; then
+    printWarn "Not deploying the Dynatrace Operator — no credentials found"
+    return 1
+  fi
 
-    deployOperatorViaHelm
+  # Deploy Operator via Helm
+  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator \
+    --version "$operator_version" \
+    --create-namespace --namespace dynatrace --atomic
 
-    waitForAllPods dynatrace
+  # Create the secret for Dynakube to use
+  kubectl -n dynatrace create secret generic "$RepositoryName" \
+    --from-literal="apiToken=$DT_OPERATOR_TOKEN" \
+    --from-literal="dataIngestToken=$DT_INGEST_TOKEN" \
+    2>/dev/null || true
 
-    #FIXME: Add Ingress Nginx instrumentation and always expose in a port so all apps have RUM regardless of technology
-    #printInfoSection "Instrumenting NGINX Ingress"
-    #bashas "cd $K8S_PLAY_DIR/apps/nginx && bash instrument-nginx.sh"
+  waitForAllPods dynatrace
+}
 
+getLatestEcrTag() {
+  # Resolves the latest version tag from ECR public gallery for a Dynatrace image.
+  # Usage: getLatestEcrTag <repository-name>
+  # Example: getLatestEcrTag "dynatrace-k8s-node-config-collector" → "1.5.8"
+  # Returns the highest semver tag (multi-arch, no -fips/-arm64/-s390x suffixes).
+  local repo="$1"
+  local tag=""
+
+  # Get anonymous auth token
+  local token
+  token=$(curl -s --max-time 10 "https://public.ecr.aws/token/" | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+
+  if [[ -n "$token" ]]; then
+    tag=$(curl -s --max-time 10 -H "Authorization: Bearer $token" \
+      "https://public.ecr.aws/v2/dynatrace/${repo}/tags/list" | \
+      python3 -c "
+import sys, json, re
+try:
+    tags = json.load(sys.stdin).get('tags', [])
+    # Multi-arch version tags only: X.Y.Z or X.Y.Z.TIMESTAMP, no arch/fips/platform suffixes
+    version_tags = [t for t in tags if re.match(r'^[0-9]+\.[0-9]+', t) and not re.search(r'-(fips|arm|s390|amd|ppc)', t)]
+    version_tags.sort(key=lambda v: [int(x) for x in re.findall(r'\d+', v)])
+    print(version_tags[-1] if version_tags else '')
+except:
+    print('')
+" 2>/dev/null)
+  fi
+
+  if [[ -z "$tag" ]]; then
+    printWarn "Could not resolve latest tag for $repo from ECR — check network"
+    echo "latest"
   else
-    printInfo "Not deploying the Dynatrace Operator, no credentials found"
+    echo "$tag"
   fi
 }
 
+loadDynakubeConfig() {
+  # Loads Dynakube configuration: defaults first, then repo overrides on top.
+  # Defaults:    .devcontainer/yaml/dynakube-defaults.yaml (synced from framework)
+  # Overrides:   .devcontainer/yaml/dynakube-config.yaml (repo-specific, never synced)
+  # Values are exported as DK_* variables. Repo overrides win.
+  local defaults_file="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml/dynakube-defaults.yaml"
+  local config_file="$REPO_PATH/.devcontainer/yaml/dynakube-config.yaml"
 
-generateDynakube(){
-    #FIXME: This code needs to be refactored. Generate a cleaner Dynakube for both architectures.
-    # Skeleton YAMLs are in the framework cache (or local in DEV mode)
-    # Generated output goes to the repo's yaml/gen/ directory
-    YAML_SRC="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml"
-    YAML_GEN="$REPO_PATH/.devcontainer/yaml/gen"
-    mkdir -p "$YAML_GEN"
+  # Step 1: Load defaults
+  if [[ -f "$defaults_file" ]]; then
+    _parseDynakubeYaml "$defaults_file"
+  else
+    printWarn "Dynakube defaults not found at $defaults_file"
+  fi
 
-    # SET API URL
-    API="/api"
-    DT_API_URL=$DT_TENANT$API
-
-    # Read the actual hostname in case changed during instalation
-    CLUSTERNAME=$(hostname)
-    export CLUSTERNAME
-
-    ARM=false
-
-    if [[ "$ARCH" == "x86_64" ]]; then
-      printInfo "Codespace is running in AMD (x86_64), Dynakube image is set as default to pull the latest from the environment $DT_ENVIRONMENT"
-    elif [[ "$ARCH" == *"arm"* || "$ARCH" == *"aarch64"* ]]; then
-      printWarn "Codespace is running in ARM architecture ($ARCH), Dynakube image will be set in Dynakube for AG and OneAgent."
-      printWarn "ActiveGate image: $AG_IMAGE"
-      printWarn "OneAgent image: $OA_IMAGE"
-      ARM=true
-    else
-      printInfo "Codespace is running on an unkown architecture ($ARCH), Dynakube image will be set in Dynakube for AG and OneAgent."
-      printInfo "ActiveGate image: $AG_IMAGE"
-      printInfo "OneAgent image: $OA_IMAGE"
-      ARM=true
-    fi
-
-    # Generate DynaKubeSkel with API URL
-    sed -e 's~apiUrl: https://ENVIRONMENTID.live.dynatrace.com/api~apiUrl: '"$DT_API_URL"'~' "$YAML_SRC/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # ClusterName for API
-    sed 's~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "CLUSTERNAME"~feature.dynatrace.com/automatic-kubernetes-api-monitoring-cluster-name: "'"$CLUSTERNAME"'"~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-
-    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # Replace Networkzone
-    sed 's~networkZone: CLUSTERNAME~networkZone: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-
-    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # Add ActiveGate config (added first so its applied to both CNFS and AppOnly)
-    cat "$YAML_SRC/dynakube-body-activegate.yaml" >> "$YAML_GEN/dynakube-skel-head.yaml"
-
-    # Set ActiveGate Group
-    sed 's~group: CLUSTERNAME~group: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-    mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-
-    if [[ $ARM == true  ]]; then
-      sed 's~# image: ""~image: "'$AG_IMAGE'"~g' "$YAML_GEN/dynakube-skel-head.yaml" > "$YAML_GEN/dynakube-skel-head.yaml.tmp"
-      mv "$YAML_GEN/dynakube-skel-head.yaml.tmp" "$YAML_GEN/dynakube-skel-head.yaml"
-    fi
-
-    # Generate CloudNative Body (head + CNFS)
-    cat "$YAML_GEN/dynakube-skel-head.yaml" "$YAML_SRC/dynakube-body-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml"
-
-    # Set CloudNative HostGroup
-    sed 's~hostGroup: CLUSTERNAME~hostGroup: '$CLUSTERNAME'~g' "$YAML_GEN/dynakube-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml.tmp"
-    mv "$YAML_GEN/dynakube-cloudnative.yaml.tmp" "$YAML_GEN/dynakube-cloudnative.yaml"
-
-    if [[ $ARM == true  ]]; then
-      sed 's~# image: ""~image: "'$OA_IMAGE'"~g' "$YAML_GEN/dynakube-cloudnative.yaml" > "$YAML_GEN/dynakube-cloudnative.yaml.tmp"
-      mv "$YAML_GEN/dynakube-cloudnative.yaml.tmp" "$YAML_GEN/dynakube-cloudnative.yaml"
-    fi
-    # Generate AppOnly Body
-    cat "$YAML_GEN/dynakube-skel-head.yaml" "$YAML_SRC/dynakube-body-apponly.yaml" > "$YAML_GEN/dynakube-apponly.yaml"
-
+  # Step 2: Overlay repo-specific overrides (only specified keys are overwritten)
+  if [[ -f "$config_file" ]]; then
+    printInfo "Applying repo-specific Dynakube overrides from: $config_file"
+    _parseDynakubeYaml "$config_file"
+  else
+    printInfo "No repo-specific Dynakube config — using defaults"
+  fi
 }
 
-#deprecated
-deployOperatorViaKubectl(){
+_parseDynakubeYaml() {
+  # Parses a flat YAML file into DK_* exported variables.
+  local file="$1"
+  while IFS=': ' read -r key value; do
+    [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+    # Remove quotes and leading spaces
+    value=$(echo "$value" | sed 's/^["'\'']*//;s/["'\'']*$//' | xargs)
+    [[ -z "$value" ]] && continue
+    local var_name="DK_$(echo "$key" | tr '[:lower:]' '[:upper:]')"
+    eval "export $var_name=\"$value\""
+  done < "$file"
+}
 
-  printInfoSection "Deploying Operator via kubectl"
+generateDynakube() {
+  # Generates a Dynakube YAML from config into .devcontainer/yaml/gen/dynakube.yaml.
+  # Usage: generateDynakube [mode]
+  #   mode overrides the config file's mode setting
+  local mode_override="$1"
 
-  kubectl create namespace dynatrace
+  printInfoSection "Generating Dynakube"
 
-  kubectl apply -f https://github.com/Dynatrace/dynatrace-operator/releases/download/v${DT_OPERATOR_VERSION}/kubernetes-csi.yaml
+  # Load config
+  loadDynakubeConfig
 
-  # Save Dynatrace Secret
-  kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
+  local mode="${mode_override:-${DK_MODE:-cloudnative}}"
+  local api_version="${DK_DYNAKUBE_API_VERSION:-v1beta6}"
+  local cluster_name="${RepositoryName:-$(hostname)}"
+  local api_url="${DT_TENANT}/api"
 
-  generateDynakube
+  local gen_dir="$REPO_PATH/.devcontainer/yaml/gen"
+  mkdir -p "$gen_dir"
+  local gen_file="$gen_dir/dynakube.yaml"
 
+  printInfo "Mode: $mode | API: $api_url | Cluster: $cluster_name"
+
+  # AG resources from config (Kind-optimized defaults)
+  local ag_cpu_req="${DK_AG_CPU_REQUEST:-100m}"
+  local ag_cpu_lim="${DK_AG_CPU_LIMIT:-500m}"
+  local ag_mem_req="${DK_AG_MEMORY_REQUEST:-512Mi}"
+  local ag_mem_lim="${DK_AG_MEMORY_LIMIT:-768Mi}"
+  local ag_replicas="${DK_AG_REPLICAS:-1}"
+
+  # Feature flags
+  local kspm="${DK_KSPM:-false}"
+  local log_mon="${DK_LOG_MONITORING:-true}"
+  local telemetry="${DK_TELEMETRY_INGEST:-false}"
+  local extensions="${DK_EXTENSIONS:-false}"
+  local sensitive="${DK_SENSITIVE_DATA:-false}"
+
+  # AG capability flags from config (independent of mode)
+  local routing="${DK_ROUTING:-true}"
+  local debugging="${DK_DEBUGGING:-true}"
+  local dynatrace_api="${DK_DYNATRACE_API:-true}"
+
+  # Build AG capabilities list
+  local ag_capabilities="      - kubernetes-monitoring"
+
+  if [[ "$routing" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - routing"
+  fi
+
+  if [[ "$debugging" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - debugging"
+  fi
+
+  if [[ "$dynatrace_api" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - dynatrace-api"
+  fi
+
+  if [[ "$telemetry" == "true" ]]; then
+    ag_capabilities="${ag_capabilities}
+      - metrics-ingest"
+  fi
+
+  # ARM image overrides — resolve latest from ECR
+  local ag_image_line=""
+  local oa_image_line=""
+  if [[ "$ARCH" == *"arm"* || "$ARCH" == *"aarch64"* ]]; then
+    printInfo "ARM architecture detected — resolving latest AG and OA images from ECR..."
+    local ag_tag
+    ag_tag=$(getLatestEcrTag "dynatrace-activegate")
+    local oa_tag
+    oa_tag=$(getLatestEcrTag "dynatrace-oneagent")
+    # NOTE: indentation is added by the template expansions below
+    # (${ag_image_line:+    ...} and ${oa_image_line:+      ...}).
+    # Putting spaces here too would double-indent and slot the line
+    # under the previous list item, breaking YAML parsing.
+    ag_image_line="image: \"public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}\""
+    oa_image_line="image: \"public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}\""
+    printInfo "ActiveGate image: public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}"
+    printInfo "OneAgent image: public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}"
+  fi
+
+  # --- Build the Dynakube YAML ---
+
+  cat > "$gen_file" <<DKEOF
+# Generated by the Dynatrace Enablement Framework — do not edit manually.
+# Regenerate with: generateDynakube $mode
+# Config: ${DK_DYNAKUBE_API_VERSION:-v1beta6} | Mode: $mode | Cluster: $cluster_name
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${cluster_name}
+  namespace: dynatrace
+data:
+  apiToken: $(printf '%s' "$DT_OPERATOR_TOKEN" | base64 -w0)
+  dataIngestToken: $(printf '%s' "$DT_INGEST_TOKEN" | base64 -w0)
+type: Opaque
+---
+apiVersion: dynatrace.com/${api_version}
+kind: DynaKube
+metadata:
+  name: ${cluster_name}
+  namespace: dynatrace
+spec:
+  apiUrl: ${api_url}
+  tokens: ${cluster_name}
+  networkZone: ${cluster_name}
+  skipCertCheck: true
+  metadataEnrichment:
+    enabled: true
+  activeGate:
+    capabilities:
+${ag_capabilities}
+${ag_image_line:+    ${ag_image_line}}
+    replicas: ${ag_replicas}
+    resources:
+      requests:
+        cpu: ${ag_cpu_req}
+        memory: ${ag_mem_req}
+      limits:
+        cpu: ${ag_cpu_lim}
+        memory: ${ag_mem_lim}
+DKEOF
+
+  # --- OneAgent section (mode-dependent) ---
+  # Normalize mode aliases
+  case "$mode" in
+    app-only) mode="apponly" ;;
+    cloud-native|cnfs) mode="cloudnative" ;;
+  esac
+
+  if [[ "$mode" == "cloudnative" ]]; then
+    cat >> "$gen_file" <<CNFSEOF
+  oneAgent:
+    hostGroup: ${cluster_name}
+    cloudNativeFullStack:
+${oa_image_line:+      ${oa_image_line}}
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      env:
+        - name: ONEAGENT_ENABLE_VOLUME_STORAGE
+          value: "true"
+CNFSEOF
+  elif [[ "$mode" == "apponly" ]]; then
+    cat >> "$gen_file" <<AOEOF
+  oneAgent:
+    applicationMonitoring: {}
+AOEOF
+  fi
+  # k8s-only mode: no oneAgent section
+
+  # --- Templates section (image refs required by operator validation) ---
+  # Resolve latest version tags from ECR public gallery
+  local has_templates=false
+  local templates_block=""
+
+  if [[ "$kspm" == "true" ]]; then
+    local kspm_tag
+    kspm_tag=$(getLatestEcrTag "dynatrace-k8s-node-config-collector")
+    has_templates=true
+    templates_block="${templates_block}
+    kspmNodeConfigurationCollector:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-k8s-node-config-collector
+        tag: \"${kspm_tag}\""
+    printInfo "KSPM node-config-collector: ${kspm_tag}"
+  fi
+
+  if [[ "$log_mon" == "true" ]]; then
+    local logmod_tag
+    logmod_tag=$(getLatestEcrTag "dynatrace-logmodule")
+    has_templates=true
+    templates_block="${templates_block}
+    logMonitoring:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-logmodule
+        tag: \"${logmod_tag}\""
+    printInfo "Log module: ${logmod_tag}"
+  fi
+
+  if [[ "$extensions" == "true" ]]; then
+    local eec_tag
+    eec_tag=$(getLatestEcrTag "dynatrace-eec")
+    has_templates=true
+    templates_block="${templates_block}
+    extensionExecutionController:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-eec
+        tag: \"${eec_tag}\""
+    printInfo "Extension Execution Controller: ${eec_tag}"
+  fi
+
+  if [[ "$telemetry" == "true" || "$extensions" == "true" ]]; then
+    local otelcol_tag
+    otelcol_tag=$(getLatestEcrTag "dynatrace-otel-collector")
+    has_templates=true
+    templates_block="${templates_block}
+    otelCollector:
+      imageRef:
+        repository: public.ecr.aws/dynatrace/dynatrace-otel-collector
+        tag: \"${otelcol_tag}\""
+    printInfo "OTel Collector: ${otelcol_tag}"
+  fi
+
+  if [[ "$has_templates" == "true" ]]; then
+    echo "  templates:${templates_block}" >> "$gen_file"
+  fi
+
+  # --- Optional features ---
+  if [[ "$log_mon" == "true" ]]; then
+    echo "  logMonitoring: {}" >> "$gen_file"
+  fi
+
+  if [[ "$telemetry" == "true" ]]; then
+    cat >> "$gen_file" <<TELEOF
+  telemetryIngest:
+    protocols:
+      - otlp
+      - statsd
+      - zipkin
+TELEOF
+  fi
+
+  if [[ "$extensions" == "true" ]]; then
+    echo "  extensions:" >> "$gen_file"
+    echo "    prometheus: {}" >> "$gen_file"
+  fi
+
+  if [[ "$kspm" == "true" ]]; then
+    cat >> "$gen_file" <<KSPMEOF
+  kspm:
+    mappedHostPaths:
+      - /boot
+      - /etc
+      - /proc/sys/kernel
+      - /sys/fs
+      - /usr/lib/systemd/system
+      - /var/lib
+KSPMEOF
+    # /sys/kernel/security/apparmor — not available in Kind (Docker-in-Docker, no apparmor)
+  fi
+
+  # --- Sensitive data ClusterRole (optional) ---
+  if [[ "$sensitive" == "true" ]]; then
+    cat >> "$gen_file" <<SENSEOF
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dynatrace-kubernetes-monitoring-sensitive
+  labels:
+    rbac.dynatrace.com/aggregate-to-monitoring: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["list", "watch", "get"]
+SENSEOF
+  fi
+
+  printInfo "Dynakube generated: $gen_file"
+  printInfo "Features: log_monitoring=$log_mon telemetry=$telemetry extensions=$extensions kspm=$kspm sensitive_data=$sensitive"
 }
 
 deployOperatorViaHelm(){
-  helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator --version "$DT_OPERATOR_VERSION" --create-namespace --namespace dynatrace --atomic
-
-  # Save Dynatrace Secret
-  kubectl -n dynatrace create secret generic dev-container --from-literal="apiToken=$DT_OPERATOR_TOKEN" --from-literal="dataIngestToken=$DT_INGEST_TOKEN"
-
-  generateDynakube
-
+  # Legacy wrapper — calls dynatraceDeployOperator
+  dynatraceDeployOperator "$@"
 }
 
 undeployOperatorViaHelm(){
@@ -1218,9 +1753,28 @@ detectIP() {
   fi
 }
 
+detectHostname() {
+  # Returns a hostname-based subdomain used as a second ingress host.
+  # Priority: $EXTERNAL_HOSTNAME > $(hostname) > "localhost".
+  # Used so apps registered in parallel workers are reachable via both
+  # the public-IP magic-DNS host AND a hostname-based host.
+  if [[ -n "$EXTERNAL_HOSTNAME" ]]; then
+    echo "$EXTERNAL_HOSTNAME"
+  else
+    local h
+    h=$(hostname 2>/dev/null)
+    if [[ -n "$h" ]]; then
+      echo "$h"
+    else
+      echo "localhost"
+    fi
+  fi
+}
+
 installIngressController() {
   # Installs the nginx ingress controller in the Kind cluster.
-  # Uses the Kind-specific manifest from the ingress-nginx project.
+  # Installs the nginx ingress controller.
+  # Uses Kind-specific or baremetal manifest depending on CLUSTER_ENGINE.
   printInfoSection "Installing nginx ingress controller"
 
   # Check if already installed
@@ -1230,9 +1784,16 @@ installIngressController() {
     return 0
   fi
 
-  # Install using the Kind-specific manifest (handles hostPort binding)
-  printInfo "Deploying ingress-nginx for Kind..."
-  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml
+  # Choose the right manifest based on cluster engine
+  # K3d uses provider/cloud (has built-in load balancer proxy on port 80/443)
+  # Kind uses provider/kind (has hostPort binding via extraPortMappings)
+  local ingress_provider="kind"
+  if [[ "$CLUSTER_ENGINE" != "kind" ]]; then
+    ingress_provider="cloud"
+  fi
+
+  printInfo "Deploying ingress-nginx (provider: $ingress_provider)..."
+  kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v${INGRESS_NGINX_VERSION}/deploy/static/provider/${ingress_provider}/deploy.yaml"
 
   printInfo "Waiting for ingress controller to be ready..."
   kubectl wait --namespace ingress-nginx \
@@ -1277,13 +1838,21 @@ registerApp() {
     return 1
   fi
 
-  local detected_ip
+  local detected_ip detected_hostname
   detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
 
-  # Create the Ingress resource
+  # Create the Ingress resource — two hosts so the app is reachable via:
+  #   1. magic-DNS public IP    (e.g. todoapp.18.134.158.252.sslip.io)
+  #   2. server hostname        (e.g. todoapp.autonomous-enablements)
+  # The hostname route lets parallel workers test their own k3d-hosted app
+  # via Host-header curl on localhost without depending on public DNS.
   local ingress_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
+  local hostname_host="${app_name}.${detected_hostname}"
 
-  printInfo "Creating Ingress for $app_name → $service_name:$service_port (host: $ingress_host)"
+  printInfo "Creating Ingress for $app_name → $service_name:$service_port"
+  printInfo "  host (ip):       $ingress_host"
+  printInfo "  host (hostname): $hostname_host"
 
   # Build annotations block
   local annotations="    nginx.ingress.kubernetes.io/proxy-read-timeout: \"3600\"
@@ -1307,6 +1876,16 @@ spec:
   ingressClassName: nginx
   rules:
   - host: ${ingress_host}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${service_name}
+            port:
+              number: ${service_port}
+  - host: ${hostname_host}
     http:
       paths:
       - path: /
@@ -1341,31 +1920,18 @@ registerAstroshopIngress() {
   # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
   # - / (everything else) → frontend-proxy:8080
   local namespace="${1:-astroshop}"
-  local detected_ip
+  local detected_ip detected_hostname
   detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
   local ingress_host="astroshop.${detected_ip}.${MAGIC_DOMAIN}"
+  local hostname_host="astroshop.${detected_hostname}"
 
-  printInfo "Creating Astroshop Ingress with otel-collector routes (host: $ingress_host)"
+  printInfo "Creating Astroshop Ingress with otel-collector routes"
+  printInfo "  host (ip):       $ingress_host"
+  printInfo "  host (hostname): $hostname_host"
 
-  kubectl apply -f - <<ASTROINGRESSEOF
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: astroshop-ingress
-  namespace: ${namespace}
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-spec:
-  ingressClassName: nginx
-  rules:
-  - host: ${ingress_host}
-    http:
-      paths:
-      - path: /v1/traces
+  # Path block reused for both hosts.
+  local astro_paths='      - path: /v1/traces
         pathType: ImplementationSpecific
         backend:
           service:
@@ -1392,7 +1958,31 @@ spec:
           service:
             name: frontend-proxy
             port:
-              number: 8080
+              number: 8080'
+
+  kubectl apply -f - <<ASTROINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astroshop-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+${astro_paths}
+  - host: ${hostname_host}
+    http:
+      paths:
+${astro_paths}
 ASTROINGRESSEOF
 
   # Register in app registry for greeting/listApps
@@ -1902,31 +2492,17 @@ registerOpentelemetryDemoIngress() {
   # - /v1/traces, /v1/metrics, /v1/logs → otel-collector:4318
   # - / → frontend-proxy:8080
   local namespace="${1:-opentelemetry-demo}"
-  local detected_ip
+  local detected_ip detected_hostname
   detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
   local ingress_host="otel-demo.${detected_ip}.${MAGIC_DOMAIN}"
+  local hostname_host="otel-demo.${detected_hostname}"
 
-  printInfo "Creating OpenTelemetry Demo Ingress (host: $ingress_host)"
+  printInfo "Creating OpenTelemetry Demo Ingress"
+  printInfo "  host (ip):       $ingress_host"
+  printInfo "  host (hostname): $hostname_host"
 
-  kubectl apply -f - <<OTELINGRESSEOF
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: otel-demo-ingress
-  namespace: ${namespace}
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
-spec:
-  ingressClassName: nginx
-  rules:
-  - host: ${ingress_host}
-    http:
-      paths:
-      - path: /v1/traces
+  local otel_paths='      - path: /v1/traces
         pathType: ImplementationSpecific
         backend:
           service:
@@ -1953,7 +2529,31 @@ spec:
           service:
             name: opentelemetry-demo-frontendproxy
             port:
-              number: 8080
+              number: 8080'
+
+  kubectl apply -f - <<OTELINGRESSEOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: otel-demo-ingress
+  namespace: ${namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: ${ingress_host}
+    http:
+      paths:
+${otel_paths}
+  - host: ${hostname_host}
+    http:
+      paths:
+${otel_paths}
 OTELINGRESSEOF
 
   # Register in app registry

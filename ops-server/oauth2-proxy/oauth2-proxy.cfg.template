@@ -1,0 +1,32 @@
+# oauth2-proxy config — Enablement Ops Dashboard
+# Rendered by setup.sh: secrets are substituted from ~/.env via envsubst.
+# Live config lives at /etc/oauth2-proxy/oauth2-proxy.cfg (chmod 640).
+
+provider = "github"
+client_id     = "${OAUTH2_CLIENT_ID}"
+client_secret = "${OAUTH2_CLIENT_SECRET}"
+
+# Restrict access to members of this GitHub org
+github_org = "${OAUTH2_GITHUB_ORG}"
+
+# Session cookie
+cookie_secret    = "${OAUTH2_COOKIE_SECRET}"
+cookie_secure    = true
+cookie_httponly  = true
+cookie_samesite  = "lax"
+cookie_expire    = "168h"
+
+# Bind locally; nginx is the public-facing entry point
+http_address  = "127.0.0.1:4180"
+reverse_proxy = true
+
+# Required by oauth2-proxy; we accept any verified GitHub email
+email_domains = ["*"]
+
+# Send X-Auth-Request-User / X-Auth-Request-Email on /oauth2/auth subrequest
+# responses. nginx captures these via auth_request_set and forwards them as
+# X-Auth-User / X-Auth-Email to the upstream dashboard so role gating and
+# trigger attribution can identify the caller. Without this flag oauth2-proxy
+# 200s the auth check but doesn't tell us *who* the user is — the dashboard
+# would treat every signed-in caller as anonymous (guest).
+set_xauthrequest = true

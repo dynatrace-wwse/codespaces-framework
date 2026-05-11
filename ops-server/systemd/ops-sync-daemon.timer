@@ -1,0 +1,11 @@
+[Unit]
+Description=Enablement Ops Sync Status Timer (hourly)
+Requires=ops-sync-daemon.service
+
+[Timer]
+# Run every hour at :00
+OnCalendar=*-*-* *:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

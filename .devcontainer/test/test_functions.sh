@@ -16,22 +16,45 @@ assertDynatraceCloudNative(){
 }
 
 assertRunningApp(){
-  # The 1st agument is the port.
-  if [ -z "$1" ]; then
-    PORT=30100
-  else
-    PORT=$1
-  fi
-    
-  URL="http://127.0.0.1:$PORT"
-  printInfoSection "Testing Deployed app running in $URL"
+  # Assert an app is reachable via BOTH ingress hosts:
+  #   1. magic-DNS public IP host: <app>.<detected-ip>.<MAGIC_DOMAIN>
+  #   2. server hostname host:     <app>.<detected-hostname>
+  # Probes localhost on the configured ingress port (K3D_LB_HTTP_PORT, default 80).
+  # Required for parallel-worker testing where each worker's k3d binds to a
+  # non-default port (e.g. 30080) and is reachable only via Host-header curl.
+  local app_name="$1"
+  local detected_ip detected_hostname port
+  detected_ip=$(detectIP)
+  detected_hostname=$(detectHostname)
+  port="${K3D_LB_HTTP_PORT:-80}"
 
-  printInfo "Asserting app is running as NodePort in kind-control-plane in port $URL"
+  local ip_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
+  local name_host="${app_name}.${detected_hostname}"
+  local target="http://localhost:${port}"
 
-  if docker exec kind-control-plane sh -c "curl --silent --fail $URL" > /dev/null; then
-    printInfo "✅ App is running on $URL"
-  else
-    printError "❌ App is NOT running on $URL"
+  printInfoSection "Testing app via ingress on ${target}"
+
+  # Retry — ingress-nginx needs a moment to reconcile a freshly-created
+  # Ingress resource. In parallel-worker runs the curl can race the
+  # controller, so probe up to 8 times with 3s spacing per host.
+  local h failed=0
+  for h in "$ip_host" "$name_host"; do
+    local ok=0 i
+    for i in $(seq 1 8); do
+      if curl --silent --fail --max-time 5 -H "Host: $h" "$target" > /dev/null; then
+        printInfo "✅ App reachable via Host: $h on $target (attempt $i)"
+        ok=1
+        break
+      fi
+      sleep 3
+    done
+    if [[ "$ok" -eq 0 ]]; then
+      printError "❌ App NOT reachable via Host: $h on $target after 8 attempts"
+      failed=1
+    fi
+  done
+
+  if [[ "$failed" -ne 0 ]]; then
     exit 1
   fi
 }

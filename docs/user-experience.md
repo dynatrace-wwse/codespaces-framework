@@ -1,4 +1,3 @@
---8<-- "snippets/user-experience.js"
 
 
 !!! tip "Maximizing User Experience with ease of use, best practices, readable code, DevOps tooling, and more..."

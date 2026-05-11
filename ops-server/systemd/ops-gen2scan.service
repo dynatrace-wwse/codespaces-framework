@@ -1,0 +1,20 @@
+[Unit]
+Description=Enablement Ops Gen2 Drift Scanner (daily)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ops
+Group=ops
+WorkingDirectory=/home/ops/enablement-framework/codespaces-framework
+ExecStart=/home/ops/ops-venv/bin/python audit/phase1-scan.py --all --output /home/ops/logs/gen2-scan-latest.json
+EnvironmentFile=/home/ops/.env
+TimeoutStartSec=1800
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ops-gen2scan
+
+[Install]
+WantedBy=multi-user.target

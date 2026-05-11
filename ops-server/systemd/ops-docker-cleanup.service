@@ -1,0 +1,18 @@
+[Unit]
+Description=Docker host-level cleanup (containers, volumes, dangling images, build cache)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+# Threshold above which we also prune images not used in the last 7 days.
+# Adjust DOCKER_DISK_THRESHOLD in /etc/environment to override.
+Environment=DOCKER_DISK_THRESHOLD=80
+Environment=DOCKER_IMAGE_AGE_HOURS=168
+ExecStart=/usr/local/bin/ops-docker-cleanup
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

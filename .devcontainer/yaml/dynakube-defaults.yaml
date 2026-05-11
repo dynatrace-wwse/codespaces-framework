@@ -1,0 +1,37 @@
+# Default Dynakube configuration for the Enablement Framework.
+# Repos can override these values with a .devcontainer/yaml/dynakube-config.yaml file.
+# Generated output goes to .devcontainer/yaml/gen/ (gitignored).
+#
+# Modes:
+#   k8s-only     - ActiveGate with kubernetes-monitoring only (no OneAgent)
+#   apponly      - kubernetes-monitoring + application monitoring (code injection, no host monitoring)
+#   cloudnative  - kubernetes-monitoring + CloudNativeFullStack (full monitoring)
+#
+# All features are optional and can be toggled independently.
+
+# Operator and Dynakube versions
+operator_version: "1.9.0"
+dynakube_api_version: "v1beta6"
+
+# Monitoring mode: k8s-only | apponly | cloudnative
+mode: apponly
+
+# Features (all optional, toggle on/off)
+kspm: false
+log_monitoring: true
+telemetry_ingest: true
+extensions: false
+sensitive_data: true
+
+# ActiveGate capabilities (toggle independently, any mode)
+routing: true
+debugging: false
+dynatrace_api: false
+
+# ActiveGate resources — Kind-optimized defaults (single-node, 4-core, 16GB)
+# One Dynakube with combined capabilities to save resources
+ag_cpu_request: "100m"
+ag_cpu_limit: "500m"
+ag_memory_request: "512Mi"
+ag_memory_limit: "1Gi"
+ag_replicas: 1

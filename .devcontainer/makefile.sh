@@ -58,6 +58,12 @@ run(){
         CMD="$1"
     fi
 
+    # Use -it when attached to a TTY (developer workflow), -i otherwise
+    # (CI / systemd / piped output) so the container still gets stdin/stdout
+    # but doesn't need a real terminal.
+    local DOCKER_TTY="-i"
+    if [ -t 1 ]; then DOCKER_TTY="-it"; fi
+
     docker run $DOCKER_ENVS \
         --name $IMAGENAME \
         --privileged \
@@ -66,7 +72,7 @@ run(){
         $PORTS \
         $VOLUMEMOUNTS \
         $WORKINGDIR \
-        -it $REPOTAG \
+        $DOCKER_TTY $REPOTAG \
         /usr/bin/zsh -c "$CMD"
 }
 
@@ -100,14 +106,20 @@ cleanStart(){
     docker kill "$IMAGENAME" 2>/dev/null
     docker rm -f "$IMAGENAME" 2>/dev/null
 
-    # 2. Kill and remove Kind containers (kind-control-plane, *-control-plane)
+    # 2. Delete K3d clusters
+    if command -v k3d &>/dev/null; then
+        echo "Removing K3d clusters..."
+        k3d cluster delete enablement 2>/dev/null
+    fi
+
+    # 3. Kill and remove Kind containers (kind-control-plane, *-control-plane)
     echo "Removing Kind containers..."
     kind_containers=$(docker ps -a --filter "name=control-plane" -q 2>/dev/null)
     if [ -n "$kind_containers" ]; then
         docker rm -f $kind_containers 2>/dev/null
     fi
 
-    # 3. Delete Kind clusters if kind CLI is available on host
+    # 4. Delete Kind clusters if kind CLI is available on host
     if command -v kind &>/dev/null; then
         for cluster in $(kind get clusters 2>/dev/null); do
             echo "  Deleting Kind cluster: $cluster"

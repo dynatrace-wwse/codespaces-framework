@@ -1,4 +1,3 @@
---8<-- "snippets/synchronizer.js"
 
 
 !!! example "Sync CLI 🔁"

@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous Enablement Ops Platform · Dynatrace</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
+    <meta name="theme-color" content="#080c14">
+    <link rel="stylesheet" href="/static/style.css?v=18">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+</head>
+<body>
+    <header>
+        <div class="topbar-inner">
+            <a class="brand" href="/">
+                <img src="/static/images/dynatrace-logo.png" alt="Dynatrace">
+                <div class="brand-text">
+                    <span class="title">Autonomous Enablement Ops Platform</span>
+                    <span class="sub">WWSE · Multi-Arch CI/CD</span>
+                </div>
+            </a>
+            <div class="spacer"></div>
+            <div class="header-right">
+                <div id="health-status" class="health-badge">checking…</div>
+                <div id="auth-status" class="auth-status">
+                    <a href="/oauth2/sign_in" class="btn-auth" id="sign-in-btn" hidden>Sign in with GitHub</a>
+                    <span id="user-info" class="user-info" hidden>
+                        <span id="user-name" class="user-name"></span>
+                        <a href="/oauth2/sign_out?rd=/" class="btn btn-small btn-secondary">Sign out</a>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <nav>
+        <div class="nav-inner">
+            <button class="tab active" data-view="fleet">Fleet</button>
+            <button class="tab" data-view="running">Running</button>
+            <button class="tab" data-view="history">History</button>
+            <button class="tab" data-view="sync">Synchronizer</button>
+            <button class="tab" data-view="agentic">Agentic</button>
+            <button class="tab" data-view="workers">Workers</button>
+            <button class="tab" data-view="nightly">Nightly</button>
+        </div>
+    </nav>
+
+    <main>
+        <!-- Fleet View -->
+        <section id="view-fleet" class="view active">
+            <!-- Cross-repo branch trigger: pick a branch, push it across all
+                 repos that have it. Useful for validating a feature branch is
+                 mergeable across the fleet (e.g. "fix/badges-and-rum-ids"). -->
+            <div class="fleet-trigger" id="fleet-trigger-panel" hidden>
+                <div class="fleet-trigger-head">
+                    <span class="fleet-trigger-title">⚡ Trigger across fleet</span>
+                    <span class="fleet-trigger-help" id="fleet-trigger-help">Run integration tests on every repo that has the chosen branch.</span>
+                </div>
+                <div class="fleet-trigger-row">
+                    <select id="fleet-branch" class="fleet-branch-select">
+                        <option value="">Select a branch…</option>
+                    </select>
+                    <select id="fleet-action" class="fleet-action-select">
+                        <option value="integration-test">Integration test</option>
+                        <option value="deploy-ghpages">Deploy GitHub Pages</option>
+                        <option value="daemon">Training</option>
+                    </select>
+                    <select id="fleet-arch" class="fleet-arch-select">
+                        <option value="both">both arches</option>
+                        <option value="arm64">arm64 only</option>
+                        <option value="amd64">amd64 only</option>
+                    </select>
+                    <span id="fleet-target-count" class="fleet-target-count"></span>
+                    <button class="btn" id="fleet-trigger-btn" data-action>Trigger fleet build</button>
+                </div>
+            </div>
+
+            <div class="controls">
+                <input type="text" id="repo-filter" placeholder="Filter repos...">
+                <select id="arch-filter">
+                    <option value="all">All architectures</option>
+                    <option value="arm64">ARM only</option>
+                    <option value="amd64">AMD only</option>
+                    <option value="both">Both</option>
+                </select>
+                <select id="fleet-status-filter">
+                    <option value="all">All statuses</option>
+                    <option value="passed">Passed only</option>
+                    <option value="failed">Failed only</option>
+                    <option value="terminated">Terminated</option>
+                    <option value="never-run">Never run</option>
+                </select>
+                <select id="fleet-branch-filter">
+                    <option value="">All branches (selected)</option>
+                </select>
+            </div>
+
+            <table id="fleet-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Arch</th>
+                        <th>ARM64</th>
+                        <th>AMD64</th>
+                        <th>Branch</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="fleet-body">
+                    <tr><td colspan="6" class="loading">Loading repos…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Running Jobs View -->
+        <section id="view-running" class="view">
+            <div id="running-summary" class="nightly-header"></div>
+            <table id="running-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Action</th>
+                        <th>Worker</th>
+                        <th>Started</th>
+                        <th>Elapsed</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="running-body">
+                    <tr><td colspan="8" class="loading">Loading running jobs…</td></tr>
+                </tbody>
+            </table>
+            <h3 style="margin-top: 24px;">Deferred · queued behind a held lock</h3>
+            <table id="deferred-table">
+                <thead>
+                    <tr>
+                        <th>Triple (repo : branch : arch)</th>
+                        <th>Depth</th>
+                    </tr>
+                </thead>
+                <tbody id="deferred-body">
+                    <tr><td colspan="2" class="loading">—</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- History View -->
+        <section id="view-history" class="view">
+            <div class="controls">
+                <input type="text" id="history-repo" placeholder="Filter repo…" style="width:160px">
+                <select id="history-arch">
+                    <option value="">All arches</option>
+                    <option value="arm64">arm64</option>
+                    <option value="amd64">amd64</option>
+                </select>
+                <select id="history-branch"><option value="">All branches</option></select>
+                <select id="history-status">
+                    <option value="">All statuses</option>
+                    <option value="passed">PASS</option>
+                    <option value="failed">FAIL</option>
+                    <option value="terminated">TERM</option>
+                </select>
+                <select id="history-type">
+                    <option value="">All types</option>
+                    <option value="integration-test">Integration test</option>
+                    <option value="deploy-ghpages">Deploy Pages</option>
+                    <option value="fix-ci">Fix CI</option>
+                    <option value="fix-issue">Fix Issue</option>
+                </select>
+                <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
+                <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
+            </div>
+            <table id="history-table">
+                <thead>
+                    <tr>
+                        <th>Started</th>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                        <th>Trigger</th>
+                        <th>Worker</th>
+                        <th>Log</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body">
+                    <tr><td colspan="10" class="loading">Loading history…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Synchronizer View -->
+        <section id="view-sync" class="view">
+            <!-- Sub-tab bar -->
+            <nav class="sync-subnav">
+                <button class="sync-tab active" data-sync-view="commands">Commands</button>
+                <button class="sync-tab" data-sync-view="status">Status</button>
+                <button class="sync-tab" data-sync-view="prs">Open PRs</button>
+                <button class="sync-tab" data-sync-view="issues">Open Issues</button>
+            </nav>
+
+            <!-- Commands sub-view -->
+            <div id="sync-view-commands" class="sync-subview">
+                <div id="sync-cards" class="sync-grid"></div>
+                <h3>Recent runs</h3>
+                <table id="sync-history-table">
+                    <thead>
+                        <tr>
+                            <th>Started</th>
+                            <th>Command</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                            <th>Triggered by</th>
+                            <th>Log</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-history-body">
+                        <tr><td colspan="6" class="loading">Loading sync history…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Status sub-view -->
+            <div id="sync-view-status" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Framework-version drift across the fleet</span>
+                    <button class="btn btn-small btn-secondary" id="sync-status-refresh">↻ Refresh</button>
+                </div>
+                <table id="sync-status-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>Pinned version</th>
+                            <th>Latest version</th>
+                            <th>Drift</th>
+                            <th>CI</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-status-body">
+                        <tr><td colspan="5" class="loading">Loading status…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Open PRs sub-view -->
+            <div id="sync-view-prs" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Open PRs across <strong id="sync-prs-org"></strong></span>
+                    <button class="btn btn-small btn-secondary" id="sync-prs-refresh" data-action>↻ Refresh</button>
+                </div>
+                <div class="controls" style="margin-bottom:8px">
+                    <input type="text" id="sync-prs-filter" placeholder="Filter by title or repo…">
+                </div>
+                <table id="sync-prs-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>#</th>
+                            <th>Title</th>
+                            <th>Author</th>
+                            <th>Labels</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-prs-body">
+                        <tr><td colspan="6" class="loading">Loading PRs…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Open Issues sub-view -->
+            <div id="sync-view-issues" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Open issues across <strong id="sync-issues-org"></strong></span>
+                    <button class="btn btn-small btn-secondary" id="sync-issues-refresh" data-action>↻ Refresh</button>
+                </div>
+                <div class="controls" style="margin-bottom:8px">
+                    <input type="text" id="sync-issues-filter" placeholder="Filter by title or repo…">
+                </div>
+                <table id="sync-issues-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>#</th>
+                            <th>Title</th>
+                            <th>Author</th>
+                            <th>Labels</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sync-issues-body">
+                        <tr><td colspan="6" class="loading">Loading issues…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Live log overlay -->
+        <div id="livelog-modal" class="modal" hidden>
+            <div class="modal-inner livelog-modal-inner">
+                <header class="modal-header livelog-header">
+                    <div class="livelog-title-row">
+                        <span id="livelog-title">Live log</span>
+                    </div>
+                    <div class="livelog-toolbar">
+                        <div class="modal-search">
+                            <input type="search" id="livelog-search" placeholder="Search…"
+                                   autocomplete="off" spellcheck="false">
+                            <button class="search-nav" id="livelog-search-prev"
+                                    title="Previous match (Shift+Enter)">◀</button>
+                            <button class="search-nav" id="livelog-search-next"
+                                    title="Next match (Enter)">▶</button>
+                            <span class="search-count" id="livelog-search-count"></span>
+                            <button class="btn btn-small btn-secondary" id="livelog-wrap-toggle"
+                                    title="Toggle line wrapping (W)">↩ Wrap</button>
+                        </div>
+                        <div id="livelog-app-tabs"></div>
+                        <div class="modal-actions">
+                            <a id="livelog-fullscreen" class="btn btn-small btn-secondary"
+                               target="_blank" rel="noopener" title="Open in a new tab">⤢ Fullscreen</a>
+                            <button id="livelog-shell" class="btn btn-small btn-secondary"
+                                    data-action title="Open interactive shell in this container"
+                                    hidden>⌨ Shell</button>
+                            <button id="livelog-terminate" class="btn btn-small btn-danger"
+                                    data-action title="Kill this job"
+                                    hidden>■ Terminate</button>
+                            <button class="btn btn-small btn-secondary" id="livelog-close">Close</button>
+                        </div>
+                    </div>
+                </header>
+                <pre id="livelog-pre"></pre>
+                <iframe id="livelog-app-frame" style="display:none;width:100%;flex:1;border:none;background:#fff"
+                        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+                <div id="livelog-app-empty" style="display:none"></div>
+            </div>
+        </div>
+
+        <!-- Agentic View -->
+        <section id="view-agentic" class="view">
+            <div class="agentic-header">
+                <p class="agentic-intro">
+                    Claude analyzes failed integration tests, determines whether the root cause is in the
+                    repo or the shared framework, then creates a fix branch and opens a PR.
+                </p>
+            </div>
+
+            <!-- Running agents -->
+            <div id="agentic-running-section">
+                <h3 class="agentic-section-title">Running Agents <span id="agentic-running-count" class="count-badge"></span></h3>
+                <table id="agentic-running-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>Branch</th>
+                            <th>Type</th>
+                            <th>Started</th>
+                            <th>Elapsed</th>
+                            <th>Log</th>
+                        </tr>
+                    </thead>
+                    <tbody id="agentic-running-body">
+                        <tr><td colspan="6" class="loading">—</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Failed integration tests -->
+            <h3 class="agentic-section-title" style="margin-top:28px">Failed Integration Tests</h3>
+            <div class="controls">
+                <select id="agentic-repo-filter"><option value="">All repos</option></select>
+                <select id="agentic-arch-filter">
+                    <option value="">All arches</option>
+                    <option value="arm64">arm64</option>
+                    <option value="amd64">amd64</option>
+                </select>
+                <button class="btn btn-small btn-secondary" id="agentic-refresh">↻ Refresh</button>
+            </div>
+            <table id="agentic-failed-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Failed step</th>
+                        <th>Status</th>
+                        <th>Failed at</th>
+                        <th>Duration</th>
+                        <th>Log</th>
+                        <th>Fix</th>
+                    </tr>
+                </thead>
+                <tbody id="agentic-failed-body">
+                    <tr><td colspan="9" class="loading">Loading…</td></tr>
+                </tbody>
+            </table>
+
+            <!-- Agent run history -->
+            <h3 class="agentic-section-title" style="margin-top:28px">Agent Run History</h3>
+            <table id="agentic-history-table">
+                <thead>
+                    <tr>
+                        <th>Started</th>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Log</th>
+                    </tr>
+                </thead>
+                <tbody id="agentic-history-body">
+                    <tr><td colspan="7" class="loading">Loading…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Workers View -->
+        <section id="view-workers" class="view">
+            <div class="worker-grid" id="worker-grid">
+                <p class="loading">Loading workers…</p>
+            </div>
+            <h3>Queue Depths</h3>
+            <div id="queue-status" class="queue-grid"></div>
+        </section>
+
+        <!-- Nightly View -->
+        <section id="view-nightly" class="view">
+            <div id="nightly-summary" class="nightly-header"></div>
+            <table id="nightly-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Arch</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Finished</th>
+                    </tr>
+                </thead>
+                <tbody id="nightly-body">
+                    <tr><td colspan="5" class="loading">Loading nightly results…</td></tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <!-- Shell modal — xterm.js PTY terminal + app preview tabs -->
+    <div id="shell-modal" class="modal" hidden>
+        <div class="modal-inner shell-modal-inner">
+            <div class="modal-header">
+                <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1">
+                    <h3 id="shell-modal-title" style="white-space:nowrap">Shell</h3>
+                    <div id="shell-app-tabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+                    <button id="shell-newwin" class="btn btn-small btn-secondary" title="Open in separate popup window">⧉ New Window</button>
+                    <button id="shell-fullscreen" class="btn btn-small btn-secondary" title="Fullscreen">⛶ Fullscreen</button>
+                    <button id="shell-close" class="btn btn-small btn-secondary">✕ Close</button>
+                </div>
+            </div>
+            <div id="shell-terminal"></div>
+            <iframe id="shell-app-frame" style="display:none;width:100%;flex:1;border:none;background:#fff" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+            <div id="shell-app-empty" style="display:none"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="/static/app.js?v=18"></script>
+</body>
+</html>

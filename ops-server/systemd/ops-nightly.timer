@@ -1,0 +1,12 @@
+[Unit]
+Description=Enablement Ops Nightly Test Timer
+Requires=ops-nightly.service
+
+[Timer]
+# Run at 02:00 UTC every day
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

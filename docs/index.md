@@ -1,5 +1,3 @@
---8<-- "snippets/index.js"
-
 --8<-- "snippets/dt-enablement.md"
 
 
@@ -10,11 +8,11 @@
 
 
 ??? tip "Framework Objective"
-  **Reduce complexity, remove friction, and increase adoption of the Dynatrace Platform.**
+    **Reduce complexity, remove friction, and increase adoption of the Dynatrace Platform.**
 
-  The Dynatrace Enablement Framework is a structured set of tools and best practices designed to streamline the delivery, maintenance, and scaling of solutions across the Dynatrace Platform. The primary goal is to drive platform adoption by ensuring consistent training, comprehensive solution coverage, and operational efficiency.
+    The Dynatrace Enablement Framework is a structured set of tools and best practices designed to streamline the delivery, maintenance, and scaling of solutions across the Dynatrace Platform. The primary goal is to drive platform adoption by ensuring consistent training, comprehensive solution coverage, and operational efficiency.
 
-  Trainings are delivered as GitHub Codespaces—publicly accessible, environment-agnostic, and built to a defined set of standards for quality, repeatability, and team alignment.
+    Trainings are delivered as GitHub Codespaces—publicly accessible, environment-agnostic, and built to a defined set of standards for quality, repeatability, and team alignment.
 
 
 ## <img src="https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg" alt="DT logo" width="22"> Dynatrace Enablement Framework in a Nutshell

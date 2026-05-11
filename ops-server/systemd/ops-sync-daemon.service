@@ -1,0 +1,19 @@
+[Unit]
+Description=Enablement Ops Sync Daemon (hourly status + drift detection)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ops
+Group=ops
+WorkingDirectory=/home/ops/enablement-framework/codespaces-framework
+ExecStart=/bin/bash -c 'PYTHONPATH=. /home/ops/ops-venv/bin/python -m sync.cli status --json > /home/ops/logs/sync-status-$(date +%%Y%%m%%d-%%H%%M%%S).json 2>&1'
+EnvironmentFile=/home/ops/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ops-sync
+
+[Install]
+WantedBy=multi-user.target
