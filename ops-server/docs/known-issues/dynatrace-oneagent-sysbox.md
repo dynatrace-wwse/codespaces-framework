@@ -1,6 +1,6 @@
-# Known Issue: Dynatrace OneAgent CloudNative — CrashLoopBackOff in Sysbox
+# Dynatrace OneAgent CloudNative — Sysbox Compatibility: k3d vs Kind
 
-**Status:** Not fixable without architectural change  
+**Status:** Confirmed — fails on k3d, works on Kind (both inside Sysbox)  
 **Component:** Dynatrace Operator / CloudNative Fullstack DynaKube  
 **Error:**
 ```
@@ -80,19 +80,45 @@ Even if the partition check passed, the fallback would fail for the namespace re
 
 ---
 
-## Can It Be Fixed?
+## k3d vs Kind: Why One Works and the Other Doesn't
 
-**No, not with the current Sysbox + CloudNative Fullstack combination.**
+The failure is **specific to k3d**, not to Sysbox in general. Verified by examining `/proc/self/mountinfo` inside each node type:
 
-The issue is architectural: CloudNative Fullstack assumes a maximum of one layer of containerisation between the DaemonSet and the real host. The Sysbox → k3d → k8s stack introduces two layers, and the CSI path resolution cannot traverse through the Sysbox namespace boundary.
+### k3d node — kubelet source path
+```
+259:1  /var/lib/docker/volumes/354647ec.../_data/volumes/93c2f31a.../_data
+       /var/lib/kubelet  rw,relatime,idmapped - ext4 /dev/root
+```
+k3d externalises all node state into **Docker volumes** managed by the Sysbox container's Docker daemon. The source path (`/var/lib/docker/volumes/...`) is meaningful only within the Sysbox container's namespace — **it does not exist inside the k3d node container's own namespace**.
 
-ClassicFullStack mode faces the same structural problem: it also needs to access real host process namespaces via `/proc/{pid}/root` for code injection, which Sysbox blocks.
+### Kind node — kubelet source path
+```
+259:1  /var/lib/sysbox/kubelet/0f86f1af1fe0075fcf34c8a45d4052a8451c1fafef5c1fad004069f5d5f93a06
+       /mnt/root/var/lib/kubelet  rw,relatime,idmapped - ext4 /dev/root
+```
+Kind uses Sysbox's **first-class Kind integration**. Sysbox stores kubelet state at `/var/lib/sysbox/kubelet/{hash}/` on the real EC2 host filesystem (confirmed: `/var/lib/sysbox/kubelet/` exists on the worker). This path is properly mounted inside the Kind node container and is accessible from within it. When the OneAgent's `hostPath: /` mounts the Kind node's root at `/mnt/root`, the path `/mnt/root/var/lib/kubelet/pods/.../csi.oneagent.dynatrace.com/...` **exists and is readable** — the CSI path resolution succeeds.
+
+### Summary
+| Cluster engine | Kubelet storage backend | OneAgent CSI path resolves? | CloudNative Fullstack works? |
+|---|---|---|---|
+| k3d (k3s) | Docker volumes (`/var/lib/docker/volumes/...`) | No — path not in node namespace | **No — CrashLoopBackOff** |
+| Kind | Sysbox-native (`/var/lib/sysbox/kubelet/...`) | Yes — on same device, in node namespace | **Yes** |
+
+## Can It Be Fixed for k3d?
+
+**Not without switching cluster engines.** The issue is that k3d's architecture externalises node state into Docker volumes, and there is no configuration knob to change where k3d stores its node data. The Sysbox CSI namespace boundary cannot be bridged.
 
 ---
 
-## What Does Work for Observability Inside Sysbox k3d
+## What Does Work for Observability
 
-### Option 1: OpenTelemetry Collector → Dynatrace SaaS (already deployed)
+### Option 0: Switch to Kind as the cluster engine
+
+If CloudNative Fullstack is required, switch from k3d to Kind. Sysbox has native Kind support and the OneAgent will initialise correctly. The `bug-busters` training sessions already run on Kind and can serve as a reference.
+
+Trade-off: Kind has no built-in LoadBalancer (no equivalent to k3d's `serverlb`). Ingress requires deploying a separate nginx ingress controller and using NodePort for external access. The app-preview port-forwarding feature of the ops dashboard would need adjustment (Kind maps NodePorts, not a single LB port).
+
+### Option 1: OpenTelemetry Collector → Dynatrace SaaS (already deployed, k3d path)
 
 The astroshop stack already ships a `codespaces-framework-otel-collector` (1/1 Running). Configure it to forward to DT SaaS via OTLP:
 
