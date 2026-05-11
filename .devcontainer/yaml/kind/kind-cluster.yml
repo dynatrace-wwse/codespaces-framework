@@ -49,6 +49,14 @@ nodes:
   - hostPort: 443
     containerPort: 443
     protocol: TCP
+  # Alternate ingress ports for envs where 80/443 are taken (e.g. ops-server Sysbox)
+  # Matches K3D_LB_HTTP_PORT=30080 / K3D_LB_HTTPS_PORT=30443 set by the worker manager
+  - hostPort: 30080
+    containerPort: 80
+    protocol: TCP
+  - hostPort: 30443
+    containerPort: 443
+    protocol: TCP
   # Legacy NodePort mappings (backward compat, USE_LEGACY_PORTS=true)
   - hostPort: 30100
     containerPort: 30100
