@@ -228,6 +228,9 @@ class WorkerAgent:
                 job["worker_arch"] = WORKER_ARCH
 
                 asyncio.create_task(self._run_job(job))
+                # Yield so the task acquires the semaphore before we check
+                # semaphore.locked() again next iteration.
+                await asyncio.sleep(0)
 
             except redis.ConnectionError:
                 log.error("Redis connection lost, retrying in 5s...")

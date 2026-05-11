@@ -321,6 +321,9 @@ class WorkerManager:
                     job["job_id"] = job_id
 
                 asyncio.create_task(self._run_with_semaphore(semaphore, job))
+                # Yield so the created task gets to acquire the semaphore
+                # before we check semaphore.locked() again next iteration.
+                await asyncio.sleep(0)
 
             except redis.ConnectionError:
                 log.error("Redis connection lost, retrying in 5s...")
