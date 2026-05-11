@@ -203,8 +203,12 @@ class WorkerAgent:
 
         while self._running:
             try:
-                # Back-pressure: leave the job in Redis until we have capacity.
-                if len(self.active_jobs) >= WORKER_CAPACITY:
+                # Back-pressure: leave the job in Redis until a semaphore slot
+                # is free. semaphore.locked() is True when _value==0 (all slots
+                # taken). Checking active_jobs has a race — it is only updated
+                # after the semaphore is acquired, so the consumer can drain the
+                # full queue before any task has a chance to run.
+                if self.semaphore.locked():
                     await asyncio.sleep(1)
                     continue
 

@@ -289,11 +289,20 @@ class WorkerManager:
             log.info("Recovered %d orphaned deferred jobs at startup", recovered)
 
     async def _consume_queue(self, queue_name: str, semaphore: asyncio.Semaphore):
-        """Consume jobs from a single queue with concurrency limiting."""
+        """Consume jobs from a single queue with concurrency limiting.
+
+        Back-pressure: only dequeue when a semaphore slot is available so jobs
+        remain visible in Redis (and the dashboard queue counter stays accurate)
+        until the worker is actually ready to run them.
+        """
         queue_key = f"queue:{queue_name}"
         while True:
             try:
-                # Blocking pop with 5s timeout
+                # Back-pressure: leave jobs in Redis until a slot is free.
+                if semaphore.locked():
+                    await asyncio.sleep(1)
+                    continue
+
                 result = await self.pool.blpop(queue_key, timeout=5)
                 if result is None:
                     continue
@@ -311,7 +320,6 @@ class WorkerManager:
                     )
                     job["job_id"] = job_id
 
-                # Acquire semaphore slot before dispatching
                 asyncio.create_task(self._run_with_semaphore(semaphore, job))
 
             except redis.ConnectionError:
