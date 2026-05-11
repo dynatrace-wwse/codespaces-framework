@@ -1,27 +1,48 @@
-name: deploy mkdocs to github pages
-run-name: ${{ github.event.head_commit.message }}  - deploy github pages
-permissions:
-  contents: write
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-      - docs/*
-jobs:
-  deploy-github-pages:
-    runs-on: ubuntu-24.04
-    # No CI Test should run longer than 10 minutes.
-    timeout-minutes: 10
-    steps:
-    - name: Checkout repository code
-      uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.x'
-    - name: MKDocs - install requirements, build, gh-deploy
-      run: |
-        pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
-        git fetch origin gh-pages:gh-pages
-        mkdocs build
-        mkdocs gh-deploy
+  name: Deploy GitHub Pages
+  run-name: ${{ github.event.head_commit.message }} - deploy github pages
+  on:
+    push:
+      branches:
+        - main
+        - docs/*
+        - rfe/*
+    workflow_dispatch:
+      inputs:
+        ref:
+          description: Branch to deploy
+          default: main
+          required: false
+
+  permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+  concurrency:
+    group: pages
+    cancel-in-progress: true
+
+  jobs:
+    deploy-github-pages:
+      environment:
+        name: github-pages
+        url: ${{ steps.deployment.outputs.page_url }}
+      runs-on: ubuntu-24.04
+      timeout-minutes: 10
+      steps:
+        - uses: actions/checkout@v4
+          with:
+            ref: ${{ inputs.ref || github.ref }}
+        - uses: actions/setup-python@v5
+          with:
+            python-version: '3.x'
+        - name: Install requirements
+          run: pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
+        - uses: actions/configure-pages@v4
+        - name: Build documentation
+          run: mkdocs build
+        - uses: actions/upload-pages-artifact@v3
+          with:
+            path: site/
+        - uses: actions/deploy-pages@v4
+          id: deployment

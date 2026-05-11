@@ -174,7 +174,79 @@ Config keys (set in `dynakube-config.yaml` or `dynakube-defaults.yaml`) map to `
 
 ---
 
-## Kubernetes & Kind
+## Kubernetes: Cluster Management
+
+The framework supports two cluster engines: **K3d** (default, lightweight) and **Kind** (for CloudNativeFullStack). Switch with the `CLUSTER_ENGINE` environment variable.
+
+### Unified Cluster API (use these in post-create.sh)
+
+| Function | Description |
+|---|---|
+| `startCluster` | Starts the cluster based on `CLUSTER_ENGINE` (default: K3d) |
+| `stopCluster` | Stops the cluster |
+| `deleteCluster` | Deletes the cluster completely |
+
+```bash
+# Default: K3d
+startCluster
+
+# Switch to Kind for CloudNativeFullStack
+export CLUSTER_ENGINE=kind
+startCluster
+```
+
+### K3d Cluster (default engine)
+
+K3d (K3s in Docker) is the default cluster engine — 3× faster startup and lower resource usage than Kind.
+
+| Function | Description |
+|---|---|
+| `startK3dCluster` | Starts, creates, or attaches to a K3d cluster named `enablement` |
+| `createK3dCluster` | Creates a new K3d cluster (configurable via env vars) |
+| `attachK3dCluster` | Merges kubeconfig and switches context to the K3d cluster |
+| `stopK3dCluster` | Stops the K3d cluster |
+| `deleteK3dCluster` | Deletes the K3d cluster |
+| `installK3d` | Installs k3d CLI if not already present |
+
+K3d port configuration (env vars for `createK3dCluster`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `K3D_CLUSTER_NAME` | `enablement` | Cluster name |
+| `K3D_LB_HTTP_PORT` | `80` | Host port for ingress port 80 |
+| `K3D_LB_HTTPS_PORT` | `443` | Host port for ingress port 443 |
+| `K3D_API_PORT` | `6443` | Kubernetes API port |
+| `K3D_NODEPORT_BASE` | `30100` | First NodePort exposed |
+
+```bash
+# On ops-server where nginx owns 80/443:
+export K3D_LB_HTTP_PORT=30080 K3D_LB_HTTPS_PORT=30443 K3D_API_PORT=6444
+startK3dCluster
+```
+
+Backward-compatibility aliases: `startK3sCluster`, `createK3sCluster`, `attachK3sCluster`, `stopK3sCluster`, `deleteK3sCluster`.
+
+### Kind Cluster
+
+Kind (Kubernetes IN Docker) is used when CloudNativeFullStack is required — OneAgent DaemonSet needs real Linux nodes, not Docker containers.
+
+| Function | Description |
+|---|---|
+| `startKindCluster` | Starts, creates, or attaches to an existing Kind cluster; installs ingress controller |
+| `createKindCluster` | Creates a new Kind cluster using the framework's kind-cluster.yml |
+| `attachKindCluster` | Writes the kubeconfig for a running Kind cluster to `~/.kube/config` |
+| `stopKindCluster` | Stops the `kind-control-plane` Docker container |
+| `deleteKindCluster` | Deletes the Kind cluster completely |
+
+```bash
+# K3d is the default — use Kind only for CNFS
+export CLUSTER_ENGINE=kind
+startKindCluster    # safe to call even if cluster already exists
+deleteKindCluster   # destructive, removes the cluster
+```
+
+!!! warning "CloudNativeFullStack on K3d"
+    OneAgent DaemonSet will CrashLoopBackOff on K3d — its nodes are Docker containers without real Linux host mounts. Use `deployApplicationMonitoring` (AppOnly mode) on K3d. Use `deployCloudNative` only with Kind.
 
 ### Pod Waiting
 
@@ -193,22 +265,6 @@ waitAppCanHandleRequests 8080 20   # port 8080, 20 retries
 ```
 
 All waiting functions retry every 10 seconds for up to 60 attempts (10 minutes), then exit with error.
-
-### Kind Cluster
-
-| Function | Description |
-|---|---|
-| `startKindCluster` | Starts, creates, or attaches to an existing Kind cluster; installs ingress controller |
-| `createKindCluster` | Creates a new Kind cluster using the framework's kind-cluster.yml |
-| `attachKindCluster` | Writes the kubeconfig for a running Kind cluster to `~/.kube/config` |
-| `stopKindCluster` | Stops the `kind-control-plane` Docker container |
-| `deleteKindCluster` | Deletes the Kind cluster completely |
-
-```bash
-startKindCluster    # safe to call even if cluster already exists
-stopKindCluster     # preserves the container, restartable
-deleteKindCluster   # destructive, removes the cluster
-```
 
 ---
 
