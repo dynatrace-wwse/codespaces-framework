@@ -5,7 +5,8 @@ source .devcontainer/util/source_framework.sh
 
 setUpTerminal
 
-# Start Kubernetes cluster (K3s by default, or Kind if CLUSTER_ENGINE=kind)
+# Kind is required for CloudNativeFullStack — OneAgent DaemonSet needs real Linux nodes
+export CLUSTER_ENGINE=kind
 startCluster
 
 installK9s
@@ -13,9 +14,8 @@ installK9s
 # Dynatrace Operator is deployed automatically, secrets are read from the env.
 dynatraceDeployOperator
 
-# You can deploy CNFS (for CNFS use Kind) or AppOnly (use k3d)
-#deployCloudNative
-deployApplicationMonitoring
+# CloudNativeFullStack: deploys OneAgent DaemonSet (requires Kind, not K3d)
+deployCloudNative
 
 # The TODO App will be deployed as a sample
 deployTodoApp

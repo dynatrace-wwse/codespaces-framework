@@ -26,6 +26,15 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ---- Global font size reduction ---- */
+.md-typeset {
+  font-size: .875rem;
+}
+
+.md-nav__link {
+  font-size: .78rem;
+}
+
 /* =============================================================
    Custom primary color (used by Material for header, links, etc.)
    ============================================================= */
@@ -436,7 +445,7 @@ body {
    ============================================================= */
 [data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link {
   color: #4e6278;
-  font-size: .75rem;
+  font-size: .7rem;
 }
 
 [data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link:hover {
