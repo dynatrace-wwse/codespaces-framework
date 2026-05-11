@@ -330,7 +330,7 @@ EOF
   export ERROR_COUNT=2
   export CODESPACE_ERRORS="Error: pod crashed"
   export DURATION=45
-  export FRAMEWORK_VERSION="1.2.7"
+  export FRAMEWORK_VERSION="1.3.0"
 
   # Mock curl to capture the payload
   curl() {

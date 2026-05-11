@@ -68,7 +68,7 @@ Extracted shared infrastructure from 27 repos into a versioned library:
 - Published `shinojosa/dt-enablement:v1.2` multi-arch image (amd64 + arm64)
 - Deployed codespaces-tracker on GKE with MaxMind geo-enrichment
 - Set up OpenPipeline for BizEvent extraction from creation logs
-- Current version: **v1.2.7**
+- Current version: **v1.3.0**
 
 ### Phase 2 — Core Refactoring (In Progress)
 
@@ -285,8 +285,7 @@ Migrate all documentation from Dynatrace Classic UI to Native Apps:
 
 | Branch | Commits ahead of origin | Status |
 |--------|------------------------|--------|
-| `main` | — | Stable. Phase 2 tasks 1-2 merged. v1.2.7 |
-| `rfe/phase2-k3s-engine` | 7 committed + uncommitted changes | Shell PTY, daemon jobs, font, fullscreen, new window. **Not yet pushed** |
+| `main` | — | Stable. Phase 2 merged. v1.3.0 |
 | `rfe/ops-server` | 37 | Ops server platform. Running on EC2 |
 | `rfe/mkdocs-jscript` | — | MkDocs RUM refactoring. Ready to merge |
 
