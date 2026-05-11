@@ -33,7 +33,7 @@ The following steps apply to both scenarios:
 		2. **CPU & Memory:** Requirements depend on your workloads. As a guideline, refer to the `hostRequirements` section in `.devcontainer.json`. A typical setup with 4 CPU cores and 16 GB RAM is sufficient for most use cases.
 		3. **Network Ports:** Ensure the following ports are open for inbound connections:
 			1. `22` (SSH)
-			2. `30100`, `30200`, `30300` (for application access; each deployed app is exposed via Kubernetes NodePort)
+			2. `80` and `443` — nginx ingress; apps are exposed via nginx ingress + sslip.io magic DNS (e.g. `todoapp.<your-ip>.sslip.io`)
 
 2. **SSH into the host**
 
