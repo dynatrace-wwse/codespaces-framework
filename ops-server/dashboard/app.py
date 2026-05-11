@@ -1702,25 +1702,64 @@ def _rewrite_proxy_body(content: bytes, base_path: str, content_type: str) -> by
 
     # Rewrite root-relative url(...) in CSS and inline HTML styles.
     # Excludes protocol-relative //... and data: URIs.
-    text = _re.sub(
-        r'url\((/(?!/)[^)]*)\)',
-        lambda m: f"url({base_path}{m.group(1)})",
-        text,
-    )
+    def _rewrite_css_url(m: "_re.Match") -> str:
+        val = m.group(1).strip("'\"")
+        if val.startswith("/") and not val.startswith("//"):
+            if not val.startswith(base_path):
+                return f"url({base_path}{val})"
+        elif _re.match(r'^https?://localhost(:\d+)?/', val):
+            path_part = _re.sub(r'^https?://localhost(:\d+)?', '', val)
+            path_part = _re.sub(r'^//+', '/', path_part)
+            if not path_part.startswith(base_path):
+                return f"url({base_path}{path_part})"
+        return m.group(0)
+
+    text = _re.sub(r"url\(([^)]*)\)", _rewrite_css_url, text)
 
     if is_html:
         # Rewrite src="/" href="/" action="/" data-src="/" attributes.
+        # Also handles absolute http://localhost:PORT/... URLs that Next.js / some
+        # apps emit (e.g. <img src="http://localhost:8080/icons/foo.svg">).
+        def _rewrite_attr_value(val: str) -> str:
+            # Root-relative /path
+            if val.startswith("/") and not val.startswith("//"):
+                if not val.startswith(base_path):
+                    return base_path + val
+            # Absolute localhost URL — strip the origin
+            elif _re.match(r'^https?://localhost(:\d+)?/', val):
+                path_part = _re.sub(r'^https?://localhost(:\d+)?', '', val)
+                # Normalise accidental double-slash after stripping origin
+                path_part = _re.sub(r'^//+', '/', path_part)
+                if not path_part.startswith(base_path):
+                    return base_path + path_part
+            return val
+
         for attr in ("src", "href", "action", "data-src"):
             text = _re.sub(
-                rf'{attr}="(/(?!/)[^"]*)"',
-                lambda m, a=attr: f'{a}="{base_path}{m.group(1)}"',
+                rf'{attr}="([^"]*)"',
+                lambda m, a=attr: f'{a}="{_rewrite_attr_value(m.group(1))}"',
                 text,
             )
             text = _re.sub(
-                rf"{attr}='(/(?!/)[^']*)'",
-                lambda m, a=attr: f"{a}='{base_path}{m.group(1)}'",
+                rf"{attr}='([^']*)'",
+                lambda m, a=attr: f"{a}='{_rewrite_attr_value(m.group(1))}'",
                 text,
             )
+
+        # srcset has comma-separated "URL [descriptor]" pairs — rewrite each URL.
+        def _rewrite_srcset(m: "_re.Match") -> str:
+            quote = m.group(1)
+            parts = []
+            for entry in m.group(2).split(","):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                tokens = entry.split(None, 1)
+                rewritten = _rewrite_attr_value(tokens[0])
+                parts.append(rewritten + (" " + tokens[1] if len(tokens) > 1 else ""))
+            return f'srcset={quote}{", ".join(parts)}{quote}'
+
+        text = _re.sub(r'srcset=(["\'])([^"\']*)\1', _rewrite_srcset, text, flags=_re.IGNORECASE)
 
         # Also rewrite Location: root-relative in meta refresh tags.
         text = _re.sub(
@@ -1729,19 +1768,32 @@ def _rewrite_proxy_body(content: bytes, base_path: str, content_type: str) -> by
             text,
         )
 
-        # Inject a tiny JS shim that patches fetch() and XMLHttpRequest.open()
-        # so root-relative API calls made from app JavaScript (e.g.
-        # $.ajax('/todos') or fetch('/api/cart')) go through the proxy instead
-        # of hitting the ops dashboard root.
+        # Inject a JS shim that:
+        # - Rewrites root-relative and absolute localhost URLs in fetch() / XHR
+        #   so dynamic API calls go through the proxy base path.
+        # - Patches history.pushState / history.replaceState so Next.js-style
+        #   client-side navigation stays inside the proxy path (prevents iframe
+        #   URL from escaping to the ops dashboard root).
         shim = (
             f"<script>"
             f"(function(){{"
             f"var B='{base_path}';"
-            f"function r(u){{return typeof u==='string'&&u.charAt(0)==='/'&&u.charAt(1)!=='/'?B+u:u;}}"
+            f"function r(u){{"
+            f"if(typeof u!=='string')return u;"
+            f"if(u.charAt(0)==='/'&&u.charAt(1)!=='/'&&u.indexOf(B)!==0)return B+u;"
+            f"if(/^https?:\\/\\/localhost(:\\d+)?\\//.test(u)){{"
+            f"try{{var p=new URL(u);var q=p.pathname.replace(/^\\/\\//,'/');if(q.indexOf(B)!==0)return B+q+(p.search||'')+(p.hash||'');}}catch(e){{}}"
+            f"}}"
+            f"return u;"
+            f"}}"
             f"var _f=window.fetch;"
             f"window.fetch=function(i,o){{return _f.call(this,typeof i==='string'?r(i):i,o);}};"
             f"var _x=XMLHttpRequest.prototype.open;"
             f"XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=r(String(u));return _x.apply(this,arguments);}};"
+            f"var _ps=history.pushState.bind(history);"
+            f"history.pushState=function(s,t,u){{return _ps(s,t,u!=null?r(String(u)):u);}};"
+            f"var _rs=history.replaceState.bind(history);"
+            f"history.replaceState=function(s,t,u){{return _rs(s,t,u!=null?r(String(u)):u);}};"
             f"}})();"
             f"</script>"
         )
