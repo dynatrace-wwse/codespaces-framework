@@ -122,17 +122,35 @@ then prepends `ssh -t -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host}`.
 
 **Important:** shell sessions into `integration-test` jobs disconnect when the test finishes and the container is torn down.  Use `daemon` jobs for interactive training sessions — the container stays alive until manually terminated.
 
-### Two-repo deployment note
+### Path layout — canonical
 
-The dashboard/worker services run as the `ops` user from `/home/ops/enablement-framework/...`.
-Edits are made in `/home/ubuntu/enablement-framework/...` (separate git clone).
-After any change, sync with:
+Both master and AMD worker use the same layout under the `ops` user:
+
+```
+/home/ops/enablement-framework/codespaces-framework/   ← services run here (ops user)
+/home/ubuntu/enablement-framework/codespaces-framework/ ← edits happen here (master only)
+```
+
+**Master only** has both paths (edit + production). The AMD worker only has the `ops` path.
+
+AMD worker git pull (future):
 ```bash
-sudo cp /home/ubuntu/.../ops-server/workers/manager.py /home/ops/.../ops-server/workers/manager.py
-sudo cp /home/ubuntu/.../ops-server/dashboard/app.py   /home/ops/.../ops-server/dashboard/app.py
+ssh autonomous-enablements-worker \
+  "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework pull"
+```
+
+After editing on master (`ubuntu` path), sync to production (`ops` path) and restart:
+```bash
+sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/workers/manager.py \
+        /home/ops/enablement-framework/codespaces-framework/ops-server/workers/manager.py
+sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/dashboard/app.py \
+        /home/ops/enablement-framework/codespaces-framework/ops-server/dashboard/app.py
 # ... static files, templates, etc.
 sudo systemctl restart ops-dashboard ops-worker
 ```
+
+> **Note:** AMD worker was historically at `/home/ops/codespaces-framework/` (no wrapper dir).
+> Migration to the canonical path: stop service → clone to new path → update systemd WorkingDirectory → restart.
 
 ---
 
