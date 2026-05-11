@@ -1,0 +1,6 @@
+version: 2
+
+# env.template contains placeholder values (not real secrets) — template
+# files are meant to show variable names, not actual credentials.
+ignore-paths:
+  - ops-server/agents/env.template
