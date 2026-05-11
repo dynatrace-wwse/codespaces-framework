@@ -7,6 +7,7 @@ on:
     branches:
       - main
       - docs/*
+      - rfe/*
 jobs:
   deploy-github-pages:
     runs-on: ubuntu-24.04
