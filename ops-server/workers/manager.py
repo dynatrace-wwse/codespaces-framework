@@ -542,27 +542,35 @@ class WorkerManager:
             return {"error": f"Unknown job type: {job_type}"}
 
     async def _run_deploy_ghpages(self, job: dict) -> dict:
-        """Run the deploy-ghpages workflow steps locally, mirroring deploy-ghpages.yaml."""
-        import shutil as _shutil
-        repo      = job["repo"]
-        repo_name = repo.split("/")[-1]
-        job_id    = job["job_id"]
-        branch    = job.get("ref") or job.get("branch") or "main"
+        """Trigger deploy-ghpages.yaml via workflow_dispatch and stream progress.
 
-        work_dir = WORKDIR / job_id
-        repo_dir = work_dir / repo_name
-        work_dir.mkdir(parents=True, exist_ok=True)
+        Pages is configured as build_type=workflow, so the correct deployment
+        path is to fire the Actions workflow (which uses actions/deploy-pages)
+        rather than running mkdocs gh-deploy locally.
+        """
+        import urllib.request
+        import urllib.error
+        import json as _json
+        import functools
+
+        repo   = job["repo"]
+        job_id = job["job_id"]
+        branch = job.get("ref") or job.get("branch") or "main"
 
         livelog_key = f"job:livelog:{job_id}"
+        output_lines: list[str] = []
+
+        async def emit(line: str) -> None:
+            output_lines.append(line)
+            current = (await self.pool.get(livelog_key) or "")
+            await self.pool.set(livelog_key, current + line + "\n", ex=7200)
+
         header = f"=== deploy-ghpages for {repo} @ {branch} ===\n"
         await self.pool.set(livelog_key, header, ex=7200)
 
         log_file   = LOGS_DIR / f"{job_id}.log"
         start_time = time.time()
 
-        # GH_DEPLOY_TOKEN must have repo/contents:write scope for pushing.
-        # GH_TOKEN (org-read only) cannot push — fall back gracefully but it
-        # will still fail at git push if only GH_TOKEN is available.
         gh_token = (
             os.environ.get("GH_DEPLOY_TOKEN")
             or os.environ.get("GH_TOKEN")
@@ -571,90 +579,112 @@ class WorkerManager:
         if not os.environ.get("GH_DEPLOY_TOKEN"):
             log.warning(
                 "GH_DEPLOY_TOKEN not set — falling back to GH_TOKEN which likely "
-                "lacks repo write scope. Set GH_DEPLOY_TOKEN in /home/ops/.env."
+                "lacks Actions write scope. Set GH_DEPLOY_TOKEN in /home/ops/.env."
             )
-        auth_url = (
-            f"https://{gh_token}@github.com/{repo}.git"
-            if gh_token else f"https://github.com/{repo}.git"
+
+        def _gh_api(path: str, method: str = "GET", body=None):
+            url = f"https://api.github.com{path}"
+            req = urllib.request.Request(url, method=method)
+            req.add_header("Authorization", f"Bearer {gh_token}")
+            req.add_header("Accept", "application/vnd.github+json")
+            req.add_header("X-GitHub-Api-Version", "2022-11-28")
+            if body is not None:
+                req.add_header("Content-Type", "application/json")
+                req.data = _json.dumps(body).encode()
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = resp.read()
+                    return resp.status, _json.loads(data) if data else None
+            except urllib.error.HTTPError as exc:
+                data = exc.read()
+                return exc.code, _json.loads(data) if data else None
+
+        loop = asyncio.get_running_loop()
+
+        async def gh_api(path: str, method: str = "GET", body=None):
+            return await loop.run_in_executor(
+                None, functools.partial(_gh_api, path, method=method, body=body)
+            )
+
+        def _finish(exit_code: int) -> dict:
+            log_file.write_text(
+                self._mask_secrets(header + "\n".join(output_lines) + "\n")
+            )
+            return {
+                "job_type":         "deploy-ghpages",
+                "exit_code":        exit_code,
+                "duration_seconds": int(time.time() - start_time),
+                "passed":           exit_code == 0,
+                "log_file":         str(log_file),
+            }
+
+        # 1. Dispatch the workflow
+        await emit(f"Triggering deploy-ghpages.yaml for {repo} @ {branch}")
+        dispatch_time = datetime.now(timezone.utc)
+
+        http_status, resp_body = await gh_api(
+            f"/repos/{repo}/actions/workflows/deploy-ghpages.yaml/dispatches",
+            method="POST",
+            body={"ref": "main", "inputs": {"ref": branch}},
         )
+        if http_status not in (204, 200):
+            await emit(f"ERROR: workflow_dispatch returned HTTP {http_status}: {resp_body}")
+            return _finish(1)
 
-        # Use a raw string + env vars to avoid f-string escaping issues with
-        # bash special chars like ${VAR} and regex character classes [^}"].
-        script = r"""
-set -euo pipefail
+        await emit("Workflow dispatched — waiting for run to appear...")
 
-# Ensure pip-installed scripts (mkdocs, ghp-import, etc.) are on PATH
-export PATH="/home/ops/.local/bin:$PATH"
-export GIT_TERMINAL_PROMPT=0
+        # 2. Poll for the triggered run (up to 60 s)
+        run_id = None
+        html_url = f"https://github.com/{repo}/actions"
+        for _ in range(30):
+            await asyncio.sleep(2)
+            _, data = await gh_api(
+                f"/repos/{repo}/actions/runs?event=workflow_dispatch&per_page=10"
+            )
+            if data:
+                for run in data.get("workflow_runs", []):
+                    run_created = datetime.fromisoformat(
+                        run["created_at"].replace("Z", "+00:00")
+                    )
+                    if run_created >= dispatch_time:
+                        run_id   = run["id"]
+                        html_url = run.get("html_url", html_url)
+                        break
+            if run_id:
+                break
 
-echo "--- Cloning $REPO @ $BRANCH ---"
-git clone --branch "$BRANCH" "https://github.com/$REPO.git" "$REPO_DIR"
-cd "$REPO_DIR"
+        if not run_id:
+            await emit("ERROR: timed out waiting for workflow run to appear (60 s)")
+            return _finish(1)
 
-git config user.email "ops-bot@enablement"
-git config user.name "Enablement Ops"
+        await emit(f"Run started: {html_url}")
+        await emit("Waiting for completion...")
 
-# Add a named remote with the token embedded so ghp_import's git push
-# uses the URL directly without going through any credential helper.
-# mkdocs gh-deploy --remote-name deploy passes this name to ghp_import.
-if [ -n "$AUTH_URL" ]; then
-    git remote add deploy "$AUTH_URL"
-    REMOTE_FLAG="--remote-name deploy"
-else
-    REMOTE_FLAG=""
-fi
+        # 3. Poll for completion (up to 10 minutes)
+        conclusion = None
+        last_status = None
+        for _ in range(60):
+            await asyncio.sleep(10)
+            _, run_data = await gh_api(f"/repos/{repo}/actions/runs/{run_id}")
+            if run_data:
+                status = run_data.get("status")
+                if status != last_status:
+                    await emit(f"  status: {status}")
+                    last_status = status
+                if status == "completed":
+                    conclusion = run_data.get("conclusion")
+                    html_url   = run_data.get("html_url", html_url)
+                    break
 
-echo "--- Fetching framework version ---"
-FRAMEWORK_VERSION=$(grep -oP ':-\K[^}"]+' .devcontainer/util/source_framework.sh 2>/dev/null | head -1 || true)
-if [ -n "$FRAMEWORK_VERSION" ]; then
-    echo "Framework version: $FRAMEWORK_VERSION"
-    BASE_URL="https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework"
-    curl -fsSL "${BASE_URL}/${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o mkdocs-base.yaml \
-        || curl -fsSL "${BASE_URL}/v${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o mkdocs-base.yaml \
-        || echo "Warning: mkdocs-base.yaml not found at tag ${FRAMEWORK_VERSION}, using repo config"
-else
-    echo "No framework version found in source_framework.sh, skipping mkdocs-base.yaml fetch"
-fi
-
-echo "--- Installing mkdocs requirements ---"
-pip install --break-system-packages -q -r docs/requirements/requirements-mkdocs.txt
-
-echo "--- Fetching gh-pages branch ---"
-git fetch origin gh-pages:gh-pages || true
-
-echo "--- Building and deploying ---"
-mkdocs build
-mkdocs gh-deploy --force $REMOTE_FLAG
-
-echo "--- Done ---"
-"""
-        proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", script,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env={
-                **os.environ,
-                "REPO":        repo,
-                "BRANCH":      branch,
-                "REPO_DIR":    str(repo_dir),
-                "AUTH_URL":    auth_url,
-                "GH_TOKEN_VAL": gh_token,
-            },
-        )
-        output   = await self._stream_to_redis(proc, livelog_key, timeout_s=300)
-        duration = int(time.time() - start_time)
-        log_file.write_text(self._mask_secrets(header + output))
-
-        if work_dir.exists():
-            _shutil.rmtree(work_dir, ignore_errors=True)
-
-        return {
-            "job_type":         "deploy-ghpages",
-            "exit_code":        proc.returncode,
-            "duration_seconds": duration,
-            "passed":           proc.returncode == 0,
-            "log_file":         str(log_file),
-        }
+        if conclusion == "success":
+            org, name = repo.split("/", 1)
+            await emit(f"Deployed successfully! Site: https://{org}.github.io/{name}/")
+            await emit(f"Run: {html_url}")
+            await emit("--- Done ---")
+            return _finish(0)
+        else:
+            await emit(f"ERROR: workflow {conclusion or 'timed out'}. See: {html_url}")
+            return _finish(1)
 
     async def _run_agent(self, job: dict, agent_type: str) -> dict:
         """Run a Claude Code agent for the given job, streaming output to Redis livelog."""
