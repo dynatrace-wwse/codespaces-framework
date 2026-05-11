@@ -1666,7 +1666,7 @@ function _switchShellTab(tab, proxyUrl) {
         frame.style.display = 'none';
         frame.src = '';
         empty.style.display = '';
-        empty.innerHTML = '<h4>No apps deployed</h4><p>Deploy a Kubernetes app inside the cluster, then register it:</p><code>registerApp &lt;name&gt; &lt;namespace&gt; &lt;service&gt; &lt;port&gt;</code>';
+        empty.innerHTML = '<h4>No apps deployed</h4><p>Open a shell and run <code>deployApp</code> without arguments to list available apps, then deploy one.</p>';
     } else {
         terminal.style.display = 'none';
         empty.style.display = 'none';
@@ -1751,7 +1751,7 @@ function _switchLivelogTab(tab, proxyUrl) {
         frame.style.display = 'none';
         frame.src = '';
         empty.style.display = '';
-        empty.innerHTML = '<h4>No apps deployed</h4><p>Deploy a Kubernetes app inside the cluster, then register it:</p><code>registerApp &lt;name&gt; &lt;namespace&gt; &lt;service&gt; &lt;port&gt;</code>';
+        empty.innerHTML = '<h4>No apps deployed</h4><p>Open a shell and run <code>deployApp</code> without arguments to list available apps, then deploy one.</p>';
     } else {
         pre.style.display = 'none';
         empty.style.display = 'none';

@@ -1676,6 +1676,88 @@ async def api_job_apps(job_id: str):
     }
 
 
+def _rewrite_proxy_body(content: bytes, base_path: str, content_type: str) -> bytes:
+    """Rewrite root-relative URLs in HTML/CSS proxy responses.
+
+    For HTML: rewrites src/href/action attributes and injects a JS shim that
+    patches fetch() and XMLHttpRequest so dynamic API calls (e.g. $.ajax('/todos'))
+    are transparently prefixed with the proxy base path at runtime.
+
+    For CSS: rewrites url(/...) patterns so background images load correctly.
+    """
+    import re as _re
+    ct = content_type.lower()
+    is_html = "html" in ct or "xhtml" in ct
+    is_css = "css" in ct
+    if not (is_html or is_css):
+        return content
+
+    charset = "utf-8"
+    if "charset=" in ct:
+        charset = ct.split("charset=")[-1].strip().split(";")[0].strip()
+    try:
+        text = content.decode(charset, errors="replace")
+    except Exception:
+        return content
+
+    # Rewrite root-relative url(...) in CSS and inline HTML styles.
+    # Excludes protocol-relative //... and data: URIs.
+    text = _re.sub(
+        r'url\((/(?!/)[^)]*)\)',
+        lambda m: f"url({base_path}{m.group(1)})",
+        text,
+    )
+
+    if is_html:
+        # Rewrite src="/" href="/" action="/" data-src="/" attributes.
+        for attr in ("src", "href", "action", "data-src"):
+            text = _re.sub(
+                rf'{attr}="(/(?!/)[^"]*)"',
+                lambda m, a=attr: f'{a}="{base_path}{m.group(1)}"',
+                text,
+            )
+            text = _re.sub(
+                rf"{attr}='(/(?!/)[^']*)'",
+                lambda m, a=attr: f"{a}='{base_path}{m.group(1)}'",
+                text,
+            )
+
+        # Also rewrite Location: root-relative in meta refresh tags.
+        text = _re.sub(
+            r'(content="\d+;\s*url=)(/(?!/)[^"]*)',
+            lambda m: f"{m.group(1)}{base_path}{m.group(2)}",
+            text,
+        )
+
+        # Inject a tiny JS shim that patches fetch() and XMLHttpRequest.open()
+        # so root-relative API calls made from app JavaScript (e.g.
+        # $.ajax('/todos') or fetch('/api/cart')) go through the proxy instead
+        # of hitting the ops dashboard root.
+        shim = (
+            f"<script>"
+            f"(function(){{"
+            f"var B='{base_path}';"
+            f"function r(u){{return typeof u==='string'&&u.charAt(0)==='/'&&u.charAt(1)!=='/'?B+u:u;}}"
+            f"var _f=window.fetch;"
+            f"window.fetch=function(i,o){{return _f.call(this,typeof i==='string'?r(i):i,o);}};"
+            f"var _x=XMLHttpRequest.prototype.open;"
+            f"XMLHttpRequest.prototype.open=function(m,u){{arguments[1]=r(String(u));return _x.apply(this,arguments);}};"
+            f"}})();"
+            f"</script>"
+        )
+        if "</head>" in text:
+            text = text.replace("</head>", shim + "</head>", 1)
+        elif "<head>" in text:
+            text = text.replace("<head>", "<head>" + shim, 1)
+        else:
+            text = shim + text
+
+    try:
+        return text.encode(charset, errors="replace")
+    except Exception:
+        return content
+
+
 @app.api_route(
     "/apps/{job_id}/{app_name}/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
@@ -1729,10 +1811,12 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
     forward_headers = {
         "Host": app_info["ingress_host"],
     }
-    for h in ("accept", "accept-language", "accept-encoding", "cookie",
+    for h in ("accept", "accept-language", "cookie",
                "content-type", "cache-control", "x-requested-with"):
         if h in request.headers:
             forward_headers[h] = request.headers[h]
+    # Don't forward accept-encoding: we decode the response body for URL
+    # rewriting, so the upstream should send uncompressed content.
 
     body = await request.body()
 
@@ -1763,14 +1847,29 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
 
     # Rewrite Location redirects so the browser stays within the proxy.
     location = resp_headers.get("location", "")
-    if location and (location.startswith("http://") or location.startswith("https://")):
-        resp_headers["location"] = f"/apps/{job_id}/{app_name}/"
+    if location:
+        if location.startswith("http://") or location.startswith("https://"):
+            # Absolute redirect from upstream — keep it inside the proxy.
+            resp_headers["location"] = f"/apps/{job_id}/{app_name}/"
+        elif location.startswith("/") and not location.startswith("//"):
+            # Root-relative redirect — prefix with proxy base.
+            resp_headers["location"] = f"/apps/{job_id}/{app_name}{location}"
 
-    return StreamingResponse(
-        iter([upstream.content]),
+    # Rewrite root-relative URLs in HTML/CSS so assets and API calls resolve
+    # through the proxy instead of hitting the ops dashboard root.
+    content_type = upstream.headers.get("content-type", "")
+    body = _rewrite_proxy_body(upstream.content, f"/apps/{job_id}/{app_name}", content_type)
+
+    # Remove content-encoding now that we've decoded/re-encoded the body.
+    resp_headers.pop("content-encoding", None)
+    resp_headers.pop("content-length", None)
+
+    from fastapi.responses import Response as PlainResponse
+    return PlainResponse(
+        content=body,
         status_code=upstream.status_code,
         headers=resp_headers,
-        media_type=upstream.headers.get("content-type"),
+        media_type=content_type or None,
     )
 
 
