@@ -30,7 +30,10 @@ def _get_prs(repo: str, head: str = None) -> list[dict]:
     if head:
         cmd.extend(["--head", head])
     result = _gh(cmd, repo)
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        print(f"  ⚠️  gh error: {result.stderr.strip() or 'no output'}", file=sys.stderr)
+        return []
+    if not result.stdout.strip():
         return []
     return json.loads(result.stdout)
 
