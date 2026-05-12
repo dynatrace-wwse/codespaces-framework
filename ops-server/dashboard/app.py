@@ -1373,12 +1373,14 @@ async def api_sync_prs():
         "--owner", GH_ORG,
         "--state", "open",
         "--limit", "100",
-        "--json", "number,title,repository,author,createdAt,updatedAt,url,labels,headRefName",
+        "--json", "number,title,repository,author,createdAt,updatedAt,url,labels",
     )
     if data.get("error") or not isinstance(data.get("rows"), list):
         return data
 
-    # Cross-reference each PR with our Redis integration-test results
+    # Cross-reference each PR with our Redis integration-test results.
+    # gh search prs does not expose headRefName, so we key by repo only
+    # (latest integration-test result per repo).
     completed_raw = await pool.lrange("jobs:completed", -500, -1)
     ci_map: dict[str, dict] = {}
     for raw in reversed(completed_raw):  # newest first
@@ -1389,11 +1391,9 @@ async def api_sync_prs():
         if j.get("type") != "integration-test":
             continue
         repo_k = j.get("repo", "")
-        branch_k = j.get("ref") or j.get("branch") or j.get("head_branch") or ""
-        key = f"{repo_k}|{branch_k}"
-        if key not in ci_map:
+        if repo_k not in ci_map:
             result = j.get("result", {}) or {}
-            ci_map[key] = {
+            ci_map[repo_k] = {
                 "passed": bool(result.get("passed")),
                 "status": j.get("status", "completed"),
                 "job_id": j.get("job_id", ""),
@@ -1403,8 +1403,7 @@ async def api_sync_prs():
 
     for pr in data["rows"]:
         repo_nwo = (pr.get("repository") or {}).get("nameWithOwner", "")
-        branch = pr.get("headRefName", "")
-        pr["_ci"] = ci_map.get(f"{repo_nwo}|{branch}")
+        pr["_ci"] = ci_map.get(repo_nwo)
 
     return data
 
