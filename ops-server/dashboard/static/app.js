@@ -1455,10 +1455,13 @@ async function loadSyncPRs(force = false) {
     }
 }
 
+let syncPRsFailedOnly = false;
+
 function renderSyncPRs() {
     const filter = (document.getElementById('sync-prs-filter').value || '').toLowerCase();
     const tbody = document.getElementById('sync-prs-body');
     const rows = syncPRsData.filter(r => {
+        if (syncPRsFailedOnly && r._ci?.overall !== 'fail') return false;
         if (!filter) return true;
         const title = (r.title || '').toLowerCase();
         const repo  = (r.repository?.nameWithOwner || r.repository?.name || '').toLowerCase();
@@ -1475,27 +1478,22 @@ function renderSyncPRs() {
         const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
         const updated = formatTime(r.updatedAt || r.updated_at);
         const ci = r._ci;
+        const checksUrl = `${r.url}/checks`;
         let ciBadge = '<span class="ci-badge none">—</span>';
-        let ciJobLink = '';
         if (ci) {
-            const isTerminated = ci.status === 'terminated';
-            const ciFailed = !ci.passed && !isTerminated;
-            if (isTerminated)    ciBadge = '<span class="ci-badge term">TERM</span>';
-            else if (ci.passed)  ciBadge = '<span class="ci-badge pass">PASS</span>';
-            else                 ciBadge = '<span class="ci-badge fail">FAIL</span>';
-            if (ci.job_id) {
-                ciBadge = `<a href="#" class="log-link" data-final-job="${escapeHtml(ci.job_id)}" title="View integration test log">${ciBadge}</a>`;
-            }
+            if (ci.overall === 'pass')         ciBadge = '<span class="ci-badge pass">PASS</span>';
+            else if (ci.overall === 'fail')    ciBadge = '<span class="ci-badge fail">FAIL</span>';
+            else if (ci.overall === 'pending') ciBadge = '<span class="ci-badge pend">PEND</span>';
+            ciBadge = `<a href="${escapeHtml(checksUrl)}" target="_blank" rel="noopener" title="View PR checks on GitHub">${ciBadge}</a>`;
         }
-        // Fix with AI: only for failed integration tests, only for sergiohinojosa
-        const showFix = isSergioUser && ci && !ci.passed && ci.status !== 'terminated';
+        const showFix = isSergioUser && ci?.overall === 'fail';
         const fixBtn = showFix
-            ? `<button class="btn-fix-ai fix-pr-btn" data-action
+            ? `<button class="btn btn-small btn-agent fix-pr-btn" data-action
                    data-repo="${escapeHtml(repo)}"
                    data-pr="${escapeHtml(String(r.number))}"
                    data-branch="${escapeHtml(r.headRefName || '')}"
-                   data-ci-job="${escapeHtml(ci?.job_id || '')}"
-                   title="Let AI analyze the failure and fix the repo or flag a framework issue">✨ Fix with AI</button>`
+                   data-checks-url="${escapeHtml(checksUrl)}"
+                   title="Let AI analyze the failure and fix the repo">Fix with AI</button>`
             : '—';
         return `<tr>
             <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo.split('/').pop())}</a></td>
@@ -1512,6 +1510,11 @@ function renderSyncPRs() {
 
 document.getElementById('sync-prs-filter').addEventListener('input', renderSyncPRs);
 document.getElementById('sync-prs-refresh').addEventListener('click', () => loadSyncPRs(true));
+document.getElementById('sync-prs-failed-only').addEventListener('click', () => {
+    syncPRsFailedOnly = !syncPRsFailedOnly;
+    document.getElementById('sync-prs-failed-only').classList.toggle('active', syncPRsFailedOnly);
+    renderSyncPRs();
+});
 
 // ── Synchronizer: Issues sub-tab ─────────────────────────────────────────────
 
@@ -1595,10 +1598,10 @@ function openFixWithAI(type, data) {
 
     if (type === 'pr') {
         title.textContent = `Fix with AI — PR #${data.number} · ${data.repo.split('/').pop()}`;
-        desc.textContent = 'The AI agent will fetch the failed integration test log, determine whether the root cause is in this repo or the shared framework, then apply a surgical fix. If the framework is at fault, the PR stays open and you will be notified. If the repo is at fault, a fix is committed to this branch and a new CI run is triggered.';
-        if (data.ciJobId) {
+        desc.textContent = 'The AI agent will fetch the failed integration test log from GitHub, determine whether the root cause is in this repo or the shared framework, then apply a surgical fix. If the framework is at fault, the PR stays open and you will be notified. If the repo is at fault, a fix is committed to this branch and a new CI run is triggered.';
+        if (data.checksUrl) {
             ciInfo.hidden = false;
-            ciInfo.innerHTML = `Failed integration test job: <a href="#" class="log-link" data-final-job="${escapeHtml(data.ciJobId)}">view log</a>`;
+            ciInfo.innerHTML = `Failed checks: <a href="${escapeHtml(data.checksUrl)}" target="_blank" rel="noopener">View on GitHub ↗</a>`;
         } else {
             ciInfo.hidden = true;
         }
@@ -1690,7 +1693,7 @@ document.addEventListener('click', e => {
             repo: prBtn.dataset.repo,
             number: prBtn.dataset.pr,
             branch: prBtn.dataset.branch,
-            ciJobId: prBtn.dataset.ciJob,
+            checksUrl: prBtn.dataset.checksUrl,
         });
         return;
     }
