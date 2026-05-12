@@ -73,18 +73,29 @@ function applyRoleGating() {
 
 // ── Tab Navigation ──────────────────────────────────────────────────────────
 
+function activateTab(view) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    const tab = document.querySelector(`.tab[data-view="${view}"]`);
+    if (!tab) return;
+    tab.classList.add('active');
+    document.getElementById(`view-${view}`).classList.add('active');
+    location.hash = view;
+    if (view === 'history') loadHistory();
+    if (view === 'running') loadRunningDetail();
+    if (view === 'sync') loadSyncTab();
+    if (view === 'agentic') loadAgentic();
+}
+
 document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
-        if (tab.dataset.view === 'history') loadHistory();
-        if (tab.dataset.view === 'running') loadRunningDetail();
-        if (tab.dataset.view === 'sync') loadSyncTab();
-        if (tab.dataset.view === 'agentic') loadAgentic();
-    });
+    tab.addEventListener('click', () => activateTab(tab.dataset.view));
 });
+
+// Restore tab from URL hash on load
+(function () {
+    const hash = location.hash.replace('#', '');
+    if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
+})();
 
 // ── Health Check ────────────────────────────────────────────────────────────
 
@@ -937,13 +948,15 @@ async function loadWorkers() {
                 <div>Redis: <strong style="color:${healthData.redis === 'connected' ? 'var(--green)' : 'var(--red)'}">${escapeHtml(healthData.redis || '?')}</strong></div>
                 <div>Total registered: ${workersData.total}</div>
             ` : '';
+            const statusKey = stale ? 'offline' : (w.status || 'offline');
+            const statusLabel = stale ? `stale (${ageSec}s)` : statusKey;
+            const statusPill = `<span class="worker-status-pill ${statusKey}">${escapeHtml(statusLabel)}</span>`;
             return `
-                <div class="worker-card ${stale ? 'offline' : w.status} ${isMaster ? 'is-master' : ''}">
-                    <h4>${escapeHtml(w.worker_id)} ${badge}</h4>
+                <div class="worker-card ${isMaster ? 'is-master' : ''} ${stale ? 'offline' : ''}">
+                    <h4>${escapeHtml(w.worker_id)} ${badge} ${statusPill}</h4>
                     <div class="meta">
                         <div>Arch: <strong>${escapeHtml(w.arch || '')}</strong></div>
                         <div>Active: ${escapeHtml(String(w.active_jobs || '0'))} / ${escapeHtml(String(w.capacity || '?'))}</div>
-                        <div>Status: ${stale ? `<span style="color:var(--red)">stale (${ageSec}s)</span>` : escapeHtml(w.status || '?')}</div>
                         <div>Last heartbeat: ${formatTime(w.last_heartbeat)}</div>
                         ${masterExtras}
                     </div>

@@ -62,6 +62,7 @@ body {
 
 a { color: inherit; text-decoration: none; }
 button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
@@ -338,7 +339,7 @@ td.running { background: rgba(0,180,222,.06); }
 .status-fail, a.status-fail { color: var(--red); font-weight: 600; }
 .status-terminated, a.status-terminated { color: var(--amber); font-weight: 600; }
 .status-none { color: var(--text-3); }
-.log-link { text-decoration: none; }
+.log-link { text-decoration: none; display: inline-flex; align-items: center; min-height: 32px; padding: 0 4px; }
 .log-link:hover { filter: brightness(1.2); }
 
 .spinner {
@@ -431,9 +432,21 @@ td.running { background: rgba(0,180,222,.06); }
 
 .worker-card:hover { border-color: var(--border); }
 
-.worker-card.ready { border-left: 3px solid var(--green); }
-.worker-card.busy { border-left: 3px solid var(--accent); }
-.worker-card.offline { border-left: 3px solid var(--text-3); opacity: 0.65; }
+.worker-card.offline { opacity: 0.65; }
+
+.worker-status-pill {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 99px;
+    border: 1px solid transparent;
+}
+.worker-status-pill.ready  { background: rgba(74,222,128,.12); color: var(--green); border-color: rgba(74,222,128,.3); }
+.worker-status-pill.busy   { background: rgba(0,180,222,.12);  color: var(--accent); border-color: rgba(0,180,222,.3); }
+.worker-status-pill.offline { background: rgba(255,255,255,.06); color: var(--text-3); border-color: var(--border-soft); }
 
 .worker-card h4 {
     font-size: 0.85rem; font-weight: 600;
@@ -625,7 +638,6 @@ h3 {
 .role-badge.agent   { background: rgba(167,139,250,.14); color: var(--purple); border-color: rgba(167,139,250,.32); }
 
 .worker-card.is-master {
-    border-left: 3px solid var(--accent);
     background: linear-gradient(180deg, rgba(0,180,222,.05) 0%, var(--surface) 60%);
 }
 
@@ -813,7 +825,7 @@ mark.log-match.current {
     background: var(--surface-2);
     border: 1px solid var(--border-soft);
     border-radius: 99px;
-    padding: 2px 8px;
+    padding: 5px 10px;
     line-height: 1.5;
     white-space: nowrap;
     transition: color .13s, border-color .13s, background .13s;
