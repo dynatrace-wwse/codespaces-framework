@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=19">
+    <link rel="stylesheet" href="/static/style.css?v=21">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -49,9 +49,6 @@
     <main>
         <!-- Fleet View -->
         <section id="view-fleet" class="view active">
-            <!-- Cross-repo branch trigger: pick a branch, push it across all
-                 repos that have it. Useful for validating a feature branch is
-                 mergeable across the fleet (e.g. "fix/badges-and-rum-ids"). -->
             <div class="fleet-trigger" id="fleet-trigger-panel" hidden>
                 <div class="fleet-trigger-head">
                     <span class="fleet-trigger-title">⚡ Trigger across fleet</span>
@@ -145,7 +142,7 @@
                     <tr><td colspan="2" class="loading">—</td></tr>
                 </tbody>
             </table>
-            <h3 style="margin-top: 24px;">Queued · waiting for a worker</h3>
+            <h3 style="margin-top: 24px;">Queued · waiting for a worker <span id="queued-count" style="color: var(--text-muted); font-size: 0.85rem; font-weight: 400;"></span></h3>
             <table id="queued-table">
                 <thead>
                     <tr>
@@ -153,12 +150,13 @@
                         <th>Branch</th>
                         <th>Arch</th>
                         <th>Type</th>
+                        <th>By</th>
                         <th>Queued</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody id="queued-body">
-                    <tr><td colspan="6" class="loading">—</td></tr>
+                    <tr><td colspan="7" class="loading">—</td></tr>
                 </tbody>
             </table>
         </section>
@@ -185,6 +183,12 @@
                     <option value="deploy-ghpages">Deploy Pages</option>
                     <option value="fix-ci">Fix CI</option>
                     <option value="fix-issue">Fix Issue</option>
+                </select>
+                <select id="history-limit" title="Rows per page">
+                    <option value="50" selected>50 rows</option>
+                    <option value="100">100 rows</option>
+                    <option value="200">200 rows</option>
+                    <option value="500">All</option>
                 </select>
                 <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
                 <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
@@ -280,12 +284,14 @@
                             <th>#</th>
                             <th>Title</th>
                             <th>Author</th>
+                            <th>CI</th>
                             <th>Labels</th>
                             <th>Updated</th>
+                            <th>Fix</th>
                         </tr>
                     </thead>
                     <tbody id="sync-prs-body">
-                        <tr><td colspan="6" class="loading">Loading PRs…</td></tr>
+                        <tr><td colspan="8" class="loading">Loading PRs…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -308,10 +314,11 @@
                             <th>Author</th>
                             <th>Labels</th>
                             <th>Updated</th>
+                            <th>Fix</th>
                         </tr>
                     </thead>
                     <tbody id="sync-issues-body">
-                        <tr><td colspan="6" class="loading">Loading issues…</td></tr>
+                        <tr><td colspan="7" class="loading">Loading issues…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -354,6 +361,30 @@
                 <iframe id="livelog-app-frame" style="display:none;width:100%;flex:1;border:none;background:#fff"
                         sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
                 <div id="livelog-app-empty" style="display:none"></div>
+            </div>
+        </div>
+
+        <!-- Fix with AI modal -->
+        <div id="fix-ai-modal" class="modal" hidden aria-modal="true" role="dialog">
+            <div class="modal-inner fix-ai-modal-inner">
+                <header class="modal-header">
+                    <h3 id="fix-ai-title">Fix with AI</h3>
+                    <button class="btn btn-small btn-secondary" id="fix-ai-close">✕ Cancel</button>
+                </header>
+                <div class="fix-ai-body">
+                    <p id="fix-ai-description" class="fix-ai-desc"></p>
+                    <label for="fix-ai-instructions" class="fix-ai-label">Additional instructions <span style="color:var(--text-3)">(optional)</span></label>
+                    <textarea id="fix-ai-instructions" class="fix-ai-textarea"
+                              placeholder="e.g. The issue is in the ingress configuration, focus on that…"
+                              rows="4"></textarea>
+                    <div id="fix-ai-ci-info" class="fix-ai-ci-info" hidden></div>
+                </div>
+                <footer class="fix-ai-footer">
+                    <button class="btn btn-small btn-secondary" id="fix-ai-cancel">Cancel</button>
+                    <button class="btn btn-small" id="fix-ai-submit" data-action>
+                        ✨ Submit fix
+                    </button>
+                </footer>
             </div>
         </div>
 
@@ -454,12 +485,13 @@
                         <th>Repository</th>
                         <th>Arch</th>
                         <th>Status</th>
+                        <th>History</th>
                         <th>Duration</th>
                         <th>Finished</th>
                     </tr>
                 </thead>
                 <tbody id="nightly-body">
-                    <tr><td colspan="5" class="loading">Loading nightly results…</td></tr>
+                    <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
                 </tbody>
             </table>
         </section>
@@ -487,6 +519,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=19"></script>
+    <script src="/static/app.js?v=21"></script>
 </body>
 </html>

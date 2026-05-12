@@ -140,12 +140,12 @@ async function loadRunning() {
                 if (!cell) continue;
                 const isRunning = !!runningMap[`${repo}|${arch}`];
                 cell.classList.toggle('running', isRunning);
-                let spinner = cell.querySelector('.spinner');
+                let spinner = cell.querySelector('.running-dot');
                 if (isRunning && !spinner) {
                     const r = runningMap[`${repo}|${arch}`];
                     cell.insertAdjacentHTML('afterbegin',
-                        `<a class="spinner log-link" title="View live log" href="#"
-                            data-job-id="${r.job_id}" data-arch="${arch}">⟳</a> `);
+                        `<a class="running-dot log-link" title="Running — view live log" href="#"
+                            data-job-id="${r.job_id}" data-arch="${arch}">●</a> `);
                 } else if (!isRunning && spinner) {
                     spinner.remove();
                 }
@@ -169,6 +169,8 @@ async function loadFleet() {
         fleetRowsByRepo[repo.repo] = repo;
         const arm = repo.builds.arm64;
         const amd = repo.builds.amd64;
+        const armHistory = (repo.history || {}).arm64 || [];
+        const amdHistory = (repo.history || {}).amd64 || [];
         const safeRepo = repo.repo.replace(/[^a-z0-9-]/gi, '_');
         const repoUrl = `https://github.com/${repo.repo}`;
         const ghPagesUrl = `https://${repo.repo.split('/')[0]}.github.io/${repo.repo.split('/')[1]}/`;
@@ -192,8 +194,8 @@ async function loadFleet() {
                 </div>
             </td>
             <td><span class="arch-badge">${repo.arch}</span></td>
-            <td data-arch="arm64">${buildCell(arm)}</td>
-            <td data-arch="amd64">${buildCell(amd)}</td>
+            <td data-arch="arm64">${buildCell(arm, armHistory)}</td>
+            <td data-arch="amd64">${buildCell(amd, amdHistory)}</td>
             <td>
                 <select class="branch-select" id="branch-${safeRepo}"
                         data-repo="${repo.repo}" data-loaded="0">
@@ -446,27 +448,48 @@ async function loadBranchesForSelect(e) {
     }
 }
 
-function buildCell(build) {
-    if (!build) return '<span class="status-none">—</span>';
-    let cls, icon;
-    if (build.status === 'terminated') {
-        cls = 'status-terminated'; icon = 'TERM';
-    } else if (build.passed) {
-        cls = 'status-pass'; icon = 'PASS';
+function buildCell(build, history) {
+    let html = '';
+    if (!build) {
+        html = '<span class="status-none">—</span>';
     } else {
-        cls = 'status-fail'; icon = 'FAIL';
+        let cls, icon;
+        if (build.status === 'terminated') {
+            cls = 'status-terminated'; icon = 'TERM';
+        } else if (build.passed) {
+            cls = 'status-pass'; icon = 'PASS';
+        } else {
+            cls = 'status-fail'; icon = 'FAIL';
+        }
+        if (build.job_id) {
+            html = `<a href="#" class="${cls} log-link"
+                       data-final-job="${build.job_id}"
+                       title="View worker log (status: ${build.status || (build.passed ? 'completed' : 'failed')})">${icon}</a>`;
+        } else if (build.run_url) {
+            html = `<a href="${build.run_url}" target="_blank" rel="noopener" class="${cls} log-link" title="View run on GitHub Actions">${icon}</a>`;
+        } else {
+            html = `<span class="${cls}">${icon}</span>`;
+        }
     }
-    if (build.job_id) {
-        // Open in the same modal as live runs (reuses ANSI rendering + auto-tail)
-        return `<a href="#" class="${cls} log-link"
-                   data-final-job="${build.job_id}"
-                   title="View worker log (status: ${build.status || (build.passed ? 'completed' : 'failed')})">${icon}</a>`;
+    if (history && history.length > 0) {
+        html += '<div class="build-spark">' + renderBuildSpark(history) + '</div>';
     }
-    if (build.run_url) {
-        // GitHub Actions logs live on github.com — keep external link
-        return `<a href="${build.run_url}" target="_blank" rel="noopener" class="${cls} log-link" title="View run on GitHub Actions">${icon}</a>`;
-    }
-    return `<span class="${cls}">${icon}</span>`;
+    return html;
+}
+
+function renderBuildSpark(history) {
+    // history is newest-first; render oldest-first (left to right)
+    return [...history].reverse().map(h => {
+        const isTerminated = h.status === 'terminated';
+        const statusKey = isTerminated ? 'term' : (h.passed ? 'pass' : 'fail');
+        const sym = isTerminated ? '–' : '|';
+        const cls = `spark-bar spark-${statusKey}`;
+        const label = escapeHtml(`${statusKey.toUpperCase()} · ${formatTime(h.finished_at)}`);
+        if (h.job_id) {
+            return `<a href="#" class="${cls}" data-final-job="${h.job_id}" title="${label}">${sym}</a>`;
+        }
+        return `<span class="${cls}" title="${label}">${sym}</span>`;
+    }).join('');
 }
 
 function onRowActionChange(safeRepo) {
@@ -847,8 +870,8 @@ document.addEventListener('click', e => {
     if (e.target.id === 'livelog-search-next') { moveSearch(1); return; }
     if (e.target.id === 'fleet-trigger-btn') { triggerFleetBuild(); return; }
 
-    // Spinner (running test) → open live-tailing modal
-    const spin = e.target.closest('a.spinner');
+    // Running dot (green ●) → open live-tailing modal
+    const spin = e.target.closest('a.running-dot');
     if (spin && spin.dataset.jobId) {
         e.preventDefault();
         const row = spin.closest('tr');
@@ -997,15 +1020,21 @@ async function loadNightly() {
     const tbody = document.getElementById('nightly-body');
     tbody.innerHTML = data.results.map(job => {
         const r = job.result || {};
-        const cls = r.passed ? 'status-pass' : 'status-fail';
-        const label = r.passed ? 'PASS' : 'FAIL';
+        const arch = r.arch || job.worker_arch || '?';
+        const isTerminated = job.status === 'terminated';
+        const cls = isTerminated ? 'status-terminated' : (r.passed ? 'status-pass' : 'status-fail');
+        const label = isTerminated ? 'TERM' : (r.passed ? 'PASS' : 'FAIL');
         const status = job.job_id
-            ? `<a href="/api/jobs/${job.job_id}/log" target="_blank" class="${cls} log-link">${label}</a>`
+            ? `<a href="#" class="${cls} log-link" data-final-job="${escapeHtml(job.job_id)}"
+                  title="View log">${label}</a>`
             : `<span class="${cls}">${label}</span>`;
+        const historyHtml = (job.history && job.history.length > 0)
+            ? `<div class="build-spark">${renderBuildSpark(job.history)}</div>` : '—';
         return `<tr>
-            <td>${job.repo.split('/').pop()}</td>
-            <td><span class="arch-badge">${r.arch || job.worker_arch || '?'}</span></td>
+            <td>${escapeHtml(job.repo.split('/').pop())}</td>
+            <td><span class="arch-badge">${escapeHtml(arch)}</span></td>
             <td>${status}</td>
+            <td>${historyHtml}</td>
             <td>${r.duration_seconds || 0}s</td>
             <td>${formatTime(job.finished_at)}</td>
         </tr>`;
@@ -1029,7 +1058,8 @@ async function loadHistory() {
     if (branch) params.set('branch', branch);
     if (status) params.set('status', status);
     if (type)   params.set('type', type);
-    params.set('limit', '200');
+    const limit = document.getElementById('history-limit')?.value || '50';
+    params.set('limit', limit);
 
     const tbody = document.getElementById('history-body');
     tbody.innerHTML = '<tr><td colspan="11" class="loading">Loading history…</td></tr>';
@@ -1064,8 +1094,8 @@ async function loadHistory() {
                 ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>
                    · <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener" title="Fullscreen">⤢</a>`
                 : '—';
-            const rerunBtn = (r.job_id && r.type === 'integration-test')
-                ? `<button class="btn btn-small btn-secondary row-rerun" data-action data-job-id="${escapeHtml(r.job_id)}" title="Re-queue this job">↻ Rerun</button>`
+            const rerunBtn = (r.job_id && r.type === 'integration-test' && isWriter())
+                ? `<button class="btn btn-small btn-secondary row-rerun" data-action data-job-id="${escapeHtml(r.job_id)}" title="Re-queue this job" aria-label="Re-run this integration test">↻ Rerun</button>`
                 : '—';
             return `<tr>
                 <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
@@ -1094,7 +1124,7 @@ document.addEventListener('input', e => {
         _historySearchTimer = setTimeout(loadHistory, 300);
     }
 });
-['history-arch', 'history-branch', 'history-status', 'history-type'].forEach(id => {
+['history-arch', 'history-branch', 'history-status', 'history-type', 'history-limit'].forEach(id => {
     document.addEventListener('change', e => {
         if (e.target.id === id) loadHistory();
     });
@@ -1162,22 +1192,29 @@ async function loadRunningDetail() {
             ).join('');
         }
 
+        const qCount = document.getElementById('queued-count');
+        if (qCount) qCount.textContent = qData.items && qData.items.length ? `(${qData.items.length})` : '';
+
         if (!qData.items || !qData.items.length) {
-            qtbody.innerHTML = '<tr><td colspan="6" class="loading">Queue is empty.</td></tr>';
+            qtbody.innerHTML = '<tr><td colspan="7" class="loading">Queue is empty.</td></tr>';
         } else {
             qtbody.innerHTML = qData.items.map(q => {
                 const repoShort = (q.repo || '').split('/').pop();
                 const repoLink = q.repo
                     ? `<a href="https://github.com/${q.repo}" target="_blank" rel="noopener">${escapeHtml(repoShort)}</a>`
                     : '—';
-                const delBtn = q.job_id
-                    ? `<button class="btn btn-small btn-danger row-queue-delete" data-action data-job-id="${escapeHtml(q.job_id)}" title="Remove from queue">✕ Remove</button>`
+                const delBtn = (q.job_id && isWriter())
+                    ? `<button class="btn btn-small btn-danger row-queue-delete" data-action data-job-id="${escapeHtml(q.job_id)}" title="Remove from queue" aria-label="Remove job from queue">✕ Remove</button>`
+                    : '—';
+                const byUser = q.requested_by
+                    ? `<span style="font-size:0.75rem;color:var(--text-2)">${escapeHtml(q.requested_by)}</span>`
                     : '—';
                 return `<tr>
                     <td>${repoLink}</td>
                     <td>${escapeHtml(q.ref || '')}</td>
                     <td><span class="arch-badge">${escapeHtml(q.arch || '')}</span></td>
                     <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(q.type || 'integration-test'))}</td>
+                    <td>${byUser}</td>
                     <td title="${escapeHtml(q.queued_at || '')}">${formatTime(q.queued_at)}</td>
                     <td>${delBtn}</td>
                 </tr>`;
@@ -1185,6 +1222,8 @@ async function loadRunningDetail() {
         }
     } catch (e) {
         tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+        if (document.getElementById('queued-body'))
+            document.getElementById('queued-body').innerHTML = `<tr><td colspan="6" class="loading">Error loading queue.</td></tr>`;
     }
 }
 
@@ -1244,13 +1283,14 @@ document.addEventListener('click', async e => {
     try {
         const res = await fetch(`/api/builds/rerun/${encodeURIComponent(jobId)}`, { method: 'POST' });
         if (res.ok) {
-            const body = await res.json();
-            alert(`Re-queued as ${body.new_job_id}`);
+            btn.textContent = '✓ queued';
+            setTimeout(() => { btn.disabled = false; btn.textContent = '↻ Rerun'; }, 2000);
         } else {
             const body = await res.json().catch(() => ({}));
-            alert(`Rerun failed (${res.status}): ${body.detail || ''}`);
+            btn.textContent = `✕ failed (${res.status})`;
+            setTimeout(() => { btn.disabled = false; btn.textContent = '↻ Rerun'; }, 3000);
         }
-    } finally {
+    } catch {
         btn.disabled = false; btn.textContent = '↻ Rerun';
     }
 });
@@ -1425,21 +1465,47 @@ function renderSyncPRs() {
         return title.includes(filter) || repo.includes(filter);
     });
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">No open PRs found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="loading">No open PRs found.</td></tr>';
         return;
     }
+    const isSergioUser = authState.user === 'sergiohinojosa';
     tbody.innerHTML = rows.map(r => {
         const repo    = r.repository?.nameWithOwner || r.repository?.name || '—';
         const author  = r.author?.login || r.author || '—';
         const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
         const updated = formatTime(r.updatedAt || r.updated_at);
+        const ci = r._ci;
+        let ciBadge = '<span class="ci-badge none">—</span>';
+        let ciJobLink = '';
+        if (ci) {
+            const isTerminated = ci.status === 'terminated';
+            const ciFailed = !ci.passed && !isTerminated;
+            if (isTerminated)    ciBadge = '<span class="ci-badge term">TERM</span>';
+            else if (ci.passed)  ciBadge = '<span class="ci-badge pass">PASS</span>';
+            else                 ciBadge = '<span class="ci-badge fail">FAIL</span>';
+            if (ci.job_id) {
+                ciBadge = `<a href="#" class="log-link" data-final-job="${escapeHtml(ci.job_id)}" title="View integration test log">${ciBadge}</a>`;
+            }
+        }
+        // Fix with AI: only for failed integration tests, only for sergiohinojosa
+        const showFix = isSergioUser && ci && !ci.passed && ci.status !== 'terminated';
+        const fixBtn = showFix
+            ? `<button class="btn-fix-ai fix-pr-btn" data-action
+                   data-repo="${escapeHtml(repo)}"
+                   data-pr="${escapeHtml(String(r.number))}"
+                   data-branch="${escapeHtml(r.headRefName || '')}"
+                   data-ci-job="${escapeHtml(ci?.job_id || '')}"
+                   title="Let AI analyze the failure and fix the repo or flag a framework issue">✨ Fix with AI</button>`
+            : '—';
         return `<tr>
-            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a></td>
+            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo.split('/').pop())}</a></td>
             <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${escapeHtml(String(r.number))}</a></td>
             <td>${escapeHtml(r.title)}</td>
             <td>${escapeHtml(String(author))}</td>
+            <td>${ciBadge}</td>
             <td>${labels || '—'}</td>
             <td>${updated}</td>
+            <td>${fixBtn}</td>
         </tr>`;
     }).join('');
 }
@@ -1484,27 +1550,178 @@ function renderSyncIssues() {
         return title.includes(filter) || repo.includes(filter);
     });
     if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="loading">No open issues found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="loading">No open issues found.</td></tr>';
         return;
     }
+    const isSergioUser = authState.user === 'sergiohinojosa';
     tbody.innerHTML = rows.map(r => {
         const repo    = r.repository?.nameWithOwner || r.repository?.name || '—';
         const author  = r.author?.login || r.author || '—';
         const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
         const updated = formatTime(r.updatedAt || r.updated_at);
+        const fixBtn = isSergioUser
+            ? `<button class="btn-fix-ai fix-issue-btn" data-action
+                   data-repo="${escapeHtml(repo)}"
+                   data-issue="${escapeHtml(String(r.number))}"
+                   data-title="${escapeHtml(r.title)}"
+                   title="Let AI analyze and fix this issue">✨ Fix with AI</button>`
+            : '—';
         return `<tr>
-            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo)}</a></td>
+            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo.split('/').pop())}</a></td>
             <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${escapeHtml(String(r.number))}</a></td>
             <td>${escapeHtml(r.title)}</td>
             <td>${escapeHtml(String(author))}</td>
             <td>${labels || '—'}</td>
             <td>${updated}</td>
+            <td>${fixBtn}</td>
         </tr>`;
     }).join('');
 }
 
 document.getElementById('sync-issues-filter').addEventListener('input', renderSyncIssues);
 document.getElementById('sync-issues-refresh').addEventListener('click', () => loadSyncIssues(true));
+
+// ── Fix with AI modal ────────────────────────────────────────────────────────
+
+let fixAiContext = null;  // { type: 'pr'|'issue', repo, number, branch?, ciJobId? }
+
+function openFixWithAI(type, data) {
+    fixAiContext = { type, ...data };
+    const modal = document.getElementById('fix-ai-modal');
+    const title = document.getElementById('fix-ai-title');
+    const desc  = document.getElementById('fix-ai-description');
+    const ciInfo = document.getElementById('fix-ai-ci-info');
+    document.getElementById('fix-ai-instructions').value = '';
+
+    if (type === 'pr') {
+        title.textContent = `Fix with AI — PR #${data.number} · ${data.repo.split('/').pop()}`;
+        desc.textContent = 'The AI agent will fetch the failed integration test log, determine whether the root cause is in this repo or the shared framework, then apply a surgical fix. If the framework is at fault, the PR stays open and you will be notified. If the repo is at fault, a fix is committed to this branch and a new CI run is triggered.';
+        if (data.ciJobId) {
+            ciInfo.hidden = false;
+            ciInfo.innerHTML = `Failed integration test job: <a href="#" class="log-link" data-final-job="${escapeHtml(data.ciJobId)}">view log</a>`;
+        } else {
+            ciInfo.hidden = true;
+        }
+    } else {
+        title.textContent = `Fix with AI — Issue #${data.number} · ${data.repo.split('/').pop()}`;
+        desc.textContent = 'The AI agent will read this issue, understand the problem, and commit a fix to a new branch in the repo, then open a pull request.';
+        ciInfo.hidden = true;
+    }
+
+    modal.hidden = false;
+    document.getElementById('fix-ai-instructions').focus();
+}
+
+function closeFixWithAI() {
+    document.getElementById('fix-ai-modal').hidden = true;
+    fixAiContext = null;
+}
+
+async function submitFixWithAI() {
+    if (!fixAiContext) return;
+    const instructions = document.getElementById('fix-ai-instructions').value.trim();
+    const submitBtn = document.getElementById('fix-ai-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting…';
+
+    try {
+        let endpoint, payload;
+        if (fixAiContext.type === 'pr') {
+            endpoint = '/api/agent/fix-pr';
+            payload = {
+                repo: fixAiContext.repo,
+                pr_number: fixAiContext.number,
+                branch: fixAiContext.branch || 'main',
+                instructions,
+            };
+        } else {
+            endpoint = '/api/agent/fix-issue';
+            payload = {
+                repo: fixAiContext.repo,
+                issue_number: fixAiContext.number,
+                instructions,
+            };
+        }
+
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload),
+        });
+
+        if (res.status === 401) {
+            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            return;
+        }
+        if (res.status === 403) {
+            const body = await res.json().catch(() => ({}));
+            alert(body.detail || 'Access denied.');
+            return;
+        }
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            alert(`Failed to submit (${res.status}): ${body.detail || ''}`);
+            return;
+        }
+
+        const data = await res.json();
+        closeFixWithAI();
+        const repoShort = fixAiContext.repo.split('/').pop();
+        const label = fixAiContext.type === 'pr'
+            ? `Fix PR #${fixAiContext.number} · ${repoShort}`
+            : `Fix Issue #${fixAiContext.number} · ${repoShort}`;
+        openLiveLog(data.job_id, label);
+    } catch (e) {
+        alert('Network error: ' + e);
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '✨ Submit fix';
+    }
+}
+
+document.addEventListener('click', e => {
+    // Fix with AI — PR button
+    const prBtn = e.target.closest('.fix-pr-btn');
+    if (prBtn) {
+        e.preventDefault();
+        if (!isWriter()) { alert('Sign in as an org member to use Fix with AI.'); return; }
+        openFixWithAI('pr', {
+            repo: prBtn.dataset.repo,
+            number: prBtn.dataset.pr,
+            branch: prBtn.dataset.branch,
+            ciJobId: prBtn.dataset.ciJob,
+        });
+        return;
+    }
+    // Fix with AI — Issue button
+    const issueBtn = e.target.closest('.fix-issue-btn');
+    if (issueBtn) {
+        e.preventDefault();
+        if (!isWriter()) { alert('Sign in as an org member to use Fix with AI.'); return; }
+        openFixWithAI('issue', {
+            repo: issueBtn.dataset.repo,
+            number: issueBtn.dataset.issue,
+            title: issueBtn.dataset.title,
+        });
+        return;
+    }
+    // Fix AI modal — close/cancel
+    if (e.target.id === 'fix-ai-close' || e.target.id === 'fix-ai-cancel' || e.target.id === 'fix-ai-modal') {
+        closeFixWithAI(); return;
+    }
+    // Fix AI modal — submit
+    if (e.target.id === 'fix-ai-submit') {
+        submitFixWithAI(); return;
+    }
+});
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('fix-ai-modal');
+        if (modal && !modal.hidden) { closeFixWithAI(); return; }
+    }
+});
 
 document.addEventListener('click', async e => {
     const card = e.target.closest('.sync-card');

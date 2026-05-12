@@ -1040,3 +1040,141 @@ mark.log-match.current {
     border-color: #166534 !important;
     cursor: default;
 }
+
+/* ─── Running indicator (green pulsing dot) ──────────────────── */
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .65; transform: scale(.85); }
+}
+.running-dot {
+    display: inline-block;
+    color: var(--green);
+    font-size: 1rem;
+    line-height: 1;
+    vertical-align: middle;
+    animation: pulse-dot 1.4s ease-in-out infinite;
+    cursor: pointer;
+    text-decoration: none;
+}
+.running-dot:hover { color: #86efac; }
+
+/* ─── Build sparkline bars (fleet + nightly history) ─────────── */
+.build-spark {
+    display: flex;
+    gap: 2px;
+    margin-top: 4px;
+    align-items: center;
+    min-height: 14px;
+}
+.spark-bar {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    text-decoration: none;
+    cursor: default;
+    transition: opacity .12s;
+    font-family: ui-monospace, monospace;
+}
+a.spark-bar { cursor: pointer; }
+a.spark-bar:hover { opacity: .75; }
+.spark-pass  { color: var(--green); }
+.spark-fail  { color: var(--red); }
+.spark-term  { color: var(--amber); }
+.spark-none  { color: var(--text-3); }
+
+/* ─── Fix with AI modal ─────────────────────────────────────── */
+.fix-ai-modal-inner {
+    width: min(560px, 94vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    overflow: hidden;
+}
+.fix-ai-body {
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+}
+.fix-ai-desc {
+    font-size: 0.85rem;
+    color: var(--text-2);
+    margin: 0;
+    line-height: 1.5;
+}
+.fix-ai-label {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-2);
+}
+.fix-ai-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 10px 12px;
+    resize: vertical;
+    outline: none;
+    transition: border-color .13s;
+}
+.fix-ai-textarea:focus { border-color: var(--accent); }
+.fix-ai-ci-info {
+    font-size: 0.78rem;
+    color: var(--text-2);
+    background: var(--surface-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    padding: 8px 12px;
+    line-height: 1.5;
+}
+.fix-ai-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 14px 24px;
+    border-top: 1px solid var(--border-soft);
+}
+
+/* ─── CI status badge in Sync PRs table ─────────────────────── */
+.ci-badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 99px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+.ci-badge.pass   { background: rgba(74,222,128,.12); color: var(--green); border-color: rgba(74,222,128,.3); }
+.ci-badge.fail   { background: rgba(251,113,133,.12); color: var(--red);  border-color: rgba(251,113,133,.3); }
+.ci-badge.term   { background: rgba(251,191,36,.1);  color: var(--amber); border-color: rgba(251,191,36,.3); }
+.ci-badge.none   { color: var(--text-3); border-color: transparent; background: transparent; }
+
+/* ─── Fix with AI button in tables ──────────────────────────── */
+.btn-fix-ai {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 99px;
+    border: 1px solid rgba(0,180,222,.35);
+    background: rgba(0,180,222,.08);
+    color: var(--accent);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .12s, border-color .12s;
+}
+.btn-fix-ai:hover { background: rgba(0,180,222,.16); border-color: rgba(0,180,222,.55); }

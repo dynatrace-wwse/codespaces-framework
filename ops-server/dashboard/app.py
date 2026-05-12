@@ -202,7 +202,7 @@ async def api_repos():
     with open(repos_path) as f:
         data = yaml.safe_load(f)
 
-    completed_raw = await pool.lrange("jobs:completed", -200, -1)
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
     local_matrix: dict[str, dict] = {}
     for raw in completed_raw:
         job = json.loads(raw)
@@ -219,6 +219,27 @@ async def api_repos():
             "job_id": job.get("job_id", ""),
             "source": "local",
         }
+
+    # History sparklines: last 10 integration-test builds per (repo, arch)
+    history_matrix: dict[str, dict[str, list]] = {}
+    for raw in reversed(completed_raw):  # newest first
+        try:
+            hj = json.loads(raw)
+        except Exception:
+            continue
+        if hj.get("type") != "integration-test":
+            continue
+        hr = hj.get("repo", "")
+        ha = hj.get("arch") or hj.get("result", {}).get("arch") or hj.get("worker_arch") or "arm64"
+        hres = hj.get("result", {}) or {}
+        history_matrix.setdefault(hr, {}).setdefault(ha, [])
+        if len(history_matrix[hr][ha]) < 10:
+            history_matrix[hr][ha].append({
+                "passed": bool(hres.get("passed")),
+                "status": hj.get("status", "completed"),
+                "finished_at": hj.get("finished_at", ""),
+                "job_id": hj.get("job_id", ""),
+            })
 
     # Pull latest_tag from fleet:release-tags (24 h TTL, populated by the
     # status-summary endpoint on each run so it survives the 5-min status cache).
@@ -287,6 +308,7 @@ async def api_repos():
             "duration": r.get("duration", "1h"),
             "ci": r.get("ci", True),
             "builds": builds,
+            "history": history_matrix.get(repo_full, {}),
             "latest_tag": release_map.get(repo_full, ""),
         })
 
@@ -595,6 +617,111 @@ async def api_agent_fix_ci(request: Request):
     return {"job_id": job_id, "status": "queued", "repo": repo, "branch": branch}
 
 
+@app.post("/api/agent/fix-pr")
+async def api_agent_fix_pr(request: Request):
+    """Queue a fix-ci agent job scoped to an open PR. Restricted to sergiohinojosa."""
+    role = await _require_writer(request)
+    user = role.get("user", "")
+    if user != "sergiohinojosa":
+        raise HTTPException(status_code=403, detail="Fix-with-AI is currently restricted to sergiohinojosa")
+    body = await request.json()
+    repo         = (body.get("repo") or "").strip()
+    pr_number    = body.get("pr_number")
+    branch       = (body.get("branch") or "main").strip()
+    instructions = (body.get("instructions") or "").strip()
+    if not repo or not pr_number:
+        raise HTTPException(400, "repo and pr_number are required")
+
+    # Fetch the most recent failed integration-test log for this repo+branch
+    failed_log = ""
+    failed_job_id = ""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    for raw in reversed(completed_raw):
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        if j.get("type") != "integration-test":
+            continue
+        if j.get("repo", "").lower() != repo.lower():
+            continue
+        ref = j.get("ref") or j.get("branch") or j.get("head_branch") or ""
+        if branch and ref != branch:
+            continue
+        result = j.get("result", {}) or {}
+        if result.get("passed"):
+            continue
+        failed_job_id = j.get("job_id", "")
+        if failed_job_id:
+            raw_log = await pool.get(f"job:log:{failed_job_id}")
+            if raw_log:
+                failed_log = raw_log[-16384:] if len(raw_log) > 16384 else raw_log
+        break
+
+    import uuid as _uuid
+    ts = int(time.time() * 1000)
+    repo_name = repo.split("/")[-1]
+    job_id = f"fix-pr-{repo_name}-{ts}-{_uuid.uuid4().hex[:6]}"
+    job = {
+        "job_id":        job_id,
+        "type":          "fix-ci",
+        "repo":          repo,
+        "ref":           branch,
+        "branch":        branch,
+        "arch":          "arm64",
+        "trigger":       "dashboard",
+        "requested_by":  user,
+        "git_author_email": "hj.sergio@gmail.com",
+        "timestamp":     datetime.utcnow().isoformat(),
+        "pr_number":     pr_number,
+        "failed_job_id": failed_job_id,
+        "failed_log":    failed_log,
+        "instructions":  instructions,
+        "context":       "fix-pr",
+    }
+    await pool.rpush("queue:agent", json.dumps(job))
+    log.info("Queued fix-pr job %s for %s PR#%s by %s", job_id, repo, pr_number, user)
+    return {"job_id": job_id, "status": "queued", "repo": repo, "pr_number": pr_number}
+
+
+@app.post("/api/agent/fix-issue")
+async def api_agent_fix_issue(request: Request):
+    """Queue a fix-issue agent job. Restricted to sergiohinojosa."""
+    role = await _require_writer(request)
+    user = role.get("user", "")
+    if user != "sergiohinojosa":
+        raise HTTPException(status_code=403, detail="Fix-with-AI is currently restricted to sergiohinojosa")
+    body = await request.json()
+    repo         = (body.get("repo") or "").strip()
+    issue_number = body.get("issue_number")
+    instructions = (body.get("instructions") or "").strip()
+    if not repo or not issue_number:
+        raise HTTPException(400, "repo and issue_number are required")
+
+    import uuid as _uuid
+    ts = int(time.time() * 1000)
+    repo_name = repo.split("/")[-1]
+    job_id = f"fix-issue-{repo_name}-{ts}-{_uuid.uuid4().hex[:6]}"
+    job = {
+        "job_id":        job_id,
+        "type":          "fix-issue",
+        "repo":          repo,
+        "ref":           "main",
+        "branch":        "main",
+        "arch":          "arm64",
+        "trigger":       "dashboard",
+        "requested_by":  user,
+        "git_author_email": "hj.sergio@gmail.com",
+        "timestamp":     datetime.utcnow().isoformat(),
+        "issue_number":  issue_number,
+        "instructions":  instructions,
+        "context":       "fix-issue",
+    }
+    await pool.rpush("queue:agent", json.dumps(job))
+    log.info("Queued fix-issue job %s for %s #%s by %s", job_id, repo, issue_number, user)
+    return {"job_id": job_id, "status": "queued", "repo": repo, "issue_number": issue_number}
+
+
 @app.get("/api/builds/running")
 async def api_builds_running():
     """Currently executing tests, plus pending queue depths.
@@ -717,14 +844,15 @@ async def api_queue_list():
             except Exception:
                 continue
             result.append({
-                "queue":     f"queue:test:{arch}",
-                "arch":      arch,
-                "position":  position,
-                "job_id":    j.get("job_id", ""),
-                "repo":      j.get("repo", ""),
-                "ref":       j.get("ref") or j.get("branch") or j.get("head_branch") or "main",
-                "type":      j.get("type", "integration-test"),
-                "queued_at": j.get("timestamp") or j.get("queued_at"),
+                "queue":        f"queue:test:{arch}",
+                "arch":         arch,
+                "position":     position,
+                "job_id":       j.get("job_id", ""),
+                "repo":         j.get("repo", ""),
+                "ref":          j.get("ref") or j.get("branch") or j.get("head_branch") or "main",
+                "type":         j.get("type", "integration-test"),
+                "queued_at":    j.get("timestamp") or j.get("queued_at"),
+                "requested_by": j.get("requested_by", ""),
             })
     return {"items": result, "total": len(result)}
 
@@ -1233,19 +1361,52 @@ async def api_sync_status_summary():
 
 @app.get("/api/sync/prs")
 async def api_sync_prs():
-    """Open framework-update PRs across the org (cached 5 min).
+    """Open PRs across the org with our integration-test CI status cross-referenced.
 
-    Uses ``gh search prs`` scoped to the org with state=open so it covers
-    all repos in one API call rather than iterating per-repo.
+    Uses ``gh search prs`` (cached 5 min) then annotates each PR with
+    ``_ci`` from Redis so the dashboard can show which PRs have a failing
+    integration test and offer the Fix-with-AI button.
     """
-    return await _gh_json(
+    data = await _gh_json(
         "sync:prs",
         "search", "prs",
         "--owner", GH_ORG,
         "--state", "open",
         "--limit", "100",
-        "--json", "number,title,repository,author,createdAt,updatedAt,url,labels",
+        "--json", "number,title,repository,author,createdAt,updatedAt,url,labels,headRefName",
     )
+    if data.get("error") or not isinstance(data.get("rows"), list):
+        return data
+
+    # Cross-reference each PR with our Redis integration-test results
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    ci_map: dict[str, dict] = {}
+    for raw in reversed(completed_raw):  # newest first
+        try:
+            j = json.loads(raw)
+        except Exception:
+            continue
+        if j.get("type") != "integration-test":
+            continue
+        repo_k = j.get("repo", "")
+        branch_k = j.get("ref") or j.get("branch") or j.get("head_branch") or ""
+        key = f"{repo_k}|{branch_k}"
+        if key not in ci_map:
+            result = j.get("result", {}) or {}
+            ci_map[key] = {
+                "passed": bool(result.get("passed")),
+                "status": j.get("status", "completed"),
+                "job_id": j.get("job_id", ""),
+                "finished_at": j.get("finished_at", ""),
+                "arch": j.get("arch") or result.get("arch") or "arm64",
+            }
+
+    for pr in data["rows"]:
+        repo_nwo = (pr.get("repository") or {}).get("nameWithOwner", "")
+        branch = pr.get("headRefName", "")
+        pr["_ci"] = ci_map.get(f"{repo_nwo}|{branch}")
+
+    return data
 
 
 @app.post("/api/sync/prs/invalidate")
@@ -1431,8 +1592,8 @@ async def api_builds_history(
 
 @app.get("/api/nightly/latest")
 async def api_nightly_latest():
-    """Latest nightly run results."""
-    completed_raw = await pool.lrange("jobs:completed", -200, -1)
+    """Latest nightly run results with per-repo build history for sparklines."""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
     nightly_jobs = []
     for j in completed_raw:
         job = json.loads(j)
@@ -1442,7 +1603,7 @@ async def api_nightly_latest():
     if not nightly_jobs:
         return {"run_id": None, "results": []}
 
-    # Group by run_id, get latest
+    # Group by run_id
     runs: dict[str, list] = {}
     for job in nightly_jobs:
         rid = job["nightly_run_id"]
@@ -1451,12 +1612,39 @@ async def api_nightly_latest():
     latest_id = sorted(runs.keys())[-1]
     latest = runs[latest_id]
 
+    # Build per-(repo, arch) history across all nightly runs (oldest→newest)
+    all_run_ids = sorted(runs.keys())
+    repo_arch_history: dict[str, list] = {}
+    for run_id in all_run_ids:
+        for job in runs[run_id]:
+            result = job.get("result", {}) or {}
+            repo_k = job.get("repo", "")
+            arch_k = job.get("arch") or result.get("arch") or job.get("worker_arch") or "arm64"
+            key = f"{repo_k}|{arch_k}"
+            repo_arch_history.setdefault(key, []).append({
+                "passed": bool(result.get("passed")),
+                "status": job.get("status", "completed"),
+                "finished_at": job.get("finished_at", ""),
+                "job_id": job.get("job_id", ""),
+                "run_id": run_id,
+            })
+
+    results_out = []
+    for job in sorted(latest, key=lambda j: j.get("repo", "")):
+        result = job.get("result", {}) or {}
+        arch_k = job.get("arch") or result.get("arch") or job.get("worker_arch") or "arm64"
+        repo_k = job.get("repo", "")
+        key = f"{repo_k}|{arch_k}"
+        # History = previous nightly runs (exclude the current one), last 7
+        hist = [h for h in repo_arch_history.get(key, []) if h["run_id"] != latest_id][-7:]
+        results_out.append({**job, "history": hist})
+
     return {
         "run_id": latest_id,
         "total": len(latest),
         "passed": sum(1 for j in latest if j.get("result", {}).get("passed")),
         "failed": sum(1 for j in latest if not j.get("result", {}).get("passed")),
-        "results": sorted(latest, key=lambda j: j.get("repo", "")),
+        "results": results_out,
     }
 
 
