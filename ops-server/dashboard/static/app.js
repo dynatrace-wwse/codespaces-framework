@@ -1019,7 +1019,7 @@ async function loadHistory() {
     params.set('limit', '200');
 
     const tbody = document.getElementById('history-body');
-    tbody.innerHTML = '<tr><td colspan="10" class="loading">Loading history…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="loading">Loading history…</td></tr>';
     try {
         const res = await fetch(`${API}/api/builds/history?` + params.toString());
         const data = await res.json();
@@ -1036,7 +1036,7 @@ async function loadHistory() {
         document.getElementById('history-count').textContent = `${data.total_returned} runs`;
 
         if (!data.rows.length) {
-            tbody.innerHTML = '<tr><td colspan="10" class="loading">No matching runs.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="11" class="loading">No matching runs.</td></tr>';
             return;
         }
         tbody.innerHTML = data.rows.map(r => {
@@ -1051,6 +1051,9 @@ async function loadHistory() {
                 ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>
                    · <a href="/log/${escapeHtml(r.job_id)}" target="_blank" rel="noopener" title="Fullscreen">⤢</a>`
                 : '—';
+            const rerunBtn = (r.job_id && r.type === 'integration-test')
+                ? `<button class="btn btn-small btn-secondary row-rerun" data-action data-job-id="${escapeHtml(r.job_id)}" title="Re-queue this job">↻ Rerun</button>`
+                : '—';
             return `<tr>
                 <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
                 <td>${repoLink}</td>
@@ -1062,10 +1065,11 @@ async function loadHistory() {
                 <td>${escapeHtml(r.trigger || '')}</td>
                 <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
                 <td>${logLink}</td>
+                <td>${rerunBtn}</td>
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="10" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
     }
 }
 
@@ -1091,10 +1095,15 @@ document.addEventListener('click', e => {
 async function loadRunningDetail() {
     const tbody = document.getElementById('running-body');
     const dtbody = document.getElementById('deferred-body');
+    const qtbody = document.getElementById('queued-body');
     const summary = document.getElementById('running-summary');
     try {
-        const res = await fetch(`${API}/api/builds/running`);
-        const data = await res.json();
+        const [runRes, qRes] = await Promise.all([
+            fetch(`${API}/api/builds/running`),
+            fetch(`${API}/api/queue/list`),
+        ]);
+        const data = await runRes.json();
+        const qData = await qRes.json();
         const now = Date.now();
 
         summary.innerHTML = `
@@ -1139,6 +1148,28 @@ async function loadRunningDetail() {
                 `<tr><td>${escapeHtml(d.triple)}</td><td>${d.depth}</td></tr>`
             ).join('');
         }
+
+        if (!qData.items || !qData.items.length) {
+            qtbody.innerHTML = '<tr><td colspan="6" class="loading">Queue is empty.</td></tr>';
+        } else {
+            qtbody.innerHTML = qData.items.map(q => {
+                const repoShort = (q.repo || '').split('/').pop();
+                const repoLink = q.repo
+                    ? `<a href="https://github.com/${q.repo}" target="_blank" rel="noopener">${escapeHtml(repoShort)}</a>`
+                    : '—';
+                const delBtn = q.job_id
+                    ? `<button class="btn btn-small btn-danger row-queue-delete" data-action data-job-id="${escapeHtml(q.job_id)}" title="Remove from queue">✕ Remove</button>`
+                    : '—';
+                return `<tr>
+                    <td>${repoLink}</td>
+                    <td>${escapeHtml(q.ref || '')}</td>
+                    <td><span class="arch-badge">${escapeHtml(q.arch || '')}</span></td>
+                    <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(q.type || 'integration-test'))}</td>
+                    <td title="${escapeHtml(q.queued_at || '')}">${formatTime(q.queued_at)}</td>
+                    <td>${delBtn}</td>
+                </tr>`;
+            }).join('');
+        }
     } catch (e) {
         tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
     }
@@ -1161,6 +1192,53 @@ document.addEventListener('click', async e => {
     } finally {
         btn.disabled = false; btn.textContent = '■ Terminate';
         loadRunningDetail();
+    }
+});
+
+document.addEventListener('click', async e => {
+    const btn = e.target.closest('.row-queue-delete');
+    if (!btn) return;
+    e.preventDefault();
+    if (!isWriter()) {
+        alert('Only org members can remove queue items.');
+        return;
+    }
+    const jobId = btn.dataset.jobId;
+    if (!confirm(`Remove job ${jobId} from the queue?`)) return;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const res = await fetch(`/api/queue/item?job_id=${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            alert(`Remove failed (${res.status}): ${body.detail || ''}`);
+        }
+    } finally {
+        loadRunningDetail();
+    }
+});
+
+document.addEventListener('click', async e => {
+    const btn = e.target.closest('.row-rerun');
+    if (!btn) return;
+    e.preventDefault();
+    if (!isWriter()) {
+        alert('Only org members can rerun jobs.');
+        return;
+    }
+    const jobId = btn.dataset.jobId;
+    if (!confirm(`Re-queue job ${jobId}?`)) return;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const res = await fetch(`/api/builds/rerun/${encodeURIComponent(jobId)}`, { method: 'POST' });
+        if (res.ok) {
+            const body = await res.json();
+            alert(`Re-queued as ${body.new_job_id}`);
+        } else {
+            const body = await res.json().catch(() => ({}));
+            alert(`Rerun failed (${res.status}): ${body.detail || ''}`);
+        }
+    } finally {
+        btn.disabled = false; btn.textContent = '↻ Rerun';
     }
 });
 

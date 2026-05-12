@@ -142,13 +142,37 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         # 2. Wait for the Sysbox's inner dockerd to be ready
         await _wait_for_inner_docker(sb_name)
 
-        # 3. Pull dt-enablement image inside the Sysbox (cached after first run)
-        pull = await asyncio.create_subprocess_exec(
-            "docker", "exec", sb_name,
-            "docker", "pull", TEST_IMAGE,
+        # 3. Inject dt-enablement into the inner Sysbox dockerd.
+        #    Pull once to the outer daemon (cached on host); then stream
+        #    save→load so we never hit Docker Hub rate limits per container.
+        outer_inspect = await asyncio.create_subprocess_exec(
+            "docker", "image", "inspect", TEST_IMAGE,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
-        await pull.wait()
+        if await outer_inspect.wait() != 0:
+            outer_pull = await asyncio.create_subprocess_exec(
+                "docker", "pull", TEST_IMAGE,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await outer_pull.wait()
+        save_proc = await asyncio.create_subprocess_exec(
+            "docker", "save", TEST_IMAGE,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        load_proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-i", sb_name, "docker", "load",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            while True:
+                chunk = await save_proc.stdout.read(65536)
+                if not chunk:
+                    break
+                load_proc.stdin.write(chunk)
+            load_proc.stdin.close()
+        finally:
+            await asyncio.gather(save_proc.wait(), load_proc.wait())
 
         # 4. Start the inner dt-enablement container (bind-mount workspace
         #    from the Sysbox's view, mount the inner docker.sock so k3d can

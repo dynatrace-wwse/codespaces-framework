@@ -13,6 +13,7 @@ Flow per repo:
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from sync.core.repos import load_repos, filter_sync_targets
@@ -187,6 +188,7 @@ def run(args):
         if status == "created":
             print(f"  🚀 PR created: {result.get('url', '')}")
             print(f"    {msg}")
+            time.sleep(10)  # stagger GHA triggers
         elif status == "would-update":
             print(f"  ⏳ {msg}")
         elif status == "error":

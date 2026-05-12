@@ -844,13 +844,38 @@ class WorkerManager:
             # 2. Wait for inner dockerd
             await self._wait_for_inner_docker(sb_name)
 
-            # 3. Pull dt-enablement inside the Sysbox
-            pull = await asyncio.create_subprocess_exec(
-                "docker", "exec", sb_name,
-                "docker", "pull", "shinojosa/dt-enablement:v1.2",
+            # 3. Inject dt-enablement into the inner Sysbox dockerd.
+            #    Pull once to the outer daemon (cached on host); then stream
+            #    save→load so we never hit Docker Hub rate limits per container.
+            _DT_IMAGE = "shinojosa/dt-enablement:v1.2"
+            outer_inspect = await asyncio.create_subprocess_exec(
+                "docker", "image", "inspect", _DT_IMAGE,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-            await pull.wait()
+            if await outer_inspect.wait() != 0:
+                outer_pull = await asyncio.create_subprocess_exec(
+                    "docker", "pull", _DT_IMAGE,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await outer_pull.wait()
+            save_proc = await asyncio.create_subprocess_exec(
+                "docker", "save", _DT_IMAGE,
+                stdout=asyncio.subprocess.PIPE,
+            )
+            load_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", "-i", sb_name, "docker", "load",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                while True:
+                    chunk = await save_proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    load_proc.stdin.write(chunk)
+                load_proc.stdin.close()
+            finally:
+                await asyncio.gather(save_proc.wait(), load_proc.wait())
 
             # 4. Start dt-enablement detached inside the Sysbox
             inner_run = [
@@ -1034,13 +1059,38 @@ class WorkerManager:
             # 2. Wait for inner dockerd
             await self._wait_for_inner_docker(sb_name)
 
-            # 3. Pull dt-enablement inside the Sysbox
-            pull = await asyncio.create_subprocess_exec(
-                "docker", "exec", sb_name,
-                "docker", "pull", "shinojosa/dt-enablement:v1.2",
+            # 3. Inject dt-enablement into the inner Sysbox dockerd.
+            #    Pull once to the outer daemon (cached on host); then stream
+            #    save→load so we never hit Docker Hub rate limits per container.
+            _DT_IMAGE = "shinojosa/dt-enablement:v1.2"
+            outer_inspect = await asyncio.create_subprocess_exec(
+                "docker", "image", "inspect", _DT_IMAGE,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-            await pull.wait()
+            if await outer_inspect.wait() != 0:
+                outer_pull = await asyncio.create_subprocess_exec(
+                    "docker", "pull", _DT_IMAGE,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await outer_pull.wait()
+            save_proc = await asyncio.create_subprocess_exec(
+                "docker", "save", _DT_IMAGE,
+                stdout=asyncio.subprocess.PIPE,
+            )
+            load_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", "-i", sb_name, "docker", "load",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                while True:
+                    chunk = await save_proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    load_proc.stdin.write(chunk)
+                load_proc.stdin.close()
+            finally:
+                await asyncio.gather(save_proc.wait(), load_proc.wait())
 
             # 4. Start dt-enablement detached inside the Sysbox
             inner_run = [

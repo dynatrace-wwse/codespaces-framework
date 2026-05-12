@@ -6,7 +6,7 @@ import logging
 import os
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import fcntl
@@ -705,6 +705,91 @@ async def api_terminate_job(job_id: str, request: Request):
     return {"status": "termination_requested", "job_id": job_id, "requested_by": requested_by}
 
 
+@app.get("/api/queue/list")
+async def api_queue_list():
+    """Contents of the pending test queues (arm64 + amd64), unordered."""
+    result = []
+    for arch in ("arm64", "amd64"):
+        items = await pool.lrange(f"queue:test:{arch}", 0, -1)
+        for position, raw in enumerate(items):
+            try:
+                j = json.loads(raw)
+            except Exception:
+                continue
+            result.append({
+                "queue":     f"queue:test:{arch}",
+                "arch":      arch,
+                "position":  position,
+                "job_id":    j.get("job_id", ""),
+                "repo":      j.get("repo", ""),
+                "ref":       j.get("ref") or j.get("branch") or j.get("head_branch") or "main",
+                "type":      j.get("type", "integration-test"),
+                "queued_at": j.get("timestamp") or j.get("queued_at"),
+            })
+    return {"items": result, "total": len(result)}
+
+
+@app.delete("/api/queue/item")
+async def api_queue_delete_item(job_id: str, request: Request):
+    """Remove a pending job from a test queue by job_id. Writer role required."""
+    await _require_writer(request)
+    removed = 0
+    for arch in ("arm64", "amd64"):
+        items = await pool.lrange(f"queue:test:{arch}", 0, -1)
+        for raw in items:
+            try:
+                j = json.loads(raw)
+                if j.get("job_id") == job_id:
+                    count = await pool.lrem(f"queue:test:{arch}", 1, raw)
+                    removed += count
+                    break
+            except Exception:
+                pass
+        if removed:
+            break
+    if not removed:
+        raise HTTPException(404, f"Job {job_id} not found in any test queue")
+    log.info("Queue item %s deleted", job_id)
+    return {"removed": removed, "job_id": job_id}
+
+
+@app.post("/api/builds/rerun/{job_id}")
+async def api_rerun_job(job_id: str, request: Request):
+    """Re-queue a completed job from history. Writer role required."""
+    role = await _require_writer(request)
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    original = None
+    for raw in completed_raw:
+        try:
+            j = json.loads(raw)
+            if j.get("job_id") == job_id:
+                original = j
+                break
+        except Exception:
+            pass
+    if not original:
+        raise HTTPException(404, f"Job {job_id} not found in history")
+    repo = original.get("repo", "")
+    ref = original.get("ref") or original.get("head_branch") or "main"
+    arch = original.get("arch") or original.get("result", {}).get("arch") or "arm64"
+    job_type = original.get("type", "integration-test")
+    if job_type not in ("integration-test",):
+        raise HTTPException(400, f"Re-run not supported for job type '{job_type}'")
+    new_job_id = str(uuid.uuid4())
+    new_job = {
+        "job_id":    new_job_id,
+        "repo":      repo,
+        "ref":       ref,
+        "arch":      arch,
+        "type":      job_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "trigger":   f"rerun-by-{role['user']}",
+    }
+    await pool.rpush(f"queue:test:{arch}", json.dumps(new_job))
+    log.info("Re-queued %s@%s (%s) as %s by %s", repo, ref, arch, new_job_id, role["user"])
+    return {"job_id": new_job_id, "status": "queued", "repo": repo, "ref": ref, "arch": arch}
+
+
 @app.get("/log/{job_id}", response_class=HTMLResponse)
 async def view_log_fullscreen(job_id: str):
     """Standalone fullscreen log viewer for a single job.
@@ -1238,6 +1323,27 @@ async def api_repo_branches(owner: str, repo: str):
     return payload
 
 
+def _infer_started_at(job: dict, result: dict) -> str:
+    """Return the best available started_at timestamp for a completed job.
+
+    Older job records may lack a 'timestamp' field (queue time). Fall back to
+    computing start = finished_at - duration_seconds so the history table
+    always shows a useful date instead of a blank.
+    """
+    ts = job.get("timestamp") or job.get("started_at")
+    if ts:
+        return ts
+    finished = job.get("finished_at")
+    dur = result.get("duration_seconds") or job.get("duration_seconds")
+    if finished and dur:
+        try:
+            fin_dt = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+            return (fin_dt - timedelta(seconds=float(dur))).isoformat()
+        except Exception:
+            return finished
+    return finished or ""
+
+
 @app.get("/api/builds/history")
 async def api_builds_history(
     repo: str | None = None,
@@ -1303,7 +1409,7 @@ async def api_builds_history(
             "passed": bool(result.get("passed")),
             "duration": int(result.get("duration_seconds", 0)),
             "exit_code": result.get("exit_code"),
-            "started_at": j.get("timestamp"),
+            "started_at": _infer_started_at(j, result),
             "finished_at": j.get("finished_at"),
             "trigger": trigger,
             "nightly_run_id": nightly_id,
