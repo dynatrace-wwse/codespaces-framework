@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=18">
+    <link rel="stylesheet" href="/static/style.css?v=19">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -145,6 +145,22 @@
                     <tr><td colspan="2" class="loading">—</td></tr>
                 </tbody>
             </table>
+            <h3 style="margin-top: 24px;">Queued · waiting for a worker</h3>
+            <table id="queued-table">
+                <thead>
+                    <tr>
+                        <th>Repository</th>
+                        <th>Branch</th>
+                        <th>Arch</th>
+                        <th>Type</th>
+                        <th>Queued</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="queued-body">
+                    <tr><td colspan="6" class="loading">—</td></tr>
+                </tbody>
+            </table>
         </section>
 
         <!-- History View -->
@@ -186,10 +202,11 @@
                         <th>Trigger</th>
                         <th>Worker</th>
                         <th>Log</th>
+                        <th>Rerun</th>
                     </tr>
                 </thead>
                 <tbody id="history-body">
-                    <tr><td colspan="10" class="loading">Loading history…</td></tr>
+                    <tr><td colspan="11" class="loading">Loading history…</td></tr>
                 </tbody>
             </table>
         </section>
@@ -470,6 +487,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=18"></script>
+    <script src="/static/app.js?v=19"></script>
 </body>
 </html>

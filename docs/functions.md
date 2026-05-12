@@ -274,8 +274,9 @@ The framework routes apps via nginx ingress with magic DNS (`sslip.io`), elimina
 
 | Function | Signature | Description |
 |---|---|---|
-| `installIngressController` | `installIngressController` | Installs nginx ingress controller in the Kind cluster |
+| `installIngressController` | `installIngressController` | Installs nginx ingress controller (auto-selects K3d `cloud` or Kind `kind` provider) |
 | `detectIP` | `detectIP` | Returns the host IP used for DNS subdomains (auto-detects: Codespaces/public/local) |
+| `detectHostname` | `detectHostname` | Returns the machine hostname used as a secondary ingress host |
 | `getAppURL` | `getAppURL <app-name> [port]` | Returns the user-facing URL for an app (Codespaces vs. sslip.io) |
 | `registerApp` | `registerApp <name> <ns> <svc> <port> [annotations]` | Creates an Ingress, registers in the app registry, sets up Codespaces port-forward |
 | `unregisterApp` | `unregisterApp <app-name> <namespace>` | Deletes the Ingress, removes port-forward, removes from registry |

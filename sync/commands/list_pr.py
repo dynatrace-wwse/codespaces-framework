@@ -26,11 +26,14 @@ def _gh(args: list[str], repo: str) -> subprocess.CompletedProcess:
 
 def _get_prs(repo: str, head: str = None) -> list[dict]:
     """List open PRs. Optionally filter by head branch."""
-    cmd = ["pr", "list", "--state", "open", "--json", "number,url,title,headRefName,statusCheckRollup"]
+    cmd = ["pr", "list", "--state", "open", "--author", "", "--json", "number,url,title,headRefName,statusCheckRollup"]
     if head:
         cmd.extend(["--head", head])
     result = _gh(cmd, repo)
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        print(f"  ⚠️  gh error: {result.stderr.strip() or 'no output'}", file=sys.stderr)
+        return []
+    if not result.stdout.strip():
         return []
     return json.loads(result.stdout)
 
@@ -176,7 +179,7 @@ def run(args):
             print(f"x '{target_repo}' not found in repos.yaml", file=sys.stderr)
             sys.exit(1)
     else:
-        repos = [r for r in repos if r.status == "active"]
+        repos = filter_sync_targets(repos)
 
     head_filter = f"{SYNC_BRANCH_PREFIX}{version}" if version else None
     print(f"Listing open PRs{f' for branch {head_filter}' if head_filter else ''} across {len(repos)} repos\n")

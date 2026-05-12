@@ -521,7 +521,8 @@ assertRunningPod dynatrace operator
 
 assertRunningPod dynatrace activegate
 
-assertRunningApp 30100
+# Call assertRunningApp with your app's registered name, e.g.:
+# assertRunningApp myapp
 """
 
 MY_FUNCTIONS_TEMPLATE = """\

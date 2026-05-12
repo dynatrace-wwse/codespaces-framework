@@ -168,12 +168,16 @@ def push(path: Path, branch_name: str) -> GitResult:
 
 def create_pr(owner: str, repo_name: str, path: Path, title: str, body: str, base: str = "main") -> GitResult:
     """Create a PR via gh CLI."""
-    result = subprocess.run(
-        ["gh", "pr", "create", "--title", title, "--body", body, "--base", base],
-        cwd=path,
-        capture_output=True,
-        text=True,
+    # Detect current branch for --head so gh doesn't abort when it can't infer upstream
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=path, capture_output=True, text=True,
     )
+    head_branch = branch_result.stdout.strip() or ""
+    cmd = ["gh", "pr", "create", "--title", title, "--body", body, "--base", base]
+    if head_branch:
+        cmd += ["--head", head_branch]
+    result = subprocess.run(cmd, cwd=path, capture_output=True, text=True)
     if result.returncode != 0:
         return GitResult(
             success=False,

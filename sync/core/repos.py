@@ -46,11 +46,13 @@ class RepoEntry:
 
 def load_repos(path: Optional[Path] = None) -> list[RepoEntry]:
     """Load and parse repos.yaml from the given path or default location."""
+    import dataclasses
     if path is None:
         path = Path(__file__).parent.parent.parent / "repos.yaml"
     with open(path) as f:
         data = yaml.safe_load(f)
-    return [RepoEntry(**r) for r in data.get("repos", [])]
+    known = {f.name for f in dataclasses.fields(RepoEntry)}
+    return [RepoEntry(**{k: v for k, v in r.items() if k in known}) for r in data.get("repos", [])]
 
 
 def validate_repos(repos: list[RepoEntry]) -> list[str]:

@@ -641,6 +641,7 @@ stopKindCluster(){
 }
 
 startKindCluster(){
+  export CLUSTER_ENGINE=kind
   printInfoSection "Starting Kubernetes Cluster (kind-control-plane)"
   KIND_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
   if [ "$KIND_STATUS" = "exited" ] || [ "$KIND_STATUS" = "dead" ]; then
@@ -707,6 +708,7 @@ deleteKindCluster() {
 # ======================================================================
 
 startK3dCluster(){
+  export CLUSTER_ENGINE=k3d
   printInfoSection "Starting Kubernetes Cluster (K3d)"
 
   installK3d
@@ -2308,6 +2310,7 @@ deployAstroshop(){
     printInfo "Astroshop deployed and available via NodePort=$PORT"
   else
     # Astroshop needs custom ingress: otel-collector paths + frontend-proxy catch-all
+    waitForAllReadyPods "$NAMESPACE"
     registerAstroshopIngress "$NAMESPACE"
   fi
 }
@@ -2483,6 +2486,7 @@ deployOpentelemetryDemo(){
     printInfo "OpenTelemetry Demo available via NodePort=$PORT"
   else
     # Same multi-path ingress pattern as astroshop — otel-collector + frontend-proxy
+    waitForAllReadyPods "$NAMESPACE"
     registerOpentelemetryDemoIngress "$NAMESPACE"
   fi
 }

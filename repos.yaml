@@ -28,6 +28,7 @@ repos:
     tags: [business-observability]
     title: "Business Observability"
     primary_tag: business-observability
+    arch: amd64
     duration: "3h"
 
   - name: enablement-dql-301
@@ -49,6 +50,7 @@ repos:
     tags: [logs, kubernetes]
     title: "Log Ingestion 101"
     primary_tag: logs
+    arch: amd64
     duration: "2h"
 
   - name: enablement-browser-dem-biz-observability
@@ -142,6 +144,7 @@ repos:
     tags: [logs, kubernetes]
     title: "Log Analytics Workshop"
     primary_tag: logs
+    arch: amd64
     duration: "3h"
 
   - name: workshop-destination-automation
