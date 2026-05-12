@@ -2236,7 +2236,7 @@ deployAITravelAdvisorApp(){
     waitAppCanHandleRequests $PORT 20
     printInfo "AI Travel Advisor is available via NodePort=$PORT"
   else
-    registerApp "ai-travel-advisor" "ai-travel-advisor" "ai-travel-advisor" 8080
+    registerApp "ai-travel-advisor" "ai-travel-advisor" "ai-travel-advisor" 80
   fi
 }
 
