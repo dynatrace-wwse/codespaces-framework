@@ -482,7 +482,7 @@ function renderBuildSpark(history) {
     return [...history].reverse().map(h => {
         const isTerminated = h.status === 'terminated';
         const statusKey = isTerminated ? 'term' : (h.passed ? 'pass' : 'fail');
-        const sym = isTerminated ? '–' : '|';
+        const sym = '|';
         const cls = `spark-bar spark-${statusKey}`;
         const label = escapeHtml(`${statusKey.toUpperCase()} · ${formatTime(h.finished_at)}`);
         if (h.job_id) {
@@ -1223,7 +1223,7 @@ async function loadRunningDetail() {
     } catch (e) {
         tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
         if (document.getElementById('queued-body'))
-            document.getElementById('queued-body').innerHTML = `<tr><td colspan="6" class="loading">Error loading queue.</td></tr>`;
+            document.getElementById('queued-body').innerHTML = `<tr><td colspan="7" class="loading">Error loading queue.</td></tr>`;
     }
 }
 

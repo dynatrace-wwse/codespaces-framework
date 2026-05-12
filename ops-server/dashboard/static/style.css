@@ -1061,20 +1061,21 @@ mark.log-match.current {
 /* ─── Build sparkline bars (fleet + nightly history) ─────────── */
 .build-spark {
     display: flex;
-    gap: 2px;
+    gap: 1px;
     margin-top: 4px;
     align-items: center;
     min-height: 14px;
 }
 .spark-bar {
     display: inline-block;
-    font-size: 0.7rem;
+    font-size: 0.65rem;
     font-weight: 700;
     line-height: 1;
     text-decoration: none;
     cursor: default;
     transition: opacity .12s;
     font-family: ui-monospace, monospace;
+    letter-spacing: -0.5px;
 }
 a.spark-bar { cursor: pointer; }
 a.spark-bar:hover { opacity: .75; }
