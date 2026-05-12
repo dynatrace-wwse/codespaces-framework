@@ -26,7 +26,7 @@ def _gh(args: list[str], repo: str) -> subprocess.CompletedProcess:
 
 def _get_prs(repo: str, head: str = None) -> list[dict]:
     """List open PRs. Optionally filter by head branch."""
-    cmd = ["pr", "list", "--state", "open", "--json", "number,url,title,headRefName,statusCheckRollup"]
+    cmd = ["pr", "list", "--state", "open", "--author", "", "--json", "number,url,title,headRefName,statusCheckRollup"]
     if head:
         cmd.extend(["--head", head])
     result = _gh(cmd, repo)
