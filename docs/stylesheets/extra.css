@@ -26,9 +26,9 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ---- Typography — override Material's 12.8px default ---- */
+/* ---- Typography — match docs.dynatrace.com (~12.8px) ---- */
 .md-typeset {
-  font-size: .875rem;
+  font-size: .8rem;
   line-height: 1.7;
 }
 

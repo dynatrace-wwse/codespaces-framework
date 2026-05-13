@@ -106,7 +106,9 @@ header {
     letter-spacing: .14em; text-transform: uppercase;
 }
 
-.spacer { flex: 1; }
+.header-center {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+}
 
 .health-badge {
     padding: 5px 12px;
