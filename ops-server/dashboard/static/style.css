@@ -307,6 +307,13 @@ td.running { background: rgba(0,180,222,.06); }
 }
 .btn-danger:hover { filter: brightness(1.1); box-shadow: 0 6px 18px rgba(251,113,133,.3); }
 
+.btn-danger-muted {
+    background: rgba(251,113,133,.12);
+    color: var(--red);
+    border-color: rgba(251,113,133,.3);
+}
+.btn-danger-muted:hover { background: rgba(251,113,133,.22); box-shadow: 0 4px 12px rgba(251,113,133,.2); filter: none; transform: translateY(-1px); }
+
 .btn-small { padding: 4px 10px; font-size: 0.75rem; }
 .btn-auth {
     background: transparent;
@@ -567,6 +574,40 @@ td.running { background: rgba(0,180,222,.06); }
     margin-bottom: 12px;
     font-size: 0.85rem;
     color: var(--text-2);
+}
+
+/* ─── Agent sub-nav ───────────────────────────────────────────── */
+.agent-subnav {
+    display: flex;
+    gap: 2px;
+    margin: 28px 0 0;
+    border-bottom: 1px solid var(--border-soft);
+    padding-bottom: 0;
+}
+.agent-tab {
+    background: none;
+    border: none;
+    color: var(--text-2);
+    font-size: 0.83rem;
+    font-weight: 500;
+    padding: 7px 14px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    border-radius: 0;
+    transition: color .15s, border-color .15s;
+}
+.agent-tab:hover { color: var(--text); }
+.agent-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.agent-subview {
+    margin-top: 16px;
+}
+.show-more-row {
+    text-align: center;
+    padding: 10px 0 4px;
 }
 
 .label-chip {
@@ -991,6 +1032,31 @@ mark.log-match.current {
 
 .agentic-header {
     margin-bottom: 16px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+.agent-ready-indicator {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+.agent-ready-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse-dot 2.2s ease-in-out infinite;
+    flex-shrink: 0;
+}
+.agent-ready-label {
+    font-size: 0.8rem;
+    color: var(--green);
+    font-weight: 500;
+    white-space: nowrap;
 }
 .agentic-intro {
     color: var(--text-muted);
@@ -1160,7 +1226,11 @@ a.spark-bar:hover { opacity: .75; }
 .ci-badge.pass   { background: rgba(74,222,128,.12); color: var(--green); border-color: rgba(74,222,128,.3); }
 .ci-badge.fail   { background: rgba(251,113,133,.12); color: var(--red);  border-color: rgba(251,113,133,.3); }
 .ci-badge.term   { background: rgba(251,191,36,.1);  color: var(--amber); border-color: rgba(251,191,36,.3); }
+.ci-badge.pend   { background: rgba(251,191,36,.1);  color: var(--amber); border-color: rgba(251,191,36,.3); animation: pend-blink 1.2s ease-in-out infinite; }
 .ci-badge.none   { color: var(--text-3); border-color: transparent; background: transparent; }
+@keyframes pend-blink { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+
+.instr-dot { font-size:.7rem; opacity:.6; cursor:default; margin-right:2px; }
 
 /* ─── Fix with AI button in tables ──────────────────────────── */
 .btn-fix-ai {
@@ -1179,3 +1249,23 @@ a.spark-bar:hover { opacity: .75; }
     transition: background .12s, border-color .12s;
 }
 .btn-fix-ai:hover { background: rgba(0,180,222,.16); border-color: rgba(0,180,222,.55); }
+
+/* ─── Toast notification ─────────────────────────────────────── */
+#ops-toast {
+    position: fixed;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%) translateY(12px);
+    background: var(--surface-2);
+    border: 1px solid var(--border-soft);
+    color: var(--text-1);
+    padding: 10px 22px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    opacity: 0;
+    transition: opacity .2s, transform .2s;
+    pointer-events: none;
+    z-index: 9999;
+    white-space: nowrap;
+}
+#ops-toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }

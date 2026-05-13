@@ -151,7 +151,14 @@ def _update_repo(repo_entry, target: str, dry_run: bool, force: bool, auto_merge
 
 
 def run(args):
+    from sync.commands.release import _get_latest_tag
     target = args.framework_version
+    if not target:
+        target = _get_latest_tag()
+        if not target:
+            print("x No --framework-version given and no git tags found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Using latest tag: {target}")
     dry_run = args.dry_run
     force = args.force
     auto_merge = args.auto_merge

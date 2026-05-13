@@ -73,6 +73,14 @@ def run(args):
 
     repos = filter_sync_targets(load_repos())
 
+    repo_filter = getattr(args, "repo", None)
+    if repo_filter:
+        repos = [r for r in repos if repo_filter in r.url or repo_filter == r.repo_name]
+
+    exclude_filter = getattr(args, "exclude", None)
+    if exclude_filter:
+        repos = [r for r in repos if exclude_filter not in r.url and exclude_filter != r.repo_name]
+
     # Pre-flight: verify all repos at target version
     print(f"🔍 Pre-flight: checking all repos are at framework {target}\n")
     if not force:

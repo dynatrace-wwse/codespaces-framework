@@ -243,6 +243,19 @@ async def api_repos():
 
     # Pull latest_tag from fleet:release-tags (24 h TTL, populated by the
     # status-summary endpoint on each run so it survives the 5-min status cache).
+    async def _fetch_latest_tag(repo_full: str) -> tuple[str, str]:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"https://api.github.com/repos/{repo_full}/releases/latest",
+                    headers={"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json"},
+                )
+                if resp.is_success:
+                    return repo_full, resp.json().get("tag_name", "")
+        except Exception:
+            pass
+        return repo_full, ""
+
     release_map: dict[str, str] = {}
     try:
         cached_tags = await pool.get("fleet:release-tags")
@@ -251,35 +264,29 @@ async def api_repos():
     except Exception:
         pass
 
-    # Fallback: fetch latest releases directly from GitHub when the cache is empty.
-    if not release_map and GH_TOKEN:
-        import asyncio as _asyncio
-        active_repos = [r["repo"] for r in data.get("repos", []) if r.get("status") == "active"]
+    displayed_repos = [
+        r["repo"] for r in data.get("repos", [])
+        if r.get("status") == "active" and r.get("listed") is not False
+    ]
 
-        async def _fetch_latest_tag(repo_full: str) -> tuple[str, str]:
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    r = await client.get(
-                        f"https://api.github.com/repos/{repo_full}/releases/latest",
-                        headers={"Authorization": f"Bearer {GH_TOKEN}", "Accept": "application/vnd.github+json"},
-                    )
-                    if r.is_success:
-                        return repo_full, r.json().get("tag_name", "")
-            except Exception:
-                pass
-            return repo_full, ""
-
-        results = await _asyncio.gather(*[_fetch_latest_tag(r) for r in active_repos])
-        release_map = {repo: tag for repo, tag in results if tag}
-        if release_map:
-            try:
-                await pool.set("fleet:release-tags", json.dumps(release_map), ex=86400)
-            except Exception:
-                pass
+    # Full fetch when cache is empty; targeted fetch for repos missing from cache.
+    if GH_TOKEN:
+        missing = [rp for rp in displayed_repos if rp not in release_map]
+        if missing:
+            results = await asyncio.gather(*[_fetch_latest_tag(rp) for rp in missing])
+            new_tags = {repo: tag for repo, tag in results if tag}
+            if new_tags:
+                release_map.update(new_tags)
+                try:
+                    await pool.set("fleet:release-tags", json.dumps(release_map), ex=86400)
+                except Exception:
+                    pass
 
     repos_out = []
     for r in data.get("repos", []):
         if r.get("status") != "active":
+            continue
+        if r.get("listed") is False:
             continue
         repo_full = r["repo"]
         builds: dict[str, dict] = dict(local_matrix.get(repo_full, {}))
@@ -572,8 +579,10 @@ async def api_trigger_ghpages_fleet(request: Request):
 
 @app.post("/api/agent/fix-ci")
 async def api_agent_fix_ci(request: Request):
-    """Queue a fix-ci agent job for a failed integration test."""
+    """Queue a fix-ci agent job for a failed integration test. Restricted to sergiohinojosa."""
     role = await _require_writer(request)
+    if role.get("user") != "sergiohinojosa":
+        raise HTTPException(status_code=403, detail="Fix-with-AI is currently restricted to sergiohinojosa")
     body = await request.json()
     repo        = (body.get("repo") or "").strip()
     branch      = (body.get("branch") or "main").strip()
@@ -632,31 +641,9 @@ async def api_agent_fix_pr(request: Request):
     if not repo or not pr_number:
         raise HTTPException(400, "repo and pr_number are required")
 
-    # Fetch the most recent failed integration-test log for this repo+branch
-    failed_log = ""
+    # Fetch the most recent failed GHA log (Test Codespace / devcontainer) for this repo+branch
+    failed_log = await _fetch_gha_failed_log(repo, branch)
     failed_job_id = ""
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
-    for raw in reversed(completed_raw):
-        try:
-            j = json.loads(raw)
-        except Exception:
-            continue
-        if j.get("type") != "integration-test":
-            continue
-        if j.get("repo", "").lower() != repo.lower():
-            continue
-        ref = j.get("ref") or j.get("branch") or j.get("head_branch") or ""
-        if branch and ref != branch:
-            continue
-        result = j.get("result", {}) or {}
-        if result.get("passed"):
-            continue
-        failed_job_id = j.get("job_id", "")
-        if failed_job_id:
-            raw_log = await pool.get(f"job:log:{failed_job_id}")
-            if raw_log:
-                failed_log = raw_log[-16384:] if len(raw_log) > 16384 else raw_log
-        break
 
     import uuid as _uuid
     ts = int(time.time() * 1000)
@@ -879,6 +866,28 @@ async def api_queue_delete_item(job_id: str, request: Request):
         raise HTTPException(404, f"Job {job_id} not found in any test queue")
     log.info("Queue item %s deleted", job_id)
     return {"removed": removed, "job_id": job_id}
+
+
+@app.delete("/api/queue/clear")
+async def api_queue_clear(request: Request, arch: str | None = None):
+    """Remove all pending jobs from test queue(s). Writer role required.
+
+    Pass ``?arch=arm64`` or ``?arch=amd64`` to clear a single arch queue;
+    omit for both queues.
+    """
+    await _require_writer(request)
+    arches = [arch] if arch in ("arm64", "amd64") else ["arm64", "amd64"]
+    total = 0
+    cleared: dict[str, int] = {}
+    for a in arches:
+        key = f"queue:test:{a}"
+        count = await pool.llen(key)
+        if count:
+            await pool.delete(key)
+        cleared[a] = count
+        total += count
+    log.info("Queue cleared: %s (total=%d) by %s", cleared, total, (await _resolve_role(request))["user"])
+    return {"cleared": cleared, "total": total}
 
 
 @app.post("/api/builds/rerun/{job_id}")
@@ -1359,53 +1368,137 @@ async def api_sync_status_summary():
     return payload
 
 
+async def _fetch_gha_failed_log(repo: str, branch: str) -> str:
+    """Fetch failed-step logs from GitHub Actions for repo+branch.
+
+    Finds the most recent failed 'Test Codespace (devcontainer)' run and
+    returns its --log-failed output (build container / start container /
+    integration.sh steps), capped at 16 KB.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "run", "list",
+        "--repo", repo,
+        "--branch", branch,
+        "--limit", "10",
+        "--json", "databaseId,name,conclusion,status",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0 or not stdout:
+        return ""
+    try:
+        runs = json.loads(stdout.decode())
+    except Exception:
+        return ""
+
+    run_id = None
+    for run in runs:
+        if run.get("conclusion") not in ("failure", "timed_out"):
+            continue
+        name = (run.get("name") or "").lower()
+        if not run_id:
+            run_id = str(run["databaseId"])
+        if "codespace" in name or "devcontainer" in name:
+            run_id = str(run["databaseId"])
+            break
+
+    if not run_id:
+        return ""
+
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "run", "view", run_id,
+        "--repo", repo,
+        "--log-failed",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0 or not stdout:
+        return ""
+
+    log_text = stdout.decode(errors="replace")
+    return log_text[-16384:] if len(log_text) > 16384 else log_text
+
+
+async def _gh_pr_ci(repo_nwo: str, pr_number: int) -> dict:
+    """Fetch statusCheckRollup + headRefName for one PR via gh pr view (no cache)."""
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "view", str(pr_number), "-R", repo_nwo,
+        "--json", "statusCheckRollup,headRefName",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return {}
+    try:
+        return json.loads(stdout.decode())
+    except Exception:
+        return {}
+
+
 @app.get("/api/sync/prs")
 async def api_sync_prs():
-    """Open PRs across the org with our integration-test CI status cross-referenced.
+    """Open PRs across the org with real GitHub CI status (statusCheckRollup).
 
-    Uses ``gh search prs`` (cached 5 min) then annotates each PR with
-    ``_ci`` from Redis so the dashboard can show which PRs have a failing
-    integration test and offer the Fix-with-AI button.
+    Uses ``gh search prs`` for the list, then enriches each PR in parallel
+    with ``gh pr view --json statusCheckRollup,headRefName`` so the CI column
+    reflects actual GitHub Actions results (not the ops-server Redis state).
+    Cached 5 minutes.
     """
+    cache_key = "sync:prs"
+    cached = await pool.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
     data = await _gh_json(
-        "sync:prs",
+        "_sync:prs:raw",
         "search", "prs",
         "--owner", GH_ORG,
         "--state", "open",
         "--limit", "100",
         "--json", "number,title,repository,author,createdAt,updatedAt,url,labels",
+        ttl=60,
     )
     if data.get("error") or not isinstance(data.get("rows"), list):
         return data
 
-    # Cross-reference each PR with our Redis integration-test results.
-    # gh search prs does not expose headRefName, so we key by repo only
-    # (latest integration-test result per repo).
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
-    ci_map: dict[str, dict] = {}
-    for raw in reversed(completed_raw):  # newest first
-        try:
-            j = json.loads(raw)
-        except Exception:
-            continue
-        if j.get("type") != "integration-test":
-            continue
-        repo_k = j.get("repo", "")
-        if repo_k not in ci_map:
-            result = j.get("result", {}) or {}
-            ci_map[repo_k] = {
-                "passed": bool(result.get("passed")),
-                "status": j.get("status", "completed"),
-                "job_id": j.get("job_id", ""),
-                "finished_at": j.get("finished_at", ""),
-                "arch": j.get("arch") or result.get("arch") or "arm64",
-            }
+    rows = data["rows"]
 
-    for pr in data["rows"]:
+    # Enrich each PR with GitHub CI status in parallel
+    async def enrich(pr):
         repo_nwo = (pr.get("repository") or {}).get("nameWithOwner", "")
-        pr["_ci"] = ci_map.get(repo_nwo)
+        if not repo_nwo:
+            return
+        detail = await _gh_pr_ci(repo_nwo, pr["number"])
+        checks = detail.get("statusCheckRollup") or []
+        pr["headRefName"] = detail.get("headRefName", "")
+        if not checks:
+            pr["_ci"] = None
+            return
+        conclusions = [c.get("conclusion") or c.get("status") or "" for c in checks]
+        failed = [c for c in checks if c.get("conclusion") in ("FAILURE", "ERROR", "TIMED_OUT")]
+        if all(c in ("SUCCESS", "NEUTRAL", "SKIPPED") for c in conclusions):
+            overall = "pass"
+        elif any(c in ("FAILURE", "ERROR", "TIMED_OUT") for c in conclusions):
+            overall = "fail"
+        elif any(c in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING") for c in conclusions):
+            overall = "pending"
+        else:
+            overall = "pending"
+        pr["_ci"] = {
+            "overall": overall,
+            "passed": overall == "pass",
+            "failed_checks": [c.get("name", "?") for c in failed],
+            "checks": checks,
+        }
 
-    return data
+    await asyncio.gather(*(enrich(pr) for pr in rows), return_exceptions=True)
+
+    payload = {"rows": rows, "cached_at": datetime.now(timezone.utc).isoformat()}
+    await pool.set(cache_key, json.dumps(payload), ex=300)
+    return payload
 
 
 @app.post("/api/sync/prs/invalidate")

@@ -112,6 +112,8 @@ repos:
     tags: [logs, kubernetes, legacy]
     title: "OpenPipeline Segments & IAM"
     primary_tag: logs
+    sync_managed: false
+    ci: false
     duration: "2h"
 
   - name: enablement-kubernetes-opentelemetry-openpipeline

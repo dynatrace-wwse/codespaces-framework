@@ -2,6 +2,19 @@
 
 const API = '';
 
+function showToast(message, duration = 4000) {
+    let toast = document.getElementById('ops-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'ops-toast';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.add('visible');
+    clearTimeout(toast._hideTimer);
+    toast._hideTimer = setTimeout(() => toast.classList.remove('visible'), duration);
+}
+
 // Auth state — combines oauth2-proxy /oauth2/userinfo (am I signed in?) with
 // the dashboard's /api/auth/role (am I a writer or guest?). Only writers can
 // execute actions; guests are read-only across the whole UI including the
@@ -663,7 +676,7 @@ function applyWrapPref() {
     if (btn) btn.textContent = wrap ? '↩ Wrap' : '→ NoWrap';
 }
 
-function openLiveLog(jobId, title) {
+function openLiveLog(jobId, title, isAgent = false) {
     currentJobId = jobId;
     currentJobIsLive = false;
     livelogAppTabsLoaded = false;
@@ -681,7 +694,7 @@ function openLiveLog(jobId, title) {
     livelogFrame.src = '';
     const pre = document.getElementById('livelog-pre');
     pre.style.display = '';
-    pre.innerHTML = '<em style="color:var(--text-muted)">Initializing isolation container…</em>';
+    pre.innerHTML = `<em style="color:var(--text-muted)">${isAgent ? 'Loading agent log…' : 'Initializing isolation container…'}</em>`;
     document.getElementById('livelog-modal').hidden = false;
     applyWrapPref();
 
@@ -707,13 +720,15 @@ function openLiveLog(jobId, title) {
                 if (shellBtn) shellBtn.hidden = true;
             } else if (res.ok) {
                 currentJobIsLive = true;
-                if (termBtn) termBtn.hidden = !isWriter();
-                if (shellBtn) shellBtn.hidden = !isWriter();
-                livelogPollCount++;
-                // Load on first live poll; refresh every ~30 s (15 × 2 s) to pick up new apps.
-                if (!livelogAppTabsLoaded || livelogPollCount % 15 === 0) {
-                    livelogAppTabsLoaded = true;
-                    _loadLivelogAppTabs(jobId);
+                if (!isAgent) {
+                    if (termBtn) termBtn.hidden = !isWriter();
+                    if (shellBtn) shellBtn.hidden = !isWriter();
+                    livelogPollCount++;
+                    // Load on first live poll; refresh every ~30 s (15 × 2 s) to pick up new apps.
+                    if (!livelogAppTabsLoaded || livelogPollCount % 15 === 0) {
+                        livelogAppTabsLoaded = true;
+                        _loadLivelogAppTabs(jobId);
+                    }
                 }
             }
             if (res.ok) {
@@ -880,6 +895,16 @@ document.addEventListener('click', e => {
         return;
     }
 
+    // Plain log-link with data-job-id (agent running jobs, post-queue links)
+    const jobIdLink = e.target.closest('a.log-link[data-job-id]');
+    if (jobIdLink && !e.target.closest('a.running-dot')) {
+        e.preventDefault();
+        const row = jobIdLink.closest('tr');
+        const label = row ? (row.querySelector('td')?.textContent?.trim() || '') : '';
+        openLiveLog(jobIdLink.dataset.jobId, label || jobIdLink.dataset.jobId, !!jobIdLink.dataset.agent);
+        return;
+    }
+
     // Final PASS/FAIL link → open same modal with the historical log
     const finalLink = e.target.closest('a[data-final-job]');
     if (finalLink) {
@@ -890,7 +915,7 @@ document.addEventListener('click', e => {
         const title = repo
             ? `${repo}${arch ? ' (' + arch + ')' : ''}`
             : finalLink.dataset.finalJob;
-        openLiveLog(finalLink.dataset.finalJob, title);
+        openLiveLog(finalLink.dataset.finalJob, title, !!finalLink.dataset.agent);
         return;
     }
 
@@ -1221,9 +1246,9 @@ async function loadRunningDetail() {
             }).join('');
         }
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
-        if (document.getElementById('queued-body'))
-            document.getElementById('queued-body').innerHTML = `<tr><td colspan="7" class="loading">Error loading queue.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+        if (qtbody)
+            qtbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
     }
 }
 
@@ -1293,6 +1318,34 @@ document.addEventListener('click', async e => {
     } catch {
         btn.disabled = false; btn.textContent = '↻ Rerun';
     }
+});
+
+// ── Clear Queue button ───────────────────────────────────────────────────────
+
+document.addEventListener('click', async e => {
+    const btn = e.target.closest('#btn-clear-queue');
+    if (!btn) return;
+    e.preventDefault();
+    if (!isWriter()) {
+        alert('Only org members can clear the queue.');
+        return;
+    }
+    if (!confirm('Remove ALL waiting jobs from both queues?')) return;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+        const res = await fetch('/api/queue/clear', { method: 'DELETE' });
+        if (res.ok) {
+            const data = await res.json();
+            btn.textContent = `✓ Cleared (${data.total})`;
+            setTimeout(() => { btn.disabled = false; btn.textContent = '✕ Clear Queue'; }, 2500);
+        } else {
+            btn.textContent = `✕ failed (${res.status})`;
+            setTimeout(() => { btn.disabled = false; btn.textContent = '✕ Clear Queue'; }, 3000);
+        }
+    } catch {
+        btn.disabled = false; btn.textContent = '✕ Clear Queue';
+    }
+    loadRunningDetail();
 });
 
 // ── Synchronizer tab ────────────────────────────────────────────────────────
@@ -1563,11 +1616,11 @@ function renderSyncIssues() {
         const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
         const updated = formatTime(r.updatedAt || r.updated_at);
         const fixBtn = isSergioUser
-            ? `<button class="btn-fix-ai fix-issue-btn" data-action
+            ? `<button class="btn btn-small btn-agent fix-issue-btn" data-action
                    data-repo="${escapeHtml(repo)}"
                    data-issue="${escapeHtml(String(r.number))}"
                    data-title="${escapeHtml(r.title)}"
-                   title="Let AI analyze and fix this issue">✨ Fix with AI</button>`
+                   title="Let AI analyze and fix this issue">Fix with AI</button>`
             : '—';
         return `<tr>
             <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo.split('/').pop())}</a></td>
@@ -1669,17 +1722,17 @@ async function submitFixWithAI() {
         }
 
         const data = await res.json();
+        const ctx = fixAiContext;
         closeFixWithAI();
-        const repoShort = fixAiContext.repo.split('/').pop();
-        const label = fixAiContext.type === 'pr'
-            ? `Fix PR #${fixAiContext.number} · ${repoShort}`
-            : `Fix Issue #${fixAiContext.number} · ${repoShort}`;
-        openLiveLog(data.job_id, label);
+        const repoShort = ctx.repo.split('/').pop();
+        activateTab('agentic');
+        setTimeout(loadAgenticRunning, 1200);
+        showToast(`Agent queued for ${repoShort} — visible in the Agentic tab`);
     } catch (e) {
         alert('Network error: ' + e);
     } finally {
         submitBtn.disabled = false;
-        submitBtn.textContent = '✨ Submit fix';
+        submitBtn.textContent = 'Submit fix';
     }
 }
 
@@ -2198,8 +2251,41 @@ function agentTypeLabel(type) {
     return map[type] || type;
 }
 
+// ── Agentic redesign ─────────────────────────────────────────────────────────
+
+let activeAgentView = 'history';
+let agentHistoryData = [];
+let agentFailedData  = [];
+let agentPRsData     = [];
+let agentIssuesData  = [];
+
+// Agent sub-tab click handler
+document.addEventListener('click', e => {
+    const atab = e.target.closest('.agent-tab');
+    if (!atab) return;
+    const view = atab.dataset.agentView;
+    if (!view) return;
+    activeAgentView = view;
+    document.querySelectorAll('.agent-tab').forEach(t => t.classList.toggle('active', t === atab));
+    document.querySelectorAll('.agent-subview').forEach(sv => sv.hidden = true);
+    document.getElementById(`agent-view-${view}`).hidden = false;
+    if (view === 'history') loadAgentHistory();
+    if (view === 'failed')  loadAgentFailed();
+    if (view === 'prs')     loadAgentPRs();
+    if (view === 'issues')  loadAgentIssues();
+});
+
 async function loadAgentic() {
-    await Promise.all([loadAgenticRunning(), loadAgenticFailed(), loadAgenticHistory()]);
+    await loadAgenticRunning();
+    document.querySelectorAll('.agent-subview').forEach(sv => sv.hidden = true);
+    document.getElementById(`agent-view-${activeAgentView}`).hidden = false;
+    document.querySelectorAll('.agent-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.agentView === activeAgentView);
+    });
+    if (activeAgentView === 'history') loadAgentHistory();
+    else if (activeAgentView === 'failed')  loadAgentFailed();
+    else if (activeAgentView === 'prs')     loadAgentPRs();
+    else if (activeAgentView === 'issues')  loadAgentIssues();
 }
 
 async function loadAgenticRunning() {
@@ -2221,7 +2307,7 @@ async function loadAgenticRunning() {
                 : 0;
             const elStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed/60)}m ${elapsed%60}s`;
             const logLink = r.job_id
-                ? `<a href="#" class="log-link" data-job-id="${escapeHtml(r.job_id)}" title="View live log">live log</a>`
+                ? `<a href="#" class="log-link" data-job-id="${escapeHtml(r.job_id)}" data-agent="true" title="View log">log</a>`
                 : '—';
             return `<tr>
                 <td>${escapeHtml(r.repo)}</td>
@@ -2237,115 +2323,322 @@ async function loadAgenticRunning() {
     }
 }
 
-async function loadAgenticFailed() {
-    const tbody = document.getElementById('agentic-failed-body');
-    const repoFilter = document.getElementById('agentic-repo-filter')?.value || '';
-    const archFilter = document.getElementById('agentic-arch-filter')?.value || '';
-    try {
-        const res  = await fetch(`${API}/api/builds/history?type=integration-test&limit=200`);
-        const data = await res.json();
-        const rows = data.rows || data;
-        let failed = rows.filter(r => r.type === 'integration-test' && !r.passed);
+// ── Agent History ─────────────────────────────────────────────────────────────
 
-        // Populate repo filter options
-        const repoSel = document.getElementById('agentic-repo-filter');
-        if (repoSel && repoSel.options.length <= 1) {
-            const repos = [...new Set(failed.map(r => r.repo))].sort();
-            repos.forEach(rp => {
-                const opt = document.createElement('option');
-                opt.value = rp; opt.textContent = rp.split('/').pop();
-                repoSel.appendChild(opt);
-            });
-        }
-
-        if (repoFilter) failed = failed.filter(r => r.repo === repoFilter);
-        if (archFilter) failed = failed.filter(r => r.arch === archFilter);
-
-        // Deduplicate: keep only the most recent failure per (repo, branch, arch)
-        const seen = new Set();
-        const deduped = [];
-        for (const r of failed) {
-            const key = `${r.repo}|${r.branch}|${r.arch}`;
-            if (!seen.has(key)) { seen.add(key); deduped.push(r); }
-        }
-        failed = deduped.slice(0, 50);
-
-        if (!failed.length) {
-            tbody.innerHTML = `<tr><td colspan="9" class="loading">No recent failures</td></tr>`;
+async function loadAgentHistory() {
+    if (!agentHistoryData.length) {
+        const tbody = document.getElementById('agent-history-body');
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">Loading…</td></tr>`;
+        try {
+            const res  = await fetch(`${API}/api/builds/history?type=all&limit=200`);
+            const data = await res.json();
+            const rows = data.rows || data;
+            agentHistoryData = rows.filter(r => AGENT_TYPES.has(r.type));
+        } catch (e) {
+            document.getElementById('agent-history-body').innerHTML =
+                `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
             return;
         }
-        tbody.innerHTML = failed.map(r => {
-            const repoShort = r.repo.split('/').pop();
-            const failedStep = r.result?.failed_step || r.failed_step || '—';
-            const dur = r.result?.duration_seconds != null
-                ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
-                : '—';
-            const logLink = r.job_id
-                ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>`
-                : '—';
-            const safeJobId    = escapeHtml(r.job_id || '');
-            const safeRepo     = escapeHtml(r.repo);
-            const safeBranch   = escapeHtml(r.branch || '');
-            const safeArch     = escapeHtml(r.arch || '');
-            const safeStep     = escapeHtml(failedStep);
-            const statusCls = r.status === 'terminated' ? 'status-terminated' : 'status-fail';
-            const statusLabel = r.status === 'terminated' ? 'TERM' : 'FAIL';
-            return `<tr id="agentic-row-${safeJobId}">
-                <td title="${safeRepo}">${escapeHtml(repoShort)}</td>
-                <td><code>${safeBranch}</code></td>
-                <td><span class="arch-badge">${safeArch}</span></td>
-                <td style="font-size:0.8rem">${safeStep}</td>
-                <td><span class="${statusCls}">${statusLabel}</span></td>
-                <td title="${escapeHtml(r.finished_at || '')}">${formatTime(r.finished_at)}</td>
-                <td>${dur}</td>
-                <td>${logLink}</td>
-                <td><button class="btn btn-small btn-agent" data-action
-                    onclick="triggerAgentFixCI('${safeJobId}','${safeRepo}','${safeBranch}','${safeArch}','${safeStep}',this)"
-                    title="Ask Claude to analyse and fix this failure">Fix with AI</button></td>
-            </tr>`;
-        }).join('');
-    } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="9" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+    renderAgentHistory();
+}
+
+function renderAgentHistory(limit = 10) {
+    const tbody   = document.getElementById('agent-history-body');
+    const moreDiv = document.getElementById('agent-history-more');
+    const filter  = (document.getElementById('agent-history-filter')?.value || '').toLowerCase();
+
+    let items = agentHistoryData;
+    if (filter) items = items.filter(r =>
+        (r.repo || '').toLowerCase().includes(filter) ||
+        (r.status || '').toLowerCase().includes(filter) ||
+        (r.type || '').toLowerCase().includes(filter)
+    );
+
+    const total = items.length;
+    if (!total) {
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">No agent runs yet</td></tr>`;
+        moreDiv.hidden = true;
+        return;
+    }
+
+    tbody.innerHTML = items.slice(0, limit).map(r => {
+        const repoShort  = r.repo.split('/').pop();
+        const statusCls  = r.status === 'terminated' ? 'status-terminated'
+            : r.status === 'failed' ? 'status-fail' : 'status-pass';
+        const statusLabel = r.status === 'terminated' ? 'TERM'
+            : r.status === 'failed' ? 'FAIL' : 'OK';
+        const dur = r.result?.duration_seconds != null
+            ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
+            : '—';
+        const logLink    = r.job_id
+            ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" data-agent="true" title="View log">log</a>`
+            : '—';
+        const instrTitle = r.instructions ? ` title="${escapeHtml(r.instructions)}"` : '';
+        const instrMark  = r.instructions ? `<span class="instr-dot"${instrTitle}>✎</span> ` : '';
+        return `<tr>
+            <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
+            <td title="${escapeHtml(r.repo)}">${escapeHtml(repoShort)}</td>
+            <td><code>${escapeHtml(r.branch || r.ref || '')}</code></td>
+            <td><span class="agent-type-badge">${escapeHtml(agentTypeLabel(r.type))}</span></td>
+            <td>${instrMark}<span class="${statusCls}">${statusLabel}</span></td>
+            <td>${dur}</td>
+            <td>${logLink}</td>
+        </tr>`;
+    }).join('');
+
+    if (total > limit) {
+        moreDiv.hidden = false;
+        moreDiv.innerHTML = `<button class="btn btn-small btn-secondary" onclick="renderAgentHistory(${total})">Show ${total - limit} more</button>`;
+    } else {
+        moreDiv.hidden = true;
     }
 }
 
-async function loadAgenticHistory() {
-    const tbody = document.getElementById('agentic-history-body');
-    try {
-        const res  = await fetch(`${API}/api/builds/history?type=all&limit=200`);
-        const data = await res.json();
-        const rows = data.rows || data;
-        const agents = rows.filter(r => AGENT_TYPES.has(r.type)).slice(0, 30);
-        if (!agents.length) {
-            tbody.innerHTML = `<tr><td colspan="7" class="loading">No agent runs yet</td></tr>`;
+document.getElementById('agent-history-filter')?.addEventListener('input', () => renderAgentHistory());
+document.getElementById('agent-history-refresh')?.addEventListener('click', () => { agentHistoryData = []; loadAgentHistory(); });
+
+// ── Agent Failed Tests ────────────────────────────────────────────────────────
+
+async function loadAgentFailed() {
+    if (!agentFailedData.length) {
+        const tbody = document.getElementById('agent-failed-body');
+        tbody.innerHTML = `<tr><td colspan="9" class="loading">Loading…</td></tr>`;
+        try {
+            const res  = await fetch(`${API}/api/builds/history?type=integration-test&limit=200`);
+            const data = await res.json();
+            const rows = data.rows || data;
+            const failed = rows.filter(r => r.type === 'integration-test' && !r.passed);
+            const seen = new Set();
+            for (const r of failed) {
+                const key = `${r.repo}|${r.branch}|${r.arch}`;
+                if (!seen.has(key)) { seen.add(key); agentFailedData.push(r); }
+            }
+        } catch (e) {
+            document.getElementById('agent-failed-body').innerHTML =
+                `<tr><td colspan="9" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
             return;
         }
-        tbody.innerHTML = agents.map(r => {
-            const repoShort = r.repo.split('/').pop();
-            const statusCls = r.status === 'terminated' ? 'status-terminated'
-                : r.status === 'failed' ? 'status-fail' : 'status-pass';
-            const statusLabel = r.status === 'terminated' ? 'TERM'
-                : r.status === 'failed' ? 'FAIL' : 'OK';
-            const dur = r.result?.duration_seconds != null
-                ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
-                : '—';
-            const logLink = r.job_id
-                ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" title="View log">log</a>`
-                : '—';
-            return `<tr>
-                <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
-                <td title="${escapeHtml(r.repo)}">${escapeHtml(repoShort)}</td>
-                <td><code>${escapeHtml(r.branch || r.ref || '')}</code></td>
-                <td><span class="agent-type-badge">${escapeHtml(agentTypeLabel(r.type))}</span></td>
-                <td><span class="${statusCls}">${statusLabel}</span></td>
-                <td>${dur}</td>
-                <td>${logLink}</td>
-            </tr>`;
-        }).join('');
-    } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+    }
+    renderAgentFailed();
+}
+
+function renderAgentFailed(limit = 10) {
+    const tbody   = document.getElementById('agent-failed-body');
+    const moreDiv = document.getElementById('agent-failed-more');
+    const filter  = (document.getElementById('agent-failed-filter')?.value || '').toLowerCase();
+    const arch    = document.getElementById('agent-failed-arch')?.value || '';
+
+    let items = agentFailedData;
+    if (filter) items = items.filter(r => (r.repo || '').toLowerCase().includes(filter));
+    if (arch)   items = items.filter(r => r.arch === arch);
+
+    const total = items.length;
+    if (!total) {
+        tbody.innerHTML = `<tr><td colspan="9" class="loading">No recent failures</td></tr>`;
+        moreDiv.hidden = true;
+        return;
+    }
+
+    tbody.innerHTML = items.slice(0, limit).map(r => {
+        const repoShort  = r.repo.split('/').pop();
+        const failedStep = r.result?.failed_step || r.failed_step || '—';
+        const dur = r.result?.duration_seconds != null
+            ? `${Math.floor(r.result.duration_seconds / 60)}m ${r.result.duration_seconds % 60}s`
+            : '—';
+        const logLink    = r.job_id
+            ? `<a href="#" class="log-link" data-final-job="${escapeHtml(r.job_id)}" data-agent="true" title="View log">log</a>`
+            : '—';
+        const safeJobId  = escapeHtml(r.job_id || '');
+        const safeRepo   = escapeHtml(r.repo);
+        const safeBranch = escapeHtml(r.branch || '');
+        const safeArch   = escapeHtml(r.arch || '');
+        const safeStep   = escapeHtml(failedStep);
+        const statusCls  = r.status === 'terminated' ? 'status-terminated' : 'status-fail';
+        const statusLabel = r.status === 'terminated' ? 'TERM' : 'FAIL';
+        return `<tr>
+            <td title="${safeRepo}">${escapeHtml(repoShort)}</td>
+            <td><code>${safeBranch}</code></td>
+            <td><span class="arch-badge">${safeArch}</span></td>
+            <td style="font-size:0.8rem">${safeStep}</td>
+            <td><span class="${statusCls}">${statusLabel}</span></td>
+            <td title="${escapeHtml(r.finished_at || '')}">${formatTime(r.finished_at)}</td>
+            <td>${dur}</td>
+            <td>${logLink}</td>
+            <td><button class="btn btn-small btn-agent" data-action
+                onclick="triggerAgentFixCI('${safeJobId}','${safeRepo}','${safeBranch}','${safeArch}','${safeStep}',this)"
+                title="Ask Claude to analyse and fix this failure">Fix with AI</button></td>
+        </tr>`;
+    }).join('');
+
+    if (total > limit) {
+        moreDiv.hidden = false;
+        moreDiv.innerHTML = `<button class="btn btn-small btn-secondary" onclick="renderAgentFailed(${total})">Show ${total - limit} more</button>`;
+    } else {
+        moreDiv.hidden = true;
     }
 }
+
+document.getElementById('agent-failed-filter')?.addEventListener('input', () => renderAgentFailed());
+document.getElementById('agent-failed-arch')?.addEventListener('change', () => renderAgentFailed());
+document.getElementById('agent-failed-refresh')?.addEventListener('click', () => { agentFailedData = []; loadAgentFailed(); });
+
+// ── Agent Failed PRs ──────────────────────────────────────────────────────────
+
+async function loadAgentPRs() {
+    if (!agentPRsData.length) {
+        const tbody = document.getElementById('agent-prs-body');
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">Fetching PRs…</td></tr>`;
+        try {
+            const res  = await fetch(`${API}/api/sync/prs`);
+            const data = await res.json();
+            if (data.error) {
+                tbody.innerHTML = `<tr><td colspan="7" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
+                return;
+            }
+            const all = Array.isArray(data.rows) ? data.rows : [];
+            agentPRsData = all.filter(r => r._ci?.overall === 'fail');
+        } catch (e) {
+            document.getElementById('agent-prs-body').innerHTML =
+                `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+            return;
+        }
+    }
+    renderAgentPRs();
+}
+
+function renderAgentPRs(limit = 10) {
+    const tbody   = document.getElementById('agent-prs-body');
+    const moreDiv = document.getElementById('agent-prs-more');
+    const filter  = (document.getElementById('agent-prs-filter')?.value || '').toLowerCase();
+
+    let items = agentPRsData;
+    if (filter) items = items.filter(r => {
+        const title = (r.title || '').toLowerCase();
+        const repo  = (r.repository?.nameWithOwner || r.repository?.name || '').toLowerCase();
+        return title.includes(filter) || repo.includes(filter);
+    });
+
+    const total = items.length;
+    if (!total) {
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">No failed PRs</td></tr>`;
+        moreDiv.hidden = true;
+        return;
+    }
+
+    const isSergioUser = authState.user === 'sergiohinojosa';
+    tbody.innerHTML = items.slice(0, limit).map(r => {
+        const repo      = r.repository?.nameWithOwner || r.repository?.name || '—';
+        const author    = r.author?.login || r.author || '—';
+        const updated   = formatTime(r.updatedAt || r.updated_at);
+        const checksUrl = `${r.url}/checks`;
+        const ciBadge   = `<a href="${escapeHtml(checksUrl)}" target="_blank" rel="noopener"><span class="ci-badge fail">FAIL</span></a>`;
+        const fixBtn    = isSergioUser
+            ? `<button class="btn btn-small btn-agent fix-pr-btn" data-action
+                   data-repo="${escapeHtml(repo)}"
+                   data-pr="${escapeHtml(String(r.number))}"
+                   data-branch="${escapeHtml(r.headRefName || '')}"
+                   data-checks-url="${escapeHtml(checksUrl)}"
+                   title="Let AI analyze the failure and fix the repo">Fix with AI</button>`
+            : '—';
+        return `<tr>
+            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo.split('/').pop())}</a></td>
+            <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${escapeHtml(String(r.number))}</a></td>
+            <td>${escapeHtml(r.title)}</td>
+            <td>${escapeHtml(String(author))}</td>
+            <td>${ciBadge}</td>
+            <td>${updated}</td>
+            <td>${fixBtn}</td>
+        </tr>`;
+    }).join('');
+
+    if (total > limit) {
+        moreDiv.hidden = false;
+        moreDiv.innerHTML = `<button class="btn btn-small btn-secondary" onclick="renderAgentPRs(${total})">Show ${total - limit} more</button>`;
+    } else {
+        moreDiv.hidden = true;
+    }
+}
+
+document.getElementById('agent-prs-filter')?.addEventListener('input', () => renderAgentPRs());
+document.getElementById('agent-prs-refresh')?.addEventListener('click', () => { agentPRsData = []; loadAgentPRs(); });
+
+// ── Agent Open Issues ─────────────────────────────────────────────────────────
+
+async function loadAgentIssues() {
+    if (!agentIssuesData.length) {
+        const tbody = document.getElementById('agent-issues-body');
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">Fetching issues…</td></tr>`;
+        try {
+            const res  = await fetch(`${API}/api/sync/issues`);
+            const data = await res.json();
+            if (data.error) {
+                tbody.innerHTML = `<tr><td colspan="7" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
+                return;
+            }
+            agentIssuesData = Array.isArray(data.rows) ? data.rows : [];
+        } catch (e) {
+            document.getElementById('agent-issues-body').innerHTML =
+                `<tr><td colspan="7" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+            return;
+        }
+    }
+    renderAgentIssues();
+}
+
+function renderAgentIssues(limit = 10) {
+    const tbody   = document.getElementById('agent-issues-body');
+    const moreDiv = document.getElementById('agent-issues-more');
+    const filter  = (document.getElementById('agent-issues-filter')?.value || '').toLowerCase();
+
+    let items = agentIssuesData;
+    if (filter) items = items.filter(r => {
+        const title = (r.title || '').toLowerCase();
+        const repo  = (r.repository?.nameWithOwner || r.repository?.name || '').toLowerCase();
+        return title.includes(filter) || repo.includes(filter);
+    });
+
+    const total = items.length;
+    if (!total) {
+        tbody.innerHTML = `<tr><td colspan="7" class="loading">No open issues</td></tr>`;
+        moreDiv.hidden = true;
+        return;
+    }
+
+    const isSergioUser = authState.user === 'sergiohinojosa';
+    tbody.innerHTML = items.slice(0, limit).map(r => {
+        const repo    = r.repository?.nameWithOwner || r.repository?.name || '—';
+        const author  = r.author?.login || r.author || '—';
+        const labels  = (r.labels || []).map(l => `<span class="label-chip">${escapeHtml(l.name || l)}</span>`).join(' ');
+        const updated = formatTime(r.updatedAt || r.updated_at);
+        const fixBtn  = isSergioUser
+            ? `<button class="btn btn-small btn-agent fix-issue-btn" data-action
+                   data-repo="${escapeHtml(repo)}"
+                   data-issue="${escapeHtml(String(r.number))}"
+                   data-title="${escapeHtml(r.title)}"
+                   title="Let AI analyze and fix this issue">Fix with AI</button>`
+            : '—';
+        return `<tr>
+            <td><a href="https://github.com/${escapeHtml(repo)}" target="_blank" rel="noopener">${escapeHtml(repo.split('/').pop())}</a></td>
+            <td><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">#${escapeHtml(String(r.number))}</a></td>
+            <td>${escapeHtml(r.title)}</td>
+            <td>${escapeHtml(String(author))}</td>
+            <td>${labels || '—'}</td>
+            <td>${updated}</td>
+            <td>${fixBtn}</td>
+        </tr>`;
+    }).join('');
+
+    if (total > limit) {
+        moreDiv.hidden = false;
+        moreDiv.innerHTML = `<button class="btn btn-small btn-secondary" onclick="renderAgentIssues(${total})">Show ${total - limit} more</button>`;
+    } else {
+        moreDiv.hidden = true;
+    }
+}
+
+document.getElementById('agent-issues-filter')?.addEventListener('input', () => renderAgentIssues());
+document.getElementById('agent-issues-refresh')?.addEventListener('click', () => { agentIssuesData = []; loadAgentIssues(); });
 
 async function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
     if (!isWriter()) { alert('Sign in as a writer to trigger agent runs.'); return; }
@@ -2375,7 +2668,7 @@ async function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, bt
         const td = btnEl.closest('td');
         if (td) {
             td.insertAdjacentHTML('beforeend',
-                ` <a href="#" class="log-link" data-job-id="${escapeHtml(data.job_id)}" title="View live log">live log</a>`);
+                ` <a href="#" class="log-link" data-job-id="${escapeHtml(data.job_id)}" data-agent="true" title="View log">log</a>`);
         }
         // Refresh running agents section
         setTimeout(loadAgenticRunning, 1500);
@@ -2385,9 +2678,6 @@ async function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, bt
         alert(`Error: ${e}`);
     }
 }
-
-// Refresh agentic running section when that tab is active
-document.getElementById('agentic-refresh')?.addEventListener('click', loadAgentic);
 
 // ── Init ────────────────────────────────────────────────────────────────────
 

@@ -6,8 +6,16 @@ All commands run from the `codespaces-framework` directory:
 
 ```bash
 cd codespaces-framework
-PYTHONPATH=. python3 -m sync.cli <command> [options]
+./sync-cli <command> [options]
 ```
+
+**Tip:** add an alias and enable tab completion by adding to your `~/.bashrc`:
+```bash
+alias sync-cli="/home/ubuntu/enablement-framework/codespaces-framework/sync-cli"
+eval "$(register-python-argcomplete sync-cli)"  # requires: pip install argcomplete
+```
+
+Examples below use `sync-cli` for brevity.
 
 ## Workflow: Full release cycle
 
@@ -36,17 +44,20 @@ sync release --part patch --dry-run
 ### 2. Push updates to all repos
 
 ```bash
-# Preview
-sync push-update --framework-version 1.2.6 --dry-run
+# Preview (uses latest git tag if --framework-version omitted)
+sync-cli push-update --dry-run
 
 # Execute: pull main → branch → full migrate → commit → push → PR
-sync push-update --framework-version 1.2.6
+sync-cli push-update
+
+# Pin to a specific version
+sync-cli push-update --framework-version 1.2.6
 
 # Re-push changes at the same version (e.g. badge updates, template fixes)
-sync push-update --framework-version 1.2.6 --force
+sync-cli push-update --force
 
 # Target a specific repo
-sync push-update --framework-version 1.2.6 --repo enablement-codespaces-template
+sync-cli push-update --repo enablement-codespaces-template
 ```
 
 ### 3. Monitor PRs and merge

@@ -4,6 +4,12 @@
 import argparse
 import sys
 
+try:
+    import argcomplete
+    _HAS_ARGCOMPLETE = True
+except ImportError:
+    _HAS_ARGCOMPLETE = False
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -17,7 +23,7 @@ def main():
         "push-update", help="Pull main, branch, migrate, commit, push, create PR"
     )
     pu.add_argument(
-        "--framework-version", required=True, help="Target framework version (X.Y.Z)"
+        "--framework-version", default=None, help="Target framework version (X.Y.Z). Defaults to the latest git tag."
     )
     pu.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
     pu.add_argument("--dry-run", action="store_true", help="Preview changes without creating PRs")
@@ -53,6 +59,8 @@ def main():
     tg.add_argument("--release", action="store_true", help="Create GitHub Releases with auto-generated notes")
     tg.add_argument("--force", action="store_true", help="Skip pre-flight checks")
     tg.add_argument("--dry-run", action="store_true", help="Preview without creating tags")
+    tg.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
+    tg.add_argument("--exclude", help="Exclude a specific repo name")
 
     # bump-repo-version
     br = subparsers.add_parser("bump-repo-version", help="Bump repo version component")
@@ -187,6 +195,9 @@ def main():
         "generate-json", help="Generate repos.json for the org GitHub Pages registry"
     )
     gj.add_argument("--output", help="Output file path (default: stdout)")
+
+    if _HAS_ARGCOMPLETE:
+        argcomplete.autocomplete(parser)
 
     args = parser.parse_args()
 

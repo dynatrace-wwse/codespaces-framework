@@ -399,7 +399,7 @@ class WorkerManager:
                 await self.pool.expire(running_key, 86400)
             elif job.get("type") in ("fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab", "deploy-ghpages"):
                 running_key = f"job:running:{job_id}"
-                await self.pool.hset(running_key, mapping={
+                _running_fields = {
                     "job_id":     job_id,
                     "repo":       job["repo"],
                     "branch":     job.get("ref") or job.get("branch") or "main",
@@ -408,7 +408,10 @@ class WorkerManager:
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "worker_id":  "master",
                     "type":       job.get("type"),
-                })
+                }
+                if job.get("instructions"):
+                    _running_fields["instructions"] = job["instructions"]
+                await self.pool.hset(running_key, mapping=_running_fields)
                 await self.pool.expire(running_key, LOCK_TTL_SECONDS)
                 # Best-effort build.started telemetry
                 try:
@@ -729,27 +732,34 @@ class WorkerManager:
             "claude",
             "--print",
             "--dangerously-skip-permissions",
-            "--max-turns", "30",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--max-turns", "50",
             prompt,
         ]
 
         log.info("Running Claude agent: %s in %s", agent_type, repo_dir)
         start_time = time.time()
 
+        # Strip ANTHROPIC_API_KEY so claude falls back to the ops user's OAuth
+        # credentials in /home/ops/.claude/ — the API key in ops .env is exhausted.
+        agent_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        agent_env.update({
+            "DT_ENVIRONMENT": DT_ENVIRONMENT,
+            "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
+            "DT_INGEST_TOKEN": DT_INGEST_TOKEN,
+            "HOME": "/home/ops",
+        })
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(repo_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={
-                **os.environ,
-                "DT_ENVIRONMENT": DT_ENVIRONMENT,
-                "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
-                "DT_INGEST_TOKEN": DT_INGEST_TOKEN,
-            },
+            env=agent_env,
         )
 
-        output = await self._stream_to_redis(proc, livelog_key, timeout_s=600)
+        output = await self._stream_agent_to_redis(proc, livelog_key, timeout_s=600)
         duration = int(time.time() - start_time)
 
         log_file.write_text(self._mask_secrets(header + output))
@@ -1215,6 +1225,118 @@ class WorkerManager:
             "log_file": str(log_file),
         }
 
+    async def _stream_agent_to_redis(self, proc, livelog_key: str, timeout_s: int) -> str:
+        """Parse stream-json claude output, extract text events, append token summary."""
+        full_text: list[str] = []
+        pending:   list[str] = []
+        last_flush = time.time()
+        deadline   = last_flush + timeout_s
+        MAX_LIVE_BYTES = 256 * 1024
+
+        async def flush():
+            if not pending:
+                return
+            chunk = self._mask_secrets("".join(pending))
+            pending.clear()
+            try:
+                await self.pool.append(livelog_key, chunk)
+                cur = await self.pool.strlen(livelog_key)
+                if cur and cur > MAX_LIVE_BYTES:
+                    tail = await self.pool.getrange(livelog_key, cur - MAX_LIVE_BYTES, cur)
+                    await self.pool.set(livelog_key, tail, ex=7200)
+            except Exception as e:
+                log.warning("agent livelog flush failed: %s", e)
+
+        while True:
+            if time.time() > deadline:
+                await flush()
+                raise asyncio.TimeoutError()
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+            except asyncio.TimeoutError:
+                line = b""
+            if not line:
+                if proc.returncode is not None or proc.stdout.at_eof():
+                    break
+                if time.time() - last_flush > 1.0:
+                    await flush(); last_flush = time.time()
+                continue
+
+            decoded = line.decode(errors="replace").rstrip("\n")
+            if not decoded:
+                continue
+
+            try:
+                event = json.loads(decoded)
+                etype = event.get("type")
+
+                if etype == "assistant":
+                    for block in event.get("message", {}).get("content", []):
+                        btype = block.get("type")
+                        if btype == "text":
+                            text = block["text"]
+                            full_text.append(text)
+                            pending.append(text)
+                        elif btype == "tool_use":
+                            tool_name = block.get("name", "?")
+                            inp       = block.get("input", {})
+                            if tool_name == "Bash":
+                                cmd_preview = inp.get("command", "").replace("\n", " ")[:200]
+                                line = f"\n▶ bash: {cmd_preview}\n"
+                            elif tool_name == "Read":
+                                line = f"\n▶ read: {inp.get('file_path', '?')}\n"
+                            elif tool_name in ("Write", "Edit"):
+                                line = f"\n▶ {tool_name.lower()}: {inp.get('file_path', '?')}\n"
+                            elif tool_name == "WebSearch":
+                                line = f"\n▶ search: {inp.get('query', '?')[:120]}\n"
+                            elif tool_name == "WebFetch":
+                                line = f"\n▶ fetch: {inp.get('url', '?')[:120]}\n"
+                            else:
+                                preview = str(inp)[:120]
+                                line = f"\n▶ {tool_name}: {preview}\n"
+                            full_text.append(line)
+                            pending.append(line)
+
+                elif etype == "result":
+                    usage    = event.get("usage", {})
+                    cost     = event.get("total_cost_usd")
+                    subtype  = event.get("subtype", "success")
+                    in_tok   = usage.get("input_tokens", 0)
+                    out_tok  = usage.get("output_tokens", 0)
+                    c_read   = usage.get("cache_read_input_tokens", 0)
+                    c_write  = usage.get("cache_creation_input_tokens", 0)
+                    turns    = event.get("num_turns", "?")
+                    dur_s    = round(event.get("duration_ms", 0) / 1000, 1)
+                    if subtype == "error_max_turns":
+                        header = f"\n\n=== Agent stopped: reached max turns ({turns}) | {dur_s}s"
+                    elif subtype and subtype.startswith("error"):
+                        header = f"\n\n=== Agent error ({subtype}) | {turns} turns | {dur_s}s"
+                    else:
+                        header = f"\n\n=== Agent done | {turns} turns | {dur_s}s"
+                    parts = [header, f" | in:{in_tok} out:{out_tok}"]
+                    if c_read:  parts.append(f" cache_read:{c_read}")
+                    if c_write: parts.append(f" cache_write:{c_write}")
+                    if cost:    parts.append(f" | cost:${cost:.4f}")
+                    parts.append(" ===\n")
+                    summary = "".join(parts)
+                    full_text.append(summary)
+                    pending.append(summary)
+
+                # skip: system, rate_limit_event, tool_result, etc.
+
+            except json.JSONDecodeError:
+                # Non-JSON line — pass through (startup messages, errors)
+                text = decoded + "\n"
+                full_text.append(text)
+                pending.append(text)
+
+            if time.time() - last_flush > 1.0:
+                await flush(); last_flush = time.time()
+
+        await proc.wait()
+        await flush()
+        return "".join(full_text)
+
     async def _stream_to_redis(self, proc, livelog_key: str, timeout_s: int) -> str:
         """Stream proc.stdout to ``livelog_key`` (~1s flush) for the dashboard."""
         full = []
@@ -1549,18 +1671,49 @@ class WorkerManager:
             org       = repo.split("/")[0]
             repo_name = repo.split("/")[-1]
             branch    = job.get("ref") or job.get("branch") or "main"
-            failed_step = job.get("failed_step") or "unknown"
-            failed_log  = job.get("failed_log") or ""
+            failed_step  = job.get("failed_step") or "unknown"
+            failed_log   = job.get("failed_log") or ""
+            instructions = job.get("instructions") or ""
+            pr_number    = job.get("pr_number")
             log_section = (
                 f"\n=== FAILED LOG ===\n{failed_log}\n=== END LOG ===\n"
                 if failed_log else "\n(no log captured)\n"
             )
+            instr_section = (
+                f"\nUser instructions: {instructions}\n"
+                if instructions else ""
+            )
+            if pr_number:
+                step3a = (
+                    f"STEP 3A — IF REPO ISSUE (PR context — commit directly to the PR branch)\n"
+                    f"  The repo is already on branch '{branch}' (PR #{pr_number}).\n"
+                    f"  Do NOT create a new branch. Commit directly here so GitHub re-runs CI.\n"
+                    f"  1. Edit the broken file. Be surgical — only change what is needed.\n"
+                    f"  2. Commit: git commit -am 'fix(ci): resolve {failed_step} failure'\n"
+                    f"  3. Push:   git push origin {branch}\n"
+                    f"     This updates PR #{pr_number} and triggers a new CI run automatically.\n\n"
+                )
+            else:
+                step3a = (
+                    f"STEP 3A — IF REPO ISSUE\n"
+                    f"  Fix the problem in this repo:\n"
+                    f"  1. Create a fix branch:\n"
+                    f"       git checkout -b agent/fix-ci-{branch}\n"
+                    f"  2. Edit the broken file. Be surgical — only change what is needed.\n"
+                    f"  3. Commit: git commit -am 'fix(ci): resolve {failed_step} failure on {branch}'\n"
+                    f"  4. Push:   git push origin agent/fix-ci-{branch}\n"
+                    f"  5. Open a PR:\n"
+                    f"       gh pr create \\\n"
+                    f"         --title 'fix(ci): resolve {failed_step} failure on {branch}' \\\n"
+                    f"         --body 'Automated fix by the Enablement Ops agent.'\n\n"
+                )
             return (
                 f"You are the Autonomous Enablement Ops agent.\n"
                 f"An integration test failed and you must diagnose and fix it.\n\n"
                 f"Repository : {repo}\n"
                 f"Branch     : {branch}\n"
                 f"Failed step: {failed_step}\n"
+                f"{instr_section}"
                 f"{log_section}\n"
                 f"The repo is already cloned at the correct branch in your working directory.\n\n"
                 f"STEP 1 — ANALYZE THE FAILURE\n"
@@ -1579,17 +1732,7 @@ class WorkerManager:
                 f"  - .devcontainer/test/integration.sh\n"
                 f"  - .devcontainer/util/source_framework.sh (identifies framework version)\n"
                 f"  Read whichever is relevant to the failed step.\n\n"
-                f"STEP 3A — IF REPO ISSUE\n"
-                f"  Fix the problem in this repo:\n"
-                f"  1. Create a fix branch:\n"
-                f"       git checkout -b agent/fix-ci-{branch}\n"
-                f"  2. Edit the broken file. Be surgical — only change what is needed.\n"
-                f"  3. Commit: git commit -am 'fix(ci): resolve {failed_step} failure on {branch}'\n"
-                f"  4. Push:   git push origin agent/fix-ci-{branch}\n"
-                f"  5. Open a PR:\n"
-                f"       gh pr create \\\n"
-                f"         --title 'fix(ci): resolve {failed_step} failure on {branch}' \\\n"
-                f"         --body 'Automated fix by the Enablement Ops agent.'\n\n"
+                f"{step3a}"
                 f"STEP 3B — IF FRAMEWORK ISSUE\n"
                 f"  Do NOT modify this repo. Instead:\n"
                 f"  1. Clone the framework into /tmp/fw-fix-{repo_name}:\n"
@@ -1611,8 +1754,7 @@ class WorkerManager:
                 f"  - Diagnosis: (one sentence — root cause)\n"
                 f"  - Scope: REPO or FRAMEWORK\n"
                 f"  - Fix: (what file, what change)\n"
-                f"  - Branch: (full branch name)\n"
-                f"  - PR: (URL if created)\n"
+                f"  - Branch/PR: (branch pushed to, or PR URL if newly opened)\n"
             )
 
         elif agent_type == "review-pr":
