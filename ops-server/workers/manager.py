@@ -1592,6 +1592,19 @@ class WorkerManager:
         except Exception as e:
             log.warning("Could not publish sync log for %s: %s", job_id, e)
 
+        # Snapshot validate output to sync:audit:latest for the Audit tab
+        if args and args[0] == "validate":
+            try:
+                audit = json.dumps({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "output": content,
+                    "job_id": job_id,
+                    "exit_code": rc,
+                })
+                await self.pool.set("sync:audit:latest", audit, ex=86400 * 7)
+            except Exception as e:
+                log.warning("Could not store audit snapshot: %s", e)
+
         return {
             "command": " ".join(args),
             "exit_code": rc,

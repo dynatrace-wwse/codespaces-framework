@@ -1531,6 +1531,18 @@ async def api_sync_issues_invalidate(request: Request):
     return {"status": "cache cleared"}
 
 
+@app.get("/api/sync/audit")
+async def api_sync_audit():
+    """Return the latest stored sync validate result."""
+    raw = await pool.get("sync:audit:latest")
+    if not raw:
+        return {"output": None, "timestamp": None, "job_id": None, "exit_code": None}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"output": raw, "timestamp": None, "job_id": None, "exit_code": None}
+
+
 @app.get("/api/repos/{owner}/{repo}/branches")
 async def api_repo_branches(owner: str, repo: str):
     """List remote branches for a repo via GitHub API.
@@ -2351,18 +2363,6 @@ _ARENA_TRAININGS_STUB = [
         "source": "orbital",
     },
     {
-        "id": "dt-k8s-operator",
-        "title": "Dynatrace Kubernetes Operator",
-        "description": "Deploy and configure the DT Operator on a live K3d cluster.",
-        "type": "lab",
-        "difficulty": "intermediate",
-        "estimatedTime": 60,
-        "tags": ["kubernetes", "operator", "oneagent"],
-        "repoUrl": "https://github.com/dynatrace-wwse/enablement-kubernetes-operator",
-        "branch": "main",
-        "source": "orbital",
-    },
-    {
         "id": "dt-opentelemetry",
         "title": "OpenTelemetry with Dynatrace",
         "description": "Instrument apps with OTel SDK and ship traces/metrics/logs to DT.",
@@ -2512,7 +2512,9 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
 @app.get("/api/health")
 async def api_health():
-    """Platform health overview."""
+    """Platform health overview. CORS open so external sites can poll status."""
+    from fastapi.responses import JSONResponse as _JSONResponse
+    _cors = {"Access-Control-Allow-Origin": "*"}
     try:
         await pool.ping()
 
@@ -2530,15 +2532,15 @@ async def api_health():
             "sync": await pool.llen("queue:sync"),
         }
 
-        return {
+        return _JSONResponse(content={
             "status": "healthy",
             "redis": "connected",
             "workers": worker_count,
             "queues": queues,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        }, headers=_cors)
     except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
+        return _JSONResponse(content={"status": "unhealthy", "error": str(e)}, headers=_cors)
 
 
 def start():

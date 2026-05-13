@@ -1366,6 +1366,7 @@ document.addEventListener('click', e => {
     if (view === 'status') loadSyncStatus();
     if (view === 'prs')    loadSyncPRs();
     if (view === 'issues') loadSyncIssues();
+    if (view === 'audit')  loadSyncAudit();
 });
 
 async function loadSyncTab() {
@@ -1636,6 +1637,67 @@ function renderSyncIssues() {
 
 document.getElementById('sync-issues-filter').addEventListener('input', renderSyncIssues);
 document.getElementById('sync-issues-refresh').addEventListener('click', () => loadSyncIssues(true));
+
+// ── Audit sub-tab ────────────────────────────────────────────────────────────
+
+async function loadSyncAudit(force = false) {
+    const meta   = document.getElementById('audit-meta');
+    const output = document.getElementById('audit-output');
+    meta.innerHTML = '<span>Loading…</span>';
+    try {
+        const res  = await fetch(`${API}/api/sync/audit`);
+        const data = await res.json();
+        if (!data.output) {
+            meta.innerHTML = '<span>No audit results yet. Run <strong>sync validate</strong> from Commands.</span>';
+            output.innerHTML = '';
+            return;
+        }
+        const ts = data.timestamp ? new Date(data.timestamp).toLocaleString() : '—';
+        const rc = data.exit_code != null ? data.exit_code : '?';
+        const issues = (data.output.match(/❌/g) || []).length;
+        const ok     = (data.output.match(/✅/g) || []).length;
+        meta.innerHTML = `
+            <span>Run: <strong>${ts}</strong></span>
+            <span>Exit code: <strong style="color:${rc===0?'var(--green)':'var(--red)'}">${rc}</strong></span>
+            <span>✅ <strong>${ok}</strong> ok</span>
+            <span>❌ <strong style="color:var(--red)">${issues}</strong> issues</span>
+            <a href="/api/jobs/${escapeHtml(data.job_id || '')}/log" target="_blank" class="btn btn-small btn-secondary" style="margin-left:auto">Raw log</a>
+        `;
+        // Syntax-highlight the output lines
+        output.innerHTML = escapeHtml(data.output)
+            .replace(/^(── .+)$/gm,           '<span class="audit-header">$1</span>')
+            .replace(/(❌[^\n]*)/g,            '<span class="audit-issue">$1</span>')
+            .replace(/(✅[^\n]*)/g,            '<span class="audit-ok">$1</span>')
+            .replace(/(⚠[^\n]*)/g,            '<span class="audit-warn">$1</span>')
+            .replace(/(MISSING:[^\n]*)/g,      '<span class="audit-issue">$1</span>')
+            .replace(/(PARSE ERROR:[^\n]*)/g,  '<span class="audit-issue">$1</span>');
+    } catch (e) {
+        meta.innerHTML = `<span style="color:var(--red)">Error loading audit: ${escapeHtml(String(e))}</span>`;
+        output.textContent = '';
+    }
+}
+
+document.getElementById('sync-audit-refresh').addEventListener('click', async () => {
+    if (!isWriter()) return showToast('Sign in as an org member to run audits.');
+    const btn = document.getElementById('sync-audit-refresh');
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    try {
+        await fetch(`${API}/api/sync/run`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cmd_id: 'validate' }),
+        });
+        showToast('Audit queued — refresh in ~30s.');
+        setTimeout(() => loadSyncAudit(true), 35000);
+    } catch (e) {
+        showToast('Failed to queue audit.');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '↻ Run Audit';
+    }
+});
 
 // ── Fix with AI modal ────────────────────────────────────────────────────────
 

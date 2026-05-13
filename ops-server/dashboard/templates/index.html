@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=21">
+    <link rel="stylesheet" href="/static/style.css?v=22">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -22,6 +22,11 @@
             </a>
             <div class="spacer"></div>
             <div class="header-right">
+                <a id="orbital-link" href="https://autonomous-enablements.whydevslovedynatrace.com" title="Orbital — CI/CD backbone" class="orbital-icon">
+                    <div class="orbital-arm"></div>
+                    <div class="orbital-planet"></div>
+                    <span class="orbital-dot healthy"></span>
+                </a>
                 <div id="health-status" class="health-badge">checking…</div>
                 <div id="auth-status" class="auth-status">
                     <a href="/oauth2/sign_in" class="btn-auth" id="sign-in-btn" hidden>Sign in with GitHub</a>
@@ -226,6 +231,7 @@
                 <button class="sync-tab" data-sync-view="status">Status</button>
                 <button class="sync-tab" data-sync-view="prs">Open PRs</button>
                 <button class="sync-tab" data-sync-view="issues">Open Issues</button>
+                <button class="sync-tab" data-sync-view="audit">Audit</button>
             </nav>
 
             <!-- Commands sub-view -->
@@ -298,6 +304,18 @@
                         <tr><td colspan="8" class="loading">Loading PRs…</td></tr>
                     </tbody>
                 </table>
+            </div>
+
+            <!-- Audit sub-view -->
+            <div id="sync-view-audit" class="sync-subview" hidden>
+                <div class="sync-subtab-header">
+                    <span>Last <code>sync validate</code> run — health of all repos</span>
+                    <button class="btn btn-small btn-secondary" id="sync-audit-refresh" data-action>↻ Run Audit</button>
+                </div>
+                <div id="audit-meta" class="audit-meta">
+                    <span>Loading…</span>
+                </div>
+                <pre id="audit-output" class="audit-output">No audit data yet. Run <strong>sync validate</strong> from the Commands tab.</pre>
             </div>
 
             <!-- Open Issues sub-view -->

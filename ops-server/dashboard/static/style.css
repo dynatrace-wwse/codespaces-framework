@@ -1269,3 +1269,77 @@ a.spark-bar:hover { opacity: .75; }
     white-space: nowrap;
 }
 #ops-toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ─── Orbital icon ───────────────────────────────────────────── */
+.orbital-icon {
+    position: relative;
+    width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; cursor: pointer;
+}
+.orbital-icon::before {
+    content: '';
+    position: absolute; inset: 0; border-radius: 50%;
+    border: 1.5px dashed rgba(0,180,222,.22);
+    pointer-events: none;
+}
+.orbital-planet {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(0,180,222,.65), 0 0 18px rgba(0,180,222,.2);
+    position: relative; z-index: 2;
+}
+.orbital-arm {
+    position: absolute; inset: 0; border-radius: 50%;
+    animation: orbit-spin 3.4s linear infinite;
+    pointer-events: none;
+}
+.orbital-arm::after {
+    content: '';
+    position: absolute; top: -3.5px; left: 50%;
+    transform: translateX(-50%);
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #94a3b8;
+    box-shadow: 0 0 4px rgba(148,163,184,.4);
+}
+@keyframes orbit-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+.orbital-dot {
+    position: absolute; bottom: 3px; right: 2px;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--text-3);
+    border: 2px solid var(--bg);
+    transition: background .4s, box-shadow .4s;
+    z-index: 3;
+}
+.orbital-dot.healthy  { background: var(--green);  box-shadow: 0 0 6px rgba(74,222,128,.55); animation: dot-pulse 2.2s ease infinite; }
+.orbital-dot.degraded { background: var(--yellow); box-shadow: 0 0 6px rgba(251,191,36,.4); }
+.orbital-dot.unhealthy{ background: var(--red);    box-shadow: 0 0 6px rgba(251,113,133,.4); }
+@keyframes dot-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .5; }
+}
+
+/* ─── Audit sub-view ─────────────────────────────────────────── */
+#sync-view-audit .audit-meta {
+    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    font-size: .8rem; color: var(--text-2);
+    padding: .75rem 0; border-bottom: 1px solid var(--border-soft); margin-bottom: 1rem;
+}
+#sync-view-audit .audit-meta strong { color: var(--text); }
+#sync-view-audit .audit-output {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: .78rem; line-height: 1.65;
+    white-space: pre-wrap; word-break: break-all;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r); padding: 1rem;
+    max-height: 65vh; overflow-y: auto;
+}
+.audit-issue  { color: var(--red); }
+.audit-ok     { color: var(--green); }
+.audit-warn   { color: var(--yellow); }
+.audit-header { color: var(--accent); font-weight: 700; }
