@@ -219,11 +219,12 @@ class WorkerAgent:
                 _, job_json = result
                 job = json.loads(job_json)
                 import uuid
-                job_id = (
-                    f"{WORKER_ID}-{job['repo'].split('/')[-1]}"
-                    f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
-                )
-                job["job_id"] = job_id
+                # Honor a pre-set job_id (e.g. from Arena provision); otherwise generate one.
+                if not job.get("job_id"):
+                    job["job_id"] = (
+                        f"{WORKER_ID}-{job['repo'].split('/')[-1]}"
+                        f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+                    )
                 job["worker_id"] = WORKER_ID
                 job["worker_arch"] = WORKER_ARCH
 
@@ -246,32 +247,36 @@ class WorkerAgent:
             self.active_jobs[job_id] = job
             log.info("Starting: %s (%s)", job_id, job["repo"])
 
-            # Pickup-time concurrency lock per (repo, branch, arch). If held,
-            # defer this job; the holder drains the deferred list on completion.
             arch = job.get("arch", WORKER_ARCH)
             triple = _triple_of(job, WORKER_ARCH)
-            lock_key = f"running:lock:{triple}"
-            acquired = await self.pool.set(
-                lock_key, job_id, nx=True, ex=LOCK_TTL_SECONDS
-            )
-            if not acquired:
-                log.info("Lock held for %s — deferring job %s", triple, job_id)
-                await self.pool.rpush(f"deferred:{triple}", json.dumps(job))
-                self.active_jobs.pop(job_id, None)
-                return
+            lock_key = None
+
+            # Concurrency lock: integration-tests only. Daemon jobs (training sessions)
+            # are allowed to run concurrently for the same repo — each user gets their own container.
+            if job.get("type") != "daemon":
+                lock_key = f"running:lock:{triple}"
+                acquired = await self.pool.set(
+                    lock_key, job_id, nx=True, ex=LOCK_TTL_SECONDS
+                )
+                if not acquired:
+                    log.info("Lock held for %s — deferring job %s", triple, job_id)
+                    await self.pool.rpush(f"deferred:{triple}", json.dumps(job))
+                    self.active_jobs.pop(job_id, None)
+                    return
 
             running_key = f"job:running:{job_id}"
             await self.pool.hset(running_key, mapping={
-                "job_id": job_id,
-                "repo": job["repo"],
-                "branch": _branch_of(job),
-                "arch": arch,
-                "ref": _branch_of(job),
+                "job_id":     job_id,
+                "repo":       job["repo"],
+                "branch":     _branch_of(job),
+                "arch":       arch,
+                "ref":        _branch_of(job),
                 "started_at": datetime.now(timezone.utc).isoformat(),
-                "worker_id": WORKER_ID,
-                "type": job.get("type", "integration-test"),
+                "worker_id":  WORKER_ID,
+                "type":       job.get("type", "integration-test"),
             })
-            await self.pool.expire(running_key, LOCK_TTL_SECONDS)
+            ttl = 86400 if job.get("type") == "daemon" else LOCK_TTL_SECONDS
+            await self.pool.expire(running_key, ttl)
 
             try:
                 if job.get("type") == "daemon":
@@ -295,7 +300,8 @@ class WorkerAgent:
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 await self.pool.ltrim("jobs:completed", -500, -1)
                 await self.pool.delete(running_key)
-                await self.pool.delete(lock_key)
+                if lock_key:
+                    await self.pool.delete(lock_key)
                 # Drain anything deferred for this triple back into the queue.
                 deferred_key = f"deferred:{triple}"
                 while True:

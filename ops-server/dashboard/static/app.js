@@ -1201,7 +1201,11 @@ async function loadRunningDetail() {
                     <td>${escapeHtml(r.branch || r.ref || '')}</td>
                     <td><span class="arch-badge">${escapeHtml(r.arch || '')}</span></td>
                     <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(r.type))}</td>
-                    <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
+                    <td>
+                        <span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span>
+                        ${r.arena_user ? `<br><span style="font-size:0.7rem;color:#4ec9b0" title="Arena session">👤 ${escapeHtml(r.arena_user)}</span>` : ''}
+                        ${r.arena_tenant ? `<br><span style="font-size:0.7rem;color:var(--text-2)" title="Tenant">${escapeHtml(r.arena_tenant.replace(/\.apps\.dynatrace\.com$/, ''))}</span>` : ''}
+                    </td>
                     <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
                     <td>${formatDuration(elapsed)}</td>
                     <td>${termBtn}</td>
