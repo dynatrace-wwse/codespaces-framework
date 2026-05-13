@@ -10,6 +10,17 @@ repos:
     primary_tag: kubernetes
     duration: "3h"
 
+  - name: enablement-dynatrace-ai-mcp
+    repo: dynatrace-wwse/enablement-dynatrace-ai-mcp
+    status: active
+    maintainer: "@SudoSmitty, @shinojosa"
+    description: "Hands-on AI/LLM observability workshop. Instrument a RAG application with OpenLLMetry, analyze traces in Dynatrace, and use the Dynatrace MCP server for agentic AI workflows."
+    tags: [gen-ai, opentelemetry, mcp]
+    title: "AI Observability & MCP"
+    primary_tag: gen-ai
+    image_tier: minimal
+    duration: "2h"
+
   - name: enablement-gen-ai-llm-observability
     repo: dynatrace-wwse/enablement-gen-ai-llm-observability
     status: active
