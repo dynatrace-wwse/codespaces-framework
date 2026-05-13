@@ -26,6 +26,26 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ---- Typography — override Material's 12.8px default ---- */
+.md-typeset {
+  font-size: 1rem;
+  line-height: 1.75;
+}
+
+/* Balanced headings (no orphan words) */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  text-wrap: balance;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Code inline — keep readable at 1rem base */
+.md-typeset code:not([class]) {
+  font-size: .875em;
+}
+
 /* =============================================================
    Custom primary color (used by Material for header, links, etc.)
    ============================================================= */

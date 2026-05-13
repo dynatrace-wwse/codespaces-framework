@@ -16,6 +16,7 @@ import termios
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -2330,6 +2331,183 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
         headers=resp_headers,
         media_type=content_type or None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Arena API — training catalog, provisioning, session management
+# ---------------------------------------------------------------------------
+
+_ARENA_TRAININGS_STUB = [
+    {
+        "id": "dt-logs-101",
+        "title": "Dynatrace Log Management 101",
+        "description": "Ingest, parse, and query logs with Dynatrace. Hands-on K3d environment.",
+        "type": "lab",
+        "difficulty": "beginner",
+        "estimatedTime": 45,
+        "tags": ["logs", "dql", "opentelemetry"],
+        "repoUrl": "https://github.com/dynatrace-wwse/enablement-logs-101",
+        "branch": "main",
+        "source": "orbital",
+    },
+    {
+        "id": "dt-k8s-operator",
+        "title": "Dynatrace Kubernetes Operator",
+        "description": "Deploy and configure the DT Operator on a live K3d cluster.",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 60,
+        "tags": ["kubernetes", "operator", "oneagent"],
+        "repoUrl": "https://github.com/dynatrace-wwse/enablement-kubernetes-operator",
+        "branch": "main",
+        "source": "orbital",
+    },
+    {
+        "id": "dt-opentelemetry",
+        "title": "OpenTelemetry with Dynatrace",
+        "description": "Instrument apps with OTel SDK and ship traces/metrics/logs to DT.",
+        "type": "lab-assessment",
+        "difficulty": "intermediate",
+        "estimatedTime": 90,
+        "tags": ["opentelemetry", "traces", "metrics", "logs"],
+        "repoUrl": "https://github.com/dynatrace-wwse/enablement-opentelemetry",
+        "branch": "main",
+        "source": "orbital",
+    },
+]
+
+
+@app.get("/api/arena/trainings")
+async def api_arena_trainings():
+    """Return available Arena trainings.
+
+    Currently returns a hardcoded stub. Future: scrape mkdocs.yaml from each
+    enablement repo and cache in Redis with a 5-minute TTL.
+    """
+    return _ARENA_TRAININGS_STUB
+
+
+class ArenaProvisionRequest(BaseModel):
+    trainingId: str
+    userId: str
+    tenantId: str = ""
+
+
+@app.post("/api/arena/provision")
+async def api_arena_provision(body: ArenaProvisionRequest):
+    """Provision a training environment for the given user + training.
+
+    Currently returns a stub job so Arena can exercise the provisioning state
+    machine end-to-end. Real implementation will queue a daemon job whose
+    executor clones the training repo into a Sysbox container.
+
+    Returns: { jobId, wsUrl, expiresAt, status }
+    """
+    import uuid as _uuid
+    training = next((t for t in _ARENA_TRAININGS_STUB if t["id"] == body.trainingId), None)
+    if training is None:
+        raise HTTPException(status_code=404, detail=f"Training '{body.trainingId}' not found")
+
+    job_id = f"arena-{_uuid.uuid4().hex[:12]}"
+    expires_at = (datetime.now(timezone.utc).replace(microsecond=0)
+                  + timedelta(hours=4)).isoformat()
+
+    # Write a stub entry so /api/arena/sessions/{job_id} can resolve it.
+    await pool.hset(f"job:running:{job_id}", mapping={
+        "repo":        training["repoUrl"].split("/")[-1],
+        "branch":      training["branch"],
+        "arch":        "amd64",
+        "started_at":  datetime.now(timezone.utc).isoformat(),
+        "worker_id":   "stub",
+        "arena_user":  body.userId,
+        "arena_tenant": body.tenantId,
+        "training_id": body.trainingId,
+        "status":      "provisioning",
+    })
+    await pool.expire(f"job:running:{job_id}", int(timedelta(hours=4).total_seconds()))
+
+    return {
+        "jobId": job_id,
+        "wsUrl": f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
+        "expiresAt": expires_at,
+        "status": "provisioning",
+    }
+
+
+@app.get("/api/arena/sessions/{job_id}")
+async def api_arena_session_status(job_id: str):
+    """Return current status + wsUrl for a provisioned training session."""
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        return {"jobId": job_id, "status": "expired"}
+
+    status = meta.get("status", "provisioning")
+    return {
+        "jobId": job_id,
+        "status": status,
+        "wsUrl": f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
+        "trainingId": meta.get("training_id", ""),
+        "userId": meta.get("arena_user", ""),
+        "expiresAt": meta.get("expires_at", ""),
+    }
+
+
+class ArenaExecRequest(BaseModel):
+    command: str
+
+
+@app.post("/api/arena/sessions/{job_id}/exec")
+async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
+    """Run a non-interactive command inside the training container.
+
+    Uses the same SSH→docker-exec chain as the PTY bridge but without a TTY,
+    so the output can be captured and returned as JSON for shell-validation
+    question types.
+
+    Returns: { stdout, stderr, exitCode }
+    """
+    import asyncio as _asyncio
+    import shlex as _shlex
+
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if meta.get("status") == "provisioning" or meta.get("worker_id") == "stub":
+        raise HTTPException(status_code=409, detail="Session not ready yet")
+
+    worker_id = meta.get("worker_id", "")
+    repo = meta.get("repo", "")
+    container = f"sb-{job_id[-32:]}"
+
+    # Build the exec command (same pattern as PTY bridge, without -t for non-interactive)
+    inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo}", "dt",
+                              "sh", "-c", body.command])
+    outer_cmd = ["docker", "exec", container, "sh", "-c", inner_cmd]
+
+    worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
+    ssh_host = worker_rec.get("ssh_host", "")
+    if ssh_host:
+        full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                    ssh_host] + outer_cmd
+    else:
+        full_cmd = outer_cmd
+
+    try:
+        proc = await _asyncio.create_subprocess_exec(
+            *full_cmd,
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=30)
+        return {
+            "stdout": stdout_b.decode("utf-8", errors="replace"),
+            "stderr": stderr_b.decode("utf-8", errors="replace"),
+            "exitCode": proc.returncode,
+        }
+    except _asyncio.TimeoutError:
+        return {"stdout": "", "stderr": "Command timed out after 30 seconds", "exitCode": -1}
+    except Exception as exc:
+        return {"stdout": "", "stderr": str(exc), "exitCode": -1}
 
 
 @app.get("/api/health")

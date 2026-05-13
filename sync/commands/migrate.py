@@ -391,11 +391,13 @@ jobs:
     - uses: actions/setup-python@v2
       with:
         python-version: '3.x'
-    - name: Fetch framework mkdocs-base.yaml
+    - name: Fetch framework assets (mkdocs-base + theme)
       run: |
         FRAMEWORK_VERSION=$(grep -oP ':-\\K[^}"]+' .devcontainer/util/source_framework.sh | head -1)
         echo "Using framework version: $FRAMEWORK_VERSION"
         curl -fsSL "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o mkdocs-base.yaml
+        mkdir -p docs/stylesheets
+        curl -fsSL "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/docs/stylesheets/extra.css" -o docs/stylesheets/extra.css
     - name: MKDocs - install requirements, build, gh-deploy
       run: |
         pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
@@ -590,8 +592,9 @@ GITIGNORE_TEMPLATE = """\
 # Framework runtime files (generated at container start)
 .devcontainer/util/.count*
 
-# Framework base config fetched at runtime
+# Framework base config and theme assets fetched at runtime
 mkdocs-base.yaml
+docs/stylesheets/extra.css
 
 # no env files
 .devcontainer/.env*
@@ -962,7 +965,7 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     ghpages_path = repo_path / ".github/workflows/deploy-ghpages.yaml"
     if ghpages_path.exists():
         content = ghpages_path.read_text()
-        if "Fetch framework mkdocs-base.yaml" not in content:
+        if "extra.css" not in content:
             ghpages_path.write_text(DEPLOY_GHPAGES_TEMPLATE)
             print(f"    updated deploy-ghpages.yaml")
 
@@ -976,7 +979,9 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
         if ".count" not in content:
             additions.append("\n# Framework runtime files\n.devcontainer/util/.count*")
         if "mkdocs-base.yaml" not in content:
-            additions.append("\n# Framework base config fetched at runtime\nmkdocs-base.yaml")
+            additions.append("\n# Framework base config and theme assets fetched at runtime\nmkdocs-base.yaml\ndocs/stylesheets/extra.css")
+        elif "docs/stylesheets/extra.css" not in content:
+            additions.append("\ndocs/stylesheets/extra.css")
         if "Dockerfile.framework" not in content:
             additions.append("\n# Temporary Dockerfile from cache for local builds\nDockerfile.framework")
         if additions:
