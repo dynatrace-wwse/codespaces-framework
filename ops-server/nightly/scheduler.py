@@ -118,12 +118,13 @@ async def run_nightly(
     await pool.set(f"nightly:{run_id}:meta", json.dumps(run_meta))
 
     # Queue jobs with staggered delays — route to arch-specific queues
-    for entry in schedule:
-        offset = entry["offset_minutes"]
-
-        if offset > 0:
-            log.info("Waiting %dm before queueing %s...", offset, entry["name"])
-            await asyncio.sleep(offset * 60)
+    for i, entry in enumerate(schedule):
+        if i > 0:
+            log.info(
+                "[%d/%d] Waiting %dm before queueing %s...",
+                i + 1, len(schedule), stagger_minutes, entry["name"],
+            )
+            await asyncio.sleep(stagger_minutes * 60)
 
         arch = entry.get("arch", "both")
         arches = [arch] if arch != "both" else ["arm64", "amd64"]
