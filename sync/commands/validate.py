@@ -61,7 +61,7 @@ def _validate_local(repo_entry, repo_path):
             pinned = m.group(1)
             expected = SOURCE_FRAMEWORK_TEMPLATE % pinned
             if content == expected:
-                print(f"  ✅ source_framework.sh matches template (v{pinned})")
+                print(f"  ✅ source_framework.sh matches template ({pinned})")
             else:
                 print(f"  ⚠️  source_framework.sh outdated — run sync migrate to update")
 
