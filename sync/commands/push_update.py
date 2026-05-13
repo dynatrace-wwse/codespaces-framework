@@ -159,6 +159,7 @@ def run(args):
             print("x No --framework-version given and no git tags found.", file=sys.stderr)
             sys.exit(1)
         print(f"Using latest tag: {target}")
+    target = target.lstrip("v")
     dry_run = args.dry_run
     force = args.force
     auto_merge = args.auto_merge

@@ -64,6 +64,7 @@ def extract_framework_version(source_content: str) -> str:
 
 def update_framework_version(source_content: str, new_version: str) -> str:
     """Update the FRAMEWORK_VERSION line in source_framework.sh content."""
+    new_version = new_version.lstrip("v")
     return _FW_VERSION_RE.sub(
         f'FRAMEWORK_VERSION="${{FRAMEWORK_VERSION:-{new_version}}}"',
         source_content,
