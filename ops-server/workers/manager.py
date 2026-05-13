@@ -1455,6 +1455,7 @@ class WorkerManager:
             f"K3D_LB_HTTPS_PORT=30443\n"
             f"K3D_API_PORT=6444\n"
             f"EXTERNAL_HOSTNAME={external_hostname}\n"
+            f"ORBITAL_ENVIRONMENT=true\n"
         )
 
     async def _git_clone(self, repo: str, ref: str, dest: Path):

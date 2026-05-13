@@ -12,13 +12,19 @@
 # Run: bash .devcontainer/test/integration_engines.sh
 source .devcontainer/util/source_framework.sh
 
-# --- Kind ---
-printInfoSection "Engine test 1/2: Kind"
-export CLUSTER_ENGINE=kind
-startKindCluster
-deployTodoApp
-assertRunningApp todoapp
-deleteKindCluster
+# Kind test only makes sense on AMD64 — kind node images are amd64-only;
+# CNFS (the primary Kind use-case) requires AMD64 Codespaces / Orbital.
+if [[ "$ARCH" != "x86_64" ]]; then
+  printWarn "Skipping Kind engine test — not running on AMD64 (arch: $ARCH)"
+else
+  # --- Kind ---
+  printInfoSection "Engine test 1/2: Kind"
+  export CLUSTER_ENGINE=kind
+  startKindCluster
+  deployTodoApp
+  assertRunningApp todoapp
+  deleteKindCluster
+fi
 
 # --- K3d ---
 printInfoSection "Engine test 2/2: K3d"

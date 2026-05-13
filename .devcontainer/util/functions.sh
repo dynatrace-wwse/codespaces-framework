@@ -69,6 +69,21 @@ printError() {
   echo -e "${GREEN}[$LOGNAME| ${RED}ERROR${GREEN} |$(timestamp) ${LILA}| ${RESET}$1${LILA}  |"
 }
 
+detectRunEnvironment(){
+  # Returns "orbital", "codespaces", or "local" based on available signals.
+  # orbital:   ORBITAL_ENVIRONMENT=true is set by the Orbital worker manager
+  #            or K3D_CLUSTER_NAME starts with "master-" (worker port-override pattern)
+  # codespaces: CODESPACE_NAME is set by GitHub Codespaces
+  # local:     fallback
+  if [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]] || [[ "${K3D_CLUSTER_NAME:-}" == master-* ]]; then
+    echo "orbital"
+  elif [[ -n "${CODESPACE_NAME:-}" ]]; then
+    echo "codespaces"
+  else
+    echo "local"
+  fi
+}
+
 postCodespaceTracker(){
 
   printInfo "Sending bizevent for $RepositoryName with $ERROR_COUNT issues built in $DURATION seconds"
@@ -81,6 +96,8 @@ postCodespaceTracker(){
 
   # Unique app ID for RUM monitoring: dynatrace-wwse-{repo-name}
   local app_id="dynatrace-wwse-${RepositoryName}"
+  local run_env
+  run_env=$(detectRunEnvironment)
 
   curl -s -X POST "$ENDPOINT_CODESPACES_TRACKER" \
   -H "Content-Type: application/json" \
@@ -95,6 +112,7 @@ postCodespaceTracker(){
   \"codespace.arch\": \"$ARCH\",
   \"codespace.name\": \"$CODESPACE_NAME\",
   \"codespace.app_id\": \"$app_id\",
+  \"run.environment\": \"$run_env\",
   \"environment\": \"$DT_ENVIRONMENT\",
   \"tenant\": \"$DT_TENANT\",
   \"framework.version\": \"$FRAMEWORK_VERSION\"
@@ -642,6 +660,14 @@ stopKindCluster(){
 
 startKindCluster(){
   export CLUSTER_ENGINE=kind
+  # On Orbital (Sysbox), Kind runs but OneAgent DaemonSet will fail — warn early
+  if [[ "$(detectRunEnvironment)" == "orbital" ]]; then
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+    printWarn " Running Kind on Orbital (Sysbox): cluster will start, but OneAgent DaemonSet"
+    printWarn " will CrashLoopBackOff — Sysbox restricts host-level syscalls required by"
+    printWarn " the OneAgent host module. Application monitoring (CSI injection) still works."
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+  fi
   printInfoSection "Starting Kubernetes Cluster (kind-control-plane)"
   KIND_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
   if [ "$KIND_STATUS" = "exited" ] || [ "$KIND_STATUS" = "dead" ]; then
@@ -1213,6 +1239,14 @@ deployCloudNative() {
     printWarn ""
     printWarn " Or use application-only mode (no CrashLoopBackOff, full app observability):"
     printWarn "   deployApplicationMonitoring"
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+  elif [[ "$(detectRunEnvironment)" == "orbital" ]]; then
+    # Kind on Orbital: cluster runs inside Sysbox but OneAgent host module will fail
+    printWarn "═══════════════════════════════════════════════════════════════════════════════"
+    printWarn " CloudNativeFullStack on Orbital (Sysbox + Kind): OneAgent DaemonSet will"
+    printWarn " CrashLoopBackOff. Sysbox restricts host-level syscalls needed by OneAgent's"
+    printWarn " host monitoring module. Code-injection (CSI driver) still works."
+    printWarn " This environment is flagged as 'orbital' in the tracker payload."
     printWarn "═══════════════════════════════════════════════════════════════════════════════"
   fi
   deployDynatrace cloudnative "$@"
