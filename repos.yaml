@@ -106,7 +106,7 @@ repos:
 
   - name: enablement-openpipeline-segments-iam
     repo: dynatrace-wwse/enablement-openpipeline-segments-iam
-    status: active
+    status: archived
     maintainer: "@shinojosa, @popecruzdt"
     description: "Configure OpenPipeline segments and IAM policies. Learn data routing, retention management, and access control for observability data in Dynatrace."
     tags: [logs, kubernetes, legacy]
@@ -114,6 +114,7 @@ repos:
     primary_tag: logs
     sync_managed: false
     ci: false
+    listed: false
     duration: "2h"
 
   - name: enablement-kubernetes-opentelemetry-openpipeline
