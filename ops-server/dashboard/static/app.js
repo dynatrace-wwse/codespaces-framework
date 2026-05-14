@@ -98,6 +98,7 @@ function activateTab(view) {
     if (view === 'running') loadRunningDetail();
     if (view === 'sync') loadSyncTab();
     if (view === 'agentic') loadAgentic();
+    if (view === 'framework') loadFramework();
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -1024,8 +1025,25 @@ async function loadWorkers() {
 
 // ── Nightly View ────────────────────────────────────────────────────────────
 
-async function loadNightly() {
-    const res = await fetch(`${API}/api/nightly/latest`);
+let _nightlyAllResults = [];
+
+async function loadNightlyRuns() {
+    const res = await fetch(`${API}/api/nightly/runs`);
+    const data = await res.json();
+    const sel = document.getElementById('nightly-run-select');
+    if (!sel) return;
+    const runs = data.runs || [];
+    sel.innerHTML = `<option value="latest">Latest run</option>` +
+        runs.map(r => {
+            const d = r.run_id.replace('nightly-', '').replace(/-\d{6}$/, '');
+            return `<option value="${escapeHtml(r.run_id)}">${escapeHtml(d)} (${r.passed}✓ ${r.failed}✗)</option>`;
+        }).join('');
+}
+
+async function loadNightly(runId) {
+    runId = runId || document.getElementById('nightly-run-select')?.value || 'latest';
+    const endpoint = runId === 'latest' ? `${API}/api/nightly/latest` : `${API}/api/nightly/run/${encodeURIComponent(runId)}`;
+    const res = await fetch(endpoint);
     const data = await res.json();
 
     const summary = document.getElementById('nightly-summary');
@@ -1042,16 +1060,34 @@ async function loadNightly() {
         <div style="color:var(--text-muted);font-size:0.8rem">${data.run_id}</div>
     `;
 
+    _nightlyAllResults = data.results || [];
+    applyNightlyFilter();
+}
+
+function applyNightlyFilter() {
+    const filter = document.getElementById('nightly-status-filter')?.value || 'all';
+    const filtered = filter === 'all' ? _nightlyAllResults
+        : _nightlyAllResults.filter(j => {
+            const passed = j.result?.passed;
+            const term = j.status === 'terminated';
+            if (filter === 'passed') return passed && !term;
+            if (filter === 'failed') return !passed || term;
+            return true;
+        });
+
     const tbody = document.getElementById('nightly-body');
-    tbody.innerHTML = data.results.map(job => {
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr><td colspan="6" class="loading">No results match filter</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(job => {
         const r = job.result || {};
         const arch = r.arch || job.worker_arch || '?';
         const isTerminated = job.status === 'terminated';
         const cls = isTerminated ? 'status-terminated' : (r.passed ? 'status-pass' : 'status-fail');
         const label = isTerminated ? 'TERM' : (r.passed ? 'PASS' : 'FAIL');
         const status = job.job_id
-            ? `<a href="#" class="${cls} log-link" data-final-job="${escapeHtml(job.job_id)}"
-                  title="View log">${label}</a>`
+            ? `<a href="#" class="${cls} log-link" data-final-job="${escapeHtml(job.job_id)}" title="View log">${label}</a>`
             : `<span class="${cls}">${label}</span>`;
         const historyHtml = (job.history && job.history.length > 0)
             ? `<div class="build-spark">${renderBuildSpark(job.history)}</div>` : '—';
@@ -1065,6 +1101,125 @@ async function loadNightly() {
         </tr>`;
     }).join('');
 }
+
+// ── Framework View ───────────────────────────────────────────────────────────
+
+let _frameworkSuitesData = [];
+
+async function loadFramework() {
+    const [suitesRes, runsRes] = await Promise.all([
+        fetch(`${API}/api/framework/suites`),
+        fetch(`${API}/api/framework/runs`),
+    ]);
+    const suitesData = await suitesRes.json();
+    const runsData = await runsRes.json();
+    _frameworkSuitesData = suitesData.suites || [];
+    renderFrameworkSuites(_frameworkSuitesData);
+    renderFrameworkRuns(runsData.runs || []);
+}
+
+function renderFrameworkSuites(suites) {
+    const grid = document.getElementById('framework-suite-grid');
+    if (!grid) return;
+    grid.innerHTML = suites.map(s => {
+        const last = s.last;
+        const comingSoon = s.status === 'coming_soon';
+        const needsVM = s.requires_native;
+        let resultHtml = '<span class="status-terminated">—</span>';
+        let metaHtml = '<span style="color:var(--text-muted);font-size:0.75rem">Never run</span>';
+        if (last) {
+            const passed = last.passed === 'true';
+            resultHtml = passed
+                ? `<a href="#" class="status-pass log-link" data-job-id="${escapeHtml(last.job_id)}" title="View log">✅ PASS</a>`
+                : `<a href="#" class="status-fail log-link" data-job-id="${escapeHtml(last.job_id)}" title="View log">❌ FAIL</a>`;
+            const ts = last.timestamp ? formatTime(last.timestamp) : '';
+            metaHtml = `<span style="color:var(--text-muted);font-size:0.75rem">${escapeHtml(last.arch)} · ${last.duration_s}s · ${ts}</span>`;
+        }
+        const badges = [
+            needsVM ? '<span class="badge badge-warn">needs VM</span>' : null,
+            s.needs_creds ? '<span class="badge badge-info">DT creds</span>' : null,
+            comingSoon ? '<span class="badge badge-muted">coming soon</span>' : null,
+        ].filter(Boolean).join(' ');
+        const btnAttrs = comingSoon ? 'disabled title="Not yet implemented"' : `data-action data-suite="${escapeHtml(s.id)}"`;
+        return `<div class="framework-card">
+            <div class="framework-card-header">
+                <span class="framework-card-name">${escapeHtml(s.name)}</span>
+                ${badges}
+            </div>
+            <p class="framework-card-desc">${escapeHtml(s.description)}</p>
+            <div class="framework-card-footer">
+                <div>${resultHtml}<br>${metaHtml}</div>
+                <button class="btn btn-small ${comingSoon ? 'btn-secondary' : ''} framework-run-btn" ${btnAttrs}>▶ Run</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderFrameworkRuns(runs) {
+    const tbody = document.getElementById('framework-runs-body');
+    if (!tbody) return;
+    if (!runs.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="loading">No framework runs yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = runs.map(r => {
+        const cls = r.passed ? 'status-pass' : 'status-fail';
+        const label = r.passed ? 'PASS' : 'FAIL';
+        const logLink = r.job_id
+            ? `<a href="#" class="log-link" data-job-id="${escapeHtml(r.job_id)}" title="View log">log</a>`
+            : '—';
+        return `<tr>
+            <td>${formatTime(r.timestamp)}</td>
+            <td>${escapeHtml(r.suite)}</td>
+            <td><span class="arch-badge">${escapeHtml(r.arch)}</span></td>
+            <td><span class="${cls}">${label}</span></td>
+            <td>${r.duration_s || 0}s</td>
+            <td>${logLink}</td>
+        </tr>`;
+    }).join('');
+}
+
+async function triggerFrameworkSuite(suiteId, ref) {
+    if (!isWriter()) { alert('Sign in as a writer to trigger tests.'); return; }
+    ref = ref || document.getElementById('framework-ref')?.value || 'main';
+    try {
+        const res = await fetch(`${API}/api/framework/trigger`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ suite: suiteId, ref, arch: suiteId === 'bats' ? 'arm64' : 'amd64' }),
+        });
+        if (!res.ok) { alert(`Error ${res.status}: ${await res.text()}`); return; }
+        const data = await res.json();
+        alert(`Queued: ${data.jobs.map(j => `${j.suite} (${j.arch})`).join(', ')}`);
+        setTimeout(loadFramework, 2000);
+    } catch (e) { alert(`Error: ${e}`); }
+}
+
+// Framework tab events
+document.addEventListener('click', e => {
+    const runBtn = e.target.closest('.framework-run-btn[data-suite]');
+    if (runBtn) {
+        e.preventDefault();
+        triggerFrameworkSuite(runBtn.dataset.suite);
+        return;
+    }
+    const runAll = e.target.closest('#framework-run-all');
+    if (runAll) {
+        e.preventDefault();
+        triggerFrameworkSuite('all');
+        return;
+    }
+    const triggerFw = e.target.closest('#nightly-trigger-framework');
+    if (triggerFw) {
+        e.preventDefault();
+        const ref = prompt('Branch to test?', 'feature/k3d-default-kind-cnfs');
+        if (ref) triggerFrameworkSuite('all', ref);
+        return;
+    }
+});
+
+document.getElementById('nightly-run-select')?.addEventListener('change', () => loadNightly());
+document.getElementById('nightly-status-filter')?.addEventListener('change', applyNightlyFilter);
 
 // ── History View ────────────────────────────────────────────────────────────
 
@@ -2754,6 +2909,7 @@ async function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, bt
     loadFleetTriggerPanel();
     loadWorkers();
     loadNightly();
+    loadNightlyRuns();
 })();
 
 // Auto-refresh

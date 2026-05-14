@@ -2586,7 +2586,7 @@ async def arena_terminal_page(job_id: str, token: str = ""):
     ws_url   = f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell"
     base_url = "https://autonomous-enablements.whydevslovedynatrace.com"
 
-    meta = await pool.hgetall(f"job:running:{job_id}") or {{}}
+    meta = await pool.hgetall(f"job:running:{job_id}") or {}
     repo_full = meta.get("repo", "")
     repo_name = repo_full.split("/")[-1] if repo_full else ""
     docs_url  = f"https://dynatrace-wwse.github.io/{repo_name}/" if repo_name else ""
@@ -2748,12 +2748,32 @@ function switchTab(name) {{
       setTimeout(() => fitAddon && fitAddon.fit(), 50);
     }}
   }}
+  if (name === 'log') {{
+    setTimeout(() => logFit && logFit.fit(), 50);
+  }}
 }}
 
-// ── Log streaming ─────────────────────────────────────────────────────────────
-// Strip ANSI escape codes for plain-text log display
-function stripAnsi(s) {{
-  return s.replace(/\x1b\[[0-9;]*[mGKHFJ]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+// ── Log terminal (xterm.js — renders ANSI colors) ────────────────────────────
+let logTerm, logFit;
+
+function initLogTerminal() {{
+  logTerm = new Terminal({{
+    cursorBlink: false,
+    fontSize: 12,
+    fontFamily: '"MesloLGS NF", "Cascadia Code NF", "Hack Nerd Font", ui-monospace, Menlo, monospace',
+    theme: {{
+      background: '#0d1117', foreground: '#d4d4d4', cursor: '#0d1117',
+      selectionBackground: '#264f78',
+    }},
+    scrollback: 20000,
+    convertEol: true,
+    disableStdin: true,
+  }});
+  logFit = new FitAddon.FitAddon();
+  logTerm.loadAddon(logFit);
+  logTerm.loadAddon(new WebLinksAddon.WebLinksAddon());
+  logTerm.open(logOutput);
+  logFit.fit();
 }}
 
 let lastLogLen = 0;
@@ -2767,10 +2787,9 @@ async function pollLivelog() {{
       return;
     }}
     const text = await r.text();
-    if (text.length > lastLogLen) {{
-      const chunk = stripAnsi(text.slice(lastLogLen));
-      logOutput.textContent += chunk;
-      logOutput.scrollTop = logOutput.scrollHeight;
+    if (text.length > lastLogLen && logTerm) {{
+      const chunk = text.slice(lastLogLen);
+      logTerm.write(chunk);
       lastLogLen = text.length;
     }}
     const ready = text.includes('Daemon ready');
@@ -2790,6 +2809,10 @@ async function pollLivelog() {{
     }}
   }} catch {{}}
 }}
+
+window.addEventListener('resize', () => {{
+  if (logFit && document.getElementById('panel-log').style.display !== 'none') logFit.fit();
+}});
 
 // ── xterm — opened lazily when Shell tab first selected ───────────────────────
 let term, fitAddon, ws;
@@ -2871,6 +2894,9 @@ function startAppsPolling() {{
   pollApps();
   appsInterval = setInterval(pollApps, 10000);
 }}
+// Init log terminal immediately (log tab is visible on load)
+document.fonts.load('12px "MesloLGS NF"').then(initLogTerminal).catch(initLogTerminal);
+
 startAppsPolling(); // show docs card immediately
 async function pollApps() {{
   try {{
@@ -2953,6 +2979,150 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
         return {"stdout": "", "stderr": "Command timed out after 30 seconds", "exitCode": -1}
     except Exception as exc:
         return {"stdout": "", "stderr": str(exc), "exitCode": -1}
+
+
+# ── Framework test suites ─────────────────────────────────────────────────────
+
+FRAMEWORK_SUITES = [
+    {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False},
+    {"id": "engines",   "name": "Engine Tests",              "description": "k3d + Kind (AMD64; Kind skipped on Orbital)",   "arch": "amd64", "needs_creds": False},
+    {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False},
+    {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Dynatrace operator + CSI injection",            "arch": "amd64", "needs_creds": True,  "status": "coming_soon"},
+    {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "OneAgent DaemonSet — needs bare-metal VM",      "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "requires_native": True},
+]
+
+@app.get("/api/framework/suites")
+async def api_framework_suites():
+    """Return framework test suite catalog with last run result from Redis."""
+    results = []
+    for suite in FRAMEWORK_SUITES:
+        last = await pool.hgetall(f"framework:suite:{suite['id']}:last")
+        results.append({**suite, "last": last or None})
+    return {"suites": results}
+
+@app.post("/api/framework/trigger")
+async def api_framework_trigger(request: Request):
+    """Trigger one or all framework test suites. Writer-only."""
+    role = await _require_writer(request)
+    body = await request.json()
+    suite_id = body.get("suite", "all")   # suite id or "all"
+    ref      = body.get("ref", "main")
+    arch     = body.get("arch", "amd64")
+
+    suites_to_run = FRAMEWORK_SUITES if suite_id == "all" else [s for s in FRAMEWORK_SUITES if s["id"] == suite_id]
+    suites_to_run = [s for s in suites_to_run if s.get("status") != "coming_soon"]
+
+    queued = []
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for s in suites_to_run:
+        target_arch = s["arch"] if suite_id == "all" else arch
+        job = {
+            "type": "framework-test",
+            "suite": s["id"],
+            "repo": "dynatrace-wwse/codespaces-framework",
+            "arch": target_arch,
+            "queue": f"test:{target_arch}",
+            "ref": ref,
+            "timestamp": timestamp,
+            "trigger": "framework",
+            "nightly_run_id": f"framework-{int(datetime.now(timezone.utc).timestamp())}",
+            "requested_by": role["user"],
+        }
+        await pool.rpush(f"queue:test:{target_arch}", json.dumps(job))
+        queued.append({"suite": s["id"], "arch": target_arch})
+
+    return {"status": "queued", "ref": ref, "jobs": queued}
+
+@app.get("/api/framework/runs")
+async def api_framework_runs(limit: int = 20):
+    """Recent framework test run results."""
+    raw = await pool.lrange("framework:runs", 0, limit - 1)
+    runs = []
+    for r in raw:
+        try:
+            runs.append(json.loads(r))
+        except Exception:
+            pass
+    return {"runs": runs}
+
+# ── Nightly runs list ─────────────────────────────────────────────────────────
+
+@app.get("/api/nightly/runs")
+async def api_nightly_runs():
+    """List all nightly run IDs with pass/fail summaries (newest first)."""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    runs: dict[str, dict] = {}
+    for j in completed_raw:
+        job = json.loads(j)
+        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
+            rid = job["nightly_run_id"]
+            r = job.get("result", {}) or {}
+            if rid not in runs:
+                runs[rid] = {"run_id": rid, "total": 0, "passed": 0, "failed": 0, "timestamp": job.get("timestamp", "")}
+            runs[rid]["total"] += 1
+            if r.get("passed"):
+                runs[rid]["passed"] += 1
+            else:
+                runs[rid]["failed"] += 1
+    sorted_runs = sorted(runs.values(), key=lambda x: x["run_id"], reverse=True)
+    return {"runs": sorted_runs}
+
+@app.get("/api/nightly/run/{run_id}")
+async def api_nightly_run(run_id: str):
+    """Get nightly results for a specific run_id (or 'latest')."""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    nightly_jobs = []
+    all_runs: dict[str, list] = {}
+    for j in completed_raw:
+        job = json.loads(j)
+        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
+            nightly_jobs.append(job)
+            all_runs.setdefault(job["nightly_run_id"], []).append(job)
+
+    if not all_runs:
+        return {"run_id": None, "results": []}
+
+    if run_id == "latest":
+        target_id = sorted(all_runs.keys())[-1]
+    else:
+        target_id = run_id
+
+    target_jobs = all_runs.get(target_id, [])
+    if not target_jobs:
+        raise HTTPException(404, f"No jobs found for nightly run {run_id}")
+
+    all_run_ids = sorted(all_runs.keys())
+    repo_arch_history: dict[str, list] = {}
+    for rid in all_run_ids:
+        for job in all_runs[rid]:
+            result = job.get("result", {}) or {}
+            repo_k = job.get("repo", "")
+            arch_k = job.get("arch") or result.get("arch") or "arm64"
+            key = f"{repo_k}|{arch_k}"
+            repo_arch_history.setdefault(key, []).append({
+                "passed": bool(result.get("passed")),
+                "status": job.get("status", "completed"),
+                "finished_at": job.get("finished_at", ""),
+                "job_id": job.get("job_id", ""),
+                "run_id": rid,
+            })
+
+    results_out = []
+    for job in sorted(target_jobs, key=lambda j: j.get("repo", "")):
+        result = job.get("result", {}) or {}
+        arch_k = job.get("arch") or result.get("arch") or "arm64"
+        repo_k = job.get("repo", "")
+        key = f"{repo_k}|{arch_k}"
+        hist = [h for h in repo_arch_history.get(key, []) if h["run_id"] != target_id][-7:]
+        results_out.append({**job, "history": hist})
+
+    return {
+        "run_id": target_id,
+        "total": len(target_jobs),
+        "passed": sum(1 for j in target_jobs if j.get("result", {}).get("passed")),
+        "failed": sum(1 for j in target_jobs if not j.get("result", {}).get("passed")),
+        "results": results_out,
+    }
 
 
 @app.get("/api/health")
