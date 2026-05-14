@@ -1483,7 +1483,7 @@ class WorkerManager:
     async def _cleanup_clusters(self):
         """Wipe stale clusters / containers / kubeconfig (best-effort)."""
         cmds = [
-            ["bash", "-c", "k3d cluster list -o name 2>/dev/null | xargs -r -I{} k3d cluster delete {}"],
+            ["bash", "-c", "k3d cluster list -o json 2>/dev/null | python3 -c \"import sys,json; [print(c['name']) for c in json.load(sys.stdin)]\" 2>/dev/null | xargs -r k3d cluster delete 2>/dev/null || true"],
             ["bash", "-c", "kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {}"],
             ["bash", "-c", "docker rm -f dt-enablement 2>/dev/null || true"],
             ["bash", "-c", "docker ps -aq --filter 'ancestor=rancher/k3s' | xargs -r docker rm -f 2>/dev/null || true"],

@@ -13,8 +13,11 @@
 source .devcontainer/util/source_framework.sh
 
 # Wipe any pre-existing clusters so port bindings don't conflict between engines.
+# Note: k3d cluster list -o name still emits a header; use JSON output instead.
 printInfo "Pre-test cleanup: removing any existing clusters..."
-k3d cluster list -o name 2>/dev/null | xargs -r -I{} k3d cluster delete {} 2>/dev/null || true
+k3d cluster list -o json 2>/dev/null \
+  | python3 -c "import sys,json; [print(c['name']) for c in json.load(sys.stdin)]" 2>/dev/null \
+  | xargs -r k3d cluster delete 2>/dev/null || true
 kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {} 2>/dev/null || true
 
 # Kind test only makes sense on AMD64 — kind node images are amd64-only;
