@@ -2649,9 +2649,7 @@ body {{ display: flex; flex-direction: column; font-family: -apple-system, sans-
 /* ── Log panel ── */
 #panel-log {{ flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }}
 #log-output {{
-  flex: 1; overflow-y: auto; padding: 12px 16px;
-  font: 12px/1.6 'MesloLGS NF', 'Cascadia Code', monospace;
-  background: #0d1117; white-space: pre-wrap; word-break: break-all;
+  flex: 1; min-height: 0; padding: 4px;
 }}
 #log-status {{
   padding: 6px 16px; font-size: 11px; color: #718096; background: #16213e;
@@ -2920,18 +2918,22 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
     worker_id = meta.get("worker_id", "")
     repo = meta.get("repo", "")
+    # repo is stored as "org/repo-name"; workspace only uses the repo-name part
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
     container = f"sb-{job_id[-32:]}"
 
     # Build the exec command (same pattern as PTY bridge, without -t for non-interactive)
-    inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo}", "dt",
+    inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
                               "sh", "-c", body.command])
     outer_cmd = ["docker", "exec", container, "sh", "-c", inner_cmd]
 
     worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
     ssh_host = worker_rec.get("ssh_host", "")
     if ssh_host:
+        # SSH concatenates list args with spaces, breaking `sh -c {inner_cmd}`.
+        # Pass the entire remote command as a single shlex-quoted string instead.
         full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                    ssh_host] + outer_cmd
+                    ssh_host, _shlex.join(outer_cmd)]
     else:
         full_cmd = outer_cmd
 
