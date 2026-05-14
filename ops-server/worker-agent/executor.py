@@ -208,10 +208,12 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
         # 6. Run each step via nested docker exec, streaming output to Redis.
+        custom_script = job.get("test_script") or "zsh .devcontainer/test/integration.sh"
+        test_label = f"frameworkTest:{job['suite']}" if job.get("suite") else "integrationTest"
         steps = [
             ("postCreateCommand", "./.devcontainer/post-create.sh"),
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
-            ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
+            (test_label,          custom_script),
         ]
         livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
         if livelog_key:
@@ -302,6 +304,22 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     # No host-level cleanup needed — Sysbox container teardown above already
     # took the inner dockerd, dt-enablement, and k3d cluster with it.
     shutil.rmtree(work_dir, ignore_errors=True)
+
+    # Persist result for framework suite cards
+    if redis_pool and job.get("framework_suite"):
+        suite = job["framework_suite"]
+        import json as _json
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        log_tail = "".join(sections)[-4000:]
+        await redis_pool.hset(f"framework:suite:{suite}:last", mapping={
+            "job_id": job_id, "timestamp": now,
+            "exit_code": str(rc), "passed": "true" if rc == 0 else "false",
+            "duration_s": str(duration), "arch": WORKER_ARCH, "log_tail": log_tail,
+        })
+        run_entry = _json.dumps({"suite": suite, "job_id": job_id, "timestamp": now,
+                                  "passed": rc == 0, "arch": WORKER_ARCH, "duration_s": duration})
+        await redis_pool.lpush("framework:runs", run_entry)
+        await redis_pool.ltrim("framework:runs", 0, 99)
 
     return {
         "test": "integration",

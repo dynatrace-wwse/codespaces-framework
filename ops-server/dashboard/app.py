@@ -2984,11 +2984,11 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 # ── Framework test suites ─────────────────────────────────────────────────────
 
 FRAMEWORK_SUITES = [
-    {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False},
-    {"id": "engines",   "name": "Engine Tests",              "description": "k3d + Kind (AMD64; Kind skipped on Orbital)",   "arch": "amd64", "needs_creds": False},
-    {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False},
-    {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Dynatrace operator + CSI injection",            "arch": "amd64", "needs_creds": True,  "status": "coming_soon"},
-    {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "OneAgent DaemonSet — needs bare-metal VM",      "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "requires_native": True},
+    {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False, "test_script": None},
+    {"id": "engines",   "name": "Engine Tests",              "description": "k3d + Kind (AMD64; Kind skipped on Orbital)",   "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_engines.sh"},
+    {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_k3d_apps.sh"},
+    {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Dynatrace operator + CSI injection",            "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "test_script": None},
+    {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "OneAgent DaemonSet — needs bare-metal VM",      "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "requires_native": True, "test_script": None},
 ]
 
 @app.get("/api/framework/suites")
@@ -3019,6 +3019,8 @@ async def api_framework_trigger(request: Request):
         job = {
             "type": "framework-test",
             "suite": s["id"],
+            "test_script": s["test_script"],   # executor uses this instead of integration.sh
+            "framework_suite": s["id"],         # signals executor to save suite result
             "repo": "dynatrace-wwse/codespaces-framework",
             "arch": target_arch,
             "queue": f"test:{target_arch}",
