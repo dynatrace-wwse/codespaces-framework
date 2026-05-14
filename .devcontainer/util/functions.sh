@@ -660,12 +660,15 @@ stopKindCluster(){
 
 startKindCluster(){
   export CLUSTER_ENGINE=kind
-  # On Orbital (Sysbox), Kind runs but OneAgent DaemonSet will fail — warn early
+  # On Orbital (Sysbox), Kind pods get stuck ContainerCreating — too many
+  # nesting levels (Sysbox→DinD→dt-enablement→kind-node→pod containers).
+  # Use k3d (startK3dCluster) on Orbital instead.
   if [[ "$(detectRunEnvironment)" == "orbital" ]]; then
     printWarn "═══════════════════════════════════════════════════════════════════════════════"
-    printWarn " Running Kind on Orbital (Sysbox): cluster will start, but OneAgent DaemonSet"
-    printWarn " will CrashLoopBackOff — Sysbox restricts host-level syscalls required by"
-    printWarn " the OneAgent host module. Application monitoring (CSI injection) still works."
+    printWarn " Kind on Orbital (Sysbox): pod containers will be stuck ContainerCreating."
+    printWarn " Sysbox cannot virtualise the 4-level container nesting Kind requires."
+    printWarn " Use startK3dCluster instead — k3d works on Orbital (3 levels only)."
+    printWarn " Kind is only supported in real VM environments (Codespaces, local)."
     printWarn "═══════════════════════════════════════════════════════════════════════════════"
   fi
   printInfoSection "Starting Kubernetes Cluster (kind-control-plane)"

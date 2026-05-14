@@ -20,10 +20,17 @@ k3d cluster list -o json 2>/dev/null \
   | xargs -r k3d cluster delete 2>/dev/null || true
 kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {} 2>/dev/null || true
 
-# Kind test only makes sense on AMD64 — kind node images are amd64-only;
-# CNFS (the primary Kind use-case) requires AMD64 Codespaces / Orbital.
+# Kind test: AMD64 + not Orbital.
+# On Orbital (Sysbox), Kind node pods get stuck in ContainerCreating — the
+# container nesting depth (Sysbox→DinD→dt-enablement→kind-node→pod) exceeds
+# what Sysbox's userspace kernel can virtualise. k3d works because it uses
+# k3s (single binary, no inner containerd) — one fewer nesting level.
+# Kind is only valid in real VM environments (GitHub Codespaces, local).
+_run_env=$(detectRunEnvironment)
 if [[ "$ARCH" != "x86_64" ]]; then
-  printWarn "Skipping Kind engine test — not running on AMD64 (arch: $ARCH)"
+  printWarn "Skipping Kind engine test — not AMD64 (arch: $ARCH)"
+elif [[ "$_run_env" == "orbital" ]]; then
+  printWarn "Skipping Kind engine test — running on Orbital/Sysbox (pods would stuck ContainerCreating)"
 else
   # --- Kind ---
   printInfoSection "Engine test 1/2: Kind"
