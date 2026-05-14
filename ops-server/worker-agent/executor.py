@@ -115,6 +115,23 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     app_port: int | None = None
 
     try:
+        # Initialize livelog immediately so the dashboard shows setup progress
+        # instead of a 404 during the ~10-minute Sysbox setup phase.
+        livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
+        if livelog_key:
+            await redis_pool.set(
+                livelog_key,
+                f"=== JOB: {job_id} ===\n"
+                f"=== REPO: {head_repo}@{ref} | ARCH: {WORKER_ARCH} ===\n"
+                f"\n[setup] Starting Sysbox container...\n",
+                ex=3600,
+            )
+
+        async def _setup_log(msg: str) -> None:
+            if livelog_key and redis_pool is not None:
+                ts = time.strftime("%H:%M:%S", time.gmtime())
+                await redis_pool.append(livelog_key, f"[{ts}] [setup] {msg}\n")
+
         # 1. Start outer Sysbox container running docker:25-dind
         app_port = await _alloc_app_port(redis_pool)
         run_cmd = [
@@ -139,9 +156,11 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         if app_port and redis_pool:
             await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
+        await _setup_log("Sysbox container started — waiting for inner Docker daemon...")
         # 2. Wait for the Sysbox's inner dockerd to be ready
         await _wait_for_inner_docker(sb_name)
 
+        await _setup_log("Inner Docker ready — loading test image into Sysbox...")
         # 3. Inject dt-enablement into the inner Sysbox dockerd.
         #    Pull once to the outer daemon (cached on host); then stream
         #    save→load so we never hit Docker Hub rate limits per container.
@@ -150,6 +169,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         if await outer_inspect.wait() != 0:
+            await _setup_log("Pulling test image from registry (first run — cached after this)...")
             outer_pull = await asyncio.create_subprocess_exec(
                 "docker", "pull", TEST_IMAGE,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
@@ -174,6 +194,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         finally:
             await asyncio.gather(save_proc.wait(), load_proc.wait())
 
+        await _setup_log("Test image loaded — starting test container...")
         # 4. Start the inner dt-enablement container (bind-mount workspace
         #    from the Sysbox's view, mount the inner docker.sock so k3d can
         #    operate inside the Sysbox).
@@ -201,12 +222,14 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             rc = proc.returncode
             raise RuntimeError("inner container start failed")
 
+        await _setup_log("Container started — waiting for docker group membership...")
         # 5. Wait for vscode (inside dt) to have docker access. The dt-enablement
         #    entrypoint adds vscode to the docker group asynchronously after
         #    `docker run -d` returns; if we exec before that finishes, k3d
         #    fails with EACCES on docker.sock.
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
+        await _setup_log("Environment ready — starting test steps")
         # 6. Run each step via nested docker exec, streaming output to Redis.
         custom_script = job.get("test_script") or "zsh .devcontainer/test/integration.sh"
         test_label = f"frameworkTest:{job['suite']}" if job.get("suite") else "integrationTest"
@@ -215,9 +238,6 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
             (test_label,          custom_script),
         ]
-        livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
-        if livelog_key:
-            await redis_pool.set(livelog_key, "", ex=3600)
 
         for label, script in steps:
             header = f"\n=== {label} ===\n"

@@ -711,14 +711,23 @@ function openLiveLog(jobId, title, isAgent = false) {
 
     const fetchOnce = async () => {
         try {
-            // Try livelog first (running). 404 → fall back to final log + stop polling.
+            // Try livelog first (running job). On 404 try the final log.
+            // If the final log is also absent the job is still setting up —
+            // keep polling so we don't go dark during the Sysbox setup phase.
             let res = await fetch(`/api/jobs/${jobId}/livelog`);
             if (res.status === 404) {
-                res = await fetch(`/api/jobs/${jobId}/log`);
-                if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
-                currentJobIsLive = false;
-                if (termBtn) termBtn.hidden = true;
-                if (shellBtn) shellBtn.hidden = true;
+                const finalRes = await fetch(`/api/jobs/${jobId}/log`);
+                if (finalRes.ok) {
+                    // Job finished — show final log and stop polling.
+                    res = finalRes;
+                    if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+                    currentJobIsLive = false;
+                    if (termBtn) termBtn.hidden = true;
+                    if (shellBtn) shellBtn.hidden = true;
+                } else {
+                    // Both 404 — job is still in setup phase. Keep polling.
+                    return;
+                }
             } else if (res.ok) {
                 currentJobIsLive = true;
                 if (!isAgent) {
