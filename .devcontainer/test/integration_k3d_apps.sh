@@ -61,9 +61,15 @@ if run_app_test "astroshop" deployAstroshop "astroshop"; then PASSED=$((PASSED +
 if run_app_test "otel-demo" deployOpentelemetryDemo "otel-demo"; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
 
 # ---------------------------------------------------------------------------
-# 4. AI Travel Advisor (gen-ai lab)
+# 4. AI Travel Advisor (gen-ai lab) — requires DT_LLM_TOKEN; skip if absent
 # ---------------------------------------------------------------------------
-if run_app_test "aitraveladvisor" deployAITravelAdvisorApp "aitraveladvisor"; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
+if [[ -z "$DT_LLM_TOKEN" ]]; then
+  printWarn "Skipping aitraveladvisor — DT_LLM_TOKEN not set"
+elif run_app_test "aitraveladvisor" deployAITravelAdvisorApp "aitraveladvisor"; then
+  PASSED=$((PASSED + 1))
+else
+  FAILED=$((FAILED + 1))
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
