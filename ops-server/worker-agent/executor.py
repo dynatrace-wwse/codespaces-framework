@@ -210,6 +210,11 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             "-e", "GIT_CONFIG_COUNT=1",
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
+            # Tell the framework it is running inside Orbital (Sysbox) so that
+            # detectRunEnvironment() returns "orbital" and guards like the Kind
+            # engine skip in integration_engines.sh fire correctly.
+            "-e", "ORBITAL_ENVIRONMENT=true",
+            "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE,
             "sleep", "infinity",
         ]
@@ -434,6 +439,8 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
             "-e", "GIT_CONFIG_COUNT=1",
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
+            "-e", "ORBITAL_ENVIRONMENT=true",
+            "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE, "sleep", "infinity",
         ]
         proc = await asyncio.create_subprocess_exec(

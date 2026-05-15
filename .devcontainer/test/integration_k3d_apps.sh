@@ -55,9 +55,9 @@ run_app_test "todoapp" deployTodoApp "todoapp"
 run_app_test "astroshop" deployAstroshop "astroshop"
 
 # ---------------------------------------------------------------------------
-# 3. Astronomy Shop (OTel demo — used by k8s-otel labs)
+# 3. OpenTelemetry Demo (OTel demo — used by k8s-otel labs)
 # ---------------------------------------------------------------------------
-run_app_test "astronomy-shop" deployAstronomyShopOpenTelemetry "astronomy-shop"
+run_app_test "otel-demo" deployOpentelemetryDemo "otel-demo"
 
 # ---------------------------------------------------------------------------
 # 4. AI Travel Advisor (gen-ai lab)
