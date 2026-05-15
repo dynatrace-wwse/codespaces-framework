@@ -2547,28 +2547,28 @@ registerOpentelemetryDemoIngress() {
         pathType: ImplementationSpecific
         backend:
           service:
-            name: opentelemetry-demo-otelcol
+            name: otel-collector
             port:
               number: 4318
       - path: /v1/metrics
         pathType: ImplementationSpecific
         backend:
           service:
-            name: opentelemetry-demo-otelcol
+            name: otel-collector
             port:
               number: 4318
       - path: /v1/logs
         pathType: ImplementationSpecific
         backend:
           service:
-            name: opentelemetry-demo-otelcol
+            name: otel-collector
             port:
               number: 4318
       - path: /
         pathType: Prefix
         backend:
           service:
-            name: opentelemetry-demo-frontendproxy
+            name: frontend-proxy
             port:
               number: 8080'
 
@@ -2601,12 +2601,12 @@ OTELINGRESSEOF
   local cs_port=""
   if [[ "$CODESPACES" == true ]]; then
     cs_port=$(getNextCodespacesPort)
-    kubectl port-forward -n "$namespace" "svc/opentelemetry-demo-frontendproxy" "${cs_port}:8080" &>/dev/null &
+    kubectl port-forward -n "$namespace" "svc/frontend-proxy" "${cs_port}:8080" &>/dev/null &
   fi
   mkdir -p "$(dirname "$APP_REGISTRY")"
   grep -v "^otel-demo|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
   mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
-  echo "otel-demo|${namespace}|opentelemetry-demo-frontendproxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+  echo "otel-demo|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
 
   local app_url
   app_url=$(getAppURL "otel-demo" "$cs_port")
