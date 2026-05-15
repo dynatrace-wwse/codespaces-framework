@@ -548,6 +548,9 @@ class WorkerManager:
         elif job_type == "daemon":
             return await self._run_daemon(job)
 
+        elif job_type == "framework-test":
+            return await self._run_framework_test(job)
+
         elif job_type == "deploy-ghpages":
             return await self._run_deploy_ghpages(job)
 
@@ -1225,6 +1228,227 @@ class WorkerManager:
             "log_file": str(log_file),
         }
 
+    async def _run_framework_test(self, job: dict) -> dict:
+        """Run a framework test suite (bats on host, or Sysbox for engine/app tests)."""
+        suite = job.get("suite", "bats")
+        if suite == "bats":
+            return await self._run_framework_bats(job)
+        else:
+            return await self._run_framework_sysbox(job)
+
+    async def _run_framework_bats(self, job: dict) -> dict:
+        """Run bats unit tests directly on the ops server (no Sysbox needed)."""
+        import shutil
+        job_id   = job["job_id"]
+        ref      = job.get("ref", "main")
+        repo     = job.get("repo", "dynatrace-wwse/codespaces-framework")
+        repo_name = repo.split("/")[-1]
+        suite    = "bats"
+
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        log_file = LOGS_DIR / f"{job_id}.log"
+        livelog_key = f"job:livelog:{job_id}"
+        await self.pool.set(livelog_key, "", ex=3600)
+
+        log.info("Running framework bats for %s @ %s", repo, ref)
+        await self._git_clone(repo, ref, repo_dir)
+
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            "bats", ".devcontainer/test/unit/", "--tap",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(repo_dir),
+        )
+        output = await self._stream_to_redis(proc, livelog_key, 300)
+        rc = proc.returncode or 0
+        duration = int(time.time() - start)
+
+        full_log = f"=== framework-bats @ {ref} ===\n{output}"
+        log_file.write_text(full_log)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+        await self._save_framework_suite_result(suite, job_id, rc, duration, "arm64", output)
+        return {"suite": suite, "exit_code": rc, "passed": rc == 0, "duration_seconds": duration, "arch": "arm64"}
+
+    async def _run_framework_sysbox(self, job: dict) -> dict:
+        """Run engines/k3d-apps/dt-* test via Sysbox + dt-enablement (AMD64 path)."""
+        import shutil
+
+        suite     = job.get("suite", "engines")
+        script_map = {
+            "engines":   "bash .devcontainer/test/integration_engines.sh",
+            "k3d-apps":  "bash .devcontainer/test/integration_k3d_apps.sh",
+        }
+        test_script = script_map.get(suite)
+        if not test_script:
+            return {"error": f"Unsupported suite for Sysbox: {suite}"}
+
+        repo      = job.get("repo", "dynatrace-wwse/codespaces-framework")
+        ref       = job.get("ref", "main")
+        repo_name = repo.split("/")[-1]
+        job_id    = job["job_id"]
+        arch      = job.get("arch", "amd64")
+        log_file  = LOGS_DIR / f"{job_id}.log"
+
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        log.info("Cloning %s @ %s for framework-sysbox %s (%s)", repo, ref, suite, job_id)
+        await self._git_clone(repo, ref, repo_dir)
+        await self._make_world_writable(repo_dir)
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
+
+        workspace  = f"/workspaces/{repo_name}"
+        env_file_inside = f"{workspace}/.devcontainer/.env"
+        sb_name    = f"sb-{job_id[-32:]}"
+        inner_name = "dt"
+
+        sections: list[str] = []
+        rc = 0
+        timed_out = False
+        failed_step = None
+        TEST_TIMEOUT = 1800
+        start_time = time.time()
+        deadline = start_time + TEST_TIMEOUT
+        livelog_key = f"job:livelog:{job_id}"
+        await self.pool.set(livelog_key, "", ex=3600)
+
+        try:
+            # 1. Sysbox outer container
+            run_cmd = [
+                "docker", "run", "-d", "--runtime=sysbox-runc",
+                "--name", sb_name,
+                "-v", f"{repo_dir}:{workspace}",
+                "docker:25-dind",
+            ]
+            proc = await asyncio.create_subprocess_exec(*run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== sysbox docker run failed ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("sysbox start failed")
+
+            # 2. Wait for inner dockerd
+            await self._wait_for_inner_docker(sb_name)
+
+            # 3. Load dt-enablement image
+            _DT_IMAGE = "shinojosa/dt-enablement:v1.2"
+            outer_inspect = await asyncio.create_subprocess_exec("docker", "image", "inspect", _DT_IMAGE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            if await outer_inspect.wait() != 0:
+                outer_pull = await asyncio.create_subprocess_exec("docker", "pull", _DT_IMAGE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                await outer_pull.wait()
+            save_proc = await asyncio.create_subprocess_exec("docker", "save", _DT_IMAGE, stdout=asyncio.subprocess.PIPE)
+            load_proc = await asyncio.create_subprocess_exec("docker", "exec", "-i", sb_name, "docker", "load", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            try:
+                while True:
+                    chunk = await save_proc.stdout.read(65536)
+                    if not chunk: break
+                    load_proc.stdin.write(chunk)
+                load_proc.stdin.close()
+            finally:
+                await asyncio.gather(save_proc.wait(), load_proc.wait())
+
+            # 4. Start dt-enablement container
+            inner_run = [
+                "docker", "exec", sb_name,
+                "docker", "run", "-d",
+                "--init", "--privileged", "--network=host",
+                "--name", inner_name,
+                "--env-file", env_file_inside,
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", f"{workspace}:{workspace}",
+                "-w", workspace,
+                "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=*",
+                _DT_IMAGE, "sleep", "infinity",
+            ]
+            proc = await asyncio.create_subprocess_exec(*inner_run, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== inner docker run failed ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("inner container start failed")
+
+            # 5. Wait for dt readiness
+            await self._wait_for_inner_dt_ready(sb_name, inner_name)
+
+            # 6. Run post-create, post-start, then the framework test script
+            steps = [
+                ("postCreateCommand", "./.devcontainer/post-create.sh"),
+                ("postStartCommand",  "./.devcontainer/post-start.sh"),
+                (f"frameworkTest:{suite}", test_script),
+            ]
+            for label, script in steps:
+                header = f"\n=== {label} ===\n"
+                sections.append(header)
+                await self.pool.append(livelog_key, header)
+                remaining = max(60, int(deadline - time.time()))
+                exec_cmd = ["docker", "exec", sb_name, "docker", "exec", "-w", workspace, inner_name, "bash", "-lc", script]
+                try:
+                    proc = await asyncio.create_subprocess_exec(*exec_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                    step_out = await self._stream_to_redis(proc, livelog_key, remaining)
+                    sections.append(step_out)
+                    if proc.returncode != 0:
+                        rc = proc.returncode
+                        failed_step = label
+                        msg = f"\n=== {label} exited rc={rc} — stopping ===\n"
+                        sections.append(msg)
+                        await self.pool.append(livelog_key, msg)
+                        break
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    sections.append(f"\n=== {label} timed out ===\n")
+                    rc = 124
+                    timed_out = True
+                    break
+
+        except Exception as e:
+            sections.append(f"\n=== executor error: {e} ===\n")
+            if rc == 0:
+                rc = 1
+        finally:
+            try:
+                kill_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", sb_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                await asyncio.wait_for(kill_proc.wait(), timeout=60)
+            except Exception:
+                pass
+
+        duration = int(time.time() - start_time)
+        full_log = f"=== framework-sysbox:{suite} @ {ref} ===\n" + "".join(sections)
+        log_file.write_text(self._mask_secrets(full_log))
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+        await self._save_framework_suite_result(suite, job_id, rc, duration, arch, "".join(sections))
+        return {"suite": suite, "exit_code": rc, "passed": rc == 0, "duration_seconds": duration, "arch": arch, "timed_out": timed_out}
+
+    async def _save_framework_suite_result(self, suite: str, job_id: str, rc: int, duration: int, arch: str, log_text: str):
+        """Store last result for a framework suite in Redis."""
+        now = datetime.now(timezone.utc).isoformat()
+        await self.pool.hset(f"framework:suite:{suite}:last", mapping={
+            "job_id": job_id,
+            "timestamp": now,
+            "exit_code": str(rc),
+            "passed": "true" if rc == 0 else "false",
+            "duration_s": str(duration),
+            "arch": arch,
+            "log_tail": log_text[-4000:],
+        })
+        run_entry = json.dumps({
+            "suite": suite, "job_id": job_id,
+            "timestamp": now, "passed": rc == 0,
+            "arch": arch, "duration_s": duration,
+        })
+        await self.pool.lpush("framework:runs", run_entry)
+        await self.pool.ltrim("framework:runs", 0, 99)
+
     async def _stream_agent_to_redis(self, proc, livelog_key: str, timeout_s: int) -> str:
         """Parse stream-json claude output, extract text events, append token summary."""
         full_text: list[str] = []
@@ -1455,6 +1679,7 @@ class WorkerManager:
             f"K3D_LB_HTTPS_PORT=30443\n"
             f"K3D_API_PORT=6444\n"
             f"EXTERNAL_HOSTNAME={external_hostname}\n"
+            f"ORBITAL_ENVIRONMENT=true\n"
         )
 
     async def _git_clone(self, repo: str, ref: str, dest: Path):
@@ -1482,7 +1707,7 @@ class WorkerManager:
     async def _cleanup_clusters(self):
         """Wipe stale clusters / containers / kubeconfig (best-effort)."""
         cmds = [
-            ["bash", "-c", "k3d cluster list -o name 2>/dev/null | xargs -r -I{} k3d cluster delete {}"],
+            ["bash", "-c", "k3d cluster list -o json 2>/dev/null | python3 -c \"import sys,json; [print(c['name']) for c in json.load(sys.stdin)]\" 2>/dev/null | xargs -r k3d cluster delete 2>/dev/null || true"],
             ["bash", "-c", "kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {}"],
             ["bash", "-c", "docker rm -f dt-enablement 2>/dev/null || true"],
             ["bash", "-c", "docker ps -aq --filter 'ancestor=rancher/k3s' | xargs -r docker rm -f 2>/dev/null || true"],

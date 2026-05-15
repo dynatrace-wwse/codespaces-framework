@@ -18,6 +18,7 @@ assertRunningPod dynatrace activegate
 assertRunningPod todoapp todoapp
 
 # Test app is reachable via nginx ingress + magic DNS (sslip.io)
+# Works for both k3d (default) and Kind clusters
 assertRunningApp todoapp
 
 

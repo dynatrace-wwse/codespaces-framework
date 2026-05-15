@@ -194,7 +194,7 @@ create_partial_cache() {
 # ============================================================
 # Test: FRAMEWORK_VERSION defaults to 1.2.0 when not set
 # ============================================================
-@test "FRAMEWORK_VERSION defaults to 1.3.0 when unset" {
+@test "FRAMEWORK_VERSION defaults to 1.3.2 when unset" {
   unset FRAMEWORK_VERSION
 
   cd "$FAKE_REPO"
@@ -205,7 +205,7 @@ create_partial_cache() {
   '
 
   # It will fail (no matching tag for remote clone) but should set the variable
-  [[ "$output" == *"VER=1.3.0"* ]]
+  [[ "$output" == *"VER=1.3.2"* ]]
 }
 
 # ============================================================
