@@ -2984,7 +2984,7 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 # ── Framework test suites ─────────────────────────────────────────────────────
 
 FRAMEWORK_SUITES = [
-    {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False, "test_script": None},
+    {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False, "test_script": "cd .devcontainer && bats test/unit/"},
     {"id": "engines",   "name": "Engine Tests",              "description": "k3d + Kind (AMD64; Kind skipped on Orbital)",   "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_engines.sh"},
     {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_k3d_apps.sh"},
     {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Dynatrace operator + CSI injection",            "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "test_script": None},

@@ -302,7 +302,9 @@ EOF
 @test "deployCloudNative calls deployDynatrace with cloudnative" {
   source_functions
 
-  # Mock deployDynatrace to capture the mode
+  # Suppress warning banners (printWarn → stdout) so we can match MODE= cleanly
+  printWarn() { :; }
+  export -f printWarn
   deployDynatrace() { echo "MODE=$1"; }
   export -f deployDynatrace
 
