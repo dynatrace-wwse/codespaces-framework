@@ -744,6 +744,8 @@ async def api_builds_running():
                 "started_at": meta.get("started_at"),
                 "worker_id": meta.get("worker_id"),
                 "type": meta.get("type", "integration-test"),
+                "arena_user": meta.get("arena_user"),
+                "arena_tenant": meta.get("arena_tenant"),
             })
         elif key_type == "string":
             parts = key.split(":", 3)
@@ -2349,42 +2351,111 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
 # Arena API — training catalog, provisioning, session management
 # ---------------------------------------------------------------------------
 
-_ARENA_TRAININGS_STUB = [
-    {
-        "id": "dt-logs-101",
-        "title": "Dynatrace Log Management 101",
-        "description": "Ingest, parse, and query logs with Dynatrace. Hands-on K3d environment.",
+# Repos in dynatrace-wwse that are available as Arena trainings.
+# Each entry maps repo name → Arena metadata overrides.
+# site_name and tags are scraped from mkdocs.yaml; these values fill gaps.
+_ARENA_REPOS = {
+    "enablement-dynatrace-log-ingest-101": {
+        "id": "log-ingest-101",
         "type": "lab",
         "difficulty": "beginner",
         "estimatedTime": 45,
-        "tags": ["logs", "dql", "opentelemetry"],
-        "repoUrl": "https://github.com/dynatrace-wwse/enablement-logs-101",
-        "branch": "main",
-        "source": "orbital",
+        "tags": ["logs", "log-ingest", "opentelemetry"],
     },
-    {
-        "id": "dt-opentelemetry",
-        "title": "OpenTelemetry with Dynatrace",
-        "description": "Instrument apps with OTel SDK and ship traces/metrics/logs to DT.",
-        "type": "lab-assessment",
+    "enablement-live-debugger-bug-hunting": {
+        "id": "live-debugger",
+        "type": "lab",
+        "difficulty": "beginner",
+        "estimatedTime": 30,
+        "tags": ["live-debugger", "debugging", "code"],
+    },
+    "enablement-gen-ai-llm-observability": {
+        "id": "gen-ai-llm",
+        "type": "lab",
         "difficulty": "intermediate",
-        "estimatedTime": 90,
-        "tags": ["opentelemetry", "traces", "metrics", "logs"],
-        "repoUrl": "https://github.com/dynatrace-wwse/enablement-opentelemetry",
-        "branch": "main",
-        "source": "orbital",
+        "estimatedTime": 60,
+        "tags": ["ai", "llm", "opentelemetry", "genai"],
     },
-]
+    "enablement-dql-fundamentals": {
+        "id": "dql-fundamentals",
+        "type": "lab-assessment",
+        "difficulty": "beginner",
+        "estimatedTime": 45,
+        "tags": ["dql", "logs", "metrics", "traces"],
+    },
+    "enablement-business-observability": {
+        "id": "business-observability",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 60,
+        "tags": ["bizevents", "business-observability", "dql"],
+    },
+}
+
+_ARENA_CATALOG_CACHE_KEY = "arena:catalog"
+_ARENA_CATALOG_TTL = 300  # 5 minutes
+
+
+async def _fetch_arena_catalog() -> list[dict]:
+    """Scrape site_name from each repo's mkdocs.yaml via GitHub API.
+
+    Falls back to repo name if mkdocs.yaml is unavailable.
+    Results cached in Redis for 5 minutes to avoid repeated API calls.
+    """
+    import base64 as _b64
+    import re as _re
+
+    async def _get_mkdocs_title(repo: str) -> tuple[str, str]:
+        """Return (site_name, description) from mkdocs.yaml, or sensible defaults."""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                url = f"{GH_API}/repos/dynatrace-wwse/{repo}/contents/mkdocs.yaml"
+                headers = {"Authorization": f"Bearer {GH_TOKEN}"} if GH_TOKEN else {}
+                resp = await client.get(url, headers=headers)
+                if resp.status_code != 200:
+                    return repo, ""
+                content = _b64.b64decode(resp.json()["content"]).decode("utf-8", errors="replace")
+                name_match = _re.search(r'^site_name:\s*["\']?(.+?)["\']?\s*$', content, _re.MULTILINE)
+                desc_match = _re.search(r'^site_description:\s*["\']?(.+?)["\']?\s*$', content, _re.MULTILINE)
+                title = name_match.group(1).strip() if name_match else repo
+                # Strip "Dynatrace Enablement Lab: " prefix for brevity
+                title = _re.sub(r'^Dynatrace (?:Enablement|Observability) Lab:\s*', '', title)
+                desc = desc_match.group(1).strip() if desc_match else ""
+                return title, desc
+        except Exception:
+            return repo, ""
+
+    trainings = []
+    for repo, meta in _ARENA_REPOS.items():
+        title, desc = await _get_mkdocs_title(repo)
+        trainings.append({
+            "id": meta["id"],
+            "title": title,
+            "description": desc or f"Hands-on {title} lab in a live Kubernetes environment.",
+            "type": meta["type"],
+            "difficulty": meta["difficulty"],
+            "estimatedTime": meta["estimatedTime"],
+            "tags": meta["tags"],
+            "repoUrl": f"https://github.com/dynatrace-wwse/{repo}",
+            "branch": "main",
+            "source": "orbital",
+        })
+    return trainings
 
 
 @app.get("/api/arena/trainings")
 async def api_arena_trainings():
-    """Return available Arena trainings.
+    """Return available Arena trainings scraped from real repos.
 
-    Currently returns a hardcoded stub. Future: scrape mkdocs.yaml from each
-    enablement repo and cache in Redis with a 5-minute TTL.
+    Titles come from mkdocs.yaml site_name. Cached in Redis for 5 minutes.
     """
-    return _ARENA_TRAININGS_STUB
+    cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
+    if cached:
+        return json.loads(cached)
+
+    trainings = await _fetch_arena_catalog()
+    await pool.set(_ARENA_CATALOG_CACHE_KEY, json.dumps(trainings), ex=_ARENA_CATALOG_TTL)
+    return trainings
 
 
 class ArenaProvisionRequest(BaseModel):
@@ -2395,61 +2466,457 @@ class ArenaProvisionRequest(BaseModel):
 
 @app.post("/api/arena/provision")
 async def api_arena_provision(body: ArenaProvisionRequest):
-    """Provision a training environment for the given user + training.
+    """Provision a training environment — queues a real daemon job on the amd64 worker.
 
-    Currently returns a stub job so Arena can exercise the provisioning state
-    machine end-to-end. Real implementation will queue a daemon job whose
-    executor clones the training repo into a Sysbox container.
-
-    Returns: { jobId, wsUrl, expiresAt, status }
+    Returns: { jobId, wsUrl, expiresAt, status: "provisioning" }
     """
     import uuid as _uuid
-    training = next((t for t in _ARENA_TRAININGS_STUB if t["id"] == body.trainingId), None)
+
+    cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
+    catalog = json.loads(cached) if cached else await _fetch_arena_catalog()
+    training = next((t for t in catalog if t["id"] == body.trainingId), None)
     if training is None:
         raise HTTPException(status_code=404, detail=f"Training '{body.trainingId}' not found")
 
+    # org/repo format for the executor (e.g. "dynatrace-wwse/enablement-live-debugger-bug-hunting")
+    repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
+    repo_name = training["repoUrl"].split("/")[-1]
     job_id = f"arena-{_uuid.uuid4().hex[:12]}"
-    expires_at = (datetime.now(timezone.utc).replace(microsecond=0)
-                  + timedelta(hours=4)).isoformat()
+    now = datetime.now(timezone.utc)
+    expires_at = (now.replace(microsecond=0) + timedelta(hours=4)).isoformat()
 
-    # Write a stub entry so /api/arena/sessions/{job_id} can resolve it.
+    job = {
+        "job_id":        job_id,
+        "type":          "daemon",
+        "repo":          repo_nwo,
+        "arch":          "amd64",
+        "ref":           training["branch"],
+        "timestamp":     now.isoformat(),
+        "trigger":       "arena",
+        "nightly_run_id": f"arena-{body.trainingId}",
+        "requested_by":  body.userId,
+    }
+    # Pre-write so session-status can resolve it before the worker picks it up.
     await pool.hset(f"job:running:{job_id}", mapping={
-        "repo":        training["repoUrl"].split("/")[-1],
-        "branch":      training["branch"],
-        "arch":        "amd64",
-        "started_at":  datetime.now(timezone.utc).isoformat(),
-        "worker_id":   "stub",
-        "arena_user":  body.userId,
+        "job_id":       job_id,
+        "repo":         repo_nwo,
+        "branch":       training["branch"],
+        "arch":         "amd64",
+        "started_at":   now.isoformat(),
+        "worker_id":    "queued",
+        "type":         "daemon",
+        "arena_user":   body.userId,
         "arena_tenant": body.tenantId,
-        "training_id": body.trainingId,
-        "status":      "provisioning",
+        "training_id":  body.trainingId,
+        "expires_at":   expires_at,
     })
     await pool.expire(f"job:running:{job_id}", int(timedelta(hours=4).total_seconds()))
+    await pool.rpush("queue:test:amd64", json.dumps(job))
 
     return {
-        "jobId": job_id,
-        "wsUrl": f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
+        "jobId":     job_id,
+        "wsUrl":     f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
         "expiresAt": expires_at,
-        "status": "provisioning",
+        "status":    "provisioning",
     }
 
 
 @app.get("/api/arena/sessions/{job_id}")
 async def api_arena_session_status(job_id: str):
-    """Return current status + wsUrl for a provisioned training session."""
+    """Return current session status.
+
+    Status transitions:
+      queued      → worker hasn't picked up the job yet
+      provisioning → worker is running postCreate/postStart (cluster setup, ~5-15 min)
+      ready       → "Daemon ready" appeared in livelog — shell is available
+      expired     → job:running key missing (terminated or TTL elapsed)
+    """
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
         return {"jobId": job_id, "status": "expired"}
 
-    status = meta.get("status", "provisioning")
+    # Check livelog for readiness signal written by execute_daemon
+    livelog = await pool.get(f"job:livelog:{job_id}")
+    if livelog and "Daemon ready" in livelog:
+        status = "ready"
+    elif meta.get("worker_id") in ("queued", ""):
+        status = "queued"
+    else:
+        status = "provisioning"
+
     return {
-        "jobId": job_id,
-        "status": status,
-        "wsUrl": f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
+        "jobId":      job_id,
+        "status":     status,
+        "wsUrl":      f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
         "trainingId": meta.get("training_id", ""),
-        "userId": meta.get("arena_user", ""),
-        "expiresAt": meta.get("expires_at", ""),
+        "userId":     meta.get("arena_user", ""),
+        "expiresAt":  meta.get("expires_at", ""),
     }
+
+
+@app.post("/api/arena/sessions/{job_id}/shell-token")
+async def api_arena_shell_token(job_id: str):
+    """Issue a single-use 60-second shell token for an arena session.
+
+    Arena orbital proxy function calls this server-side (no browser OAuth needed).
+    The returned token is passed to the /terminal/{job_id}?token=... page.
+    """
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if meta.get("worker_id") in ("queued", "stub"):
+        raise HTTPException(status_code=409, detail="Session not ready yet")
+
+    token = secrets.token_hex(16)
+    await pool.set(f"shell:token:{token}", job_id, ex=60)
+    return {"token": token}
+
+
+@app.get("/terminal/{job_id}", response_class=HTMLResponse)
+async def arena_terminal_page(job_id: str, token: str = ""):
+    """Standalone xterm.js terminal page for Arena training sessions.
+
+    Tabs: Log (livelog stream, plain text) | Shell (xterm PTY, lazy-opened) | Apps (proxy + docs)
+
+    Shell is opened lazily when the user first clicks the Shell tab and "Daemon ready"
+    has been seen in the log — this avoids xterm measuring 0x0 when hidden.
+
+    Auth: single-use shell token passed as ?token=.
+    """
+    ws_url   = f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell"
+    base_url = "https://autonomous-enablements.whydevslovedynatrace.com"
+
+    meta = await pool.hgetall(f"job:running:{job_id}") or {}
+    repo_full = meta.get("repo", "")
+    repo_name = repo_full.split("/")[-1] if repo_full else ""
+    docs_url  = f"https://dynatrace-wwse.github.io/{repo_name}/" if repo_name else ""
+
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Training Environment</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<style>
+@font-face {{
+  font-family: 'MesloLGS NF';
+  src: url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Regular.ttf') format('truetype');
+  font-weight: normal; font-style: normal;
+}}
+@font-face {{
+  font-family: 'MesloLGS NF';
+  src: url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Bold.ttf') format('truetype');
+  font-weight: bold; font-style: normal;
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+html, body {{ height: 100%; overflow: hidden; background: #1a1a2e; color: #d4d4d4; }}
+body {{ display: flex; flex-direction: column; font-family: -apple-system, sans-serif; }}
+
+#topbar {{
+  background: #16213e; color: #a0aec0; font-size: 12px; line-height: 38px;
+  padding: 0 16px; display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0; border-bottom: 1px solid #0d3460; gap: 16px;
+}}
+#brand {{ display: flex; align-items: center; gap: 8px; }}
+#brand-logo {{ color: #00b4d8; font-size: 18px; }}
+#brand-name {{ color: #e2e8f0; font-weight: 600; font-size: 13px; letter-spacing: 0.3px; }}
+#status {{ font-size: 11px; color: #718096; white-space: nowrap; }}
+#status.ok   {{ color: #48bb78; }}
+#status.err  {{ color: #fc8181; }}
+#status.busy {{ color: #ed8936; }}
+
+#tabbar {{
+  background: #16213e; border-bottom: 1px solid #0d3460;
+  display: flex; flex-shrink: 0; padding: 0 8px;
+}}
+.tab {{
+  padding: 0 20px; line-height: 36px; cursor: pointer;
+  border-bottom: 2px solid transparent; color: #718096;
+  font-size: 12px; user-select: none; transition: color .15s; position: relative;
+}}
+.tab:hover  {{ color: #a0aec0; }}
+.tab.active {{ color: #00b4d8; border-bottom-color: #00b4d8; }}
+.tab.disabled {{ opacity: 0.4; cursor: not-allowed; }}
+.tab .badge {{
+  display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 8px;
+  font-size: 10px; background: #48bb78; color: #1a1a2e; font-weight: 700;
+  vertical-align: middle;
+}}
+
+#panels {{ flex: 1; display: flex; flex-direction: column; min-height: 0; }}
+
+/* ── Log panel ── */
+#panel-log {{ flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }}
+#log-output {{
+  flex: 1; min-height: 0; padding: 4px;
+}}
+#log-status {{
+  padding: 6px 16px; font-size: 11px; color: #718096; background: #16213e;
+  border-top: 1px solid #0d3460; flex-shrink: 0;
+}}
+
+/* ── Shell panel ── */
+#panel-shell {{ flex: 1; padding: 4px; min-height: 0; display: none; flex-direction: column; }}
+#terminal {{ flex: 1; min-height: 0; }}
+
+/* ── Apps panel ── */
+#panel-apps {{
+  flex: 1; padding: 20px; overflow-y: auto; display: none; background: #1a1a2e;
+}}
+#panel-apps h3 {{ color: #e2e8f0; font-size: 13px; margin-bottom: 16px; }}
+.app-card {{
+  background: #16213e; border: 1px solid #0d3460; border-radius: 6px;
+  padding: 14px 16px; margin-bottom: 10px;
+  display: flex; align-items: center; justify-content: space-between;
+}}
+.app-card.docs-card {{ border-color: #1a4a6b; }}
+.app-name {{ color: #00b4d8; font-size: 13px; font-weight: 600; }}
+.app-sub  {{ color: #718096; font-size: 11px; margin-top: 3px; }}
+.app-btn {{
+  background: #0e639c; color: #fff; padding: 5px 14px; border-radius: 4px;
+  font-size: 12px; text-decoration: none; transition: background .15s; white-space: nowrap;
+}}
+.app-btn:hover {{ background: #1177bb; }}
+.app-btn.docs-btn {{ background: #2d6a4f; }}
+.app-btn.docs-btn:hover {{ background: #40916c; }}
+</style>
+</head>
+<body>
+<div id="topbar">
+  <div id="brand">
+    <span id="brand-logo">⬡</span>
+    <span id="brand-name">Dynatrace Enablements</span>
+  </div>
+  <span id="status" class="busy">Setting up environment…</span>
+</div>
+<div id="tabbar">
+  <div class="tab active" id="tab-log"   onclick="switchTab('log')">📋 Log</div>
+  <div class="tab disabled" id="tab-shell" onclick="switchTab('shell')">⌨ Shell</div>
+  <div class="tab" id="tab-apps" onclick="switchTab('apps')">🚀 Apps</div>
+</div>
+<div id="panels">
+  <div id="panel-log">
+    <div id="log-output"></div>
+    <div id="log-status">Waiting for provisioning log…</div>
+  </div>
+  <div id="panel-shell">
+    <div id="terminal"></div>
+  </div>
+  <div id="panel-apps">
+    <h3>Apps &amp; Resources</h3>
+    <div id="apps-list">
+      {'<div class="app-card docs-card"><div><div class="app-name">📖 Training Documentation</div><div class="app-sub">GitHub Pages</div></div><a class="app-btn docs-btn" href="' + docs_url + '" target="_blank" rel="noopener">Open ↗</a></div>' if docs_url else ''}
+      <div id="dynamic-apps"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
+<script>
+const JOB_ID   = {json.dumps(job_id)};
+const TOKEN    = {json.dumps(token)};
+const WS_URL   = {json.dumps(ws_url)};
+const BASE_URL = {json.dumps(base_url)};
+
+const statusEl  = document.getElementById('status');
+const logOutput = document.getElementById('log-output');
+const logStatus = document.getElementById('log-status');
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+let termOpened = false;
+let shellReady = false; // true once "Daemon ready" seen
+
+function switchTab(name) {{
+  if (name === 'shell' && !shellReady) return; // locked until env ready
+
+  ['log','shell','apps'].forEach(n => {{
+    const panel = document.getElementById('panel-' + n);
+    const tab   = document.getElementById('tab-' + n);
+    const show  = n === name;
+    panel.style.display = show ? (n === 'shell' ? 'flex' : (n === 'apps' ? 'block' : 'flex')) : 'none';
+    tab.className = 'tab' + (show ? ' active' : '') +
+                    (n === 'shell' && !shellReady ? ' disabled' : '');
+  }});
+
+  if (name === 'shell') {{
+    if (!termOpened) {{
+      openTerminal();
+    }} else {{
+      setTimeout(() => fitAddon && fitAddon.fit(), 50);
+    }}
+  }}
+  if (name === 'log') {{
+    setTimeout(() => logFit && logFit.fit(), 50);
+  }}
+}}
+
+// ── Log terminal (xterm.js — renders ANSI colors) ────────────────────────────
+let logTerm, logFit;
+
+function initLogTerminal() {{
+  logTerm = new Terminal({{
+    cursorBlink: false,
+    fontSize: 12,
+    fontFamily: '"MesloLGS NF", "Cascadia Code NF", "Hack Nerd Font", ui-monospace, Menlo, monospace',
+    theme: {{
+      background: '#0d1117', foreground: '#d4d4d4', cursor: '#0d1117',
+      selectionBackground: '#264f78',
+    }},
+    scrollback: 20000,
+    convertEol: true,
+    disableStdin: true,
+  }});
+  logFit = new FitAddon.FitAddon();
+  logTerm.loadAddon(logFit);
+  logTerm.loadAddon(new WebLinksAddon.WebLinksAddon());
+  logTerm.open(logOutput);
+  logFit.fit();
+}}
+
+let lastLogLen = 0;
+let logTimer   = setInterval(pollLivelog, 2000);
+
+async function pollLivelog() {{
+  try {{
+    const r = await fetch(`${{BASE_URL}}/api/jobs/${{JOB_ID}}/livelog`);
+    if (r.status === 404) {{
+      logStatus.textContent = 'Waiting for container to start…';
+      return;
+    }}
+    const text = await r.text();
+    if (text.length > lastLogLen && logTerm) {{
+      const chunk = text.slice(lastLogLen);
+      logTerm.write(chunk);
+      lastLogLen = text.length;
+    }}
+    const ready = text.includes('Daemon ready');
+    logStatus.textContent = ready
+      ? '✓ Environment ready — click Shell to connect'
+      : `Streaming log… (${{Math.round(lastLogLen / 1024)}} KB)`;
+
+    if (ready && !shellReady) {{
+      clearInterval(logTimer); logTimer = null;
+      shellReady = true;
+      // Unlock Shell tab
+      const shellTab = document.getElementById('tab-shell');
+      shellTab.className = 'tab';
+      shellTab.innerHTML = '⌨ Shell <span class="badge">Ready</span>';
+      statusEl.textContent = 'Environment ready';
+      statusEl.className   = 'ok';
+    }}
+  }} catch {{}}
+}}
+
+window.addEventListener('resize', () => {{
+  if (logFit && document.getElementById('panel-log').style.display !== 'none') logFit.fit();
+}});
+
+// ── xterm — opened lazily when Shell tab first selected ───────────────────────
+let term, fitAddon, ws;
+
+async function openTerminal() {{
+  termOpened = true;
+  statusEl.textContent = 'Fetching shell token…';
+  statusEl.className   = 'busy';
+
+  // Always fetch a fresh token right before connecting — the URL token (if any)
+  // has a 60s TTL and will have expired if the user waited for provisioning.
+  let token = TOKEN; // fallback to URL param
+  try {{
+    const tr = await fetch(`${{BASE_URL}}/api/arena/sessions/${{JOB_ID}}/shell-token`, {{ method: 'POST' }});
+    if (tr.ok) {{ const j = await tr.json(); token = j.token; }}
+  }} catch {{ /* use URL token as fallback */ }}
+
+  statusEl.textContent = 'Connecting shell…';
+
+  document.fonts.load('13px "MesloLGS NF"').then(() => {{
+    term = new Terminal({{
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: '"MesloLGS NF", "Cascadia Code NF", "Hack Nerd Font", ui-monospace, Menlo, monospace',
+      theme: {{
+        background: '#1a1a2e', foreground: '#d4d4d4', cursor: '#00b4d8',
+        selectionBackground: '#264f78',
+      }},
+      scrollback: 5000,
+      convertEol: false,
+    }});
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit(); // panel-shell is VISIBLE at this point — correct dimensions
+
+    const rows = term.rows, cols = term.cols;
+    ws = new WebSocket(`${{WS_URL}}?token=${{encodeURIComponent(token)}}&rows=${{rows}}&cols=${{cols}}`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {{
+      statusEl.textContent = 'Connected';
+      statusEl.className   = 'ok';
+      ws.send(JSON.stringify({{ type: 'resize', rows, cols }}));
+    }};
+    ws.onmessage = (e) => {{
+      if (e.data instanceof ArrayBuffer) term.write(new Uint8Array(e.data));
+      else term.write(e.data);
+    }};
+    ws.onclose = (e) => {{
+      statusEl.textContent = `Disconnected (${{e.code}})`;
+      statusEl.className   = 'err';
+      term.writeln('\r\n\x1b[31mSession closed.\x1b[0m');
+    }};
+    ws.onerror = () => {{
+      statusEl.textContent = 'Connection error';
+      statusEl.className   = 'err';
+    }};
+
+    const encoder = new TextEncoder();
+    term.onData(d => {{ if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(d)); }});
+    term.onResize(sz => {{
+      if (ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({{ type: 'resize', rows: sz.rows, cols: sz.cols }}));
+    }});
+  }});
+}}
+
+window.addEventListener('resize', () => {{
+  if (termOpened && fitAddon) fitAddon.fit();
+}});
+
+// ── Apps polling — starts on page load, not just when shell connects ──────────
+let appsInterval = null;
+function startAppsPolling() {{
+  if (appsInterval) return;
+  pollApps();
+  appsInterval = setInterval(pollApps, 10000);
+}}
+// Init log terminal immediately (log tab is visible on load)
+document.fonts.load('12px "MesloLGS NF"').then(initLogTerminal).catch(initLogTerminal);
+
+startAppsPolling(); // show docs card immediately
+async function pollApps() {{
+  try {{
+    const r = await fetch(`${{BASE_URL}}/api/jobs/${{JOB_ID}}/apps`);
+    if (!r.ok) return;
+    const {{apps}} = await r.json();
+    const el = document.getElementById('dynamic-apps');
+    el.innerHTML = (apps || []).map(a => `
+      <div class="app-card">
+        <div>
+          <div class="app-name">${{a.name}}</div>
+          <div class="app-sub">port ${{a.port}}</div>
+        </div>
+        <a class="app-btn" href="${{BASE_URL}}${{a.proxy_url}}" target="_blank" rel="noopener">Open ↗</a>
+      </div>`).join('');
+  }} catch {{}}
+}}
+</script>
+</body>
+</html>""")
 
 
 class ArenaExecRequest(BaseModel):
@@ -2477,18 +2944,22 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
     worker_id = meta.get("worker_id", "")
     repo = meta.get("repo", "")
+    # repo is stored as "org/repo-name"; workspace only uses the repo-name part
+    repo_name = repo.split("/")[-1] if "/" in repo else repo
     container = f"sb-{job_id[-32:]}"
 
     # Build the exec command (same pattern as PTY bridge, without -t for non-interactive)
-    inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo}", "dt",
+    inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
                               "sh", "-c", body.command])
     outer_cmd = ["docker", "exec", container, "sh", "-c", inner_cmd]
 
     worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
     ssh_host = worker_rec.get("ssh_host", "")
     if ssh_host:
+        # SSH concatenates list args with spaces, breaking `sh -c {inner_cmd}`.
+        # Pass the entire remote command as a single shlex-quoted string instead.
         full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                    ssh_host] + outer_cmd
+                    ssh_host, _shlex.join(outer_cmd)]
     else:
         full_cmd = outer_cmd
 
@@ -2508,6 +2979,152 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
         return {"stdout": "", "stderr": "Command timed out after 30 seconds", "exitCode": -1}
     except Exception as exc:
         return {"stdout": "", "stderr": str(exc), "exitCode": -1}
+
+
+# ── Framework test suites ─────────────────────────────────────────────────────
+
+FRAMEWORK_SUITES = [
+    {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False, "test_script": "cd .devcontainer && bats test/unit/"},
+    {"id": "engines",   "name": "Engine Tests",              "description": "k3d + Kind (AMD64; Kind skipped on Orbital)",   "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_engines.sh"},
+    {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_k3d_apps.sh"},
+    {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Dynatrace operator + CSI injection",            "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "test_script": None},
+    {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "OneAgent DaemonSet — needs bare-metal VM",      "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "requires_native": True, "test_script": None},
+]
+
+@app.get("/api/framework/suites")
+async def api_framework_suites():
+    """Return framework test suite catalog with last run result from Redis."""
+    results = []
+    for suite in FRAMEWORK_SUITES:
+        last = await pool.hgetall(f"framework:suite:{suite['id']}:last")
+        results.append({**suite, "last": last or None})
+    return {"suites": results}
+
+@app.post("/api/framework/trigger")
+async def api_framework_trigger(request: Request):
+    """Trigger one or all framework test suites. Writer-only."""
+    role = await _require_writer(request)
+    body = await request.json()
+    suite_id = body.get("suite", "all")   # suite id or "all"
+    ref      = body.get("ref", "main")
+    arch     = body.get("arch", "amd64")
+
+    suites_to_run = FRAMEWORK_SUITES if suite_id == "all" else [s for s in FRAMEWORK_SUITES if s["id"] == suite_id]
+    suites_to_run = [s for s in suites_to_run if s.get("status") != "coming_soon"]
+
+    queued = []
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for s in suites_to_run:
+        target_arch = s["arch"] if suite_id == "all" else arch
+        job = {
+            "type": "framework-test",
+            "suite": s["id"],
+            "test_script": s["test_script"],   # executor uses this instead of integration.sh
+            "framework_suite": s["id"],         # signals executor to save suite result
+            "repo": "dynatrace-wwse/codespaces-framework",
+            "arch": target_arch,
+            "queue": f"test:{target_arch}",
+            "ref": ref,
+            "timestamp": timestamp,
+            "trigger": "framework",
+            "nightly_run_id": f"framework-{int(datetime.now(timezone.utc).timestamp())}",
+            "requested_by": role["user"],
+        }
+        await pool.rpush(f"queue:test:{target_arch}", json.dumps(job))
+        queued.append({"suite": s["id"], "arch": target_arch})
+
+    return {"status": "queued", "ref": ref, "jobs": queued}
+
+@app.get("/api/framework/runs")
+async def api_framework_runs(limit: int = 20):
+    """Recent framework test run results."""
+    raw = await pool.lrange("framework:runs", 0, limit - 1)
+    runs = []
+    for r in raw:
+        try:
+            runs.append(json.loads(r))
+        except Exception:
+            pass
+    return {"runs": runs}
+
+# ── Nightly runs list ─────────────────────────────────────────────────────────
+
+@app.get("/api/nightly/runs")
+async def api_nightly_runs():
+    """List all nightly run IDs with pass/fail summaries (newest first)."""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    runs: dict[str, dict] = {}
+    for j in completed_raw:
+        job = json.loads(j)
+        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
+            rid = job["nightly_run_id"]
+            r = job.get("result", {}) or {}
+            if rid not in runs:
+                runs[rid] = {"run_id": rid, "total": 0, "passed": 0, "failed": 0, "timestamp": job.get("timestamp", "")}
+            runs[rid]["total"] += 1
+            if r.get("passed"):
+                runs[rid]["passed"] += 1
+            else:
+                runs[rid]["failed"] += 1
+    sorted_runs = sorted(runs.values(), key=lambda x: x["run_id"], reverse=True)
+    return {"runs": sorted_runs}
+
+@app.get("/api/nightly/run/{run_id}")
+async def api_nightly_run(run_id: str):
+    """Get nightly results for a specific run_id (or 'latest')."""
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    nightly_jobs = []
+    all_runs: dict[str, list] = {}
+    for j in completed_raw:
+        job = json.loads(j)
+        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
+            nightly_jobs.append(job)
+            all_runs.setdefault(job["nightly_run_id"], []).append(job)
+
+    if not all_runs:
+        return {"run_id": None, "results": []}
+
+    if run_id == "latest":
+        target_id = sorted(all_runs.keys())[-1]
+    else:
+        target_id = run_id
+
+    target_jobs = all_runs.get(target_id, [])
+    if not target_jobs:
+        raise HTTPException(404, f"No jobs found for nightly run {run_id}")
+
+    all_run_ids = sorted(all_runs.keys())
+    repo_arch_history: dict[str, list] = {}
+    for rid in all_run_ids:
+        for job in all_runs[rid]:
+            result = job.get("result", {}) or {}
+            repo_k = job.get("repo", "")
+            arch_k = job.get("arch") or result.get("arch") or "arm64"
+            key = f"{repo_k}|{arch_k}"
+            repo_arch_history.setdefault(key, []).append({
+                "passed": bool(result.get("passed")),
+                "status": job.get("status", "completed"),
+                "finished_at": job.get("finished_at", ""),
+                "job_id": job.get("job_id", ""),
+                "run_id": rid,
+            })
+
+    results_out = []
+    for job in sorted(target_jobs, key=lambda j: j.get("repo", "")):
+        result = job.get("result", {}) or {}
+        arch_k = job.get("arch") or result.get("arch") or "arm64"
+        repo_k = job.get("repo", "")
+        key = f"{repo_k}|{arch_k}"
+        hist = [h for h in repo_arch_history.get(key, []) if h["run_id"] != target_id][-7:]
+        results_out.append({**job, "history": hist})
+
+    return {
+        "run_id": target_id,
+        "total": len(target_jobs),
+        "passed": sum(1 for j in target_jobs if j.get("result", {}).get("passed")),
+        "failed": sum(1 for j in target_jobs if not j.get("result", {}).get("passed")),
+        "results": results_out,
+    }
 
 
 @app.get("/api/health")

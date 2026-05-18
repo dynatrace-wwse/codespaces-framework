@@ -1,0 +1,84 @@
+#!/bin/bash
+# K3d multi-app integration test — AMD64 only.
+#
+# Validates that each app deploys successfully on k3d and is reachable
+# through the nginx ingress. Runs sequentially — each app is deployed into
+# a fresh k3d cluster, verified, then torn down.
+#
+# Skip list: apps that only support amd64 already guard themselves, but
+# we also skip here because this test file is exclusively for AMD64 CI.
+#
+# Run: bash .devcontainer/test/integration_k3d_apps.sh
+source .devcontainer/util/source_framework.sh
+
+if [[ "$ARCH" != "x86_64" ]]; then
+  printWarn "Skipping k3d apps integration test — AMD64 only (arch: $ARCH)"
+  exit 0
+fi
+
+PASSED=0
+FAILED=0
+
+run_app_test() {
+  local app_name="$1"
+  local deploy_fn="$2"
+  local assert_name="${3:-$app_name}"
+  local result=0
+
+  printInfoSection "Testing app: $app_name"
+  export CLUSTER_ENGINE=k3d
+  startK3dCluster
+
+  if "$deploy_fn" 2>&1; then
+    if assertRunningApp "$assert_name" 2>&1; then
+      printInfo "✅ $app_name — deployed and reachable"
+    else
+      printError "❌ $app_name — deployed but NOT reachable via ingress"
+      result=1
+    fi
+  else
+    printError "❌ $app_name — deployment FAILED"
+    result=1
+  fi
+
+  deleteK3dCluster
+  return $result
+}
+
+# ---------------------------------------------------------------------------
+# 1. Todo App — lightweight test app, always available
+# ---------------------------------------------------------------------------
+if run_app_test "todoapp" deployTodoApp "todoapp"; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
+
+# ---------------------------------------------------------------------------
+# 2. Astroshop (AMD64 only — guarded inside deployAstroshop)
+# ---------------------------------------------------------------------------
+if run_app_test "astroshop" deployAstroshop "astroshop"; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
+
+# ---------------------------------------------------------------------------
+# 3. OpenTelemetry Demo (OTel demo — used by k8s-otel labs)
+# ---------------------------------------------------------------------------
+if run_app_test "otel-demo" deployOpentelemetryDemo "otel-demo"; then PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); fi
+
+# ---------------------------------------------------------------------------
+# 4. AI Travel Advisor (gen-ai lab) — requires DT_LLM_TOKEN; skip if absent
+# ---------------------------------------------------------------------------
+if [[ -z "$DT_LLM_TOKEN" ]]; then
+  printWarn "Skipping aitraveladvisor — DT_LLM_TOKEN not set"
+elif run_app_test "aitraveladvisor" deployAITravelAdvisorApp "aitraveladvisor"; then
+  PASSED=$((PASSED + 1))
+else
+  FAILED=$((FAILED + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+printInfoSection "K3d apps integration test — results"
+printInfo "Passed: $PASSED"
+if [[ "$FAILED" -gt 0 ]]; then
+  printError "Failed: $FAILED"
+  exit 1
+else
+  printInfo "✅ All $PASSED app(s) passed on k3d"
+fi

@@ -48,6 +48,7 @@
             <button class="tab" data-view="sync">Synchronizer</button>
             <button class="tab" data-view="agentic">Agentic</button>
             <button class="tab" data-view="workers">Workers</button>
+            <button class="tab" data-view="framework">Framework</button>
             <button class="tab" data-view="nightly">Nightly</button>
         </div>
     </nav>
@@ -573,7 +574,20 @@
 
         <!-- Nightly View -->
         <section id="view-nightly" class="view">
-            <div id="nightly-summary" class="nightly-header"></div>
+            <div class="nightly-toolbar">
+                <div id="nightly-summary" class="nightly-header" style="flex:1;margin-bottom:0;"></div>
+                <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+                    <select id="nightly-run-select" title="Select nightly run">
+                        <option value="latest">Latest run</option>
+                    </select>
+                    <select id="nightly-status-filter" title="Filter by status">
+                        <option value="all">All</option>
+                        <option value="passed">Passed</option>
+                        <option value="failed">Failed</option>
+                    </select>
+                    <button class="btn btn-small" id="nightly-trigger-framework" data-action title="Trigger engine + app tests on AMD64">⚡ Framework Tests</button>
+                </div>
+            </div>
             <table id="nightly-table">
                 <thead>
                     <tr>
@@ -587,6 +601,39 @@
                 </thead>
                 <tbody id="nightly-body">
                     <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Framework Tests View -->
+        <section id="view-framework" class="view">
+            <div class="framework-toolbar">
+                <div>
+                    <h2 style="margin:0;font-size:1rem;font-weight:600">Framework Tests</h2>
+                    <p style="margin:2px 0 0;font-size:0.8rem;color:var(--text-muted)">Test the framework itself: unit tests, cluster engines, app exposure, Dynatrace components</p>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <input type="text" id="framework-ref" value="feature/k3d-default-kind-cnfs" style="width:240px" placeholder="Branch or ref">
+                    <button class="btn btn-small" id="framework-run-all" data-action>▶ Run All</button>
+                </div>
+            </div>
+            <div id="framework-suite-grid" class="framework-suite-grid">
+                <p class="loading">Loading suites…</p>
+            </div>
+            <h3 style="margin:24px 0 8px">Recent Framework Runs</h3>
+            <table id="framework-runs-table">
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Suite</th>
+                        <th>Arch</th>
+                        <th>Result</th>
+                        <th>Duration</th>
+                        <th>Log</th>
+                    </tr>
+                </thead>
+                <tbody id="framework-runs-body">
+                    <tr><td colspan="6" class="loading">—</td></tr>
                 </tbody>
             </table>
         </section>
