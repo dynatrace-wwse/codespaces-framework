@@ -1,0 +1,106 @@
+{
+  "name": "Enablement GitHub Pages & RUM",
+  "type": "dashboard",
+  "isPrivate": false,
+  "content": {
+    "version": 21,
+    "variables": [],
+    "tiles": {
+      "0": {
+        "type": "markdown",
+        "content": "## GitHub Pages & Real User Monitoring\nPage load BizEvents from all `dynatrace-wwse.github.io` documentation sites. App ID: `ff78563295ff1e42`."
+      },
+      "1": {
+        "title": "Page Views (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize total = count()",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Page Views", "prefixIcon": "EyeOpenIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "2": {
+        "title": "Unique Sessions (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize sessions = countDistinct(`dt.rum.session.id`)",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Sessions", "prefixIcon": "UserIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "3": {
+        "title": "Countries Reached (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize countries = countDistinct(`geo.country.name`)",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Countries", "prefixIcon": "GlobeIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "4": {
+        "title": "Docs Sites Active (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize sites = countDistinct(`event.provider`)",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Sites", "prefixIcon": "FolderIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "5": {
+        "title": "Page Views Over Time (daily)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{bin(timestamp, 1d)}",
+        "visualization": "lineChart",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "6": {
+        "title": "Top Pages",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{page}\n| sort views desc\n| limit 20",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "barChart": { "categoryAxis": { "fieldName": "page" }, "valueAxes": [{ "fieldName": "views" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "7": {
+        "title": "Views by Country",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), sessions = countDistinct(`dt.rum.session.id`), by:{`geo.country.name`, `geo.continent.name`}\n| sort views desc\n| limit 20",
+        "visualization": "table",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "8": {
+        "title": "Views by Device Type",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{`device.type`}\n| sort views desc",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "barChart": { "categoryAxis": { "fieldName": "device.type" }, "valueAxes": [{ "fieldName": "views" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "9": {
+        "title": "Views by Browser",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{`browser.name`}\n| sort views desc",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "barChart": { "categoryAxis": { "fieldName": "browser.name" }, "valueAxes": [{ "fieldName": "views" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "10": {
+        "title": "Sessions by Page — Detail",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), sessions = countDistinct(`dt.rum.session.id`), by:{page, `event.provider`}\n| sort views desc\n| limit 30",
+        "visualization": "table",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      }
+    }
+  }
+}

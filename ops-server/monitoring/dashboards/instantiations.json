@@ -1,0 +1,111 @@
+{
+  "name": "Enablement Instantiations & Adoption",
+  "type": "dashboard",
+  "isPrivate": false,
+  "content": {
+    "version": 21,
+    "variables": [],
+    "tiles": {
+      "0": {
+        "type": "markdown",
+        "content": "## Instantiations & Adoption\nAll codespace instantiation events — real users, Orbital CI, GitHub Actions CI, and local containers. Geo-located by IP."
+      },
+      "1": {
+        "title": "Total Instantiations (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize total = count()",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Total", "prefixIcon": "ComputerIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "2": {
+        "title": "Real User Codespaces (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"github-codespaces\"\n| summarize total = count()",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Real Users", "prefixIcon": "UserIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "3": {
+        "title": "Error Rate (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize total = count(), errors = countIf(`content.codespace.errors` != \"0\" and isNotNull(`content.codespace.errors`))\n| fieldsAdd errorRate = round(toDouble(errors) / toDouble(total) * 100, decimals: 1)\n| fields errorRate",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Error Rate %", "prefixIcon": "WarningIcon", "showLabel": true },
+          "thresholds": [
+            { "color": "#4fd5e0", "value": 0 },
+            { "color": "#f5d565", "value": 5 },
+            { "color": "#ec6868", "value": 15 }
+          ]
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "4": {
+        "title": "Active Repositories (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize repos = countDistinct(`content.repository.name`)",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Repos", "prefixIcon": "FolderIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "5": {
+        "title": "Instantiations by Type",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), by:{`content.codespace.type`}\n| sort count desc",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "barChart": { "categoryAxis": { "fieldName": "content.codespace.type" }, "valueAxes": [{ "fieldName": "count" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "6": {
+        "title": "Instantiations Over Time (by type)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), by:{bin(timestamp, 1d), `content.codespace.type`}",
+        "visualization": "lineChart",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "7": {
+        "title": "By Repository (top 20)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), errors = countIf(`content.codespace.errors` != \"0\" and isNotNull(`content.codespace.errors`)), by:{`content.repository.name`}\n| sort count desc\n| limit 20",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "barChart": { "categoryAxis": { "fieldName": "content.repository.name" }, "valueAxes": [{ "fieldName": "count" }, { "fieldName": "errors" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "8": {
+        "title": "By Country (real user + GH Actions)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"github-codespaces\", \"github-workflow\", \"local-docker-container\")\n| filter isNotNull(`content.geo.country.name`)\n| summarize count = count(), by:{`content.geo.country.name`, `content.geo.continent.name`}\n| sort count desc\n| limit 25",
+        "visualization": "table",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "9": {
+        "title": "Real Codespace Instantiations — Location Detail",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"github-codespaces\"\n| fields timestamp, `content.repository.name`, `content.codespace.arch`, `content.codespace.creation`, `content.codespace.errors`, `content.geo.city.name`, `content.geo.country.name`, `content.geo.continent.name`\n| sort timestamp desc",
+        "visualization": "table",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "10": {
+        "title": "Errors by Repository",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.errors` != \"0\"\n| filter isNotNull(`content.codespace.errors`)\n| summarize errors = count(), by:{`content.repository.name`, `content.codespace.type`}\n| sort errors desc\n| limit 20",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "barChart": { "categoryAxis": { "fieldName": "content.repository.name" }, "valueAxes": [{ "fieldName": "errors" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      }
+    }
+  }
+}

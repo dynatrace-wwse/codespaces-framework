@@ -1,0 +1,11 @@
+[Unit]
+Description=Orbital host metrics push to Dynatrace
+After=network.target
+
+[Service]
+Type=oneshot
+User=ops
+WorkingDirectory=/home/ops/enablement-framework/codespaces-framework/ops-server
+ExecStart=/usr/bin/python3 /home/ops/enablement-framework/codespaces-framework/ops-server/monitoring/push_metrics.py
+StandardOutput=journal
+StandardError=journal
