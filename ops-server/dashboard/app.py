@@ -2572,6 +2572,64 @@ async def api_arena_shell_token(job_id: str):
     return {"token": token}
 
 
+@app.get("/shell/{job_id}", response_class=HTMLResponse)
+async def arena_shell_page(job_id: str):
+    """Standalone xterm.js shell page for Arena training sessions.
+
+    Same self-contained HTML as the ops-dashboard popup (shellPopupHtml in app.js)
+    but uses /api/arena/sessions/{id}/shell-token so no ops-portal auth is needed.
+    Intended to be window.open()'d from the DT App.
+    """
+    base_url = "https://autonomous-enablements.whydevslovedynatrace.com"
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Shell · {job_id}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<style>
+@font-face{{font-family:'MesloLGS NF';src:url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Regular.ttf') format('truetype');font-weight:normal;font-style:normal}}
+@font-face{{font-family:'MesloLGS NF';src:url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Bold.ttf') format('truetype');font-weight:bold;font-style:normal}}
+html,body{{margin:0;padding:0;background:#000;width:100%;height:100vh;overflow:hidden}}
+#t{{width:100%;height:100vh;padding:4px;box-sizing:border-box}}
+</style>
+</head>
+<body>
+<div id="t"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script>
+(async()=>{{
+  const jobId={json.dumps(job_id)};
+  const BASE='{base_url}';
+  const term=new Terminal({{cursorBlink:true,fontFamily:'"MesloLGS NF","Cascadia Code NF",ui-monospace,monospace',fontSize:13,theme:{{background:'#000000',foreground:'#e2e8f2',cursor:'#00b4de'}}}});
+  const fit=new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('t'));
+  await document.fonts.load('13px "MesloLGS NF"').catch(()=>{{}});
+  fit.fit();
+  term.write('\\x1b[36m◈  Connecting to isolation container…\\x1b[0m\\r\\n');
+  let token='';
+  try{{
+    const r=await fetch(BASE+'/api/arena/sessions/'+jobId+'/shell-token',{{method:'POST'}});
+    if(!r.ok){{term.write('\\r\\n\\x1b[31mFailed to get shell token ('+r.status+')\\x1b[0m\\r\\n');return;}}
+    ({{token}}=await r.json());
+  }}catch(err){{term.write('\\r\\n\\x1b[31mError: '+err+'\\x1b[0m\\r\\n');return;}}
+  const ws=new WebSocket('wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/'+jobId+'/shell?token='+encodeURIComponent(token)+'&rows='+term.rows+'&cols='+term.cols);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{{term.write('\\x1b[32m◈  Tunnel established — spawning shell\\x1b[0m\\r\\n\\r\\n');ws.send(JSON.stringify({{type:'resize',rows:term.rows,cols:term.cols}}));}};
+  ws.onmessage=e=>{{term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data);}};
+  ws.onclose=()=>term.write('\\r\\n\\x1b[90m[connection closed]\\x1b[0m\\r\\n');
+  ws.onerror=()=>term.write('\\r\\n\\x1b[31m[WebSocket error]\\x1b[0m\\r\\n');
+  term.onData(d=>{{if(ws.readyState===WebSocket.OPEN)ws.send(new TextEncoder().encode(d));}});
+  term.onResize(({{rows,cols}})=>{{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({{type:'resize',rows,cols}}));}});
+  window.addEventListener('resize',()=>fit.fit());
+}})();
+</script>
+</body>
+</html>""")
+
+
 @app.get("/terminal/{job_id}", response_class=HTMLResponse)
 async def arena_terminal_page(job_id: str, token: str = ""):
     """Standalone xterm.js terminal page for Arena training sessions.
