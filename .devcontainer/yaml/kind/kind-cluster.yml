@@ -29,7 +29,7 @@ nodes:
     nodeRegistration:
       kubeletExtraArgs:
         node-labels: "ingress-ready=true"
-  # 
+  #
   # Start cleaning unused images when disk usage exceeds 85%
   # Stop cleaning once it drops below 80%
   # Remove any unused image older than 7 days regardless of disk pressure
@@ -38,6 +38,22 @@ nodes:
     imageGCHighThresholdPercent: 85
     imageGCLowThresholdPercent: 80
     imageMaximumGCAge: 168h
+    # K8s 1.31+ enables UserNamespacesSupport (beta) by default.
+    # Kubelet writes net.ipv4.ip_unprivileged_port_start per pod sandbox via
+    # runc openat2(RESOLVE_NO_XDEV). In Docker-in-Docker (Codespace devcontainers)
+    # /proc/sys is a bind mount on a different device → EXDEV → FailedCreatePodSandBox.
+    # Disable the feature to suppress the sysctl write. Also skip kernel-default
+    # enforcement so kubelet doesn't fight read-only procfs at node startup.
+    protectKernelDefaults: false
+    featureGates:
+      UserNamespacesSupport: false
+  # Propagate the feature gate to the API server so it doesn't advertise
+  # user-namespace fields that the kubelet won't honour.
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        feature-gates: "UserNamespacesSupport=false"
   extraMounts:
   - hostPath: /
     containerPath: /mnt/root

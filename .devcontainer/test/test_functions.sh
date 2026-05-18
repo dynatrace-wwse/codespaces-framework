@@ -198,6 +198,85 @@ assertAppDeployed(){
   printInfo "✅ App '$app_name' fully deployed and accessible"
 }
 
+assertAstroshopContent() {
+  # Validates the Astroshop frontend:
+  #   1. Root path returns valid HTML
+  #   2. Page contains expected shop-related keywords
+  #   3. At least one static asset (img/css/js) loads with HTTP 200/304
+  # Call after assertRunningApp confirms the ingress is up.
+  local app_name="astroshop"
+  local detected_ip port ip_host
+  detected_ip=$(detectIP)
+  port="${K3D_LB_HTTP_PORT:-80}"
+  ip_host="${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
+  local target="http://localhost:${port}"
+
+  printInfoSection "Asserting Astroshop HTML + assets via ${target} (Host: ${ip_host})"
+
+  # Fetch main page with retries — Next.js SSR can be slow on first hit
+  local html i
+  for i in $(seq 1 8); do
+    html=$(curl --silent --fail --max-time 20 -L -H "Host: ${ip_host}" "${target}/" 2>/dev/null)
+    [[ -n "$html" ]] && break
+    printInfo "Attempt ${i}/8 — page not ready, waiting 5s..."
+    sleep 5
+  done
+
+  if [[ -z "$html" ]]; then
+    printError "❌ Astroshop root page returned empty response after 8 attempts"
+    exit 1
+  fi
+
+  # 1. Valid HTML structure
+  if echo "$html" | grep -qi '<html'; then
+    printInfo "✅ Root page returns valid HTML document"
+  else
+    printError "❌ Root page missing <html> tag"
+    printError "First 300 chars: ${html:0:300}"
+    exit 1
+  fi
+
+  # 2. Expected shop content keywords
+  if echo "$html" | grep -qiE 'astro|opentelemetry|shop|telescope|astronomy|cart|product'; then
+    printInfo "✅ Root page contains expected shop content"
+  else
+    printWarn "⚠️  Root page does not match expected shop keywords (may be a proxy/loading page)"
+    printWarn "Page excerpt: $(echo "$html" | head -3)"
+  fi
+
+  # 3. Static asset reachability — extract src/href pointing to relative asset paths
+  local assets asset_url status ok=0 fail=0
+  assets=$(echo "$html" | \
+    grep -oiE '(src|href)="(/[^"]+\.(png|jpg|jpeg|gif|webp|svg|css|js|woff2?))"' | \
+    grep -oE '"[^"]+"' | tr -d '"' | sort -u | head -10)
+
+  if [[ -z "$assets" ]]; then
+    printWarn "No static asset URLs found in HTML — skipping asset HTTP checks"
+  else
+    while IFS= read -r asset_url; do
+      status=$(curl --silent --output /dev/null \
+        --write-out "%{http_code}" \
+        --max-time 10 \
+        -H "Host: ${ip_host}" \
+        "${target}${asset_url}" 2>/dev/null)
+      if [[ "$status" =~ ^(200|304)$ ]]; then
+        printInfo "✅ ${asset_url} → HTTP ${status}"
+        ok=$((ok + 1))
+      else
+        printWarn "⚠️  ${asset_url} → HTTP ${status}"
+        fail=$((fail + 1))
+      fi
+    done <<< "$assets"
+
+    if [[ "$ok" -gt 0 ]]; then
+      printInfo "✅ ${ok} asset(s) loaded successfully (${fail} unexpected)"
+    else
+      printError "❌ No static assets loaded — checked ${fail} URLs, all failed"
+      exit 1
+    fi
+  fi
+}
+
 assertEnvVariable(){
   # Assert an environment variable is set and optionally matches a pattern
   # Usage: assertEnvVariable <var-name> [pattern]
