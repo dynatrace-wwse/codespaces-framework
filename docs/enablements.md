@@ -1,29 +1,74 @@
 
+## Enablement Repositories
 
-## 📚 Enablement Repositories
+All enablements are part of the Dynatrace Enablement Framework and browsable on [**The Hub**](https://dynatrace-wwse.github.io){:target="_blank"} — the central index of every managed lab, workshop, and demo.
 
-Explore these repositories to deepen your knowledge or use them as a foundation for your own projects.
+The table below is generated live from the registry and always reflects the current set of managed repositories.
 
-| Repository Name | Description |
-|-----------------|-------------|
-| [enablement-codespaces-template](https://github.com/dynatrace-wwse/enablement-codespaces-template) | The main template repository to kickstart your own enablement with all framework features pre-configured. |
-| [enablement-live-debugger-bug-hunting](https://github.com/dynatrace-wwse/enablement-live-debugger-bug-hunting) | Learn live debugging and bug hunting techniques using Dynatrace in real-world scenarios. |
-| [enablement-gen-ai-llm-observability](https://github.com/dynatrace-wwse/enablement-gen-ai-llm-observability) | Explore observability for GenAI and LLM workloads, including tracing and monitoring best practices. |
-| [enablement-business-observability](https://github.com/dynatrace-wwse/enablement-business-observability) | Focus on business analytics and observability, leveraging Dynatrace BizEvents and dashboards. |
-| [enablement-dql-301](https://github.com/dynatrace-wwse/enablement-dql-301) | Advanced enablement for Dynatrace Query Language (DQL), including hands-on labs and exercises. |
-| [enablement-dynatrace-log-ingest-101](https://github.com/dynatrace-wwse/enablement-dynatrace-log-ingest-101) | Introduction to log ingestion and analytics with Dynatrace. |
-| [enablement-kubernetes-opentelemetry](https://github.com/dynatrace-wwse/enablement-kubernetes-opentelemetry) | Kubernetes observability and OpenTelemetry integration with Dynatrace. |
-| [enablement-browser-dem-biz-observability](https://github.com/dynatrace-wwse/enablement-browser-dem-biz-observability) | Browser Digital Experience Monitoring and business observability use cases. |
-| [enablement-workflow-essentials](https://github.com/dynatrace-wwse/enablement-workflow-essentials) | Essential workflows and automation for Dynatrace enablements. |
-| [workshop-dynatrace-log-analytics](https://github.com/dynatrace-wwse/workshop-dynatrace-log-analytics) | Workshop repository for hands-on log analytics with Dynatrace. |
-| [bug-busters](https://github.com/dynatrace-wwse/bug-busters) | Gamified bug hunting and troubleshooting challenges using Dynatrace. |
+<div id="repos-container" markdown="0">
+  <p style="color:var(--md-default-fg-color--light);padding:1rem 0">Loading repositories…</p>
+</div>
+
+<script>
+(function () {
+  var container = document.getElementById('repos-container');
+
+  function tagSpan(t) {
+    return '<span style="display:inline-block;padding:.1em .45em;margin:.1em .15em .1em 0;border-radius:999px;font-size:.65rem;font-weight:700;letter-spacing:.06em;background:rgba(0,180,222,.12);border:1px solid rgba(0,180,222,.3);color:#00b4de">' + t + '</span>';
+  }
+
+  fetch('https://dynatrace-wwse.github.io/repos.json')
+    .then(function(r) { return r.json(); })
+    .then(function(repos) {
+
+      repos.sort(function(a, b) {
+        var order = function(s) {
+          if (s.startsWith('enablement')) return 0;
+          if (s.startsWith('workshop'))   return 1;
+          if (s.startsWith('demo'))       return 2;
+          if (s === 'codespaces-framework') return 99;
+          return 3;
+        };
+        var d = order(a.repo) - order(b.repo);
+        return d !== 0 ? d : a.repo.localeCompare(b.repo);
+      });
+
+      var rows = repos.map(function(r) {
+        if (r.repo === 'codespaces-framework') return '';
+        var docsUrl = 'https://dynatrace-wwse.github.io/' + r.repo + '/';
+        var ghUrl   = 'https://github.com/dynatrace-wwse/' + r.repo;
+        var tags    = (r.tags || []).map(tagSpan).join('');
+        var dur     = r.duration ? '<span style="font-size:.75rem;white-space:nowrap">' + r.duration + '</span>' : '—';
+        return '<tr>'
+          + '<td><a href="' + docsUrl + '" target="_blank" rel="noopener"><strong>' + (r.title || r.repo) + '</strong></a>'
+          + '<br><a href="' + ghUrl + '" target="_blank" rel="noopener" style="font-size:.7rem;opacity:.7">' + r.repo + '</a></td>'
+          + '<td style="font-size:.75rem">' + (r.desc || '') + '</td>'
+          + '<td>' + tags + '</td>'
+          + '<td style="text-align:center">' + dur + '</td>'
+          + '</tr>';
+      }).join('');
+
+      container.innerHTML =
+        '<table>'
+        + '<thead><tr>'
+        + '<th>Enablement</th>'
+        + '<th>Description</th>'
+        + '<th>Tags</th>'
+        + '<th style="text-align:center">Duration</th>'
+        + '</tr></thead>'
+        + '<tbody>' + rows + '</tbody>'
+        + '</table>';
+    })
+    .catch(function() {
+      container.innerHTML = '<p>Could not load repository list — visit <a href="https://dynatrace-wwse.github.io" target="_blank">The Hub</a> directly.</p>';
+    });
+})();
+</script>
 
 ---
 
-<!-- TODO: Add a way to contact the COE and a formular to all enablements on which training is missing -->
-
-!!! tip "More to come"
-    - Stay tuned, more enablements are coming with more advanced use cases...
+!!! tip "Contribute or request a new enablement"
+    Open an issue on [codespaces-framework](https://github.com/dynatrace-wwse/codespaces-framework/issues){:target="_blank"} or reach out to the COE team.
 
 <div class="grid cards" markdown>
 - [Continue to What's Next →](whats-next.md)
