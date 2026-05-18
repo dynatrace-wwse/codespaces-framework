@@ -8,22 +8,23 @@
     "tiles": {
       "0": {
         "type": "markdown",
-        "content": "## CI/CD & Orbital\nIntegration test runs from Orbital workers and GitHub Actions. Pass/fail by repo, arch, and run type.\n\n**Types:** `local-docker-container` = Orbital | `github-workflow` = GitHub Actions"
+        "content": "# CI/CD & Orbital\n\nIntegration test runs from Orbital (local-docker-container) and GitHub Actions (github-workflow) across all [dynatrace-wwse](https://github.com/dynatrace-wwse) enablement repos.\n\n[← Overview](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/27ea9191-533f-4911-89ae-ef96fe63c7ef) · [Instantiations →](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/48b50182-c097-47a3-b864-1b72eb234946)"
       },
       "1": {
-        "title": "Total CI Runs (7d)",
+        "title": "Total CI Runs",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize total = count()",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "CI Runs", "prefixIcon": "PipelineIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "2": {
-        "title": "Pass Rate (7d)",
+        "title": "Pass Rate %",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize total = count(), passed = countIf(`content.codespace.errors` == \"0\")\n| fieldsAdd passRate = round(toDouble(passed) / toDouble(total) * 100, decimals: 1)\n| fields passRate",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize total = count(), passed = countIf(content.codespace.errors == \"0\")\n| fieldsAdd passRate = round(toDouble(passed) / toDouble(total) * 100, decimals: 1)\n| fields passRate",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Pass Rate %", "prefixIcon": "CheckmarkIcon", "showLabel": true },
@@ -33,75 +34,144 @@
             { "color": "#4fd5e0", "value": 90 }
           ]
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "3": {
-        "title": "Orbital Runs (7d)",
+        "title": "Orbital Runs",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"local-docker-container\"\n| summarize total = count()",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter content.codespace.type == \"local-docker-container\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Orbital", "prefixIcon": "ServerIcon", "showLabel": true }
+          "singleValue": { "label": "Orbital (local)", "prefixIcon": "ServerIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "4": {
-        "title": "GitHub Actions Runs (7d)",
+        "title": "GitHub Actions Runs",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"github-workflow\"\n| summarize total = count()",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter content.codespace.type == \"github-workflow\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "GH Actions", "prefixIcon": "GitHubIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "5": {
-        "title": "Avg Build Duration (minutes)",
+        "title": "Failed Runs",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| filter isNotNull(`content.codespace.creation`)\n| summarize avgSec = avg(toLong(`content.codespace.creation`))\n| fieldsAdd avgMin = round(toDouble(avgSec) / 60, decimals: 1)\n| fields avgMin",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize failed = countIf(content.codespace.errors != \"0\")",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Avg Minutes", "prefixIcon": "ClockIcon", "showLabel": true }
+          "singleValue": { "label": "Failures", "prefixIcon": "WarningIcon", "showLabel": true },
+          "thresholds": [
+            { "color": "#4fd5e0", "value": 0 },
+            { "color": "#f5d565", "value": 5 },
+            { "color": "#ec6868", "value": 20 }
+          ]
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "6": {
-        "title": "CI Results by Repository",
+        "title": "CI Runs Over Time",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize passed = countIf(`content.codespace.errors` == \"0\"), failed = countIf(`content.codespace.errors` != \"0\"), by:{`content.repository.name`}\n| sort passed + failed desc\n| limit 20",
-        "visualization": "barChart",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| makeTimeseries count = count(), by: { content.codespace.type }, interval: 1d",
+        "visualization": "areaChart",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "content.repository.name" }, "valueAxes": [{ "fieldName": "passed" }, { "fieldName": "failed" }] }
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "7": {
-        "title": "CI Results Over Time (daily)",
+        "title": "Pass vs Fail Over Time",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize passed = countIf(`content.codespace.errors` == \"0\"), failed = countIf(`content.codespace.errors` != \"0\"), by:{bin(timestamp, 1d)}",
-        "visualization": "lineChart",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| makeTimeseries passed = countIf(content.codespace.errors == \"0\"), failed = countIf(content.codespace.errors != \"0\"), interval: 1d",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "8": {
-        "title": "Runs by Architecture",
+        "title": "Runs by Repository",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize count = count(), passed = countIf(`content.codespace.errors` == \"0\"), by:{`content.codespace.arch`}",
-        "visualization": "barChart",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize count = count(), by: { content.repository.name }\n| sort count desc\n| limit 25",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "9": {
-        "title": "Failed Runs — Details",
+        "title": "Run Type",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| filter `content.codespace.errors` != \"0\"\n| fields timestamp, `content.repository.name`, `content.codespace.type`, `content.codespace.arch`, `content.codespace.errors`, `content.codespace.creation`\n| sort timestamp desc\n| limit 50",
-        "visualization": "table",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize count = count(), by: { content.codespace.type }",
+        "visualization": "donutChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "10": {
-        "title": "Build Duration Distribution (seconds)",
+        "title": "Architecture",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| filter isNotNull(`content.codespace.creation`)\n| summarize avgDuration = avg(toLong(`content.codespace.creation`)), maxDuration = max(toLong(`content.codespace.creation`)), minDuration = min(toLong(`content.codespace.creation`)), by:{`content.repository.name`}\n| sort avgDuration desc\n| limit 20",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize count = count(), by: { content.codespace.arch }",
+        "visualization": "donutChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "11": {
+        "title": "Failures by Repository",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| filter content.codespace.errors != \"0\"\n| summarize count = count(), by: { content.repository.name }\n| sort count desc\n| limit 20",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "red" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "12": {
+        "title": "Failure Details",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| filter content.codespace.errors != \"0\"\n| fields timestamp, content.repository.name, content.codespace.type, content.codespace.arch, content.codespace.errors\n| sort timestamp desc\n| limit 50",
         "visualization": "table",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "visualizationSettings": {},
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "13": {
+        "title": "Pass Rate by Repository",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize total = count(), passed = countIf(content.codespace.errors == \"0\"), failed = countIf(content.codespace.errors != \"0\"), by: { content.repository.name }\n| fieldsAdd passRate = round(toDouble(passed) / toDouble(total) * 100, decimals: 1)\n| sort total desc\n| limit 25",
+        "visualization": "table",
+        "visualizationSettings": {
+          "table": { "sortBy": [{ "columnId": "[\"total\"]", "direction": "descending" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       }
     }
   }

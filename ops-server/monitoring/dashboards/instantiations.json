@@ -8,103 +8,210 @@
     "tiles": {
       "0": {
         "type": "markdown",
-        "content": "## Instantiations & Adoption\nAll codespace instantiation events — real users, Orbital CI, GitHub Actions CI, and local containers. Geo-located by IP."
+        "content": "# Instantiations & Adoption\n\nAll codespace instantiations across the [dynatrace-wwse](https://github.com/dynatrace-wwse) enablement framework — real users, CI runs, and global reach.\n\n[← CI/CD](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/14e4b002-1b7d-4543-927b-cd0497ee8a2e) · [← Overview](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/27ea9191-533f-4911-89ae-ef96fe63c7ef) · [GitHub Pages →](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/a20a6def-bbb5-46da-a0c9-1b7e2566e4af)"
       },
       "1": {
-        "title": "Total Instantiations (7d)",
+        "title": "Total Instantiations",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize total = count()",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Total", "prefixIcon": "ComputerIcon", "showLabel": true }
+          "singleValue": { "label": "Instantiations", "prefixIcon": "ComputerIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "2": {
-        "title": "Real User Codespaces (7d)",
+        "title": "Real User Codespaces",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"github-codespaces\"\n| summarize total = count()",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter content.codespace.type == \"github-codespaces\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Real Users", "prefixIcon": "UserIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "3": {
-        "title": "Error Rate (7d)",
+        "title": "Error Rate %",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize total = count(), errors = countIf(`content.codespace.errors` != \"0\" and isNotNull(`content.codespace.errors`))\n| fieldsAdd errorRate = round(toDouble(errors) / toDouble(total) * 100, decimals: 1)\n| fields errorRate",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize total = count(), errors = countIf(content.codespace.errors != \"0\")\n| fieldsAdd errorRate = round(toDouble(errors) / toDouble(total) * 100, decimals: 1)\n| fields errorRate",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Error Rate %", "prefixIcon": "WarningIcon", "showLabel": true },
           "thresholds": [
             { "color": "#4fd5e0", "value": 0 },
             { "color": "#f5d565", "value": 5 },
-            { "color": "#ec6868", "value": 15 }
+            { "color": "#ec6868", "value": 10 }
           ]
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "4": {
-        "title": "Active Repositories (7d)",
+        "title": "Active Repositories",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize repos = countDistinct(`content.repository.name`)",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize repos = countDistinct(content.repository.name)",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Repos", "prefixIcon": "FolderIcon", "showLabel": true }
+          "singleValue": { "label": "Repositories", "prefixIcon": "FolderIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "5": {
-        "title": "Instantiations by Type",
+        "title": "Countries Reached",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), by:{`content.codespace.type`}\n| sort count desc",
-        "visualization": "barChart",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.geo.country.name)\n| summarize countries = countDistinct(content.geo.country.name)",
+        "visualization": "singleValue",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "content.codespace.type" }, "valueAxes": [{ "fieldName": "count" }] }
+          "singleValue": { "label": "Countries", "prefixIcon": "GlobeIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "6": {
-        "title": "Instantiations Over Time (by type)",
+        "title": "Instantiations Over Time",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), by:{bin(timestamp, 1d), `content.codespace.type`}",
-        "visualization": "lineChart",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| makeTimeseries count = count(), by: { content.codespace.type }, interval: 1d",
+        "visualization": "areaChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "7": {
-        "title": "By Repository (top 20)",
+        "title": "City-Level Instantiations",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), errors = countIf(`content.codespace.errors` != \"0\" and isNotNull(`content.codespace.errors`)), by:{`content.repository.name`}\n| sort count desc\n| limit 20",
-        "visualization": "barChart",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.geo.latitude) and content.geo.latitude != 0\n| summarize count = count(), by: { content.geo.city.name, content.geo.latitude, content.geo.longitude }\n| fields content.geo.latitude, content.geo.longitude, count, content.geo.city.name",
+        "visualization": "bubbleMap",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "content.repository.name" }, "valueAxes": [{ "fieldName": "count" }, { "fieldName": "errors" }] }
+          "mapView": { "defaultZoom": "world" },
+          "autoSelectVisualization": false
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "8": {
-        "title": "By Country (real user + GH Actions)",
+        "title": "Instantiations by Country",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"github-codespaces\", \"github-workflow\", \"local-docker-container\")\n| filter isNotNull(`content.geo.country.name`)\n| summarize count = count(), by:{`content.geo.country.name`, `content.geo.continent.name`}\n| sort count desc\n| limit 25",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.geo.country.name)\n| fieldsAdd countryCode = coalesce(content.geo.country.isoCode, if(content.geo.country.name == \"United States\", \"US\", else: if(content.geo.country.name == \"United Kingdom\", \"GB\", else: if(contains(content.geo.country.name, \"Netherlands\"), \"NL\", else: if(content.geo.country.name == \"Australia\", \"AU\", else: if(content.geo.country.name == \"New Zealand\", \"NZ\", else: if(content.geo.country.name == \"Singapore\", \"SG\", else: if(content.geo.country.name == \"Spain\", \"ES\", else: if(content.geo.country.name == \"Germany\", \"DE\", else: if(content.geo.country.name == \"France\", \"FR\", else: if(content.geo.country.name == \"India\", \"IN\", else: if(content.geo.country.name == \"Japan\", \"JP\", else: if(content.geo.country.name == \"Brazil\", \"BR\", else: if(content.geo.country.name == \"Canada\", \"CA\", else: \"XX\")))))))))))))\n| summarize count = count(), by: { countryCode }\n| fields countryCode, count",
         "visualization": "table",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "visualizationSettings": {},
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "9": {
-        "title": "Real Codespace Instantiations — Location Detail",
+        "title": "By Repository",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"github-codespaces\"\n| fields timestamp, `content.repository.name`, `content.codespace.arch`, `content.codespace.creation`, `content.codespace.errors`, `content.geo.city.name`, `content.geo.country.name`, `content.geo.continent.name`\n| sort timestamp desc",
-        "visualization": "table",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize count = count(), by: { content.repository.name }\n| sort count desc\n| limit 25",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "10": {
-        "title": "Errors by Repository",
+        "title": "Instantiation Type",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.errors` != \"0\"\n| filter isNotNull(`content.codespace.errors`)\n| summarize errors = count(), by:{`content.repository.name`, `content.codespace.type`}\n| sort errors desc\n| limit 20",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize count = count(), by: { content.codespace.type }",
+        "visualization": "donutChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "11": {
+        "title": "OS Architecture",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize count = count(), by: { content.codespace.arch }",
+        "visualization": "donutChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "12": {
+        "title": "Top Countries",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.geo.country.name)\n| summarize count = count(), by: { content.geo.country.name }\n| sort count desc\n| limit 15",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "13": {
+        "title": "Errors Over Time",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| makeTimeseries total = count(), errors = countIf(content.codespace.errors != \"0\"), interval: 1d",
         "visualization": "barChart",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "content.repository.name" }, "valueAxes": [{ "fieldName": "errors" }] }
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "red" }]
+          }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "14": {
+        "title": "Error Details",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter content.codespace.errors != \"0\"\n| fields timestamp, content.repository.name, content.codespace.errors, content.codespace.type, content.geo.city.name, content.geo.country.name\n| sort timestamp desc\n| limit 30",
+        "visualization": "table",
+        "visualizationSettings": {},
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "15": {
+        "title": "Dynatrace Tenants Used",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.tenant) and content.tenant != \"\"\n| summarize count = count(), by: { content.tenant, content.codespace.type }\n| sort count desc\n| limit 30",
+        "visualization": "table",
+        "visualizationSettings": {
+          "table": { "sortBy": [{ "columnId": "[\"count\"]", "direction": "descending" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "16": {
+        "title": "Repos by Country",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.geo.country.name)\n| summarize count = count(), by: { content.repository.name, content.geo.country.name }\n| sort count desc\n| limit 40",
+        "visualization": "table",
+        "visualizationSettings": {
+          "table": { "sortBy": [{ "columnId": "[\"count\"]", "direction": "descending" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "17": {
+        "title": "Instantiations by Repository Over Time",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| makeTimeseries count = count(), by: { content.repository.name }, interval: 1d\n| sort count desc\n| limit 10",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       }
     }
   }

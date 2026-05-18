@@ -15,138 +15,182 @@
         "content": "### CI/CD & Orbital\n[→ Full Dashboard](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/14e4b002-1b7d-4543-927b-cd0497ee8a2e)"
       },
       "2": {
-        "title": "CI Runs (7d)",
+        "title": "CI Runs",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize total = count()",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "CI Runs", "prefixIcon": "PipelineIcon", "showLabel": true }
+          "singleValue": { "label": "CI Runs (7d)", "prefixIcon": "PipelineIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "3": {
-        "title": "CI Pass Rate (7d)",
+        "title": "Pass Rate %",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize total = count(), passed = countIf(`content.codespace.errors` == \"0\")\n| fieldsAdd passRate = round(toDouble(passed) / toDouble(total) * 100, decimals: 1)\n| fields passRate",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| summarize total = count(), passed = countIf(content.codespace.errors == \"0\")\n| fieldsAdd passRate = round(toDouble(passed) / toDouble(total) * 100, decimals: 1)\n| fields passRate",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Pass Rate %", "prefixIcon": "CheckmarkIcon", "showLabel": true },
+          "singleValue": { "label": "Pass Rate % (7d)", "prefixIcon": "CheckmarkIcon", "showLabel": true },
           "thresholds": [
             { "color": "#ec6868", "value": 0 },
             { "color": "#f5d565", "value": 70 },
             { "color": "#4fd5e0", "value": 90 }
           ]
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "4": {
         "title": "CI Trend (7d)",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter in(`content.codespace.type`, \"local-docker-container\", \"github-workflow\")\n| summarize passed = countIf(`content.codespace.errors` == \"0\"), failed = countIf(`content.codespace.errors` != \"0\"), by:{bin(timestamp, 1d)}",
-        "visualization": "lineChart",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter in(content.codespace.type, \"local-docker-container\", \"github-workflow\")\n| makeTimeseries passed = countIf(content.codespace.errors == \"0\"), failed = countIf(content.codespace.errors != \"0\"), interval: 1d",
+        "visualization": "barChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "5": {
         "type": "markdown",
         "content": "### Instantiations & Adoption\n[→ Full Dashboard](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/48b50182-c097-47a3-b864-1b72eb234946)"
       },
       "6": {
-        "title": "Total Instantiations (7d)",
+        "title": "Total Instantiations",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize total = count()",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Total", "prefixIcon": "ComputerIcon", "showLabel": true }
+          "singleValue": { "label": "Total (7d)", "prefixIcon": "ComputerIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "7": {
-        "title": "Real User Codespaces (7d)",
+        "title": "Real User Codespaces",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| filter `content.codespace.type` == \"github-codespaces\"\n| summarize total = count()",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter content.codespace.type == \"github-codespaces\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Real Users", "prefixIcon": "UserIcon", "showLabel": true }
+          "singleValue": { "label": "Real Users (7d)", "prefixIcon": "UserIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "8": {
-        "title": "Instantiations by Type (7d)",
+        "title": "Countries Reached",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"codespacestracker.creation\"\n| summarize count = count(), by:{`content.codespace.type`}\n| sort count desc",
-        "visualization": "barChart",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| filter isNotNull(content.geo.country.name)\n| summarize countries = countDistinct(content.geo.country.name)",
+        "visualization": "singleValue",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "content.codespace.type" }, "valueAxes": [{ "fieldName": "count" }] }
+          "singleValue": { "label": "Countries (7d)", "prefixIcon": "GlobeIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "9": {
+        "title": "Instantiation Type (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| summarize count = count(), by: { content.codespace.type }",
+        "visualization": "donutChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "10": {
         "type": "markdown",
         "content": "### GitHub Pages & RUM\n[→ Full Dashboard](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/a20a6def-bbb5-46da-a0c9-1b7e2566e4af)"
       },
-      "10": {
-        "title": "Page Views (7d)",
-        "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize total = count()",
-        "visualization": "singleValue",
-        "visualizationSettings": {
-          "singleValue": { "label": "Page Views", "prefixIcon": "EyeOpenIcon", "showLabel": true }
-        },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
-      },
       "11": {
-        "title": "Unique Sessions (7d)",
+        "title": "Page Views",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize sessions = countDistinct(`dt.rum.session.id`)",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
-          "singleValue": { "label": "Sessions", "prefixIcon": "UserIcon", "showLabel": true }
+          "singleValue": { "label": "Page Views (7d)", "prefixIcon": "EyeOpenIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "12": {
-        "title": "Top Pages (7d)",
+        "title": "Unique Sessions",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{page}\n| sort views desc\n| limit 15",
-        "visualization": "barChart",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| summarize sessions = countDistinct(dt.rum.session.id)",
+        "visualization": "singleValue",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "page" }, "valueAxes": [{ "fieldName": "views" }] }
+          "singleValue": { "label": "Sessions (7d)", "prefixIcon": "UserIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "13": {
+        "title": "Page Views Over Time (7d)",
+        "type": "data",
+        "query": "fetch bizevents, from:now()-7d\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| makeTimeseries views = count(), interval: 1d",
+        "visualization": "areaChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "14": {
         "type": "markdown",
         "content": "### Orbital Fleet Health\nHost metrics from master (autonomous-enablements) and workers (ip-172-31-10-70, ip-172-31-9-59). Pushed every 60s via orbital-metrics.timer — no OneAgent."
       },
-      "14": {
+      "15": {
         "title": "CPU % — All Hosts",
         "type": "data",
         "query": "timeseries avg(`orbital.host.cpu.pct`), from:now()-1h, by:{host}",
         "visualization": "lineChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
       },
-      "15": {
+      "16": {
         "title": "Memory % — All Hosts",
         "type": "data",
         "query": "timeseries avg(`orbital.host.memory.used_pct`), from:now()-1h, by:{host}",
         "visualization": "lineChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
       },
-      "16": {
+      "17": {
         "title": "Disk % — All Hosts",
         "type": "data",
         "query": "timeseries avg(`orbital.host.disk.used_pct`), from:now()-1h, by:{host}",
         "visualization": "lineChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
       },
-      "17": {
+      "18": {
         "title": "Redis — Queue Depth & Active Jobs",
         "type": "data",
         "query": "timeseries amd64=avg(`orbital.redis.queue.amd64`), arm64=avg(`orbital.redis.queue.arm64`), active=avg(`orbital.redis.active_jobs`), from:now()-1h",
         "visualization": "lineChart",
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
       },
-      "18": {
+      "19": {
         "title": "Registered Workers",
         "type": "data",
         "query": "timeseries avg(`orbital.redis.workers`), from:now()-1h",

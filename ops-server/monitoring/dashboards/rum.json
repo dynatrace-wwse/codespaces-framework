@@ -8,98 +8,134 @@
     "tiles": {
       "0": {
         "type": "markdown",
-        "content": "## GitHub Pages & Real User Monitoring\nPage load BizEvents from all `dynatrace-wwse.github.io` documentation sites. App ID: `ff78563295ff1e42`."
+        "content": "# GitHub Pages & RUM\n\nDocumentation engagement across [dynatrace-wwse.github.io](https://dynatrace-wwse.github.io) — page views, sessions, and geographic reach.\n\n[← Instantiations](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/48b50182-c097-47a3-b864-1b72eb234946) · [← Overview](https://geu80787.apps.dynatrace.com/ui/apps/dynatrace.dashboards/dashboard/27ea9191-533f-4911-89ae-ef96fe63c7ef)"
       },
       "1": {
-        "title": "Page Views (7d)",
+        "title": "Page Views",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize total = count()",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| summarize total = count()",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Page Views", "prefixIcon": "EyeOpenIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "2": {
-        "title": "Unique Sessions (7d)",
+        "title": "Unique Sessions",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize sessions = countDistinct(`dt.rum.session.id`)",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| summarize sessions = countDistinct(dt.rum.session.id)",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Sessions", "prefixIcon": "UserIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "3": {
-        "title": "Countries Reached (7d)",
+        "title": "Countries",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize countries = countDistinct(`geo.country.name`)",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(geo.country.name)\n| summarize countries = countDistinct(geo.country.name)",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Countries", "prefixIcon": "GlobeIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "4": {
-        "title": "Docs Sites Active (7d)",
+        "title": "Documentation Sites",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize sites = countDistinct(`event.provider`)",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(dt.rum.application.id)\n| summarize sites = countDistinct(dt.rum.application.id)",
         "visualization": "singleValue",
         "visualizationSettings": {
           "singleValue": { "label": "Sites", "prefixIcon": "FolderIcon", "showLabel": true }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "5": {
-        "title": "Page Views Over Time (daily)",
+        "title": "Page Views Over Time",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{bin(timestamp, 1d)}",
-        "visualization": "lineChart",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| makeTimeseries views = count(), interval: 1d",
+        "visualization": "areaChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "6": {
-        "title": "Top Pages",
+        "title": "Most Viewed Pages",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{page}\n| sort views desc\n| limit 20",
-        "visualization": "barChart",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(page)\n| summarize views = count(), by: { page, dt.rum.application.id }\n| sort views desc\n| limit 20",
+        "visualization": "table",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "page" }, "valueAxes": [{ "fieldName": "views" }] }
+          "autoSelectVisualization": false
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "7": {
-        "title": "Views by Country",
+        "title": "Top Documentation Pages",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), sessions = countDistinct(`dt.rum.session.id`), by:{`geo.country.name`, `geo.continent.name`}\n| sort views desc\n| limit 20",
-        "visualization": "table",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(page)\n| summarize views = count(), by: { page }\n| sort views desc\n| limit 15",
+        "visualization": "categoricalBarChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "8": {
-        "title": "Views by Device Type",
+        "title": "Page Views by Country",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{`device.type`}\n| sort views desc",
-        "visualization": "barChart",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(geo.country.name)\n| summarize views = count(), by: { geo.country.name }\n| sort views desc\n| limit 15",
+        "visualization": "categoricalBarChart",
         "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "device.type" }, "valueAxes": [{ "fieldName": "views" }] }
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
         },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "9": {
-        "title": "Views by Browser",
+        "title": "Country Reach",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), by:{`browser.name`}\n| sort views desc",
-        "visualization": "barChart",
-        "visualizationSettings": {
-          "barChart": { "categoryAxis": { "fieldName": "browser.name" }, "valueAxes": [{ "fieldName": "views" }] }
-        },
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(geo.country.name)\n| fieldsAdd countryCode = coalesce(geo.country.isoCode, if(geo.country.name == \"United States\", \"US\", else: if(geo.country.name == \"United Kingdom\", \"GB\", else: if(contains(geo.country.name, \"Netherlands\"), \"NL\", else: if(geo.country.name == \"Australia\", \"AU\", else: if(geo.country.name == \"New Zealand\", \"NZ\", else: if(geo.country.name == \"Singapore\", \"SG\", else: if(geo.country.name == \"Spain\", \"ES\", else: if(geo.country.name == \"Germany\", \"DE\", else: if(geo.country.name == \"France\", \"FR\", else: if(geo.country.name == \"India\", \"IN\", else: if(geo.country.name == \"Japan\", \"JP\", else: if(geo.country.name == \"Brazil\", \"BR\", else: if(geo.country.name == \"Canada\", \"CA\", else: \"XX\")))))))))))))\n| summarize count = count(), by: { countryCode }\n| fields countryCode, count",
+        "visualization": "table",
+        "visualizationSettings": {},
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       },
       "10": {
-        "title": "Sessions by Page — Detail",
+        "title": "RUM Apps — Page Views & Performance",
         "type": "data",
-        "query": "fetch bizevents, from:now()-7d\n| filter event.type == \"page_load\"\n| summarize views = count(), sessions = countDistinct(`dt.rum.session.id`), by:{page, `event.provider`}\n| sort views desc\n| limit 30",
+        "query": "fetch user.events\n| summarize views = count(), avgDuration = avg(duration), by: { dt.rum.application.id }\n| lookup [data\n  record(id = \"0300531523b332e3\", name = \"demo-mcp-unguard\"),\n  record(id = \"1551d00ab46737d4\", name = \"log-ingest-101\"),\n  record(id = \"50e6d81a11783485\", name = \"demo-nvidia-agent\"),\n  record(id = \"59b0b1c4d53a32f5\", name = \"browser-dem-biz\"),\n  record(id = \"640a44336fc29980\", name = \"bug-busters\"),\n  record(id = \"6c332b985a9890d6\", name = \"live-debugger\"),\n  record(id = \"6f303dd9fa111f82\", name = \"dql-fundamentals\"),\n  record(id = \"7c50bce5c0cc890f\", name = \"codespaces-template\"),\n  record(id = \"8d3a8e2f85a94d58\", name = \"k8s-otel-openpipeline\"),\n  record(id = \"a8e749099685c188\", name = \"workflow-essentials\"),\n  record(id = \"ad7b68fd2b9d9448\", name = \"k8s-opentelemetry\"),\n  record(id = \"d6a688035595a70d\", name = \"log-analytics-ws\"),\n  record(id = \"e1da735db6894c6c\", name = \"remote-environment\"),\n  record(id = \"e4d90cc9ebfea2e7\", name = \"gen-ai-llm\"),\n  record(id = \"e6d3d89f79f14be8\", name = \"wwse.github.io\"),\n  record(id = \"ec2456210a428096\", name = \"dql-301\"),\n  record(id = \"f0e597e550cc03f6\", name = \"business-obs\"),\n  record(id = \"ff78563295ff1e42\", name = \"codespaces-framework\")],\n  sourceField: dt.rum.application.id, lookupField: id, prefix: \"app.\"\n| fieldsAdd appName = coalesce(app.name, dt.rum.application.id)\n| fields appName, views, avgDuration\n| sort views desc\n| limit 20",
         "visualization": "table",
-        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+        "visualizationSettings": {
+          "table": { "columnWidths": { "[\"appName\"]": 388, "[\"avgDuration\"]": 150, "[\"views\"]": 100 }, "sortBy": [{ "columnId": "[\"views\"]", "direction": "descending" }] }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
+      },
+      "11": {
+        "title": "Views Over Time by Site",
+        "type": "data",
+        "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| makeTimeseries views = count(), by: { dt.rum.application.id }, interval: 1d",
+        "visualization": "lineChart",
+        "visualizationSettings": {
+          "coloring": {
+            "colorRules": [{ "field": "DT.name", "comparator": "= *value*", "value": "", "type": "string", "colorMode": "color-palette", "colorPalette": "blue-moss" }]
+          }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
+        "davis": { "davisVisualization": { "isAvailable": true } }
       }
     }
   }
