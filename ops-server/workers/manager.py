@@ -397,6 +397,22 @@ class WorkerManager:
                     "type":       "daemon",
                 })
                 await self.pool.expire(running_key, 86400)
+            elif job.get("type") == "framework-test":
+                # No concurrency lock — suites don't share resources.
+                # TTL covers the longest possible suite (k3d-apps ~45 min).
+                running_key = f"job:running:{job_id}"
+                await self.pool.hset(running_key, mapping={
+                    "job_id":     job_id,
+                    "repo":       job.get("repo", "dynatrace-wwse/codespaces-framework"),
+                    "branch":     job.get("ref", "main"),
+                    "arch":       arch,
+                    "ref":        job.get("ref", "main"),
+                    "suite":      job.get("suite", ""),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "worker_id":  "master",
+                    "type":       "framework-test",
+                })
+                await self.pool.expire(running_key, 3600)
             elif job.get("type") in ("fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab", "deploy-ghpages"):
                 running_key = f"job:running:{job_id}"
                 _running_fields = {
