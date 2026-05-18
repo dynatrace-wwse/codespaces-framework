@@ -171,6 +171,7 @@ class WorkerAgent:
         await self.pool.delete(port_pool_key)
         ports = list(range(APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT))
         await self.pool.rpush(port_pool_key, *[str(p) for p in ports])
+        await self.pool.expire(port_pool_key, REGISTRATION_TTL)
         log.info(
             "App proxy port pool initialised: %s (ports %d–%d)",
             port_pool_key, APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT - 1,
@@ -179,6 +180,7 @@ class WorkerAgent:
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to master."""
         worker_key = f"worker:{WORKER_ID}"
+        port_pool_key = f"worker:{WORKER_ID}:app_ports_free"
         while self._running:
             try:
                 await self.pool.hset(worker_key, mapping={
@@ -187,6 +189,7 @@ class WorkerAgent:
                     "status": "ready" if len(self.active_jobs) < WORKER_CAPACITY else "busy",
                 })
                 await self.pool.expire(worker_key, REGISTRATION_TTL)
+                await self.pool.expire(port_pool_key, REGISTRATION_TTL)
             except redis.ConnectionError:
                 log.warning("Heartbeat failed — Redis connection lost")
             await asyncio.sleep(HEARTBEAT_INTERVAL)

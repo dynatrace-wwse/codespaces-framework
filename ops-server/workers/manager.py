@@ -144,6 +144,7 @@ class WorkerManager:
         await self.pool.delete(port_pool_key)
         ports = list(range(APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT))
         await self.pool.rpush(port_pool_key, *[str(p) for p in ports])
+        await self.pool.expire(port_pool_key, 60)
         log.info(
             "Master app proxy port pool initialised (ports %d–%d)",
             APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT - 1,
@@ -180,6 +181,7 @@ class WorkerManager:
                     ),
                 })
                 await self.pool.expire("worker:master-arm64", 60)
+                await self.pool.expire("worker:master:app_ports_free", 60)
                 # Refresh daemon job:running keys so they don't expire mid-session.
                 for jid, j in list(self.active_jobs.items()):
                     if j.get("type") == "daemon":
