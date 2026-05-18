@@ -1273,6 +1273,12 @@ class WorkerManager:
         log_file.write_text(full_log)
         shutil.rmtree(work_dir, ignore_errors=True)
 
+        # Persist log to both keys with 7-day TTL:
+        # job:livelog — read by the live dashboard stream
+        # job:log     — read by /api/jobs/{id}/log endpoint
+        await self.pool.set(livelog_key, full_log, ex=86400 * 7)
+        await self.pool.set(f"job:log:{job_id}", full_log, ex=86400 * 7)
+
         await self._save_framework_suite_result(suite, job_id, rc, duration, "arm64", output)
         return {"suite": suite, "exit_code": rc, "passed": rc == 0, "duration_seconds": duration, "arch": "arm64"}
 

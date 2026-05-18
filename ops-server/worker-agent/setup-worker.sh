@@ -14,6 +14,8 @@ export NEEDRESTART_MODE=a
 OPS_USER="ops"
 OPS_HOME="/home/${OPS_USER}"
 VENV_DIR="${OPS_HOME}/ops-venv"
+REPO_DIR="${OPS_HOME}/enablement-framework/codespaces-framework"
+SYSBOX_VERSION="0.6.7"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -27,8 +29,8 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 # ── Detect architecture ──────────────────────────────────────────────────────
 ARCH=$(uname -m)
 case "${ARCH}" in
-    aarch64|arm64) ARCH_DEB="arm64"; ARCH_K8S="arm64"; ARCH_GO="arm64" ;;
-    x86_64)        ARCH_DEB="amd64"; ARCH_K8S="amd64"; ARCH_GO="amd64" ;;
+    aarch64|arm64) ARCH_DEB="arm64"; ARCH_K8S="arm64" ;;
+    x86_64)        ARCH_DEB="amd64"; ARCH_K8S="amd64" ;;
     *)             error "Unsupported architecture: ${ARCH}" ;;
 esac
 
@@ -40,7 +42,7 @@ if ! id -u "${OPS_USER}" &>/dev/null; then
     useradd -m -s /bin/bash "${OPS_USER}"
 fi
 
-# ── System packages (minimal — no Redis, no Nginx, no Claude) ────────────────
+# ── System packages ──────────────────────────────────────────────────────────
 info "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
@@ -55,14 +57,46 @@ apt-get install -y -qq \
     ca-certificates \
     gnupg \
     socat \
-    iptables
+    iptables \
+    rsync
 
 # ── Enable Docker ────────────────────────────────────────────────────────────
 systemctl enable --now docker
 usermod -aG docker "${OPS_USER}"
-# ubuntu user also needs docker access: the master's ops-dashboard SSHes in as
-# ubuntu to run 'docker exec' into Sysbox containers for the shell PTY bridge.
+# ubuntu user needs docker access: master ops-dashboard SSHes in as ubuntu
+# to run 'docker exec' into Sysbox containers for the shell PTY bridge.
 usermod -aG docker ubuntu 2>/dev/null || true
+
+# ── Install Sysbox CE ────────────────────────────────────────────────────────
+if ! command -v sysbox-runc &>/dev/null; then
+    info "Installing Sysbox CE ${SYSBOX_VERSION} (${ARCH_DEB})..."
+    SYSBOX_DEB="sysbox-ce_${SYSBOX_VERSION}.linux_${ARCH_DEB}.deb"
+    curl -fsSL -o "/tmp/${SYSBOX_DEB}" \
+        "https://github.com/nestybox/sysbox/releases/download/v${SYSBOX_VERSION}/${SYSBOX_DEB}"
+    apt-get install -y "/tmp/${SYSBOX_DEB}"
+    rm -f "/tmp/${SYSBOX_DEB}"
+    systemctl enable --now sysbox
+fi
+
+# ── Configure Docker daemon (sysbox runtime + stable CIDR) ──────────────────
+info "Configuring Docker daemon..."
+cat > /etc/docker/daemon.json << 'DAEMON'
+{
+    "runtimes": {
+        "sysbox-runc": {
+            "path": "/usr/bin/sysbox-runc"
+        }
+    },
+    "bip": "172.20.0.1/16",
+    "default-address-pools": [
+        {
+            "base": "172.25.0.0/16",
+            "size": 24
+        }
+    ]
+}
+DAEMON
+systemctl restart docker
 
 # ── Install GitHub CLI ───────────────────────────────────────────────────────
 if ! command -v gh &>/dev/null; then
@@ -94,18 +128,25 @@ if ! command -v k3d &>/dev/null; then
     curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 fi
 
-# ── Clone worker-agent code ─────────────────────────────────────────────────
-AGENT_DIR="${OPS_HOME}/worker-agent"
-if [[ ! -d "${AGENT_DIR}" ]]; then
-    info "Cloning worker-agent code..."
+# ── Clone worker-agent code (canonical path) ─────────────────────────────────
+AGENT_SYMLINK="${OPS_HOME}/worker-agent"
+if [[ ! -d "${REPO_DIR}" ]]; then
+    info "Cloning codespaces-framework (sparse)..."
+    sudo -u "${OPS_USER}" mkdir -p "${OPS_HOME}/enablement-framework"
     sudo -u "${OPS_USER}" git clone \
         --depth 1 --filter=blob:none --sparse \
         https://github.com/dynatrace-wwse/codespaces-framework.git \
-        "${OPS_HOME}/codespaces-framework"
-    cd "${OPS_HOME}/codespaces-framework"
-    sudo -u "${OPS_USER}" git sparse-checkout set ops-server/worker-agent ops-server/requirements.txt ops-server/systemd ops-server/ops-docker-cleanup.sh
-    ln -sf "${OPS_HOME}/codespaces-framework/ops-server/worker-agent" "${AGENT_DIR}"
+        "${REPO_DIR}"
+    cd "${REPO_DIR}"
+    sudo -u "${OPS_USER}" git sparse-checkout init --no-cone
+    sudo -u "${OPS_USER}" git sparse-checkout set \
+        'ops-server/worker-agent/**' \
+        'ops-server/requirements.txt' \
+        'ops-server/systemd/**' \
+        'ops-server/ops-docker-cleanup.sh'
 fi
+# Convenience symlink: /home/ops/worker-agent → …/ops-server/worker-agent
+ln -sfn "${REPO_DIR}/ops-server/worker-agent" "${AGENT_SYMLINK}"
 
 # ── Python virtual environment ──────────────────────────────────────────────
 info "Setting up Python venv..."
@@ -121,19 +162,19 @@ sudo -u "${OPS_USER}" mkdir -p \
     "${OPS_HOME}/workdir"
 
 # ── Install systemd service ─────────────────────────────────────────────────
-cat > /etc/systemd/system/ops-worker-agent.service << 'UNIT'
+cat > /etc/systemd/system/ops-worker-agent.service << UNIT
 [Unit]
 Description=Enablement Ops Worker Agent
-After=network-online.target docker.service
+After=network-online.target docker.service sysbox.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=ops
 Group=ops
-WorkingDirectory=/home/ops/codespaces-framework/ops-server
-ExecStart=/home/ops/ops-venv/bin/python -m worker-agent.agent
-EnvironmentFile=/home/ops/.env
+WorkingDirectory=${REPO_DIR}/ops-server
+ExecStart=${VENV_DIR}/bin/python -m worker-agent.agent
+EnvironmentFile=${OPS_HOME}/.env
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -144,13 +185,10 @@ SyslogIdentifier=ops-worker-agent
 WantedBy=multi-user.target
 UNIT
 
-cp "${OPS_HOME}/codespaces-framework/ops-server/ops-docker-cleanup.sh" \
-    /usr/local/bin/ops-docker-cleanup
+cp "${REPO_DIR}/ops-server/ops-docker-cleanup.sh" /usr/local/bin/ops-docker-cleanup
 chmod +x /usr/local/bin/ops-docker-cleanup
-cp "${OPS_HOME}/codespaces-framework/ops-server/systemd/ops-docker-cleanup.service" \
-    /etc/systemd/system/
-cp "${OPS_HOME}/codespaces-framework/ops-server/systemd/ops-docker-cleanup.timer" \
-    /etc/systemd/system/
+cp "${REPO_DIR}/ops-server/systemd/ops-docker-cleanup.service" /etc/systemd/system/
+cp "${REPO_DIR}/ops-server/systemd/ops-docker-cleanup.timer"   /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable ops-worker-agent.service
 systemctl enable --now ops-docker-cleanup.timer
@@ -158,25 +196,22 @@ systemctl enable --now ops-docker-cleanup.timer
 # ── Summary ──────────────────────────────────────────────────────────────────
 info "=========================================="
 info "  Worker Node installed! (${ARCH_DEB})"
+info "  Repo: ${REPO_DIR}"
 info "=========================================="
 echo ""
-echo "  Next steps (as ops user):"
+echo "  Next steps:"
 echo ""
-echo "  1. Configure .env:"
-echo "     cat > ${OPS_HOME}/.env << EOF"
-echo "     MASTER_REDIS_URL=redis://<master-private-ip>:6379/0"
-echo "     MASTER_REDIS_PASSWORD=<redis-auth-password>"
+echo "  1. Create /home/ops/.env:"
+echo "     MASTER_REDIS_URL=redis://172.31.36.172:6379/0"
+echo "     MASTER_REDIS_PASSWORD=<password>"
 echo "     WORKER_ARCH=${ARCH_DEB}"
 echo "     WORKER_CAPACITY=6"
+echo "     WORKER_SSH_HOST=<alias in master ops ~/.ssh/config>"
 echo "     DT_ENVIRONMENT=https://geu80787.apps.dynatrace.com"
 echo "     DT_OPERATOR_TOKEN=<token>"
 echo "     DT_INGEST_TOKEN=<token>"
-echo "     EOF"
+echo "     TEST_TIMEOUT=1800"
 echo ""
-echo "  2. Authenticate GitHub CLI:"
-echo "     sudo -u ops gh auth login"
-echo ""
-echo "  3. Start the worker:"
-echo "     sudo systemctl start ops-worker-agent"
-echo "     journalctl -u ops-worker-agent -f"
+echo "  2. sudo systemctl start ops-worker-agent"
+echo "     sudo journalctl -u ops-worker-agent -f"
 echo ""
