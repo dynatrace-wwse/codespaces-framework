@@ -48,7 +48,7 @@ def parse_version(s: str) -> Version:
 
 
 def parse_combined_tag(s: str) -> CombinedTag:
-    m = _COMBINED_RE.match(s.strip())
+    m = _COMBINED_RE.match(s.strip().lstrip("v"))
     if not m:
         raise ValueError(f"Invalid combined tag: {s}")
     return CombinedTag(parse_version(m.group(1)), parse_version(m.group(2)))
