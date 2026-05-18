@@ -113,6 +113,48 @@
           "barChart": { "categoryAxis": { "fieldName": "page" }, "valueAxes": [{ "fieldName": "views" }] }
         },
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "13": {
+        "type": "markdown",
+        "content": "### Orbital Fleet Health\nHost metrics from master (autonomous-enablements) and workers (ip-172-31-10-70, ip-172-31-9-59). Pushed every 60s via orbital-metrics.timer — no OneAgent."
+      },
+      "14": {
+        "title": "CPU % — All Hosts",
+        "type": "data",
+        "query": "timeseries avg(`orbital.host.cpu.pct`), from:now()-1h, by:{host}",
+        "visualization": "lineChart",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "15": {
+        "title": "Memory % — All Hosts",
+        "type": "data",
+        "query": "timeseries avg(`orbital.host.memory.used_pct`), from:now()-1h, by:{host}",
+        "visualization": "lineChart",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "16": {
+        "title": "Disk % — All Hosts",
+        "type": "data",
+        "query": "timeseries avg(`orbital.host.disk.used_pct`), from:now()-1h, by:{host}",
+        "visualization": "lineChart",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "17": {
+        "title": "Redis — Queue Depth & Active Jobs",
+        "type": "data",
+        "query": "timeseries amd64=avg(`orbital.redis.queue.amd64`), arm64=avg(`orbital.redis.queue.arm64`), active=avg(`orbital.redis.active_jobs`), from:now()-1h",
+        "visualization": "lineChart",
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
+      },
+      "18": {
+        "title": "Registered Workers",
+        "type": "data",
+        "query": "timeseries avg(`orbital.redis.workers`), from:now()-1h",
+        "visualization": "singleValue",
+        "visualizationSettings": {
+          "singleValue": { "label": "Workers", "prefixIcon": "ServerIcon", "showLabel": true }
+        },
+        "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false }
       }
     }
   }
