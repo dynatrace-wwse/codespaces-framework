@@ -2481,7 +2481,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     # org/repo format for the executor (e.g. "dynatrace-wwse/enablement-live-debugger-bug-hunting")
     repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
     repo_name = training["repoUrl"].split("/")[-1]
-    job_id = f"arena-{_uuid.uuid4().hex[:12]}"
+    job_id = f"enablement-{_uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     expires_at = (now.replace(microsecond=0) + timedelta(hours=4)).isoformat()
 
@@ -2493,7 +2493,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "ref":           training["branch"],
         "timestamp":     now.isoformat(),
         "trigger":       "arena",
-        "nightly_run_id": f"arena-{body.trainingId}",
+        "nightly_run_id": f"enablement-{body.trainingId}",
         "requested_by":  body.userId,
     }
     # Pre-write so session-status can resolve it before the worker picks it up.
@@ -2649,12 +2649,19 @@ body {{ display: flex; flex-direction: column; font-family: -apple-system, sans-
 /* ── Log panel ── */
 #panel-log {{ flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }}
 #log-output {{
-  flex: 1; min-height: 0; padding: 4px;
+  flex: 1; min-height: 0; margin: 0; padding: 14px;
+  overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  font: 12px/1.5 ui-monospace, Menlo, monospace; color: #c9d1d9; background: #0d1117;
 }}
 #log-status {{
   padding: 6px 16px; font-size: 11px; color: #718096; background: #16213e;
   border-top: 1px solid #0d3460; flex-shrink: 0;
 }}
+.ansi-bold {{ font-weight: bold; }}
+.ansi-red {{ color: #f85149; }} .ansi-green {{ color: #3fb950; }}
+.ansi-yellow {{ color: #d29922; }} .ansi-blue {{ color: #58a6ff; }}
+.ansi-magenta {{ color: #bc8cff; }} .ansi-cyan {{ color: #39c5cf; }}
+.ansi-white {{ color: #c9d1d9; }} .ansi-gray {{ color: #8b949e; }}
 
 /* ── Shell panel ── */
 #panel-shell {{ flex: 1; padding: 4px; min-height: 0; display: none; flex-direction: column; }}
@@ -2697,7 +2704,7 @@ body {{ display: flex; flex-direction: column; font-family: -apple-system, sans-
 </div>
 <div id="panels">
   <div id="panel-log">
-    <div id="log-output"></div>
+    <pre id="log-output">Loading…</pre>
     <div id="log-status">Waiting for provisioning log…</div>
   </div>
   <div id="panel-shell">
@@ -2748,32 +2755,28 @@ function switchTab(name) {{
       setTimeout(() => fitAddon && fitAddon.fit(), 50);
     }}
   }}
-  if (name === 'log') {{
-    setTimeout(() => logFit && logFit.fit(), 50);
-  }}
 }}
 
-// ── Log terminal (xterm.js — renders ANSI colors) ────────────────────────────
-let logTerm, logFit;
-
-function initLogTerminal() {{
-  logTerm = new Terminal({{
-    cursorBlink: false,
-    fontSize: 12,
-    fontFamily: '"MesloLGS NF", "Cascadia Code NF", "Hack Nerd Font", ui-monospace, Menlo, monospace',
-    theme: {{
-      background: '#0d1117', foreground: '#d4d4d4', cursor: '#0d1117',
-      selectionBackground: '#264f78',
-    }},
-    scrollback: 20000,
-    convertEol: true,
-    disableStdin: true,
+// ── Log panel (pre + ANSI colors) ────────────────────────────────────────────
+const logEl = document.getElementById('log-output');
+const ANSI_COLORS = {{30:'gray',31:'red',32:'green',33:'yellow',34:'blue',35:'magenta',36:'cyan',37:'white',
+                     90:'gray',91:'red',92:'green',93:'yellow',94:'blue',95:'magenta',96:'cyan',97:'white'}};
+function escHtml(s){{return s.replace(/[&<>]/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[c]))}}
+function ansiToHtml(text){{
+  let out='',open=0,last=0;
+  text.replace(/\x1b\[([0-9;]*)m/g,(m,codes,i)=>{{
+    out+=escHtml(text.slice(last,i)); last=i+m.length;
+    const parts=codes?codes.split(';').map(Number):[0];
+    for(const c of parts){{
+      if(c===0){{while(open-->0)out+='</span>';open=0;}}
+      else if(c===1){{out+='<span class="ansi-bold">';open++;}}
+      else if(ANSI_COLORS[c]){{out+='<span class="ansi-'+ANSI_COLORS[c]+'">';open++;}}
+    }}
+    return m;
   }});
-  logFit = new FitAddon.FitAddon();
-  logTerm.loadAddon(logFit);
-  logTerm.loadAddon(new WebLinksAddon.WebLinksAddon());
-  logTerm.open(logOutput);
-  logFit.fit();
+  out+=escHtml(text.slice(last));
+  while(open-->0)out+='</span>';
+  return out;
 }}
 
 let lastLogLen = 0;
@@ -2787,9 +2790,10 @@ async function pollLivelog() {{
       return;
     }}
     const text = await r.text();
-    if (text.length > lastLogLen && logTerm) {{
-      const chunk = text.slice(lastLogLen);
-      logTerm.write(chunk);
+    if (text.length > lastLogLen) {{
+      if (lastLogLen === 0) logEl.textContent = '';
+      logEl.innerHTML += ansiToHtml(text.slice(lastLogLen));
+      logEl.scrollTop = logEl.scrollHeight;
       lastLogLen = text.length;
     }}
     const ready = text.includes('Daemon ready');
@@ -2800,7 +2804,6 @@ async function pollLivelog() {{
     if (ready && !shellReady) {{
       clearInterval(logTimer); logTimer = null;
       shellReady = true;
-      // Unlock Shell tab
       const shellTab = document.getElementById('tab-shell');
       shellTab.className = 'tab';
       shellTab.innerHTML = '⌨ Shell <span class="badge">Ready</span>';
@@ -2809,10 +2812,6 @@ async function pollLivelog() {{
     }}
   }} catch {{}}
 }}
-
-window.addEventListener('resize', () => {{
-  if (logFit && document.getElementById('panel-log').style.display !== 'none') logFit.fit();
-}});
 
 // ── xterm — opened lazily when Shell tab first selected ───────────────────────
 let term, fitAddon, ws;
@@ -2894,9 +2893,6 @@ function startAppsPolling() {{
   pollApps();
   appsInterval = setInterval(pollApps, 10000);
 }}
-// Init log terminal immediately (log tab is visible on load)
-document.fonts.load('12px "MesloLGS NF"').then(initLogTerminal).catch(initLogTerminal);
-
 startAppsPolling(); // show docs card immediately
 async function pollApps() {{
   try {{
