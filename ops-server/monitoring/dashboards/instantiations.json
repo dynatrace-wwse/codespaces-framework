@@ -203,7 +203,7 @@
       "17": {
         "title": "Instantiations by Repository Over Time",
         "type": "data",
-        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| makeTimeseries count = count(), by: { content.repository.name }, interval: 1d\n| sort count desc\n| limit 10",
+        "query": "fetch bizevents\n| filter event.provider == \"com.dynatracewwse.codespacestracker\"\n| makeTimeseries count = count(), by: { content.repository.name }, interval: 1d",
         "visualization": "barChart",
         "visualizationSettings": {
           "coloring": {
@@ -213,6 +213,26 @@
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
         "davis": { "davisVisualization": { "isAvailable": true } }
       }
+    },
+    "layouts": {
+      "0":  { "x": 0,  "y": 0,  "w": 21, "h": 2 },
+      "1":  { "x": 0,  "y": 2,  "w": 4,  "h": 4 },
+      "2":  { "x": 4,  "y": 2,  "w": 4,  "h": 4 },
+      "3":  { "x": 8,  "y": 2,  "w": 5,  "h": 4 },
+      "4":  { "x": 13, "y": 2,  "w": 4,  "h": 4 },
+      "5":  { "x": 17, "y": 2,  "w": 4,  "h": 4 },
+      "6":  { "x": 0,  "y": 6,  "w": 13, "h": 8 },
+      "10": { "x": 13, "y": 6,  "w": 4,  "h": 8 },
+      "11": { "x": 17, "y": 6,  "w": 4,  "h": 8 },
+      "9":  { "x": 0,  "y": 14, "w": 12, "h": 8 },
+      "12": { "x": 12, "y": 14, "w": 9,  "h": 8 },
+      "7":  { "x": 0,  "y": 22, "w": 14, "h": 12 },
+      "8":  { "x": 14, "y": 22, "w": 7,  "h": 12 },
+      "13": { "x": 0,  "y": 34, "w": 11, "h": 8 },
+      "14": { "x": 11, "y": 34, "w": 10, "h": 8 },
+      "15": { "x": 0,  "y": 42, "w": 10, "h": 8 },
+      "16": { "x": 10, "y": 42, "w": 11, "h": 8 },
+      "17": { "x": 0,  "y": 50, "w": 21, "h": 9 }
     }
   }
 }

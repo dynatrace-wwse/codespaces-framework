@@ -72,9 +72,7 @@
         "type": "data",
         "query": "fetch bizevents\n| filter event.provider == \"dynatrace-wwse.github.io\"\n| filter isNotNull(page)\n| summarize views = count(), by: { page, dt.rum.application.id }\n| sort views desc\n| limit 20",
         "visualization": "table",
-        "visualizationSettings": {
-          "autoSelectVisualization": false
-        },
+        "visualizationSettings": { "autoSelectVisualization": false },
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
         "davis": { "davisVisualization": { "isAvailable": true } }
       },
@@ -137,6 +135,20 @@
         "querySettings": { "maxResultRecords": 1000, "defaultScanLimitGbytes": 500, "maxResultMegaBytes": 1, "defaultSamplingRatio": 10, "enableSampling": false },
         "davis": { "davisVisualization": { "isAvailable": true } }
       }
+    },
+    "layouts": {
+      "0":  { "x": 0,  "y": 0,  "w": 21, "h": 2 },
+      "1":  { "x": 0,  "y": 2,  "w": 5,  "h": 4 },
+      "2":  { "x": 5,  "y": 2,  "w": 5,  "h": 4 },
+      "3":  { "x": 10, "y": 2,  "w": 5,  "h": 4 },
+      "4":  { "x": 15, "y": 2,  "w": 6,  "h": 4 },
+      "5":  { "x": 0,  "y": 6,  "w": 13, "h": 8 },
+      "8":  { "x": 13, "y": 6,  "w": 8,  "h": 8 },
+      "7":  { "x": 0,  "y": 14, "w": 12, "h": 8 },
+      "9":  { "x": 12, "y": 14, "w": 9,  "h": 8 },
+      "10": { "x": 0,  "y": 22, "w": 13, "h": 9 },
+      "11": { "x": 13, "y": 22, "w": 8,  "h": 9 },
+      "6":  { "x": 0,  "y": 31, "w": 21, "h": 9 }
     }
   }
 }
