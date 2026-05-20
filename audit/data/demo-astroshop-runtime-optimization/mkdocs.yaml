@@ -1,8 +1,8 @@
 INHERIT: mkdocs-base.yaml
 
-site_name: "Dynatrace Enablement Lab: Demo MCP with Unguard"
+site_name: "Dynatrace Enablement Lab: Astroshop Runtime Optimization"
 repo_name: "View Code on GitHub"
-repo_url: "https://github.com/dynatrace-wwse/demo-mcp-unguard"
+repo_url: "https://github.com/dynatrace-wwse/demo-astroshop-runtime-optimization"
 nav:
   - "1. About": index.md
   - "2. Getting started": 2-getting-started.md
@@ -12,4 +12,4 @@ nav:
   - "6. What's next?": whats-next.md
 
 extra:
-  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/300531523b332e3_complete.js"
+  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/dafdc1b85d10563b_complete.js"

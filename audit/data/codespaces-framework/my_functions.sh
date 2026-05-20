@@ -11,3 +11,8 @@ customFunction(){
   printInfo "1 + 1 = $(( 1 + 1 ))"
 
 }
+
+
+
+
+

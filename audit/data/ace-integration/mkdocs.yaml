@@ -1,6 +1,6 @@
 INHERIT: mkdocs-base.yaml
 
-site_name: "Dynatrace Enablement Lab: Codespaces template"
+site_name: "Dynatrace Enablement Lab: ACE Integration"
 repo_name: "View Code on GitHub"
 repo_url: "https://github.com/dynatrace-wwse/ace-integration"
 nav:
@@ -13,4 +13,4 @@ nav:
   - "7. What's next?": whats-next.md
 
 extra:
-  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/7c50bce5c0cc890f_complete.js"
+  rum_snippet: "https://js-cdn.dynatrace.com/jstag/1612cf70810/bf81393wlb/967ab7143d93e8c7_complete.js"

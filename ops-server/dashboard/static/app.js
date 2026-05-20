@@ -1808,62 +1808,61 @@ document.getElementById('sync-issues-refresh').addEventListener('click', () => l
 
 // ── Audit sub-tab ────────────────────────────────────────────────────────────
 
+function _scopeAuditCSS(raw) {
+    // Drop global reset and body rules, scope everything else to #audit-content
+    return raw
+        .replace(/\*\s*\{[^}]*\}/g, '')
+        .replace(/body\s*\{[^}]*\}/g, '')
+        .replace(/([^{}@\n][^{}]*)\{([^{}]*)\}/g, (m, sel, props) => {
+            const s = sel.trim();
+            if (!s || s === ':root') return m;  // keep :root as-is
+            const scoped = s.split(',').map(p => `#audit-content ${p.trim()}`).join(', ');
+            return `${scoped} {${props}}`;
+        });
+}
+
 async function loadSyncAudit(force = false) {
-    const meta   = document.getElementById('audit-meta');
-    const output = document.getElementById('audit-output');
-    meta.innerHTML = '<span>Loading…</span>';
+    const container = document.getElementById('audit-content');
+    if (!container) return;
+    if (!force && container.dataset.loaded) return;
+    container.innerHTML = '<div style="padding:1.5rem;color:var(--text-2)">Loading audit…</div>';
     try {
-        const res  = await fetch(`${API}/api/sync/audit`);
-        const data = await res.json();
-        if (!data.output) {
-            meta.innerHTML = '<span>No audit results yet. Run <strong>sync validate</strong> from Commands.</span>';
-            output.innerHTML = '';
-            return;
-        }
-        const ts = data.timestamp ? new Date(data.timestamp).toLocaleString() : '—';
-        const rc = data.exit_code != null ? data.exit_code : '?';
-        const issues = (data.output.match(/❌/g) || []).length;
-        const ok     = (data.output.match(/✅/g) || []).length;
-        meta.innerHTML = `
-            <span>Run: <strong>${ts}</strong></span>
-            <span>Exit code: <strong style="color:${rc===0?'var(--green)':'var(--red)'}">${rc}</strong></span>
-            <span>✅ <strong>${ok}</strong> ok</span>
-            <span>❌ <strong style="color:var(--red)">${issues}</strong> issues</span>
-            <a href="/api/jobs/${escapeHtml(data.job_id || '')}/log" target="_blank" class="btn btn-small btn-secondary" style="margin-left:auto">Raw log</a>
-        `;
-        // Syntax-highlight the output lines
-        output.innerHTML = escapeHtml(data.output)
-            .replace(/^(── .+)$/gm,           '<span class="audit-header">$1</span>')
-            .replace(/(❌[^\n]*)/g,            '<span class="audit-issue">$1</span>')
-            .replace(/(✅[^\n]*)/g,            '<span class="audit-ok">$1</span>')
-            .replace(/(⚠[^\n]*)/g,            '<span class="audit-warn">$1</span>')
-            .replace(/(MISSING:[^\n]*)/g,      '<span class="audit-issue">$1</span>')
-            .replace(/(PARSE ERROR:[^\n]*)/g,  '<span class="audit-issue">$1</span>');
+        const res = await fetch('/audit' + (force ? '?t=' + Date.now() : ''));
+        const html = await res.text();
+        const doc  = new DOMParser().parseFromString(html, 'text/html');
+        let css = '';
+        doc.querySelectorAll('style').forEach(s => { css += s.textContent; });
+        container.innerHTML = `<style>${_scopeAuditCSS(css)}</style>` + doc.body.innerHTML;
+        container.dataset.loaded = '1';
     } catch (e) {
-        meta.innerHTML = `<span style="color:var(--red)">Error loading audit: ${escapeHtml(String(e))}</span>`;
-        output.textContent = '';
+        container.innerHTML = `<div style="color:var(--red);padding:1rem">Error loading audit: ${escapeHtml(String(e))}</div>`;
     }
 }
 
 document.getElementById('sync-audit-refresh').addEventListener('click', async () => {
-    if (!isWriter()) return showToast('Sign in as an org member to run audits.');
+    if (!isWriter()) return showToast('Sign in as an org member to regenerate the audit.');
     const btn = document.getElementById('sync-audit-refresh');
     btn.disabled = true;
-    btn.textContent = 'Running…';
+    btn.textContent = 'Fetching from GitHub…';
+    showToast('Pulling fresh data from GitHub (~2 min)…');
     try {
-        await fetch(`${API}/api/sync/run`, {
+        const res = await fetch(`${API}/api/audit/refresh`, {
             method: 'POST',
             credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cmd_id: 'validate' }),
         });
-        showToast('Audit queued — refresh in ~30s.');
-        setTimeout(() => loadSyncAudit(true), 35000);
+        if (res.ok) {
+            const data = await res.json();
+            showToast(data.message || 'Audit refreshed.');
+            delete document.getElementById('audit-content').dataset.loaded;
+            await loadSyncAudit(true);
+        } else {
+            showToast('Audit refresh failed — check server logs.');
+        }
     } catch (e) {
-        showToast('Failed to queue audit.');
+        showToast('Failed to regenerate audit.');
     } finally {
         btn.disabled = false;
-        btn.textContent = '↻ Run Audit';
+        btn.textContent = '↻ Regenerate';
     }
 });
 

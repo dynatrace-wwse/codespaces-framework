@@ -1545,6 +1545,96 @@ async def api_sync_audit():
         return {"output": raw, "timestamp": None, "job_id": None, "exit_code": None}
 
 
+_AUDIT_SCRIPT    = FRAMEWORK_DIR / "audit" / "generate-html.py"
+_AUDIT_FETCH_SH  = FRAMEWORK_DIR / "audit" / "fetch-data.sh"
+_AUDIT_CACHE_KEY = "audit:html:cache"
+_AUDIT_CACHE_TTL = 3600  # 1 hour
+
+
+async def _fetch_audit_data() -> bool:
+    """Run fetch-data.sh to pull fresh repo data from GitHub. Returns True on success."""
+    if not _AUDIT_FETCH_SH.exists():
+        log.error("fetch-data.sh not found: %s", _AUDIT_FETCH_SH)
+        return False
+    gh_token = os.environ.get("GH_TOKEN", "")
+    env = {**os.environ, "GH_TOKEN": gh_token} if gh_token else os.environ
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", str(_AUDIT_FETCH_SH),
+            cwd=str(_AUDIT_FETCH_SH.parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        if proc.returncode == 0:
+            log.info("Audit data fetch complete")
+            return True
+        log.warning("fetch-data.sh exited %s: %s", proc.returncode, stdout.decode(errors="replace")[-500:])
+    except asyncio.TimeoutError:
+        log.error("fetch-data.sh timed out after 5m")
+    except Exception as e:
+        log.error("fetch-data.sh error: %s", e)
+    return False
+
+
+async def _generate_audit_html() -> str | None:
+    """Run generate-html.py and return the generated HTML string."""
+    import sys
+    import tempfile
+    if not _AUDIT_SCRIPT.exists():
+        log.error("Audit script not found: %s", _AUDIT_SCRIPT)
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
+        out_path = Path(f.name)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(_AUDIT_SCRIPT), "--output", str(out_path),
+            cwd=str(_AUDIT_SCRIPT.parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode == 0 and out_path.exists():
+            return out_path.read_text(encoding="utf-8")
+        log.warning("Audit script exited %s: %s", proc.returncode, stdout.decode(errors="replace"))
+    except asyncio.TimeoutError:
+        log.error("Audit generation timed out")
+    except Exception as e:
+        log.error("Audit generation error: %s", e)
+    finally:
+        out_path.unlink(missing_ok=True)
+    return None
+
+
+@app.get("/audit", response_class=HTMLResponse)
+async def view_audit():
+    """Serve the rich audit HTML page (cached, regenerated from generate-html.py)."""
+    cached = await pool.get(_AUDIT_CACHE_KEY)
+    if cached:
+        return HTMLResponse(content=cached)
+    html = await _generate_audit_html()
+    if html:
+        await pool.set(_AUDIT_CACHE_KEY, html, ex=_AUDIT_CACHE_TTL)
+        return HTMLResponse(content=html)
+    return HTMLResponse(content="<p style='color:red;font-family:monospace'>Audit generation failed — check server logs.</p>", status_code=500)
+
+
+@app.post("/api/audit/refresh")
+async def api_audit_refresh(request: Request):
+    """Fetch fresh data from GitHub, regenerate audit HTML, update cache (writer only)."""
+    await _require_writer(request)
+    await pool.delete(_AUDIT_CACHE_KEY)
+    fetched = await _fetch_audit_data()
+    if not fetched:
+        log.warning("fetch-data.sh failed — regenerating from existing data")
+    html = await _generate_audit_html()
+    if html:
+        await pool.set(_AUDIT_CACHE_KEY, html, ex=_AUDIT_CACHE_TTL)
+        return {"status": "ok", "fetched": fetched, "message": "Audit refreshed from GitHub." if fetched else "Regenerated from cached data (fetch failed)."}
+    raise HTTPException(status_code=500, detail="Audit generation failed — check server logs.")
+
+
 @app.get("/api/repos/{owner}/{repo}/branches")
 async def api_repo_branches(owner: str, repo: str):
     """List remote branches for a repo via GitHub API.
@@ -2389,6 +2479,111 @@ _ARENA_REPOS = {
         "difficulty": "intermediate",
         "estimatedTime": 60,
         "tags": ["bizevents", "business-observability", "dql"],
+    },
+    "enablement-kubernetes-opentelemetry": {
+        "id": "kubernetes-opentelemetry",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 180,
+        "tags": ["kubernetes", "opentelemetry", "traces"],
+    },
+    "enablement-dynatrace-ai-mcp": {
+        "id": "ai-mcp",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 120,
+        "tags": ["gen-ai", "opentelemetry", "mcp"],
+    },
+    "enablement-dql-301": {
+        "id": "dql-301",
+        "type": "lab",
+        "difficulty": "advanced",
+        "estimatedTime": 60,
+        "tags": ["dql", "logs", "business-observability"],
+    },
+    "enablement-browser-dem-biz-observability": {
+        "id": "browser-dem-biz",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 120,
+        "tags": ["rum", "business-observability", "dql"],
+    },
+    "enablement-workflow-essentials": {
+        "id": "workflow-essentials",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 150,
+        "tags": ["workflows", "automation"],
+    },
+    "enablement-azure-webapp-otel": {
+        "id": "azure-webapp-otel",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 120,
+        "tags": ["opentelemetry", "azure"],
+    },
+    "enablement-kubernetes-opentelemetry-openpipeline": {
+        "id": "kubernetes-otel-openpipeline",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 180,
+        "tags": ["kubernetes", "opentelemetry", "logs"],
+    },
+    "workshop-dynatrace-log-analytics": {
+        "id": "log-analytics",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 180,
+        "tags": ["logs", "kubernetes", "dql"],
+    },
+    "workshop-destination-automation": {
+        "id": "destination-automation",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 120,
+        "tags": ["workflows", "automation"],
+    },
+    "demo-agentic-ai-with-nvidia": {
+        "id": "agentic-ai-nvidia",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 90,
+        "tags": ["gen-ai", "opentelemetry"],
+    },
+    "demo-mcp-unguard": {
+        "id": "mcp-unguard",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 60,
+        "tags": ["application-security", "gen-ai"],
+    },
+    "demo-opentelemetry": {
+        "id": "opentelemetry-demo",
+        "type": "lab",
+        "difficulty": "beginner",
+        "estimatedTime": 60,
+        "tags": ["opentelemetry", "traces"],
+    },
+    "demo-astroshop-runtime-optimization": {
+        "id": "astroshop-runtime",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 90,
+        "tags": ["kubernetes", "devops"],
+    },
+    "demo-astroshop-problems": {
+        "id": "astroshop-problems",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 90,
+        "tags": ["kubernetes", "live-debugger"],
+    },
+    "bug-busters": {
+        "id": "bug-busters",
+        "type": "lab",
+        "difficulty": "intermediate",
+        "estimatedTime": 90,
+        "tags": ["live-debugger", "devops"],
     },
 }
 

@@ -21,7 +21,9 @@ configureAceDT
 
 ace install app_easytravel
 
-# 
+registerApp "easytravel" "easytravel" "angular-frontend-service" 8080
+
+#
 # If the Codespace was created via Workflow end2end test will be done, otherwise
 # it'll verify if there are error in the logs and will show them in the greeting as well a monitoring 
 # notification will be sent on the instantiation details

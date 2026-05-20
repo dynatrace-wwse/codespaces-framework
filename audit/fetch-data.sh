@@ -72,12 +72,42 @@ for REPO in "${REPOS[@]}"; do
     echo "" > "$RDIR/devcontainer.json"
   fi
 
-  # 4. myFunctions.sh
-  MYFUNC_RAW=$(gh api "repos/$ORG/$REPO/contents/.devcontainer/myFunctions.sh" 2>/dev/null || true)
+  # 4. my_functions.sh — try util/ subdir first, then legacy paths
+  MYFUNC_RAW=$(gh api "repos/$ORG/$REPO/contents/.devcontainer/util/my_functions.sh" 2>/dev/null || true)
+  if ! echo "$MYFUNC_RAW" | jq -e '.content' >/dev/null 2>&1; then
+    MYFUNC_RAW=$(gh api "repos/$ORG/$REPO/contents/.devcontainer/my_functions.sh" 2>/dev/null || true)
+  fi
+  if ! echo "$MYFUNC_RAW" | jq -e '.content' >/dev/null 2>&1; then
+    MYFUNC_RAW=$(gh api "repos/$ORG/$REPO/contents/.devcontainer/myFunctions.sh" 2>/dev/null || true)
+  fi
   if echo "$MYFUNC_RAW" | jq -e '.content' >/dev/null 2>&1; then
-    echo "$MYFUNC_RAW" | jq -r '.content' | tr -d '\n' | base64 -d > "$RDIR/myFunctions.sh" 2>/dev/null || echo "" > "$RDIR/myFunctions.sh"
+    echo "$MYFUNC_RAW" | jq -r '.content' | tr -d '\n' | base64 -d > "$RDIR/my_functions.sh" 2>/dev/null || echo "" > "$RDIR/my_functions.sh"
   else
-    echo "" > "$RDIR/myFunctions.sh"
+    echo "" > "$RDIR/my_functions.sh"
+  fi
+
+  # 4b. post-create.sh
+  PC_RAW=$(gh api "repos/$ORG/$REPO/contents/.devcontainer/post-create.sh" 2>/dev/null || true)
+  if echo "$PC_RAW" | jq -e '.content' >/dev/null 2>&1; then
+    echo "$PC_RAW" | jq -r '.content' | tr -d '\n' | base64 -d > "$RDIR/post-create.sh" 2>/dev/null || echo "" > "$RDIR/post-create.sh"
+  else
+    echo "" > "$RDIR/post-create.sh"
+  fi
+
+  # 4c. post-start.sh
+  PS_RAW=$(gh api "repos/$ORG/$REPO/contents/.devcontainer/post-start.sh" 2>/dev/null || true)
+  if echo "$PS_RAW" | jq -e '.content' >/dev/null 2>&1; then
+    echo "$PS_RAW" | jq -r '.content' | tr -d '\n' | base64 -d > "$RDIR/post-start.sh" 2>/dev/null || echo "" > "$RDIR/post-start.sh"
+  else
+    echo "" > "$RDIR/post-start.sh"
+  fi
+
+  # 4d. mkdocs.yaml (contains RUM snippet)
+  MKDOCS_RAW=$(gh api "repos/$ORG/$REPO/contents/mkdocs.yaml" 2>/dev/null || true)
+  if echo "$MKDOCS_RAW" | jq -e '.content' >/dev/null 2>&1; then
+    echo "$MKDOCS_RAW" | jq -r '.content' | tr -d '\n' | base64 -d > "$RDIR/mkdocs.yaml" 2>/dev/null || echo "" > "$RDIR/mkdocs.yaml"
+  else
+    echo "" > "$RDIR/mkdocs.yaml"
   fi
 
   # 5. README.md

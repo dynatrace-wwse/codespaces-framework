@@ -1325,22 +1325,13 @@ a.spark-bar:hover { opacity: .75; }
 }
 
 /* ─── Audit sub-view ─────────────────────────────────────────── */
-#sync-view-audit .audit-meta {
-    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-    font-size: .8rem; color: var(--text-2);
-    padding: .75rem 0; border-bottom: 1px solid var(--border-soft); margin-bottom: 1rem;
+.audit-content {
+    padding: 4px 0;
+    overflow-y: auto;
+    max-height: 75vh;
 }
-#sync-view-audit .audit-meta strong { color: var(--text); }
-#sync-view-audit .audit-output {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: .78rem; line-height: 1.65;
-    white-space: pre-wrap; word-break: break-all;
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-soft);
-    border-radius: var(--r); padding: 1rem;
-    max-height: 65vh; overflow-y: auto;
-}
+/* Scope box-model reset to audit content only */
+.audit-content * { box-sizing: border-box; }
 .audit-issue  { color: var(--red); }
 .audit-ok     { color: var(--green); }
 .audit-warn   { color: var(--yellow); }

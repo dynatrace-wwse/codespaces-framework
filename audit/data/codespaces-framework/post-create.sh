@@ -5,16 +5,17 @@ source .devcontainer/util/source_framework.sh
 
 setUpTerminal
 
-startKindCluster
+# Start Kubernetes cluster (K3s by default, or Kind if CLUSTER_ENGINE=kind)
+startCluster
 
 installK9s
 
 # Dynatrace Operator is deployed automatically, secrets are read from the env.
 dynatraceDeployOperator
 
-# You can deploy CNFS or AppOnly
-deployCloudNative
-#deployApplicationMonitoring
+# You can deploy CNFS (for CNFS use Kind) or AppOnly (use k3d)
+#deployCloudNative
+deployApplicationMonitoring
 
 # The TODO App will be deployed as a sample
 deployTodoApp

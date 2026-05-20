@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=23">
+    <link rel="stylesheet" href="/static/style.css?v=25">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -311,13 +311,11 @@
             <!-- Audit sub-view -->
             <div id="sync-view-audit" class="sync-subview" hidden>
                 <div class="sync-subtab-header">
-                    <span>Last <code>sync validate</code> run — health of all repos</span>
-                    <button class="btn btn-small btn-secondary" id="sync-audit-refresh" data-action>↻ Run Audit</button>
+                    <span>Master technical audit — all repos</span>
+                    <button class="btn btn-small btn-secondary" id="sync-audit-refresh" data-action>↻ Regenerate</button>
+                    <a href="/audit" target="_blank" class="btn btn-small btn-secondary">⤢ Full Screen</a>
                 </div>
-                <div id="audit-meta" class="audit-meta">
-                    <span>Loading…</span>
-                </div>
-                <pre id="audit-output" class="audit-output">No audit data yet. Run <strong>sync validate</strong> from the Commands tab.</pre>
+                <div id="audit-content" class="audit-content"></div>
             </div>
 
             <!-- Open Issues sub-view -->
@@ -661,6 +659,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=22"></script>
+    <script src="/static/app.js?v=24"></script>
 </body>
 </html>

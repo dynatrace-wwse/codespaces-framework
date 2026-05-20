@@ -167,8 +167,7 @@ print('Headless session completed.')
     printInfo "✅ Application initialized successfully — Traceloop SDK is ready."
   else
     printError "'Traceloop SDK initialized' not found in init output."
-    printError "Init output:
-$INIT_OUTPUT"
+    printError "Init output:\n$INIT_OUTPUT"
     return 1
   fi
 }
