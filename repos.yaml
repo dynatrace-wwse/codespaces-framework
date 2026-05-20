@@ -1,5 +1,15 @@
 repos:
   # ── Enablement labs (source of truth for dynatrace-wwse.github.io registry) ──
+  - name: enablement-kubernetes-101
+    repo: dynatrace-wwse/enablement-kubernetes-101
+    status: active
+    maintainer: "@shinojosa, @saikkoj"
+    description: "Introduction to Kubernetes fundamentals with Dynatrace. Learn core concepts — pods, deployments, services — and observe a live cluster with full-stack monitoring."
+    tags: [kubernetes]
+    title: "Kubernetes 101"
+    primary_tag: kubernetes
+    duration: "1.5h"
+
   - name: enablement-kubernetes-opentelemetry
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry
     status: active
