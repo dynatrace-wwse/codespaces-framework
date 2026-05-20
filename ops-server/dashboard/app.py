@@ -1547,6 +1547,7 @@ async def api_sync_audit():
 
 _AUDIT_SCRIPT    = FRAMEWORK_DIR / "audit" / "generate-html.py"
 _AUDIT_FETCH_SH  = FRAMEWORK_DIR / "audit" / "fetch-data.sh"
+_AUDIT_DATA_DIR  = FRAMEWORK_DIR / "audit" / "data"
 _AUDIT_CACHE_KEY = "audit:html:cache"
 _AUDIT_CACHE_TTL = 3600  # 1 hour
 
@@ -1557,7 +1558,7 @@ async def _fetch_audit_data() -> bool:
         log.error("fetch-data.sh not found: %s", _AUDIT_FETCH_SH)
         return False
     gh_token = os.environ.get("GH_TOKEN", "")
-    env = {**os.environ, "GH_TOKEN": gh_token} if gh_token else os.environ
+    env = {**os.environ, "GH_TOKEN": gh_token, "AUDIT_DATA_DIR": str(_AUDIT_DATA_DIR)}
     try:
         proc = await asyncio.create_subprocess_exec(
             "bash", str(_AUDIT_FETCH_SH),
@@ -1593,6 +1594,7 @@ async def _generate_audit_html() -> str | None:
             cwd=str(_AUDIT_SCRIPT.parent),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env={**os.environ, "AUDIT_DATA_DIR": str(_AUDIT_DATA_DIR)},
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
         if proc.returncode == 0 and out_path.exists():

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ORG="dynatrace-wwse"
-OUTPUT_DIR="/home/ubuntu/enablement-framework/codespaces-framework/audit/data"
+OUTPUT_DIR="${AUDIT_DATA_DIR:-$(dirname "$0")/data}"
 mkdir -p "$OUTPUT_DIR"
 
 REPOS=(
