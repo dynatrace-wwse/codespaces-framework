@@ -9,7 +9,7 @@ Observability serves as a crucial feedback channel to orchestrate and moderate t
 In our AI Travel Advisor app, we have three different agents:
 
 - Valid City: verifies that a prompt is asking about a valid city name
-- Travel Advice: provides a travel reccomendation
+- Travel Advice: provides a travel recommendation
 - Excuse: provides an excuse why the AI chat-bot cannot answer the request
 
 These Agents are orchestrated through LangChain using a complex system prompt.
