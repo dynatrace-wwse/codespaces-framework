@@ -590,6 +590,7 @@ async def api_agent_fix_ci(request: Request):
     arch        = (body.get("arch") or "arm64").strip()
     failed_job_id = (body.get("failed_job_id") or "").strip()
     failed_step   = (body.get("failed_step") or "").strip()
+    instructions  = (body.get("instructions") or "").strip()
 
     if not repo:
         raise HTTPException(400, "repo is required")
@@ -620,6 +621,7 @@ async def api_agent_fix_ci(request: Request):
         "failed_job_id": failed_job_id,
         "failed_log":    failed_log,
         "failed_step":   failed_step,
+        "instructions":  instructions,
     }
 
     await pool.rpush("queue:agent", json.dumps(job))
@@ -2482,6 +2484,13 @@ _ARENA_REPOS = {
         "estimatedTime": 60,
         "tags": ["bizevents", "business-observability", "dql"],
     },
+    "enablement-kubernetes-101": {
+        "id": "kubernetes-101",
+        "type": "lab-assessment",
+        "difficulty": "beginner",
+        "estimatedTime": 60,
+        "tags": ["kubernetes", "observability"],
+    },
     "enablement-kubernetes-opentelemetry": {
         "id": "kubernetes-opentelemetry",
         "type": "lab",
@@ -2749,6 +2758,42 @@ async def api_arena_session_status(job_id: str):
         "userId":     meta.get("arena_user", ""),
         "expiresAt":  meta.get("expires_at", ""),
     }
+
+
+@app.get("/api/arena/user-session")
+async def api_arena_user_session(userId: str, trainingId: str):
+    """Find an existing running session for a given user + training.
+
+    Scans job:running:enablement-* keys and returns the first match.
+    Returns 404 if none found.
+    """
+    cursor = 0
+    while True:
+        cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=100)
+        for key in keys:
+            meta = await pool.hgetall(key)
+            if not meta:
+                continue
+            if meta.get("arena_user") == userId and meta.get("training_id") == trainingId:
+                job_id = meta.get("job_id", key.split(":")[-1])
+                livelog = await pool.get(f"job:livelog:{job_id}")
+                if livelog and "Daemon ready" in livelog:
+                    status = "ready"
+                elif meta.get("worker_id") in ("queued", ""):
+                    status = "queued"
+                else:
+                    status = "provisioning"
+                return {
+                    "jobId":      job_id,
+                    "status":     status,
+                    "wsUrl":      f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
+                    "trainingId": meta.get("training_id", ""),
+                    "userId":     meta.get("arena_user", ""),
+                    "expiresAt":  meta.get("expires_at", ""),
+                }
+        if cursor == 0:
+            break
+    raise HTTPException(status_code=404, detail="No active session found")
 
 
 @app.post("/api/arena/sessions/{job_id}/shell-token")
@@ -3375,6 +3420,63 @@ async def api_nightly_run(run_id: str):
         "passed": sum(1 for j in target_jobs if j.get("result", {}).get("passed")),
         "failed": sum(1 for j in target_jobs if not j.get("result", {}).get("passed")),
         "results": results_out,
+    }
+
+
+@app.get("/api/nightly/run/{run_id}/summary")
+async def api_nightly_run_summary(run_id: str):
+    """Extract common error patterns from failed jobs in a nightly run."""
+    import re as _re
+
+    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    all_runs: dict[str, list] = {}
+    for j in completed_raw:
+        job = json.loads(j)
+        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
+            all_runs.setdefault(job["nightly_run_id"], []).append(job)
+
+    if run_id == "latest":
+        if not all_runs:
+            return {"run_id": None, "patterns": []}
+        target_id = sorted(all_runs.keys())[-1]
+    else:
+        target_id = run_id
+
+    target_jobs = all_runs.get(target_id, [])
+    failed_jobs = [j for j in target_jobs if not (j.get("result") or {}).get("passed")]
+
+    if not failed_jobs:
+        return {"run_id": target_id, "patterns": []}
+
+    # Patterns that signal real failures (not noise)
+    _ERROR_RE = _re.compile(
+        r"(error|fail(ed)?|timeout|oomkill|exit code [1-9]|panic|exception|"
+        r"cannot|could not|no such|permission denied|connection refused)",
+        _re.IGNORECASE,
+    )
+    # Strip timestamps (e.g. "2026-05-25T10:01:23Z") and hex job IDs
+    _STRIP_RE = _re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*|[a-f0-9]{12,}")
+
+    counts: dict[str, int] = {}
+    for job in failed_jobs:
+        log_raw = await pool.get(f"job:log:{job.get('job_id', '')}")
+        if not log_raw:
+            continue
+        for line in log_raw.splitlines():
+            line = line.strip()
+            if not line or len(line) < 10:
+                continue
+            if not _ERROR_RE.search(line):
+                continue
+            normalized = _STRIP_RE.sub("…", line)[:120].strip()
+            if normalized:
+                counts[normalized] = counts.get(normalized, 0) + 1
+
+    top = sorted(counts.items(), key=lambda x: -x[1])[:12]
+    return {
+        "run_id": target_id,
+        "failed_jobs": len(failed_jobs),
+        "patterns": [{"line": k, "count": v} for k, v in top],
     }
 
 

@@ -93,23 +93,32 @@ fi
 ARCH=$(arch)
 export ARCH=$ARCH
 
-# Cluster engine: k3d (default, lightweight K3s-in-Docker) or kind (full K8s for CloudNativeFullStack)
+# Cluster engine: k3d (default) or kind. Used by startCluster/stopCluster/deleteCluster.
+# NOTE: only AppOnly DT monitoring works on K3d inside Sysbox. CloudNative requires Kind.
 export CLUSTER_ENGINE="${CLUSTER_ENGINE:-k3d}"
 
 # Kind configuration (used when CLUSTER_ENGINE=kind)
 export KINDIMAGE="kind-control-plane"
 
-# Detect cluster status based on engine
-if [[ "$CLUSTER_ENGINE" == "kind" ]]; then
-  CLUSTER_STATUS=$(docker inspect -f '{{.State.Status}}' $KINDIMAGE 2>/dev/null)
-  CLUSTER_TYPE="Kind"
-else
-  # K3d: check if the enablement cluster node is running
-  CLUSTER_STATUS=$(docker inspect -f '{{.State.Status}}' k3d-enablement-server-0 2>/dev/null)
+# Detect cluster status independent of CLUSTER_ENGINE — probes both engines and
+# falls back to kubectl so detection works regardless of how the cluster was started.
+_k3d_st=$(docker inspect -f '{{.State.Status}}' k3d-enablement-server-0 2>/dev/null)
+_kind_st=$(docker inspect -f '{{.State.Status}}' "${KINDIMAGE}" 2>/dev/null)
+if [[ "$_k3d_st" == "running" ]]; then
+  CLUSTER_STATUS="running"
   CLUSTER_TYPE="K3d (K3s)"
+elif [[ "$_kind_st" == "running" ]]; then
+  CLUSTER_STATUS="running"
+  CLUSTER_TYPE="Kind"
+elif kubectl cluster-info 2>/dev/null 1>/dev/null; then
+  CLUSTER_STATUS="running"
+  CLUSTER_TYPE="Kubernetes"
+else
+  CLUSTER_STATUS=""
+  CLUSTER_TYPE=""
 fi
-export CLUSTER_STATUS=$CLUSTER_STATUS
-export CLUSTER_TYPE=$CLUSTER_TYPE
+unset _k3d_st _kind_st
+export CLUSTER_STATUS CLUSTER_TYPE
 # Legacy variable for backward compatibility
 export KIND_STATUS=$CLUSTER_STATUS
 
