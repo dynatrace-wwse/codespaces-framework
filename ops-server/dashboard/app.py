@@ -1501,13 +1501,17 @@ async def api_sync_prs():
             pr["_ci"] = None
             return
         conclusions = [c.get("conclusion") or c.get("status") or "" for c in checks]
-        failed = [c for c in checks if c.get("conclusion") in ("FAILURE", "ERROR", "TIMED_OUT")]
+        failed = [c for c in checks if c.get("conclusion") in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE")]
         if all(c in ("SUCCESS", "NEUTRAL", "SKIPPED") for c in conclusions):
             overall = "pass"
-        elif any(c in ("FAILURE", "ERROR", "TIMED_OUT") for c in conclusions):
+        elif any(c in ("FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE") for c in conclusions):
             overall = "fail"
-        elif any(c in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING") for c in conclusions):
+        elif any(c in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED") for c in conclusions):
             overall = "pending"
+        elif any(c == "CANCELLED" for c in conclusions):
+            # CANCELLED after IN_PROGRESS is already caught above; reaching here means
+            # the run was cancelled with no new run in flight — treat as failed.
+            overall = "fail"
         else:
             overall = "pending"
         pr["_ci"] = {
