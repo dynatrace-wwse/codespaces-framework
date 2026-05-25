@@ -1009,6 +1009,28 @@ async function loadWorkers() {
             const statusKey = stale ? 'offline' : (w.status || 'offline');
             const statusLabel = stale ? `stale (${ageSec}s)` : statusKey;
             const statusPill = `<span class="worker-status-pill ${statusKey}">${escapeHtml(statusLabel)}</span>`;
+            const _pctBar = (val, label, warnAt = 80) => {
+                if (val == null || val === '') return '';
+                const pct = parseFloat(val);
+                if (isNaN(pct)) return '';
+                const color = pct >= warnAt ? 'var(--red)' : pct >= 60 ? 'var(--yellow, #f5a623)' : 'var(--green)';
+                return `<div style="margin-top:4px">
+                    <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--text-muted)">
+                        <span>${label}</span><span>${pct}%</span>
+                    </div>
+                    <div style="background:var(--bg-2);border-radius:3px;height:5px;overflow:hidden">
+                        <div style="width:${Math.min(pct,100)}%;height:100%;background:${color};transition:width 1s"></div>
+                    </div>
+                </div>`;
+            };
+            const metricsHtml = [
+                _pctBar(w.cpu_pct, 'CPU'),
+                _pctBar(w.mem_pct, `Mem${w.mem_used_gb ? ` (${w.mem_used_gb}/${w.mem_total_gb} GB)` : ''}`),
+                _pctBar(w.disk_pct, 'Disk', 90),
+                w.containers_running != null && w.containers_running !== ''
+                    ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Containers: ${escapeHtml(String(w.containers_running))}</div>`
+                    : '',
+            ].filter(Boolean).join('');
             return `
                 <div class="worker-card ${isMaster ? 'is-master' : ''} ${stale ? 'offline' : ''}">
                     <h4>${escapeHtml(w.worker_id)} ${badge} ${statusPill}</h4>
@@ -1018,6 +1040,7 @@ async function loadWorkers() {
                         <div>Last heartbeat: ${formatTime(w.last_heartbeat)}</div>
                         ${masterExtras}
                     </div>
+                    ${metricsHtml}
                 </div>
             `;
         }).join('');
@@ -1071,6 +1094,19 @@ async function loadNightly(runId) {
 
     _nightlyAllResults = data.results || [];
     applyNightlyFilter();
+
+    // Load common-error summary if there are failures
+    const failCount = data.failed || 0;
+    const panel = document.getElementById('nightly-errors-panel');
+    if (panel) {
+        if (failCount > 0 && data.run_id) {
+            panel.hidden = false;
+            document.getElementById('nightly-errors-body').innerHTML = '<span style="color:var(--text-muted)">Analysing failure patterns…</span>';
+            loadNightlyErrorSummary(data.run_id);
+        } else {
+            panel.hidden = true;
+        }
+    }
 }
 
 function applyNightlyFilter() {
@@ -1109,6 +1145,28 @@ function applyNightlyFilter() {
             <td>${formatTime(job.finished_at)}</td>
         </tr>`;
     }).join('');
+}
+
+async function loadNightlyErrorSummary(runId) {
+    const body = document.getElementById('nightly-errors-body');
+    if (!body) return;
+    try {
+        const res = await fetch(`${API}/api/nightly/run/${encodeURIComponent(runId)}/summary`);
+        if (!res.ok) { body.innerHTML = '<span style="color:var(--text-muted)">Could not load error summary.</span>'; return; }
+        const data = await res.json();
+        const patterns = data.patterns || [];
+        if (!patterns.length) {
+            body.innerHTML = '<span style="color:var(--text-muted)">No common patterns found in failure logs.</span>';
+            return;
+        }
+        body.innerHTML = patterns.map(p => `
+            <div style="display:flex;gap:8px;align-items:baseline;margin-bottom:4px;border-left:3px solid var(--red);padding-left:8px">
+                <span class="status-fail" style="font-size:0.75rem;flex-shrink:0">${p.count}×</span>
+                <code style="font-size:0.75rem;color:var(--text-2);white-space:pre-wrap;word-break:break-all">${escapeHtml(p.line)}</code>
+            </div>`).join('');
+    } catch (e) {
+        body.innerHTML = `<span style="color:var(--text-muted)">Error: ${escapeHtml(String(e))}</span>`;
+    }
 }
 
 // ── Framework View ───────────────────────────────────────────────────────────
@@ -1221,7 +1279,7 @@ document.addEventListener('click', e => {
     const triggerFw = e.target.closest('#nightly-trigger-framework');
     if (triggerFw) {
         e.preventDefault();
-        const ref = prompt('Branch to test?', 'feature/k3d-default-kind-cnfs');
+        const ref = prompt('Branch to test?', 'main');
         if (ref) triggerFrameworkSuite('all', ref);
         return;
     }
@@ -1868,7 +1926,7 @@ document.getElementById('sync-audit-refresh').addEventListener('click', async ()
 
 // ── Fix with AI modal ────────────────────────────────────────────────────────
 
-let fixAiContext = null;  // { type: 'pr'|'issue', repo, number, branch?, ciJobId? }
+let fixAiContext = null;  // { type: 'pr'|'issue'|'ci', repo, ... }
 
 function openFixWithAI(type, data) {
     fixAiContext = { type, ...data };
@@ -1887,6 +1945,12 @@ function openFixWithAI(type, data) {
         } else {
             ciInfo.hidden = true;
         }
+    } else if (type === 'ci') {
+        const repoShort = data.repo.split('/').pop();
+        title.textContent = `Fix with AI — ${repoShort} [${data.arch}]`;
+        desc.textContent = `The AI agent will read the failed test log, determine whether the root cause is in this repo or the shared framework, then commit a surgical fix to a new branch and open a PR.`;
+        ciInfo.hidden = false;
+        ciInfo.textContent = `Job: ${data.jobId || '—'} · Branch: ${data.branch || 'main'} · Step: ${data.failedStep || '—'}`;
     } else {
         title.textContent = `Fix with AI — Issue #${data.number} · ${data.repo.split('/').pop()}`;
         desc.textContent = 'The AI agent will read this issue, understand the problem, and commit a fix to a new branch in the repo, then open a pull request.';
@@ -1917,6 +1981,16 @@ async function submitFixWithAI() {
                 repo: fixAiContext.repo,
                 pr_number: fixAiContext.number,
                 branch: fixAiContext.branch || 'main',
+                instructions,
+            };
+        } else if (fixAiContext.type === 'ci') {
+            endpoint = '/api/agent/fix-ci';
+            payload = {
+                failed_job_id: fixAiContext.jobId,
+                repo: fixAiContext.repo,
+                branch: fixAiContext.branch || 'main',
+                arch: fixAiContext.arch,
+                failed_step: fixAiContext.failedStep,
                 instructions,
             };
         } else {
@@ -1954,6 +2028,17 @@ async function submitFixWithAI() {
         const ctx = fixAiContext;
         closeFixWithAI();
         const repoShort = ctx.repo.split('/').pop();
+        // Update the originating CI table button if present
+        if (ctx.type === 'ci' && ctx._btn) {
+            ctx._btn.textContent = '✓ Queued';
+            ctx._btn.classList.add('btn-success');
+            ctx._btn.disabled = true;
+            const td = ctx._btn.closest('td');
+            if (td && data.job_id) {
+                td.insertAdjacentHTML('beforeend',
+                    ` <a href="#" class="log-link" data-job-id="${escapeHtml(data.job_id)}" data-agent="true" title="View log">log</a>`);
+            }
+        }
         activateTab('agentic');
         setTimeout(loadAgenticRunning, 1200);
         showToast(`Agent queued for ${repoShort} — visible in the Agentic tab`);
@@ -2869,43 +2954,9 @@ function renderAgentIssues(limit = 10) {
 document.getElementById('agent-issues-filter')?.addEventListener('input', () => renderAgentIssues());
 document.getElementById('agent-issues-refresh')?.addEventListener('click', () => { agentIssuesData = []; loadAgentIssues(); });
 
-async function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
+function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
     if (!isWriter()) { alert('Sign in as a writer to trigger agent runs.'); return; }
-    btnEl.disabled = true;
-    btnEl.textContent = 'Queuing…';
-    try {
-        const res = await fetch(`${API}/api/agent/fix-ci`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                failed_job_id: failedJobId,
-                repo, branch, arch,
-                failed_step: failedStep,
-            }),
-        });
-        if (!res.ok) {
-            const txt = await res.text();
-            btnEl.disabled = false;
-            btnEl.textContent = 'Fix with AI';
-            alert(`Error ${res.status}: ${txt}`);
-            return;
-        }
-        const data = await res.json();
-        btnEl.textContent = '✓ Queued';
-        btnEl.classList.add('btn-success');
-        // Show a link to the live log next to the button
-        const td = btnEl.closest('td');
-        if (td) {
-            td.insertAdjacentHTML('beforeend',
-                ` <a href="#" class="log-link" data-job-id="${escapeHtml(data.job_id)}" data-agent="true" title="View log">log</a>`);
-        }
-        // Refresh running agents section
-        setTimeout(loadAgenticRunning, 1500);
-    } catch (e) {
-        btnEl.disabled = false;
-        btnEl.textContent = 'Fix with AI';
-        alert(`Error: ${e}`);
-    }
+    openFixWithAI('ci', { jobId: failedJobId, repo, branch, arch, failedStep, _btn: btnEl });
 }
 
 // ── Init ────────────────────────────────────────────────────────────────────

@@ -819,6 +819,24 @@ async def api_terminate_job(job_id: str, request: Request):
         )
         raise HTTPException(404, detail)
     requested_by = role["user"]
+
+    # Revoke provisioned DT tokens for this session (best-effort, non-blocking)
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
+        from provisioning import DTTokenProvisioner
+        try:
+            token_ids = json.loads(meta["dt_token_ids"])
+            provisioner = DTTokenProvisioner(
+                tenant_url=meta["dt_tenant_url"],
+                api_token=meta.get("dt_auth_token", ""),
+                oauth_client_id=meta.get("dt_oauth_client_id", ""),
+                oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+            )
+            asyncio.create_task(provisioner.revoke_tokens(token_ids))
+            log.info("Revoking %d DT token(s) for session %s", len(token_ids), job_id)
+        except Exception as exc:
+            log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+
     await pool.publish("ops:terminate", job_id)
     log.info("Termination requested for %s by %s", job_id, requested_by)
     return {"status": "termination_requested", "job_id": job_id, "requested_by": requested_by}
@@ -2668,15 +2686,26 @@ class ArenaProvisionRequest(BaseModel):
     trainingId: str
     userId: str
     tenantId: str = ""
+    # DT tenant for this session — if omitted, falls back to worker static creds.
+    tenantUrl: str = ""
+    # Auth for token provisioning: OAuth2 (preferred, app-installed flow) OR existing API token.
+    oauthClientId: str = ""
+    oauthClientSecret: str = ""
+    apiToken: str = ""          # existing token with apiTokens.write scope
 
 
 @app.post("/api/arena/provision")
 async def api_arena_provision(body: ArenaProvisionRequest):
     """Provision a training environment — queues a real daemon job on the amd64 worker.
 
-    Returns: { jobId, wsUrl, expiresAt, status: "provisioning" }
+    If tenantUrl + auth credentials are provided, auto-creates scoped DT API tokens
+    for this session (named enbl-{repo}-{user}-{suffix}, expiry = session TTL).
+    Token IDs are stored in Redis so they can be revoked on session termination.
+
+    Returns: { jobId, wsUrl, expiresAt, status: "provisioning", tokenProvisioned: bool }
     """
     import uuid as _uuid
+    from provisioning import DTTokenProvisioner, load_token_specs
 
     cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
     catalog = json.loads(cached) if cached else await _fetch_arena_catalog()
@@ -2684,12 +2713,43 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     if training is None:
         raise HTTPException(status_code=404, detail=f"Training '{body.trainingId}' not found")
 
-    # org/repo format for the executor (e.g. "dynatrace-wwse/enablement-live-debugger-bug-hunting")
     repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
-    repo_name = training["repoUrl"].split("/")[-1]
     job_id = f"enablement-{_uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
-    expires_at = (now.replace(microsecond=0) + timedelta(hours=4)).isoformat()
+    session_hours = 4
+    expires_at = (now.replace(microsecond=0) + timedelta(hours=session_hours)).isoformat()
+
+    # --- Token provisioning ---
+    dt_env: dict[str, str] = {}
+    provisioned_token_ids: list[str] = []
+    token_provisioned = False
+
+    tenant_url = body.tenantUrl.rstrip("/") if body.tenantUrl else ""
+    if tenant_url and (body.apiToken or (body.oauthClientId and body.oauthClientSecret)):
+        try:
+            provisioner = DTTokenProvisioner(
+                tenant_url=tenant_url,
+                api_token=body.apiToken,
+                oauth_client_id=body.oauthClientId,
+                oauth_client_secret=body.oauthClientSecret,
+            )
+            specs = await load_token_specs(repo_nwo, ref=training["branch"])
+            result = await provisioner.create_tokens(
+                repo=repo_nwo,
+                user_id=body.userId,
+                specs=specs,
+                expires_in_hours=session_hours,
+            )
+            dt_env = result.env
+            provisioned_token_ids = result.token_ids
+            token_provisioned = True
+        except Exception as exc:
+            # Non-fatal: log and fall back to worker static creds
+            import logging as _log
+            _log.getLogger("ops-dashboard").warning(
+                "Token provisioning failed for %s / %s: %s — falling back to worker creds",
+                repo_nwo, body.userId, exc,
+            )
 
     job = {
         "job_id":        job_id,
@@ -2702,8 +2762,10 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "nightly_run_id": f"enablement-{body.trainingId}",
         "requested_by":  body.userId,
     }
-    # Pre-write so session-status can resolve it before the worker picks it up.
-    await pool.hset(f"job:running:{job_id}", mapping={
+    if dt_env:
+        job["dt_env"] = dt_env
+
+    redis_meta = {
         "job_id":       job_id,
         "repo":         repo_nwo,
         "branch":       training["branch"],
@@ -2712,18 +2774,33 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "worker_id":    "queued",
         "type":         "daemon",
         "arena_user":   body.userId,
-        "arena_tenant": body.tenantId,
+        "arena_tenant": body.tenantId or tenant_url,
         "training_id":  body.trainingId,
         "expires_at":   expires_at,
-    })
-    await pool.expire(f"job:running:{job_id}", int(timedelta(hours=4).total_seconds()))
+        "token_provisioned": "1" if token_provisioned else "0",
+    }
+    if provisioned_token_ids:
+        redis_meta["dt_token_ids"] = json.dumps(provisioned_token_ids)
+    if tenant_url:
+        redis_meta["dt_tenant_url"] = tenant_url
+    # Store auth so terminate can revoke tokens. Token has apiTokens.read+write only.
+    if token_provisioned:
+        if body.apiToken:
+            redis_meta["dt_auth_token"] = body.apiToken
+        elif body.oauthClientId:
+            redis_meta["dt_oauth_client_id"] = body.oauthClientId
+            redis_meta["dt_oauth_client_secret"] = body.oauthClientSecret
+
+    await pool.hset(f"job:running:{job_id}", mapping=redis_meta)
+    await pool.expire(f"job:running:{job_id}", int(timedelta(hours=session_hours).total_seconds()))
     await pool.rpush("queue:test:amd64", json.dumps(job))
 
     return {
-        "jobId":     job_id,
-        "wsUrl":     f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
-        "expiresAt": expires_at,
-        "status":    "provisioning",
+        "jobId":            job_id,
+        "wsUrl":            f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
+        "expiresAt":        expires_at,
+        "status":           "provisioning",
+        "tokenProvisioned": token_provisioned,
     }
 
 
@@ -3265,14 +3342,14 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.PIPE,
         )
-        stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=30)
+        stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
         return {
             "stdout": stdout_b.decode("utf-8", errors="replace"),
             "stderr": stderr_b.decode("utf-8", errors="replace"),
             "exitCode": proc.returncode,
         }
     except _asyncio.TimeoutError:
-        return {"stdout": "", "stderr": "Command timed out after 30 seconds", "exitCode": -1}
+        return {"stdout": "", "stderr": "Command timed out after 120 seconds", "exitCode": -1}
     except Exception as exc:
         return {"stdout": "", "stderr": str(exc), "exitCode": -1}
 
