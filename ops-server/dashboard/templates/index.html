@@ -601,6 +601,11 @@
                     <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
                 </tbody>
             </table>
+            <!-- Nightly common-error summary (shown only when failures exist) -->
+            <div id="nightly-errors-panel" hidden style="margin-top:16px">
+                <h3 style="margin:0 0 8px;font-size:0.9rem;font-weight:600">Common failure patterns</h3>
+                <div id="nightly-errors-body" style="font-size:0.8rem"></div>
+            </div>
         </section>
 
         <!-- Framework Tests View -->
@@ -611,7 +616,7 @@
                     <p style="margin:2px 0 0;font-size:0.8rem;color:var(--text-muted)">Test the framework itself: unit tests, cluster engines, app exposure, Dynatrace components</p>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
-                    <input type="text" id="framework-ref" value="feature/k3d-default-kind-cnfs" style="width:240px" placeholder="Branch or ref">
+                    <input type="text" id="framework-ref" value="main" style="width:240px" placeholder="Branch or ref">
                     <button class="btn btn-small" id="framework-run-all" data-action>▶ Run All</button>
                 </div>
             </div>

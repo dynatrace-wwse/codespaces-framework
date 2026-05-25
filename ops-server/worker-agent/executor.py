@@ -382,7 +382,9 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
     log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
     await _git_clone(head_repo, ref, repo_dir)
     await _make_world_writable(repo_dir)
-    _write_env_file(repo_dir / ".devcontainer" / ".env")
+    # Per-session provisioned tokens override the worker-level static creds.
+    dt_env_overrides: dict[str, str] | None = job.get("dt_env") or None
+    _write_env_file(repo_dir / ".devcontainer" / ".env", overrides=dt_env_overrides)
 
     start_time = time.time()
     workspace = f"/workspaces/{repo_name}"
@@ -660,14 +662,21 @@ def _redact(token: str) -> str:
     return token[:14] + "***REDACTED***"
 
 
-def _write_env_file(env_path: Path):
-    """Mirror what the GHA workflow writes to .devcontainer/.env."""
+def _write_env_file(env_path: Path, overrides: dict[str, str] | None = None):
+    """Write .devcontainer/.env with DT credentials.
+
+    Uses per-session overrides (provisioned tokens) when provided, falls back
+    to the worker-level static env vars (used by integration tests).
+    """
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text(
-        f"DT_ENVIRONMENT={DT_ENVIRONMENT}\n"
-        f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}\n"
-        f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}\n"
-    )
+    resolved = {
+        "DT_ENVIRONMENT":   DT_ENVIRONMENT,
+        "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
+        "DT_INGEST_TOKEN":  DT_INGEST_TOKEN,
+    }
+    if overrides:
+        resolved.update(overrides)
+    env_path.write_text("".join(f"{k}={v}\n" for k, v in resolved.items() if v))
 
 
 async def _make_world_writable(repo_dir: Path):

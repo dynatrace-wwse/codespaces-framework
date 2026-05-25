@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+import shutil
 import signal
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -177,16 +179,66 @@ class WorkerAgent:
             port_pool_key, APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT - 1,
         )
 
+    @staticmethod
+    def _collect_metrics() -> dict:
+        """Collect host CPU, memory, disk, and container metrics."""
+        metrics = {}
+        try:
+            import psutil as _ps
+            metrics["cpu_pct"] = str(round(_ps.cpu_percent(interval=None), 1))
+            vm = _ps.virtual_memory()
+            metrics["mem_pct"] = str(round(vm.percent, 1))
+            metrics["mem_used_gb"] = str(round(vm.used / 1024 ** 3, 2))
+            metrics["mem_total_gb"] = str(round(vm.total / 1024 ** 3, 2))
+        except ImportError:
+            # psutil not yet installed — read procfs directly
+            try:
+                with open("/proc/loadavg") as f:
+                    load1 = float(f.read().split()[0])
+                cpu_count = len([l for l in open("/proc/cpuinfo") if l.startswith("processor")])
+                metrics["cpu_pct"] = str(round(min(load1 / max(cpu_count, 1) * 100, 100), 1))
+            except Exception:
+                pass
+            try:
+                info = {}
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        k, v = line.split(":")
+                        info[k.strip()] = int(v.split()[0])
+                total = info.get("MemTotal", 0)
+                avail = info.get("MemAvailable", 0)
+                if total:
+                    metrics["mem_pct"] = str(round((total - avail) / total * 100, 1))
+                    metrics["mem_total_gb"] = str(round(total / 1024 ** 2, 2))
+                    metrics["mem_used_gb"] = str(round((total - avail) / 1024 ** 2, 2))
+            except Exception:
+                pass
+        try:
+            du = shutil.disk_usage("/")
+            metrics["disk_pct"] = str(round(du.used / du.total * 100, 1))
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(
+                ["docker", "ps", "-q"], timeout=3, stderr=subprocess.DEVNULL
+            )
+            metrics["containers_running"] = str(len([l for l in out.splitlines() if l]))
+        except Exception:
+            pass
+        return metrics
+
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to master."""
         worker_key = f"worker:{WORKER_ID}"
         port_pool_key = f"worker:{WORKER_ID}:app_ports_free"
         while self._running:
             try:
+                metrics = await asyncio.get_event_loop().run_in_executor(None, self._collect_metrics)
                 await self.pool.hset(worker_key, mapping={
                     "active_jobs": str(len(self.active_jobs)),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "status": "ready" if len(self.active_jobs) < WORKER_CAPACITY else "busy",
+                    **metrics,
                 })
                 await self.pool.expire(worker_key, REGISTRATION_TTL)
                 await self.pool.expire(port_pool_key, REGISTRATION_TTL)

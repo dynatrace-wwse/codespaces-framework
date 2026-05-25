@@ -168,10 +168,59 @@ class WorkerManager:
         except Exception as e:
             log.warning("Failed to free master app proxy port %s: %s", port, e)
 
+    @staticmethod
+    def _collect_metrics() -> dict:
+        """Collect host CPU, memory, disk, and container metrics."""
+        import shutil as _shutil
+        metrics = {}
+        try:
+            import psutil as _ps
+            metrics["cpu_pct"] = str(round(_ps.cpu_percent(interval=None), 1))
+            vm = _ps.virtual_memory()
+            metrics["mem_pct"] = str(round(vm.percent, 1))
+            metrics["mem_used_gb"] = str(round(vm.used / 1024 ** 3, 2))
+            metrics["mem_total_gb"] = str(round(vm.total / 1024 ** 3, 2))
+        except ImportError:
+            try:
+                with open("/proc/loadavg") as f:
+                    load1 = float(f.read().split()[0])
+                cpu_count = len([l for l in open("/proc/cpuinfo") if l.startswith("processor")])
+                metrics["cpu_pct"] = str(round(min(load1 / max(cpu_count, 1) * 100, 100), 1))
+            except Exception:
+                pass
+            try:
+                info = {}
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        k, v = line.split(":")
+                        info[k.strip()] = int(v.split()[0])
+                total = info.get("MemTotal", 0)
+                avail = info.get("MemAvailable", 0)
+                if total:
+                    metrics["mem_pct"] = str(round((total - avail) / total * 100, 1))
+                    metrics["mem_total_gb"] = str(round(total / 1024 ** 2, 2))
+                    metrics["mem_used_gb"] = str(round((total - avail) / 1024 ** 2, 2))
+            except Exception:
+                pass
+        try:
+            du = _shutil.disk_usage("/")
+            metrics["disk_pct"] = str(round(du.used / du.total * 100, 1))
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(
+                ["docker", "ps", "-q"], timeout=3, stderr=subprocess.DEVNULL
+            )
+            metrics["containers_running"] = str(len([l for l in out.splitlines() if l]))
+        except Exception:
+            pass
+        return metrics
+
     async def _master_heartbeat_loop(self):
         """Refresh the master's worker record every 15s so it never expires."""
         while not self._shutdown:
             try:
+                metrics = await asyncio.get_event_loop().run_in_executor(None, self._collect_metrics)
                 await self.pool.hset("worker:master-arm64", mapping={
                     "active_jobs": str(len(self.active_jobs)),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
@@ -179,6 +228,7 @@ class WorkerManager:
                         "ready" if len(self.active_jobs) < MAX_PARALLEL_WORKERS
                         else "busy"
                     ),
+                    **metrics,
                 })
                 await self.pool.expire("worker:master-arm64", 60)
                 await self.pool.expire("worker:master:app_ports_free", 60)

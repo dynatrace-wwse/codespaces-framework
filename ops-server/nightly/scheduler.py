@@ -81,6 +81,7 @@ async def run_nightly(
     stagger_minutes: int = 5,
     parallel: int = 6,
     dry_run: bool = False,
+    include_framework: bool = False,
 ):
     """Execute the nightly test schedule."""
     repos = load_testable_repos()
@@ -143,6 +144,45 @@ async def run_nightly(
             log.info("Queued: %s → queue:test:%s (order %d)", entry["name"], a, entry["order"])
 
     log.info("All %d repos queued for nightly run %s", len(schedule), run_id)
+
+    if include_framework:
+        log.info("Queueing framework tests (bats on arm64, k3d-basic + k3d-apps on amd64)…")
+        fw_timestamp = datetime.now(timezone.utc).isoformat()
+        fw_nightly_id = f"framework-nightly-{run_id}"
+        # bats unit tests — run on ARM master (no Sysbox needed)
+        await pool.rpush("queue:test:arm64", json.dumps({
+            "type": "framework-test",
+            "suite": "bats",
+            "test_script": "bats .devcontainer/test/unit/ --tap",
+            "framework_suite": "bats",
+            "repo": "dynatrace-wwse/codespaces-framework",
+            "arch": "arm64",
+            "queue": "test:arm64",
+            "ref": "main",
+            "timestamp": fw_timestamp,
+            "trigger": "nightly",
+            "nightly_run_id": fw_nightly_id,
+        }))
+        # k3d-basic and k3d-apps — run on AMD64 workers (need Sysbox)
+        for suite_id, script in [
+            ("k3d-basic", "bash .devcontainer/test/integration_k3d_basic.sh"),
+            ("k3d-apps",  "bash .devcontainer/test/integration_k3d_apps.sh"),
+        ]:
+            await pool.rpush("queue:test:amd64", json.dumps({
+                "type": "framework-test",
+                "suite": suite_id,
+                "test_script": script,
+                "framework_suite": suite_id,
+                "repo": "dynatrace-wwse/codespaces-framework",
+                "arch": "amd64",
+                "queue": "test:amd64",
+                "ref": "main",
+                "timestamp": fw_timestamp,
+                "trigger": "nightly",
+                "nightly_run_id": fw_nightly_id,
+            }))
+        log.info("Framework test jobs queued under %s", fw_nightly_id)
+
     await pool.aclose()
 
 
@@ -186,6 +226,7 @@ def main():
     n.add_argument("--stagger", type=int, default=5, help="Minutes between test starts (default: 5)")
     n.add_argument("--parallel", type=int, default=6, help="Max parallel workers (default: 6)")
     n.add_argument("--dry-run", action="store_true", help="Print schedule without running")
+    n.add_argument("--include-framework", action="store_true", help="Also queue framework tests (bats, k3d-basic, k3d-apps)")
 
     # single
     s = sub.add_parser("single", help="Run a single repo test")
@@ -200,7 +241,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "nightly":
-        asyncio.run(run_nightly(args.stagger, args.parallel, args.dry_run))
+        asyncio.run(run_nightly(args.stagger, args.parallel, args.dry_run, args.include_framework))
     elif args.command == "single":
         asyncio.run(run_single(args.repo))
     elif args.command == "schedule":
