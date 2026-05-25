@@ -412,6 +412,7 @@ async def execute_daemon(
     log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
     await _git_clone(head_repo, ref, repo_dir)
     await _make_world_writable(repo_dir)
+    # Per-session provisioned tokens override the worker-level static creds.
     dt_env_overrides: dict[str, str] | None = job.get("dt_env") or None
     _write_env_file(
         repo_dir / ".devcontainer" / ".env",
@@ -721,7 +722,11 @@ def _write_env_file(
     overrides: dict[str, str] | None = None,
     orbital_job_id: str = "",
 ):
-    """Write .devcontainer/.env with DT credentials."""
+    """Write .devcontainer/.env with DT credentials.
+
+    Uses per-session overrides (provisioned tokens) when provided, falls back
+    to the worker-level static env vars (used by integration tests).
+    """
     env_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = {
         "DT_ENVIRONMENT":    DT_ENVIRONMENT,
