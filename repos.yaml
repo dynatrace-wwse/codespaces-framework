@@ -164,6 +164,7 @@ repos:
     maintainer: "@shinojosa, @popecruzdt"
     description: "Workshop on destination automation with Dynatrace Workflows. Build end-to-end automated pipelines for alerting, ticketing, and remediation."
     sync_managed: false
+    ci: false
     tags: [workflows, ansible]
     title: "Destination Automation Workshop"
     primary_tag: workflows
