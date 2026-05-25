@@ -1,0 +1,29 @@
+# Default Dynatrace API token definitions for Enablement Framework training sessions.
+#
+# Used by the Arena provisioner to auto-create scoped, time-limited tokens in the
+# attendee's DT tenant before post-create.sh runs. No manual token copy-paste needed.
+#
+# Repos can override with their own .devcontainer/yaml/dt-tokens.yaml.
+# Only specify the tokens your repo actually needs — the provisioner creates exactly these.
+#
+# Token naming: enbl-{repo}-{user}-{name_suffix}  (auto-prefixed, max 100 chars)
+# Token expiry: matches training session TTL (default 4h)
+
+tokens:
+  - name_suffix: operator
+    env_var: DT_OPERATOR_TOKEN
+    scopes:
+      - activeGateTokenManagement.write
+      - entities.read
+      - settings.read
+      - settings.write
+      - DataExport
+      - InstallerDownload
+
+  - name_suffix: ingest
+    env_var: DT_INGEST_TOKEN
+    scopes:
+      - metrics.ingest
+      - logs.ingest
+      - events.ingest
+      - openTelemetryTrace.ingest
