@@ -46,7 +46,7 @@ DT_INGEST_TOKEN = os.environ.get("DT_INGEST_TOKEN", "")
 # Timeouts
 TEST_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "900"))  # 15 min
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL", "30"))  # seconds
-REGISTRATION_TTL = int(os.environ.get("REGISTRATION_TTL", "120"))  # seconds
+REGISTRATION_TTL = int(os.environ.get("REGISTRATION_TTL", "300"))  # seconds — must exceed pool init time (~90s)
 
 # App proxy port pool — each Sysbox container publishes one port in this range
 # so the ops-server dashboard can reverse-proxy to the k3d LB without an SSH tunnel.

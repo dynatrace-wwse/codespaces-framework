@@ -478,10 +478,18 @@ class WorkerAgent:
         """Send periodic heartbeats to master."""
         worker_key = f"worker:{WORKER_ID}"
         port_pool_key = f"worker:{WORKER_ID}:app_ports_free"
+        # Static fields written every heartbeat so they survive key expiry + recreation.
+        static_fields = {
+            "arch": WORKER_ARCH,
+            "capacity": str(WORKER_CAPACITY),
+            "host": WORKER_HOST,
+            "ssh_host": WORKER_SSH_HOST or WORKER_HOST,
+        }
         while self._running:
             try:
                 metrics = await asyncio.get_event_loop().run_in_executor(None, self._collect_metrics)
                 await self.pool.hset(worker_key, mapping={
+                    **static_fields,
                     "active_jobs": str(len(self.active_jobs)),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "status": "ready" if len(self.active_jobs) < WORKER_CAPACITY else "busy",
