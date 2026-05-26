@@ -1845,17 +1845,13 @@ installIngressController() {
 
 getAppURL() {
   # Returns the user-facing URL for an app based on environment type.
-  # Usage: getAppURL <app-name> [port]
+  # Usage: getAppURL <app-name>
+  # Codespaces: port 80 is forwarded; catch-all ingress rule routes the request.
   local app_name="$1"
-  local cs_port="$2"
   local detected_ip
 
   if [[ "$CODESPACES" == true ]]; then
-    if [[ -n "$cs_port" ]]; then
-      echo "https://${CODESPACE_NAME}-${cs_port}.app.github.dev"
-    else
-      echo "https://${CODESPACE_NAME}-80.app.github.dev"
-    fi
+    echo "https://${CODESPACE_NAME}-80.app.github.dev"
   else
     detected_ip=$(detectIP)
     echo "http://${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
@@ -1934,16 +1930,19 @@ spec:
             name: ${service_name}
             port:
               number: ${service_port}
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ${service_name}
+            port:
+              number: ${service_port}
 INGRESSEOF
 
-  # For Codespaces: set up port forwarding for this app
+  # cs_port stays empty — Codespaces uses port 80 via the catch-all ingress rule
   local cs_port=""
-  if [[ "$CODESPACES" == true ]]; then
-    cs_port=$(getNextCodespacesPort)
-    printInfo "Setting up Codespaces port forward on port $cs_port for $app_name"
-    # Use kubectl port-forward in background
-    kubectl port-forward -n "$namespace" "svc/$service_name" "${cs_port}:${service_port}" &>/dev/null &
-  fi
 
   # Write to app registry
   mkdir -p "$(dirname "$APP_REGISTRY")"
@@ -2022,14 +2021,13 @@ ${astro_paths}
     http:
       paths:
 ${astro_paths}
+  - http:
+      paths:
+${astro_paths}
 ASTROINGRESSEOF
 
-  # Register in app registry for greeting/listApps
+  # cs_port stays empty — Codespaces uses port 80 via catch-all ingress rule
   local cs_port=""
-  if [[ "$CODESPACES" == true ]]; then
-    cs_port=$(getNextCodespacesPort)
-    kubectl port-forward -n "$namespace" "svc/frontend-proxy" "${cs_port}:8080" &>/dev/null &
-  fi
   mkdir -p "$(dirname "$APP_REGISTRY")"
   # Remove old entry if exists
   grep -v "^astroshop|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
@@ -2049,15 +2047,7 @@ unregisterApp() {
 
   kubectl delete ingress "${app_name}-ingress" -n "$namespace" 2>/dev/null
 
-  # Kill any port-forward for this app
   if [[ -f "$APP_REGISTRY" ]]; then
-    local cs_port
-    cs_port=$(grep "^${app_name}|" "$APP_REGISTRY" | cut -d'|' -f6)
-    if [[ -n "$cs_port" ]]; then
-      # Kill the port-forward process
-      pkill -f "port-forward.*${cs_port}:" 2>/dev/null || true
-    fi
-    # Remove from registry
     grep -v "^${app_name}|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null
     mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null
   fi
