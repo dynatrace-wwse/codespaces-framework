@@ -117,6 +117,13 @@ async def execute_integration_test(
     if slot:
         # Clone into the slot's persistent workspace directory.
         repo_dir = slot.workspace / repo_name
+        # Clean via docker exec so container-owned files (uid 1000) are removable.
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", slot.sb_name, "sh", "-c",
+            f"rm -rf /workspaces/{repo_name}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
         if repo_dir.exists():
             shutil.rmtree(repo_dir, ignore_errors=True)
         repo_dir.mkdir(parents=True, exist_ok=True)
@@ -384,6 +391,13 @@ async def execute_daemon(
 
     if slot:
         repo_dir = slot.workspace / repo_name
+        # Clean via docker exec so container-owned files (uid 1000) are removable.
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", slot.sb_name, "sh", "-c",
+            f"rm -rf /workspaces/{repo_name}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
         if repo_dir.exists():
             shutil.rmtree(repo_dir, ignore_errors=True)
         repo_dir.mkdir(parents=True, exist_ok=True)
