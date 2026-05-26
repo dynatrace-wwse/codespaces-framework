@@ -3326,21 +3326,19 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
     repo_name = repo.split("/")[-1] if "/" in repo else repo
     container = meta.get("sb_name") or f"sb-{job_id[-32:]}"
 
-    # Build the exec command (same pattern as PTY bridge, without -t for non-interactive).
-    # dt container uses zsh (matches PTY bridge); outer sb-* container uses bash (Ubuntu).
-    inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
-                              "zsh", "-c", body.command])
-    outer_cmd = ["docker", "exec", container, "bash", "-c", inner_cmd]
+    # Match PTY bridge pattern: no outer shell wrapper — Sysbox container has docker but not bash.
+    # PTY: docker exec sb-{id} docker exec -it -w /workspaces/{repo} dt zsh
+    cmd_args = ["docker", "exec", container,
+                "docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
+                "zsh", "-c", body.command]
 
     worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
     ssh_host = worker_rec.get("ssh_host", "")
     if ssh_host:
-        # SSH concatenates list args with spaces, breaking `sh -c {inner_cmd}`.
-        # Pass the entire remote command as a single shlex-quoted string instead.
         full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                    ssh_host, _shlex.join(outer_cmd)]
+                    ssh_host, _shlex.join(cmd_args)]
     else:
-        full_cmd = outer_cmd
+        full_cmd = cmd_args
 
     try:
         proc = await _asyncio.create_subprocess_exec(
