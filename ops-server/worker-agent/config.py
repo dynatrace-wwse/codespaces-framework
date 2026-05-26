@@ -35,6 +35,9 @@ REPOS_DIR = Path.home() / "repos"
 LOGS_DIR = Path.home() / "logs"
 WORKDIR = Path.home() / "workdir"
 
+# Pre-warmed Sysbox slot directories live here (one subdir per slot index).
+SLOT_BASE_DIR = Path(os.environ.get("SLOT_BASE_DIR", str(WORKDIR / "slots")))
+
 # Dynatrace (for integration tests)
 DT_ENVIRONMENT = os.environ.get("DT_ENVIRONMENT", "")
 DT_OPERATOR_TOKEN = os.environ.get("DT_OPERATOR_TOKEN", "")

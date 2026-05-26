@@ -1,4 +1,23 @@
-"""Remote worker agent — pulls jobs from master Redis and executes integration tests."""
+"""Remote worker agent — pulls jobs from master Redis and executes integration tests.
+
+## Warm Sysbox Pool
+
+At startup the agent pre-warms ``WORKER_CAPACITY`` Sysbox containers in
+parallel. Each slot has its inner dockerd running and TEST_IMAGE already
+loaded, eliminating the 60-120s startup overhead that previously occurred
+at the start of every integration test or Arena training session.
+
+Job flow with warm pool:
+  1. Slot acquired from queue (~0s — blocks only if all capacity in use)
+  2. git clone into slot workspace (~5-10s)
+  3. docker exec sb → docker run dt (~3s)
+  4. wait for vscode/docker group (~5s)
+  5. postCreate + postStart + test
+
+Between jobs the slot is cleaned (rm dt, volume/network prune inside the
+Sysbox) and returned to the queue. The outer Sysbox and its cached image
+stay alive. If a slot becomes unhealthy it is automatically re-initialized.
+"""
 
 import asyncio
 import json
@@ -8,6 +27,7 @@ import signal
 import subprocess
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import redis.asyncio as redis
 
@@ -23,10 +43,18 @@ from .config import (
     REGISTRATION_TTL,
     APP_PROXY_PORT_START,
     APP_PROXY_PORT_COUNT,
+    K3D_LB_HTTP_PORT,
+    SLOT_BASE_DIR,
+    TEST_IMAGE,
 )
-from .executor import execute_integration_test, execute_daemon
+from .executor import (
+    execute_integration_test,
+    execute_daemon,
+    SysboxSlot,
+    _wait_for_inner_docker,
+    _pipe_image_to_sysbox,
+)
 
-# Keep in sync with workers/manager.py — see ops-server/design/2026-05-07-triage-queue.md
 LOCK_TTL_SECONDS = 7200
 
 
@@ -37,12 +65,219 @@ def _branch_of(job: dict) -> str:
 def _triple_of(job: dict, default_arch: str) -> str:
     return f"{job['repo']}:{_branch_of(job)}:{job.get('arch', default_arch)}"
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("ops-worker-agent")
+
+
+class SysboxPool:
+    """Pool of pre-warmed Sysbox containers, one per worker capacity slot.
+
+    Each slot keeps a ``docker:25-dind`` container running with its inner
+    dockerd ready and TEST_IMAGE pre-loaded. Jobs acquire a slot, use it,
+    then release it. Between uses the inner ``dt`` container and its volumes/
+    networks are pruned; the outer Sysbox stays alive.
+
+    Port assignment: slot ``i`` always publishes ``APP_PROXY_PORT_START + i``
+    on the host. This is fixed at Sysbox run time, so no dynamic allocation
+    is needed.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        short_id = WORKER_ID[-6:]
+        self.slots: list[SysboxSlot] = [
+            SysboxSlot(
+                index=i,
+                sb_name=f"sb-slot-{short_id}-{i}",
+                workspace=SLOT_BASE_DIR / str(i) / "workspace",
+                port=APP_PROXY_PORT_START + i,
+            )
+            for i in range(capacity)
+        ]
+        self._queue: asyncio.Queue[SysboxSlot] = asyncio.Queue()
+
+    async def init(self) -> int:
+        """Start all slots concurrently. Returns the number of ready slots."""
+        results = await asyncio.gather(
+            *(self._init_slot(s) for s in self.slots),
+            return_exceptions=True,
+        )
+        ready = sum(1 for r in results if r is True)
+        log.info("SysboxPool: %d/%d slots ready", ready, self._capacity)
+        return ready
+
+    async def _init_slot(self, slot: SysboxSlot) -> bool:
+        """(Re)initialize one slot: start outer Sysbox, wait for inner dockerd, load image."""
+        # Clean up any orphan container from a previous agent run.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-fv", slot.sb_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception:
+            pass
+
+        # Prepare workspace directory (persistent across jobs; cleared between uses).
+        try:
+            if slot.workspace.exists():
+                shutil.rmtree(slot.workspace, ignore_errors=True)
+            slot.workspace.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            log.error("Slot %d: workspace mkdir failed: %s", slot.index, exc)
+            return False
+
+        # Start outer Sysbox with the workspace directory mounted at /workspaces.
+        # The port is fixed per slot so no dynamic allocation is needed.
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "run", "-d",
+            "--runtime=sysbox-runc",
+            "--name", slot.sb_name,
+            "-p", f"{slot.port}:{K3D_LB_HTTP_PORT}",
+            "-v", f"{slot.workspace}:/workspaces",
+            "docker:25-dind",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            log.error(
+                "Slot %d: sysbox start failed: %s",
+                slot.index, err.decode(errors="replace")[:300],
+            )
+            return False
+
+        # Wait for inner dockerd (Sysbox takes ~20-40s to initialize its inner namespaces).
+        try:
+            await _wait_for_inner_docker(slot.sb_name, timeout_s=90)
+        except RuntimeError as exc:
+            log.error("Slot %d: %s", slot.index, exc)
+            await asyncio.create_subprocess_exec(
+                "docker", "rm", "-fv", slot.sb_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            return False
+
+        # Ensure TEST_IMAGE is present on the outer daemon, then load it into the slot.
+        outer_inspect = await asyncio.create_subprocess_exec(
+            "docker", "image", "inspect", TEST_IMAGE,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        if await outer_inspect.wait() != 0:
+            log.info("Slot %d: pulling %s to outer daemon...", slot.index, TEST_IMAGE)
+            pull = await asyncio.create_subprocess_exec(
+                "docker", "pull", TEST_IMAGE,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await pull.wait()
+
+        try:
+            await _pipe_image_to_sysbox(slot.sb_name)
+        except Exception as exc:
+            log.error("Slot %d: image load failed: %s", slot.index, exc)
+            await asyncio.create_subprocess_exec(
+                "docker", "rm", "-fv", slot.sb_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            return False
+
+        # Record current image digest for staleness detection on release.
+        slot.image_digest = await _image_digest(TEST_IMAGE)
+
+        await self._queue.put(slot)
+        log.info(
+            "Slot %d (%s) ready — port %d, image %.12s",
+            slot.index, slot.sb_name, slot.port, slot.image_digest,
+        )
+        return True
+
+    async def acquire(self) -> SysboxSlot:
+        """Block until a pre-warmed slot is available and return it."""
+        return await self._queue.get()
+
+    async def release(self, slot: SysboxSlot, healthy: bool = True) -> None:
+        """Clean slot state and return it to the pool.
+
+        If ``healthy`` is False (executor raised an exception), the Sysbox may
+        be in an unknown state — the slot is re-initialized from scratch.
+        Otherwise only the inner docker state is wiped; the outer Sysbox and
+        its cached TEST_IMAGE remain.
+        """
+        if not healthy:
+            log.warning("Slot %d unhealthy — re-initializing", slot.index)
+            ok = await self._init_slot(slot)
+            if not ok:
+                log.error(
+                    "Slot %d re-init failed — slot removed from pool until next agent restart",
+                    slot.index,
+                )
+            # _init_slot puts slot back into the queue on success.
+            return
+
+        # Wipe inner docker state without touching the outer Sysbox or its image cache.
+        for cmd in [
+            ["docker", "exec", slot.sb_name, "docker", "rm", "-fv", "dt"],
+            ["docker", "exec", slot.sb_name, "docker", "volume", "prune", "-f"],
+            ["docker", "exec", slot.sb_name, "docker", "network", "prune", "-f"],
+        ]:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=30)
+            except Exception:
+                pass
+
+        # Reload TEST_IMAGE into the slot if it was updated on the outer daemon.
+        current_digest = await _image_digest(TEST_IMAGE)
+        if current_digest and current_digest != slot.image_digest:
+            log.info("Slot %d: TEST_IMAGE updated — reloading into inner docker", slot.index)
+            try:
+                await _pipe_image_to_sysbox(slot.sb_name)
+                slot.image_digest = current_digest
+            except Exception as exc:
+                log.warning("Slot %d: image reload failed: %s — slot marked unhealthy", slot.index, exc)
+                await self.release(slot, healthy=False)
+                return
+
+        await self._queue.put(slot)
+
+    async def shutdown(self) -> None:
+        """Kill all slot containers (called on agent shutdown)."""
+        await asyncio.gather(
+            *(self._kill_slot(s) for s in self.slots),
+            return_exceptions=True,
+        )
+        log.info("SysboxPool: all slot containers removed")
+
+    async def _kill_slot(self, slot: SysboxSlot) -> None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-fv", slot.sb_name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception:
+            pass
+
+
+async def _image_digest(image: str) -> str:
+    """Return the Id digest of a local Docker image, or empty string on error."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "image", "inspect", "--format={{index .Id}}", image,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return out.decode().strip() if proc.returncode == 0 else ""
+    except Exception:
+        return ""
 
 
 class WorkerAgent:
@@ -53,20 +288,19 @@ class WorkerAgent:
         self.active_jobs: dict[str, dict] = {}
         self.semaphore = asyncio.Semaphore(WORKER_CAPACITY)
         self._running = True
-        # Job IDs whose owners requested termination (via ops:terminate pub/sub
-        # or local SIGTERM). The job's finally block sets status='terminated'.
         self._terminated_jobs: set[str] = set()
         self._shutdown = False
+        self.sysbox_pool = SysboxPool(WORKER_CAPACITY)
+        # Maps job_id → SysboxSlot so _kill_job_container can find the right container.
+        self._job_slots: dict[str, SysboxSlot] = {}
 
     async def start(self):
-        """Connect to master Redis, register, and start consuming."""
+        """Connect to master Redis, register, initialize pool, and start consuming."""
         kwargs = {"decode_responses": True}
         if MASTER_REDIS_PASSWORD:
             kwargs["password"] = MASTER_REDIS_PASSWORD
 
         self.pool = redis.from_url(MASTER_REDIS_URL, **kwargs)
-
-        # Verify connection
         await self.pool.ping()
         log.info(
             "Connected to master Redis. Worker: %s (arch=%s, capacity=%d)",
@@ -75,7 +309,9 @@ class WorkerAgent:
 
         await self._register()
 
-        # Install SIGTERM/SIGINT handlers for graceful shutdown.
+        log.info("Initializing Sysbox pool (%d slots)...", WORKER_CAPACITY)
+        await self.sysbox_pool.init()
+
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
@@ -85,7 +321,6 @@ class WorkerAgent:
             except NotImplementedError:
                 pass
 
-        # Run consumer, heartbeat, and termination listener concurrently
         await asyncio.gather(
             self._consume_queue(),
             self._heartbeat_loop(),
@@ -110,9 +345,15 @@ class WorkerAgent:
             await self._kill_job_container(job_id)
 
     async def _kill_job_container(self, job_id: str):
-        """Mark a job as terminated and force-remove its Sysbox container."""
+        """Mark a job as terminated and force-remove its Sysbox container.
+
+        For slotted jobs, killing the outer Sysbox makes the executor's
+        ``docker wait`` return, triggering the finally block. The pool's
+        release() will re-initialize the slot since the container is gone.
+        """
         self._terminated_jobs.add(job_id)
-        sb_name = f"sb-{job_id[-32:]}"
+        slot = self._job_slots.get(job_id)
+        sb_name = slot.sb_name if slot else f"sb-{job_id[-32:]}"
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "rm", "-fv", sb_name,
@@ -128,7 +369,7 @@ class WorkerAgent:
             log.warning("Failed to kill %s: %s", sb_name, e)
 
     async def _handle_shutdown(self, sig):
-        """Graceful shutdown: kill active job containers, then exit."""
+        """Graceful shutdown: kill active job containers, shut down pool, then exit."""
         if self._shutdown:
             return
         self._shutdown = True
@@ -145,12 +386,20 @@ class WorkerAgent:
             if not self.active_jobs:
                 break
             await asyncio.sleep(1)
+        await self.sysbox_pool.shutdown()
         log.info("Shutdown cleanup complete (active=%d)", len(self.active_jobs))
-        loop = asyncio.get_running_loop()
-        loop.stop()
+        asyncio.get_running_loop().stop()
 
     async def _register(self):
-        """Register this worker with the master."""
+        """Register this worker with the master and prime the psutil CPU baseline."""
+        # Prime psutil so the first heartbeat reports an accurate cpu_pct.
+        # cpu_percent(interval=None) returns 0.0 on first call if never primed.
+        try:
+            import psutil as _ps
+            _ps.cpu_percent(interval=0.1)
+        except ImportError:
+            pass
+
         worker_key = f"worker:{WORKER_ID}"
         fields = {
             "arch": WORKER_ARCH,
@@ -166,9 +415,8 @@ class WorkerAgent:
         await self.pool.expire(worker_key, REGISTRATION_TTL)
         log.info("Registered as %s", worker_key)
 
-        # (Re)initialise the app proxy port pool. Always recreate on startup so
-        # stale entries from a previous run don't accumulate; graceful shutdown
-        # kills all Sysbox containers first so no ports are in use at this point.
+        # Keep the legacy Redis port pool for backward compatibility (used by the
+        # non-slot code path and the co-located ARM worker manager.py).
         port_pool_key = f"worker:{WORKER_ID}:app_ports_free"
         await self.pool.delete(port_pool_key)
         ports = list(range(APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT))
@@ -191,7 +439,6 @@ class WorkerAgent:
             metrics["mem_used_gb"] = str(round(vm.used / 1024 ** 3, 2))
             metrics["mem_total_gb"] = str(round(vm.total / 1024 ** 3, 2))
         except ImportError:
-            # psutil not yet installed — read procfs directly
             try:
                 with open("/proc/loadavg") as f:
                     load1 = float(f.read().split()[0])
@@ -247,22 +494,12 @@ class WorkerAgent:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def _consume_queue(self):
-        """Pull jobs from the arch-specific test queue.
-
-        Only dequeues when a slot is available so jobs stay visible in Redis
-        (and the dashboard queue counter stays accurate) until the worker is
-        actually ready to run them.
-        """
+        """Pull jobs from the arch-specific test queue with semaphore back-pressure."""
         queue_key = f"queue:test:{WORKER_ARCH}"
         log.info("Consuming from %s", queue_key)
 
         while self._running:
             try:
-                # Back-pressure: leave the job in Redis until a semaphore slot
-                # is free. semaphore.locked() is True when _value==0 (all slots
-                # taken). Checking active_jobs has a race — it is only updated
-                # after the semaphore is acquired, so the consumer can drain the
-                # full queue before any task has a chance to run.
                 if self.semaphore.locked():
                     await asyncio.sleep(1)
                     continue
@@ -274,7 +511,6 @@ class WorkerAgent:
                 _, job_json = result
                 job = json.loads(job_json)
                 import uuid
-                # Honor a pre-set job_id (e.g. from Arena provision); otherwise generate one.
                 if not job.get("job_id"):
                     job["job_id"] = (
                         f"{WORKER_ID}-{job['repo'].split('/')[-1]}"
@@ -284,8 +520,6 @@ class WorkerAgent:
                 job["worker_arch"] = WORKER_ARCH
 
                 asyncio.create_task(self._run_job(job))
-                # Yield so the task acquires the semaphore before we check
-                # semaphore.locked() again next iteration.
                 await asyncio.sleep(0)
 
             except redis.ConnectionError:
@@ -296,7 +530,7 @@ class WorkerAgent:
                 await asyncio.sleep(1)
 
     async def _run_job(self, job: dict):
-        """Execute a single job within the semaphore."""
+        """Execute a single job: acquire a warm Sysbox slot, run, then release."""
         async with self.semaphore:
             job_id = job["job_id"]
             self.active_jobs[job_id] = job
@@ -306,8 +540,6 @@ class WorkerAgent:
             triple = _triple_of(job, WORKER_ARCH)
             lock_key = None
 
-            # Concurrency lock: integration-tests only. Daemon jobs (training sessions)
-            # are allowed to run concurrently for the same repo — each user gets their own container.
             if job.get("type") != "daemon":
                 lock_key = f"running:lock:{triple}"
                 acquired = await self.pool.set(
@@ -333,18 +565,31 @@ class WorkerAgent:
             ttl = 86400 if job.get("type") == "daemon" else LOCK_TTL_SECONDS
             await self.pool.expire(running_key, ttl)
 
+            # Acquire a pre-warmed slot. Blocks if all capacity is in use.
+            slot = await self.sysbox_pool.acquire()
+            self._job_slots[job_id] = slot
+            # Persist the actual Sysbox container name so the dashboard (app.py)
+            # can resolve it without hardcoding the sb-{job_id} naming convention.
+            await self.pool.hset(running_key, "sb_name", slot.sb_name)
+            healthy = True
+
             try:
                 if job.get("type") == "daemon":
-                    result = await execute_daemon(job, redis_pool=self.pool)
+                    result = await execute_daemon(job, redis_pool=self.pool, slot=slot)
                 else:
-                    result = await execute_integration_test(job, redis_pool=self.pool)
+                    result = await execute_integration_test(job, redis_pool=self.pool, slot=slot)
                 job["result"] = result
                 job["status"] = "completed"
             except Exception as e:
                 log.error("Job %s failed: %s", job_id, e)
                 job["result"] = {"error": str(e)}
                 job["status"] = "failed"
+                healthy = False
             finally:
+                self._job_slots.pop(job_id, None)
+                # Release slot back to pool (re-init if unhealthy).
+                await self.sysbox_pool.release(slot, healthy=healthy)
+
                 if job_id in self._terminated_jobs:
                     job["status"] = "terminated"
                     job["result"] = job.get("result") or {}
@@ -357,7 +602,6 @@ class WorkerAgent:
                 await self.pool.delete(running_key)
                 if lock_key:
                     await self.pool.delete(lock_key)
-                # Drain anything deferred for this triple back into the queue.
                 deferred_key = f"deferred:{triple}"
                 while True:
                     item = await self.pool.lpop(deferred_key)
@@ -365,24 +609,14 @@ class WorkerAgent:
                         break
                     try:
                         d_job = json.loads(item)
-                        await self.pool.rpush(
-                            f"queue:test:{d_job.get('arch', arch)}", item
-                        )
+                        await self.pool.rpush(f"queue:test:{d_job.get('arch', arch)}", item)
                     except Exception as e:
-                        log.warning(
-                            "Could not re-queue deferred job for %s: %s",
-                            triple, e,
-                        )
+                        log.warning("Could not re-queue deferred job for %s: %s", triple, e)
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished: %s → %s", job_id, job["status"])
 
     async def _publish_log(self, job: dict):
-        """Upload the per-job log to master Redis so the dashboard can serve it.
-
-        The log file lives on the worker's local filesystem; we read it,
-        truncate to the last 256KB, and store under ``job:log:<id>`` with a
-        7-day TTL.
-        """
+        """Upload the per-job log to master Redis so the dashboard can serve it."""
         result = job.get("result", {}) or {}
         log_path = result.get("log_file")
         if not log_path:
@@ -391,7 +625,6 @@ class WorkerAgent:
             content = open(log_path, "r", errors="replace").read()
         except OSError as e:
             content = f"(log unavailable: {e})"
-        # Cap at 256KB — integration tests can be huge
         max_bytes = 256 * 1024
         if len(content.encode()) > max_bytes:
             content = "... (truncated; see /home/ops/logs/{}.log on worker) ...\n\n".format(

@@ -10,13 +10,27 @@ The repo's GHA workflow uses devcontainers/ci@v0.3 to:
 We replicate that with: ``docker run -d ... sleep infinity`` + per-step
 ``docker exec`` so each PR is tested the same way GHA tests it, while
 streaming live output to Redis for the dashboard.
+
+## Warm Sysbox Pool
+
+When a ``SysboxSlot`` is passed, the outer Sysbox container is already
+running with its inner dockerd ready and TEST_IMAGE pre-loaded. The
+executor skips those startup steps entirely (saves 60-120s) and goes
+straight to git clone → start inner container → run steps.
+
+The slot's Sysbox is NOT torn down on job completion; the pool's
+``release()`` method cleans inner state (rm dt, prune volumes/networks)
+and returns the slot to the queue for the next job.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import shutil
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import redis.asyncio as redis_async
@@ -38,6 +52,23 @@ from .config import (
 )
 
 log = logging.getLogger("ops-worker-agent")
+
+
+@dataclass
+class SysboxSlot:
+    """A pre-warmed Sysbox container managed by SysboxPool.
+
+    The outer Sysbox (docker:25-dind) is started once at agent startup with
+    its workspace directory mounted at /workspaces and TEST_IMAGE pre-loaded
+    into the inner dockerd. Jobs claim a slot, clone their repo into
+    slot.workspace, run, then release the slot — the outer container stays
+    alive and the inner docker is wiped between uses.
+    """
+    index: int
+    sb_name: str              # docker container name, e.g. sb-slot-abc123-0
+    workspace: Path           # host path mounted at /workspaces inside the Sysbox
+    port: int                 # fixed host port published on this Sysbox for app proxy
+    image_digest: str = field(default="", compare=False)
 
 
 async def _alloc_app_port(redis_pool) -> int | None:
@@ -62,25 +93,41 @@ async def _free_app_port(redis_pool, port: int | None) -> None:
         log.warning("Failed to free app proxy port %s: %s", port, e)
 
 
-async def execute_integration_test(job: dict, redis_pool=None) -> dict:
+async def execute_integration_test(
+    job: dict,
+    redis_pool=None,
+    slot: SysboxSlot | None = None,
+) -> dict:
     """Run an integration test against the PR's branch (or main, for nightly).
+
+    If ``slot`` is provided the outer Sysbox startup and image loading are
+    skipped — the slot's container is already warm. Otherwise falls back to
+    the traditional per-job Sysbox lifecycle.
 
     If ``redis_pool`` is given, live output is streamed to ``job:livelog:<id>``
     every 2s while the test runs so the dashboard can tail it.
     """
-    repo      = job["repo"]                       # base repo, e.g. dynatrace-wwse/codespaces-framework
-    head_repo = job.get("head_repo") or repo      # for fork PRs (head.repo.full_name), else same as base
+    repo      = job["repo"]
+    head_repo = job.get("head_repo") or repo
     ref       = job.get("ref") or job.get("head_branch") or "main"
     repo_name = repo.split("/")[-1]
     job_id    = job["job_id"]
     log_file  = LOGS_DIR / f"{job_id}.log"
 
-    # Per-job working dir so concurrent tests can't trample each other
-    work_dir = WORKDIR / job_id
-    repo_dir = work_dir / repo_name
-    if work_dir.exists():
-        shutil.rmtree(work_dir, ignore_errors=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
+    if slot:
+        # Clone into the slot's persistent workspace directory.
+        repo_dir = slot.workspace / repo_name
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        work_dir = None
+    else:
+        # Legacy path: per-job working directory.
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
     await _git_clone(head_repo, ref, repo_dir)
@@ -90,21 +137,9 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     start_time = time.time()
     log.info("Running integration test for %s (arch=%s, ref=%s)", repo_name, WORKER_ARCH, ref)
 
-    # Architecture: Sysbox isolates each test in its own kernel/network/filesystem
-    # bubble so multiple tests can run on the same host without colliding on
-    # ports, container names, or k3d cluster names.
-    #
-    #   Outer container (--runtime=sysbox-runc):  docker:25-dind
-    #     └─ Inner dockerd (private to this Sysbox)
-    #         └─ dt-enablement test container (--privileged, --network=host
-    #            within the Sysbox)
-    #             └─ k3d cluster (server + LB, all confined to inner dockerd)
-    #
-    # The host docker daemon never sees the k3d containers; only the outer
-    # Sysbox container is visible from `docker ps` on the host.
     workspace = f"/workspaces/{repo_name}"
     env_file_inside = f"{workspace}/.devcontainer/.env"
-    sb_name = f"sb-{job_id[-32:]}"
+    sb_name = slot.sb_name if slot else f"sb-{job_id[-32:]}"
     inner_name = "dt"
 
     sections = []
@@ -112,18 +147,17 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     timed_out = False
     failed_step = None
     deadline = start_time + TEST_TIMEOUT
-    app_port: int | None = None
+    app_port: int | None = slot.port if slot else None
 
     try:
-        # Initialize livelog immediately so the dashboard shows setup progress
-        # instead of a 404 during the ~10-minute Sysbox setup phase.
         livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
         if livelog_key:
+            warm_note = f"slot {slot.index} pre-warmed" if slot else "starting Sysbox..."
             await redis_pool.set(
                 livelog_key,
                 f"=== JOB: {job_id} ===\n"
                 f"=== REPO: {head_repo}@{ref} | ARCH: {WORKER_ARCH} ===\n"
-                f"\n[setup] Starting Sysbox container...\n",
+                f"\n[setup] {warm_note}\n",
                 ex=3600,
             )
 
@@ -132,72 +166,56 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
                 ts = time.strftime("%H:%M:%S", time.gmtime())
                 await redis_pool.append(livelog_key, f"[{ts}] [setup] {msg}\n")
 
-        # 1. Start outer Sysbox container running docker:25-dind
-        app_port = await _alloc_app_port(redis_pool)
-        run_cmd = [
-            "docker", "run",
-            "-d",
-            "--runtime=sysbox-runc",
-            "--name", sb_name,
-            "-v", f"{repo_dir}:{workspace}",
-        ]
-        if app_port:
-            run_cmd += ["-p", f"{app_port}:{K3D_LB_HTTP_PORT}"]
-        run_cmd.append("docker:25-dind")
-        proc = await asyncio.create_subprocess_exec(
-            *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
-            sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
-            rc = proc.returncode
-            raise RuntimeError("sysbox container start failed")
+        if slot:
+            # Slot already has the Sysbox running with inner dockerd and image ready.
+            await _setup_log(f"Slot {slot.index} ({slot.sb_name}) — inner Docker and image pre-warmed")
+            if redis_pool:
+                await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(slot.port))
+        else:
+            # ── Legacy: start a fresh Sysbox for this job ──────────────────
+            app_port = await _alloc_app_port(redis_pool)
+            run_cmd = [
+                "docker", "run",
+                "-d",
+                "--runtime=sysbox-runc",
+                "--name", sb_name,
+                "-v", f"{repo_dir}:{workspace}",
+            ]
+            if app_port:
+                run_cmd += ["-p", f"{app_port}:{K3D_LB_HTTP_PORT}"]
+            run_cmd.append("docker:25-dind")
+            proc = await asyncio.create_subprocess_exec(
+                *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                rc = proc.returncode
+                raise RuntimeError("sysbox container start failed")
 
-        if app_port and redis_pool:
-            await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
+            if app_port and redis_pool:
+                await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
-        await _setup_log("Sysbox container started — waiting for inner Docker daemon...")
-        # 2. Wait for the Sysbox's inner dockerd to be ready
-        await _wait_for_inner_docker(sb_name)
+            await _setup_log("Sysbox container started — waiting for inner Docker daemon...")
+            await _wait_for_inner_docker(sb_name)
 
-        await _setup_log("Inner Docker ready — loading test image into Sysbox...")
-        # 3. Inject dt-enablement into the inner Sysbox dockerd.
-        #    Pull once to the outer daemon (cached on host); then stream
-        #    save→load so we never hit Docker Hub rate limits per container.
-        outer_inspect = await asyncio.create_subprocess_exec(
-            "docker", "image", "inspect", TEST_IMAGE,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        if await outer_inspect.wait() != 0:
-            await _setup_log("Pulling test image from registry (first run — cached after this)...")
-            outer_pull = await asyncio.create_subprocess_exec(
-                "docker", "pull", TEST_IMAGE,
+            await _setup_log("Inner Docker ready — loading test image into Sysbox...")
+            outer_inspect = await asyncio.create_subprocess_exec(
+                "docker", "image", "inspect", TEST_IMAGE,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-            await outer_pull.wait()
-        save_proc = await asyncio.create_subprocess_exec(
-            "docker", "save", TEST_IMAGE,
-            stdout=asyncio.subprocess.PIPE,
-        )
-        load_proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "-i", sb_name, "docker", "load",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            while True:
-                chunk = await save_proc.stdout.read(65536)
-                if not chunk:
-                    break
-                load_proc.stdin.write(chunk)
-            load_proc.stdin.close()
-        finally:
-            await asyncio.gather(save_proc.wait(), load_proc.wait())
+            if await outer_inspect.wait() != 0:
+                await _setup_log("Pulling test image from registry (first run — cached after this)...")
+                outer_pull = await asyncio.create_subprocess_exec(
+                    "docker", "pull", TEST_IMAGE,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await outer_pull.wait()
+            await _pipe_image_to_sysbox(sb_name)
 
-        await _setup_log("Test image loaded — starting test container...")
-        # 4. Start the inner dt-enablement container (bind-mount workspace
-        #    from the Sysbox's view, mount the inner docker.sock so k3d can
-        #    operate inside the Sysbox).
+        await _setup_log("Starting test container...")
+        # Inner container: bind-mount the workspace path that's already visible
+        # inside the Sysbox (whether via slot mount or per-job volume mount).
         inner_run = [
             "docker", "exec", sb_name,
             "docker", "run", "-d",
@@ -210,9 +228,6 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             "-e", "GIT_CONFIG_COUNT=1",
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
-            # Tell the framework it is running inside Orbital (Sysbox) so that
-            # detectRunEnvironment() returns "orbital" and guards like the Kind
-            # engine skip in integration_engines.sh fire correctly.
             "-e", "ORBITAL_ENVIRONMENT=true",
             "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE,
@@ -228,14 +243,9 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             raise RuntimeError("inner container start failed")
 
         await _setup_log("Container started — waiting for docker group membership...")
-        # 5. Wait for vscode (inside dt) to have docker access. The dt-enablement
-        #    entrypoint adds vscode to the docker group asynchronously after
-        #    `docker run -d` returns; if we exec before that finishes, k3d
-        #    fails with EACCES on docker.sock.
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
         await _setup_log("Environment ready — starting test steps")
-        # 6. Run each step via nested docker exec, streaming output to Redis.
         custom_script = job.get("test_script") or "zsh .devcontainer/test/integration.sh"
         test_label = f"frameworkTest:{job['suite']}" if job.get("suite") else "integrationTest"
         steps = [
@@ -250,7 +260,6 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
             if livelog_key:
                 await redis_pool.append(livelog_key, header)
             remaining = max(60, int(deadline - time.time()))
-            # docker exec <sysbox> docker exec <dt> bash -lc <script>
             exec_cmd = [
                 "docker", "exec", sb_name,
                 "docker", "exec",
@@ -264,9 +273,7 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
-                step_out = await _stream_to_redis(
-                    proc, redis_pool, livelog_key, remaining
-                )
+                step_out = await _stream_to_redis(proc, redis_pool, livelog_key, remaining)
                 sections.append(step_out)
                 if proc.returncode != 0:
                     rc = proc.returncode
@@ -293,29 +300,30 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
         if rc == 0:
             rc = 1
     finally:
-        await _free_app_port(redis_pool, app_port)
-        # 7. Always tear down the outer Sysbox container — everything inside
-        #    (inner dockerd, dt-enablement, k3d cluster) goes with it.
-        #    -v also removes anonymous volumes (docker:dind declares a VOLUME for
-        #    its data dir; without -v those volumes accumulate on the host).
-        try:
-            kill_proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-fv", sb_name,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(kill_proc.wait(), timeout=60)
-        except Exception:
-            pass
-        # Safety net: purge any other leftover anonymous volumes from this or
-        # previous runs that didn't get the -v treatment (e.g. after a crash).
-        try:
-            vol_proc = await asyncio.create_subprocess_exec(
-                "docker", "volume", "prune", "-f",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(vol_proc.wait(), timeout=30)
-        except Exception:
-            pass
+        if slot:
+            # Slot path: only clean the repo clone. The pool's release() handles
+            # inner container removal and Sysbox state reset.
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        else:
+            # Legacy path: tear down the entire outer Sysbox (takes everything with it).
+            await _free_app_port(redis_pool, app_port)
+            try:
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-fv", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(kill_proc.wait(), timeout=60)
+            except Exception:
+                pass
+            try:
+                vol_proc = await asyncio.create_subprocess_exec(
+                    "docker", "volume", "prune", "-f",
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(vol_proc.wait(), timeout=30)
+            except Exception:
+                pass
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     duration = int(time.time() - start_time)
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -326,11 +334,6 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     )
     log_file.write_text(_mask_secrets(header + "".join(sections)))
 
-    # No host-level cleanup needed — Sysbox container teardown above already
-    # took the inner dockerd, dt-enablement, and k3d cluster with it.
-    shutil.rmtree(work_dir, ignore_errors=True)
-
-    # Persist result for framework suite cards
     if redis_pool and job.get("framework_suite"):
         suite = job["framework_suite"]
         import json as _json
@@ -359,12 +362,18 @@ async def execute_integration_test(job: dict, redis_pool=None) -> dict:
     }
 
 
-async def execute_daemon(job: dict, redis_pool=None) -> dict:
+async def execute_daemon(
+    job: dict,
+    redis_pool=None,
+    slot: SysboxSlot | None = None,
+) -> dict:
     """Start the devcontainer environment and keep it alive until terminated.
 
     Mirrors execute_integration_test setup (clone → Sysbox → dt → postCreate →
     postStart) but skips the integration test and blocks on ``docker wait``
     instead, giving users an interactive shell for training / exploration.
+
+    When ``slot`` is provided the Sysbox startup and image-load are skipped.
     """
     repo      = job["repo"]
     head_repo = job.get("head_repo") or repo
@@ -373,61 +382,78 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
     job_id    = job["job_id"]
     log_file  = LOGS_DIR / f"{job_id}.log"
 
-    work_dir = WORKDIR / job_id
-    repo_dir = work_dir / repo_name
-    if work_dir.exists():
-        shutil.rmtree(work_dir, ignore_errors=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
+    if slot:
+        repo_dir = slot.workspace / repo_name
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        work_dir = None
+    else:
+        work_dir = WORKDIR / job_id
+        repo_dir = work_dir / repo_name
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
     await _git_clone(head_repo, ref, repo_dir)
     await _make_world_writable(repo_dir)
-    # Per-session provisioned tokens override the worker-level static creds.
     dt_env_overrides: dict[str, str] | None = job.get("dt_env") or None
     _write_env_file(repo_dir / ".devcontainer" / ".env", overrides=dt_env_overrides)
 
     start_time = time.time()
     workspace = f"/workspaces/{repo_name}"
     env_file_inside = f"{workspace}/.devcontainer/.env"
-    sb_name = f"sb-{job_id[-32:]}"
+    sb_name = slot.sb_name if slot else f"sb-{job_id[-32:]}"
     inner_name = "dt"
 
     sections = []
     rc = 0
     livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
-    app_port: int | None = None
 
     try:
-        # 1. Outer Sysbox container
-        app_port = await _alloc_app_port(redis_pool)
-        run_cmd = [
-            "docker", "run", "-d",
-            "--runtime=sysbox-runc",
-            "--name", sb_name,
-            "-v", f"{repo_dir}:{workspace}",
-        ]
-        if app_port:
-            run_cmd += ["-p", f"{app_port}:{K3D_LB_HTTP_PORT}"]
-        run_cmd.append("docker:25-dind")
-        proc = await asyncio.create_subprocess_exec(
-            *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
-            sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
-            raise RuntimeError("sysbox container start failed")
+        if slot:
+            if redis_pool:
+                await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(slot.port))
+            log.info("Daemon %s using pre-warmed slot %d (%s)", job_id, slot.index, slot.sb_name)
+        else:
+            # Legacy: start fresh Sysbox, load image via save/load (not docker pull —
+            # pull hits the registry every time; save/load reuses the outer daemon cache).
+            app_port = await _alloc_app_port(redis_pool)
+            run_cmd = [
+                "docker", "run", "-d",
+                "--runtime=sysbox-runc",
+                "--name", sb_name,
+                "-v", f"{repo_dir}:{workspace}",
+            ]
+            if app_port:
+                run_cmd += ["-p", f"{app_port}:{K3D_LB_HTTP_PORT}"]
+            run_cmd.append("docker:25-dind")
+            proc = await asyncio.create_subprocess_exec(
+                *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0:
+                sections.append(f"=== sysbox docker run failed (rc={proc.returncode}) ===\n{err.decode(errors='replace')}")
+                raise RuntimeError("sysbox container start failed")
 
-        if app_port and redis_pool:
-            await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
+            if app_port and redis_pool:
+                await redis_pool.hset(f"job:running:{job_id}", "app_proxy_port", str(app_port))
 
-        await _wait_for_inner_docker(sb_name)
+            await _wait_for_inner_docker(sb_name)
 
-        # 2. Pull + start dt container
-        pull = await asyncio.create_subprocess_exec(
-            "docker", "exec", sb_name, "docker", "pull", TEST_IMAGE,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        await pull.wait()
+            # Load image via save→load pipe so we reuse the outer daemon's cached layer.
+            outer_inspect = await asyncio.create_subprocess_exec(
+                "docker", "image", "inspect", TEST_IMAGE,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            if await outer_inspect.wait() != 0:
+                outer_pull = await asyncio.create_subprocess_exec(
+                    "docker", "pull", TEST_IMAGE,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await outer_pull.wait()
+            await _pipe_image_to_sysbox(sb_name)
 
         inner_run = [
             "docker", "exec", sb_name,
@@ -455,7 +481,6 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
 
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
-        # 3. postCreate + postStart (set up cluster and apps)
         if livelog_key:
             await redis_pool.set(livelog_key, "", ex=86400)
 
@@ -486,7 +511,6 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
                 if livelog_key:
                     await redis_pool.append(livelog_key, msg)
 
-        # 4. Signal readiness then block until the container is terminated
         ready_msg = (
             "\n=== Daemon ready — environment is up ===\n"
             "=== Connect via the Shell button. Terminate when done. ===\n"
@@ -509,16 +533,20 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
         if rc == 0:
             rc = 1
     finally:
-        await _free_app_port(redis_pool, app_port)
-        shutil.rmtree(work_dir, ignore_errors=True)
-        try:
-            kill_proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-fv", sb_name,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(kill_proc.wait(), timeout=60)
-        except Exception:
-            pass
+        if slot:
+            # Slot path: clean repo clone only; pool.release() handles the rest.
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        else:
+            await _free_app_port(redis_pool, locals().get("app_port"))
+            shutil.rmtree(work_dir, ignore_errors=True)
+            try:
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-fv", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(kill_proc.wait(), timeout=60)
+            except Exception:
+                pass
 
     duration = int(time.time() - start_time)
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -535,11 +563,33 @@ async def execute_daemon(job: dict, redis_pool=None) -> dict:
         "ref": ref,
         "exit_code": rc,
         "duration_seconds": duration,
-        "passed": True,   # termination is expected/normal
+        "passed": True,
         "timed_out": False,
         "failed_step": "",
         "log_file": str(log_file),
     }
+
+
+async def _pipe_image_to_sysbox(sb_name: str) -> None:
+    """Stream TEST_IMAGE from the outer daemon into the Sysbox's inner docker via save→load."""
+    save_proc = await asyncio.create_subprocess_exec(
+        "docker", "save", TEST_IMAGE,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    load_proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", "-i", sb_name, "docker", "load",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        while True:
+            chunk = await save_proc.stdout.read(65536)
+            if not chunk:
+                break
+            load_proc.stdin.write(chunk)
+        load_proc.stdin.close()
+    finally:
+        await asyncio.gather(save_proc.wait(), load_proc.wait())
 
 
 async def _stream_to_redis(proc, redis_pool, livelog_key, timeout_s: int) -> str:
@@ -561,7 +611,6 @@ async def _stream_to_redis(proc, redis_pool, livelog_key, timeout_s: int) -> str
         pending.clear()
         try:
             await redis_pool.append(livelog_key, _mask_secrets(chunk))
-            # Trim if it grew past max
             current = await redis_pool.strlen(livelog_key)
             if current and current > MAX_LIVE_BYTES:
                 tail = await redis_pool.getrange(livelog_key, current - MAX_LIVE_BYTES, current)
@@ -580,7 +629,6 @@ async def _stream_to_redis(proc, redis_pool, livelog_key, timeout_s: int) -> str
         if not line:
             if proc.returncode is not None or proc.stdout.at_eof():
                 break
-            # No data this tick — flush what we have
             if time.time() - last_flush > 1.0:
                 await flush()
                 last_flush = time.time()
@@ -631,20 +679,11 @@ async def _wait_for_inner_dt_ready(sb_name: str, inner_name: str, timeout_s: int
 
 
 def _mask_secrets(content: str) -> str:
-    """Redact known DT tokens before writing/uploading the log.
-
-    The dt-enablement image's entrypoint dumps the environment via ``set``
-    for debugging after switching to the docker group, which leaks tokens
-    if not masked. We also mask any literal token value found anywhere
-    in stdout/stderr (e.g. helm install args, kubectl secrets dumps).
-    """
+    """Redact known DT tokens before writing/uploading the log."""
     import re
-    # Mask each known token value verbatim
     for secret in (DT_OPERATOR_TOKEN, DT_INGEST_TOKEN):
         if secret and len(secret) > 12:
             content = content.replace(secret, _redact(secret))
-    # Catch-all for any dt0c01.*/dt0s01.*/dt0s16.* token shape we missed
-    # (60+ chars, alphanumeric + dots/underscores)
     content = re.sub(
         r"\bdt0[cs]\d{2}\.[A-Z0-9]{24}\.[A-Z0-9]{60,80}\b",
         lambda m: _redact(m.group(0)),
@@ -654,25 +693,18 @@ def _mask_secrets(content: str) -> str:
 
 
 def _redact(token: str) -> str:
-    """Keep the prefix (dt0c01.XXXXXXXX) so we can still tell which token
-    is which; replace the secret part with stars."""
     if not token:
         return "***"
-    # Show first 14 chars (dt0c01.XXXXXXXX) then mask the rest
     return token[:14] + "***REDACTED***"
 
 
 def _write_env_file(env_path: Path, overrides: dict[str, str] | None = None):
-    """Write .devcontainer/.env with DT credentials.
-
-    Uses per-session overrides (provisioned tokens) when provided, falls back
-    to the worker-level static env vars (used by integration tests).
-    """
+    """Write .devcontainer/.env with DT credentials."""
     env_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = {
-        "DT_ENVIRONMENT":   DT_ENVIRONMENT,
+        "DT_ENVIRONMENT":    DT_ENVIRONMENT,
         "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
-        "DT_INGEST_TOKEN":  DT_INGEST_TOKEN,
+        "DT_INGEST_TOKEN":   DT_INGEST_TOKEN,
     }
     if overrides:
         resolved.update(overrides)
@@ -693,7 +725,6 @@ async def _git_clone(repo: str, ref: str, dest: Path):
     """Shallow-clone the given repo at the given ref (branch or tag) into ``dest``."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://github.com/{repo}.git"
-    # --branch accepts branches and tags. Falls back to default branch if ref doesn't exist.
     proc = await asyncio.create_subprocess_exec(
         "git", "clone", "--depth", "1", "--branch", ref, url, str(dest),
         stdout=asyncio.subprocess.PIPE,
@@ -701,7 +732,6 @@ async def _git_clone(repo: str, ref: str, dest: Path):
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        # Retry without --branch in case ref is a sha (rare for our workflow).
         log.warning("git clone --branch %s failed; retrying default branch", ref)
         proc = await asyncio.create_subprocess_exec(
             "git", "clone", "--depth", "1", url, str(dest),
@@ -713,34 +743,3 @@ async def _git_clone(repo: str, ref: str, dest: Path):
             raise RuntimeError(
                 f"git clone {url} failed (rc={proc.returncode}): {stderr.decode()[:500]}"
             )
-
-
-async def _cleanup_clusters():
-    """Wipe stale clusters / containers / kubeconfig before or after a test.
-
-    Failures are ignored — best-effort cleanup. The next test will pick up
-    a clean slate either way.
-    """
-    cmds = [
-        # Remove all k3d clusters (most common state from a previous test)
-        ["bash", "-c", "k3d cluster list -o name 2>/dev/null | xargs -r -I{} k3d cluster delete {}"],
-        # Remove all kind clusters (if framework was switched to kind engine)
-        ["bash", "-c", "kind get clusters 2>/dev/null | xargs -r -I{} kind delete cluster --name {}"],
-        # Force-remove any framework dev container with a known name
-        ["bash", "-c", "docker rm -f dt-enablement 2>/dev/null || true"],
-        # Stale rancher/k3s containers (k3d nodes that didn't get cleaned)
-        ["bash", "-c", "docker ps -aq --filter 'ancestor=rancher/k3s' | xargs -r docker rm -f 2>/dev/null || true"],
-        ["bash", "-c", "docker ps -aq --filter 'name=k3d-' | xargs -r docker rm -f 2>/dev/null || true"],
-        # Stale kubeconfig — k3d/kind write here; next post-create.sh will rewrite cleanly
-        ["bash", "-c", "rm -f ~/.kube/config 2>/dev/null || true"],
-    ]
-    for cmd in cmds:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=60)
-        except Exception:
-            pass

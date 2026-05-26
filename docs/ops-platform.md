@@ -69,7 +69,7 @@ The name _Orbital_ captures how the platform works: worker nodes orbit a central
 | **Dashboard** | FastAPI + uvicorn | Web UI, REST API, WebSocket PTY bridge |
 | **Webhook Server** | FastAPI | Receives GitHub org-level webhooks, routes to Redis |
 | **Worker Manager** | `workers/manager.py` — Python asyncio | Co-located ARM worker (capacity 4); also dispatches agent/sync jobs to the master node |
-| **Worker Agent** | `worker-agent/agent.py` — Python asyncio | Remote AMD worker (capacity 2); pulls from `queue:test:amd64`, reports logs back to master Redis |
+| **Worker Agent** | `worker-agent/agent.py` — Python asyncio | Remote AMD workers (capacity 6 each, warm Sysbox pool); pulls from `queue:test:amd64`, reports logs back to master Redis |
 | **Nightly Scheduler** | systemd timer | Staggered nightly build orchestration at 02:00 UTC |
 | **Sync Daemon** | systemd timer | Hourly framework-version drift detection |
 | **Gen2 Scanner** | systemd timer | Daily Gen2→Gen3 documentation drift scan |
@@ -141,6 +141,57 @@ curl --silent --fail --max-time 5 \
 ```
 
 nginx ingress inside k3d matches the Host header to the sslip.io ingress rule and forwards to the `todoapp` service. The catch-all ingress rule (no host) is also present but is not used in Orbital — Host-header routing is more specific and reliable for CI assertions.
+
+### Warm Sysbox Pool — fast startup
+
+!!! tip "80% faster job start"
+    Before: every job paid a **60-120s** setup tax (start Sysbox → wait inner dockerd → load image).
+    After: jobs start in **13-18s** — the Sysbox containers are pre-warmed at agent startup.
+
+At startup the worker agent pre-warms one Sysbox container per capacity slot in parallel. Each slot runs the full lifecycle once — outer container up, inner dockerd ready, `TEST_IMAGE` loaded — and then waits idle. Jobs claim a slot from the pool queue the moment they're dequeued from Redis.
+
+```
+Agent startup (one-time, ~60s parallel):
+  Slot 0: sysbox run → wait dockerd → docker save|load  ┐
+  Slot 1: sysbox run → wait dockerd → docker save|load  ├─ all in parallel
+  ...                                                    │
+  Slot 5: sysbox run → wait dockerd → docker save|load  ┘
+
+Per job (critical path after warm pool):
+  1. pool.acquire()          ~0s  (blocks only if all slots in use)
+  2. git clone --depth 1    ~5-10s
+  3. docker exec sb → dt    ~3s
+  4. wait vscode/docker      ~5s
+  5. postCreate + test       (lab-specific)
+  ─────────────────────────────────────────────────────────
+  Setup overhead: 13-18s   (was 60-120s)
+```
+
+**Between jobs** the slot is cleaned — inner `dt` container removed, volumes and non-default networks pruned inside the Sysbox — and returned to the pool queue. The outer Sysbox and its cached `TEST_IMAGE` stay alive. If `TEST_IMAGE` is updated on the outer daemon the new layers are piped into the slot's inner docker at release time.
+
+**Port assignment** is fixed per slot: slot `i` always publishes `APP_PROXY_PORT_START + i` on the host. This eliminates the dynamic Redis port pool for slotted jobs.
+
+**Slot recovery**: if a slot becomes unhealthy (executor exception, inner dockerd crash) the pool re-initializes it from scratch in the background. A lost slot reduces temporary parallelism but does not stall the agent.
+
+```
+Slot lifecycle:
+  ┌─ agent.start() ──────────────────────────────────────┐
+  │  SysboxPool.init() → 6 slots started in parallel     │
+  └──────────────────────────────────────────────────────┘
+          │
+          ▼  slot in queue
+  ┌─ job arrives ────────────────────────────────────────┐
+  │  pool.acquire()  → claims slot from queue            │
+  │  git clone → start dt → run                         │
+  │  pool.release()  → rm dt + prune → queue.put(slot)  │
+  └──────────────────────────────────────────────────────┘
+          │  termination signal
+          ▼
+  _kill_job_container → docker rm -fv sb-slot-*
+  pool.release(healthy=False) → _init_slot() → re-queue
+```
+
+**Disk hygiene**: each release runs `docker volume prune -f` and `docker network prune -f` inside the Sysbox, preventing volume/network accumulation across jobs. The outer daemon retains only `docker:25-dind` and `TEST_IMAGE` — nothing else accumulates.
 
 ### Why Sysbox changes everything
 

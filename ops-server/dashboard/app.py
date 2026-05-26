@@ -1962,8 +1962,9 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
     repo_name = repo.split("/")[-1] if "/" in repo else repo or "workspace"
     workspace = f"/workspaces/{repo_name}"
 
-    # Sysbox container name mirrors executor.py: sb-{last 32 chars of job_id}
-    sb_name = f"sb-{job_id[-32:]}"
+    # sb_name is stored in the running hash by the warm-pool agent (slot-based jobs).
+    # Fall back to the legacy naming for non-slotted jobs.
+    sb_name = meta.get("sb_name") or f"sb-{job_id[-32:]}"
     inner_exec = [
         "docker", "exec", "-it", sb_name,
         "docker", "exec", "-it",
@@ -2130,7 +2131,7 @@ async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
             pass
 
     worker_id = meta.get("worker_id", "")
-    sb_name = f"sb-{job_id[-32:]}"
+    sb_name = meta.get("sb_name") or f"sb-{job_id[-32:]}"
     # App registry is written by the framework's registerApp() helper to
     # ${HOME}/.cache/dt-framework/app-registry (HOME=/home/vscode inside dt).
     registry_path = "/home/vscode/.cache/dt-framework/app-registry"
@@ -3323,12 +3324,13 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
     repo = meta.get("repo", "")
     # repo is stored as "org/repo-name"; workspace only uses the repo-name part
     repo_name = repo.split("/")[-1] if "/" in repo else repo
-    container = f"sb-{job_id[-32:]}"
+    container = meta.get("sb_name") or f"sb-{job_id[-32:]}"
 
-    # Build the exec command (same pattern as PTY bridge, without -t for non-interactive)
+    # Build the exec command (same pattern as PTY bridge, without -t for non-interactive).
+    # dt container uses zsh (matches PTY bridge); outer sb-* container uses bash (Ubuntu).
     inner_cmd = _shlex.join(["docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
-                              "sh", "-c", body.command])
-    outer_cmd = ["docker", "exec", container, "sh", "-c", inner_cmd]
+                              "zsh", "-c", body.command])
+    outer_cmd = ["docker", "exec", container, "bash", "-c", inner_cmd]
 
     worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
     ssh_host = worker_rec.get("ssh_host", "")

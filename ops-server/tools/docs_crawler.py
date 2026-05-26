@@ -92,14 +92,49 @@ def _extract_steps(soup: BeautifulSoup) -> list[Step]:
     for el in content.find_all(["p", "li", "pre", "code", "h2", "h3", "h4"]):
         tag = el.name
 
-        # Code/pre → shell step
-        if tag in ("pre", "code"):
-            code_text = el.get_text(strip=True)
-            if not code_text or len(code_text) < 3:
+        # Only <pre> blocks are real code blocks in MkDocs.
+        # Bare <code> inside <p>/<li> are inline references — skip entirely.
+        if tag == "code":
+            continue
+
+        if tag == "pre":
+            # separator="" preserves whitespace between Pygments <span> tokens
+            code_text = el.get_text(separator="").strip()
+            if not code_text or len(code_text) < 5:
                 continue
-            # Avoid duplicating nested code inside pre
-            if tag == "code" and el.parent and el.parent.name == "pre":
+
+            # Negative: skip JS/TypeScript blocks upfront — these appear in
+            # automation/workflow labs and may contain `export` or `import`
+            # that would otherwise match the bash-verb whitelist below.
+            _JS_STARTS = (
+                "import ", "export default", "export async", "export const",
+                "// ", "/* ", "const ", "async function", "let ", "var ",
+            )
+            if code_text.startswith(_JS_STARTS):
                 continue
+
+            # Positive whitelist: only emit shell step if at least one line
+            # starts with a known bash command verb. This prevents DT config
+            # values, DQL queries, and YAML from being executed.
+            _BASH_VERBS = (
+                "kubectl", "helm ", "docker ", "curl ", "export ",
+                "cd ", "cat ", "echo ", "git ", "pip ", "pip3 ",
+                "python ", "python3 ", "bash ", "sh ", "sudo ",
+                "apt-", "apt ", "snap ", "./", "/usr/", "/bin/",
+                "node ", "npm ", "yarn ", "uv ", "cp ", "mv ",
+                "mkdir ", "rm ", "chmod ", "chown ", "tar ", "wget ",
+                "source ", "set -", "openssl ", "jq ",
+            )
+            if not any(
+                line.lstrip().startswith(_BASH_VERBS)
+                for line in code_text.splitlines()
+            ):
+                continue
+
+            # Skip unsubstituted placeholder tokens — running them is meaningless
+            if re.search(r"\{your-[^}]+\}|<your-[^>]+>|\{your_[^}]+\}", code_text):
+                continue
+
             steps.append(Step(type="shell", content=code_text))
             continue
 
