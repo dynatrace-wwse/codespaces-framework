@@ -121,6 +121,27 @@ docker exec sb-{job_id} docker exec dt bash -lc "source integration.sh"
 docker rm -f sb-{job_id}
 ```
 
+### Port configuration inside Sysbox
+
+The host machine (master or AMD worker) already has its own nginx on port 80. Each Sysbox container runs its k3d cluster on **non-default ports** to avoid collision:
+
+```bash
+K3D_LB_HTTP_PORT=30080    # host port → k3d LB → nginx ingress HTTP
+K3D_LB_HTTPS_PORT=30443   # host port → k3d LB → nginx ingress HTTPS
+K3D_API_PORT=6444          # host port → k3s API server
+```
+
+The framework's `assertRunningApp` function reads `K3D_LB_HTTP_PORT` and probes the app via **Host-header curl** — no browser required:
+
+```bash
+# assertRunningApp "todoapp" inside a Sysbox container
+curl --silent --fail --max-time 5 \
+  -H "Host: todoapp.172.16.0.10.sslip.io" \
+  http://localhost:30080
+```
+
+nginx ingress inside k3d matches the Host header to the sslip.io ingress rule and forwards to the `todoapp` service. The catch-all ingress rule (no host) is also present but is not used in Orbital — Host-header routing is more specific and reliable for CI assertions.
+
 ### Why Sysbox changes everything
 
 Before Sysbox, running nested Kubernetes clusters required `--privileged` containers that shared the host's kernel namespaces. Running six such containers simultaneously on one machine caused network conflicts, process namespace collisions, and unpredictable failures.

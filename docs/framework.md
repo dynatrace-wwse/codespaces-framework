@@ -133,28 +133,67 @@ Defines the development container for VS Code and Codespaces.
 
 This directory contains the application code and sample apps. Each app has its own subfolder inside `apps/` in the framework cache.
 
-### Nginx Ingress + sslip.io Magic DNS
+### Nginx Ingress + App Exposure
 
-Apps are published through **nginx ingress-nginx** rather than raw NodePorts. Each app gets two ingress hosts automatically so it is reachable in every instantiation type:
+Apps are published through **nginx ingress-nginx** on port 80. Each `registerApp` call creates an Ingress with **three rules** so the app is reachable in every instantiation type without any extra configuration:
 
-| Host | Example | Used for |
-|------|---------|---------|
-| `<app>.<public-ip>.sslip.io` | `todoapp.18.134.158.252.sslip.io` | Codespace tunnels, remote VMs, CI workers |
-| `<app>.<hostname>` | `todoapp.codespace-abc123` | Local / VS Code / Host-header curl in CI |
+| Rule | Matches | Example URL | Environment |
+|------|---------|-------------|-------------|
+| `<app>.<public-ip>.sslip.io` | sslip.io magic-DNS host | `http://todoapp.18.134.158.252.sslip.io` | VS Code / local container / remote VM |
+| `<app>.<hostname>` | machine hostname | `http://todoapp.codespace-abc123` | VS Code / Host-header curl in CI |
+| *(catch-all, no host)* | any other Host header | `https://{name}-80.app.github.dev` | **GitHub Codespaces** |
 
-[sslip.io](https://sslip.io) is a wildcard DNS service that resolves `<anything>.<ip>.sslip.io` directly to `<ip>`. No DNS record management is needed — the IP is embedded in the hostname itself.
+[sslip.io](https://sslip.io) is a wildcard DNS service that resolves `<anything>.<ip>.sslip.io` directly to `<ip>`. No DNS record management needed.
 
-```
-Browser → http://todoapp.18.134.158.252.sslip.io
-              DNS resolves to 18.134.158.252
-              Nginx ingress routes by Host header → todoapp service:80
-```
+#### How each environment reaches the app
 
-The IP is detected at deploy time by `detectIP()`:
+=== "VS Code / Local container"
 
-- If `$EXTERNAL_IP` is set → use it
-- If running in GitHub Codespaces → `127.0.0.1` (tunnel handles routing)
-- Otherwise → public IP via `ifconfig.me`, fallback to `hostname -I`
+    Port 80 on the host maps directly to the nginx ingress LoadBalancer. The app is reachable via its sslip.io URL:
+
+    ```
+    Browser → http://todoapp.18.134.158.252.sslip.io
+                  DNS: sslip.io resolves to 18.134.158.252
+                  nginx ingress matches Host header → todoapp service:80
+    ```
+
+    `devcontainer.json` forwards port 80: `"forwardPorts": [80]`
+
+=== "GitHub Codespaces"
+
+    Codespaces forwards port 80 from the container and exposes it at `{codespacename}-80.app.github.dev`. Incoming requests carry a Host header that nginx doesn't recognise (it contains the Codespace name, not the sslip.io pattern). The **catch-all ingress rule** (no `host:` field) handles these:
+
+    ```
+    Browser → https://{codespacename}-80.app.github.dev
+                  Codespaces tunnel → container port 80
+                  nginx: no host rule matches → catch-all → primary app service:80
+    ```
+
+    `getAppURL` returns `https://${CODESPACE_NAME}-80.app.github.dev` automatically.
+
+    !!! info "Multiple apps in one Codespace"
+        When multiple apps are registered the **last** one registered owns the catch-all. Secondary apps are still reachable via their sslip.io host (`app.127.0.0.1.sslip.io`) — `detectIP()` returns `127.0.0.1` in Codespaces which resolves back to the container.
+
+=== "Orbital (CI/CD ops server)"
+
+    On the ops server, ports 80/443 are owned by the server's own nginx. Each CI job gets a K3d cluster on a non-default port (`K3D_LB_HTTP_PORT=30080`). The `assertRunningApp` test function probes via **Host-header curl** — no browser needed:
+
+    ```bash
+    # assertRunningApp sends:
+    curl --fail --max-time 5 \
+      -H "Host: todoapp.172.16.0.10.sslip.io" \
+      http://localhost:30080
+    ```
+
+    The Host header matches the sslip.io ingress rule; nginx routes correctly even on the non-default port.
+
+#### IP detection (`detectIP`)
+
+| Condition | IP used | Result |
+|-----------|---------|--------|
+| `$EXTERNAL_IP` set | that value | explicit override |
+| GitHub Codespaces | `127.0.0.1` | sslip.io host resolves to loopback; catch-all handles Codespaces URL |
+| Otherwise | public IP via `ifconfig.me`, fallback `hostname -I` | standard sslip.io URL |
 
 Apps are registered with `registerApp <name> <namespace> <service> <port>` which creates the Ingress resource and writes to the **app registry** (`~/.cache/dt-framework/app-registry`). The registry persists across shell sessions so `deployApp` can show status even after a restart.
 
@@ -266,10 +305,13 @@ Configurable env vars (override before calling `startK3dCluster`):
 | `K3D_LB_HTTP_PORT` | `80` | Host port → ingress HTTP |
 | `K3D_LB_HTTPS_PORT` | `443` | Host port → ingress HTTPS |
 | `K3D_API_PORT` | `6443` | Host port → k8s API server |
-| `K3D_NODEPORT_BASE` | `30100` | Base NodePort for legacy services |
 
-!!! tip "Ops server overrides"
-    On the CI/CD ops server where nginx already owns ports 80/443, each test gets its own K3d cluster with non-default ports: `K3D_LB_HTTP_PORT=30080 K3D_LB_HTTPS_PORT=30443 K3D_API_PORT=6444`. The `assertRunningApp` function automatically uses `K3D_LB_HTTP_PORT` for its Host-header probe.
+!!! tip "Orbital (ops server) overrides"
+    On the CI/CD ops server, the host's own nginx already owns ports 80/443. Each CI job overrides to non-conflicting ports:
+    ```bash
+    K3D_LB_HTTP_PORT=30080  K3D_LB_HTTPS_PORT=30443  K3D_API_PORT=6444
+    ```
+    `assertRunningApp` reads `K3D_LB_HTTP_PORT` for its Host-header curl probe, so tests work correctly without any code changes.
 
 #### K3d Cluster Functions
 
@@ -346,10 +388,10 @@ This enables Kind and other Docker-based tools to work inside the dev environmen
 	source .devcontainer/util/source_framework.sh
 
 	setUpTerminal
-	startKindCluster
+	startK3dCluster
 	installK9s
 	dynatraceDeployOperator
-	deployCloudNative
+	deployAppOnly
 	deployTodoApp
 	finalizePostCreation
 
@@ -378,8 +420,8 @@ Reusable shell functions loaded into every shell session:
 | `FRAMEWORK_VERSION` | pinned per repo | Framework tag to pull from cache |
 | `MAGIC_DOMAIN` | `sslip.io` | Wildcard DNS for app ingress hosts |
 | `K3D_CLUSTER_NAME` | `enablement` | K3d cluster name |
-| `K3D_LB_HTTP_PORT` | `80` | K3d load balancer → ingress HTTP |
-| `K3D_LB_HTTPS_PORT` | `443` | K3d load balancer → ingress HTTPS |
+| `K3D_LB_HTTP_PORT` | `80` | K3d LB → ingress HTTP (Orbital overrides to `30080`) |
+| `K3D_LB_HTTPS_PORT` | `443` | K3d LB → ingress HTTPS (Orbital overrides to `30443`) |
 | `APP_REGISTRY` | `~/.cache/dt-framework/app-registry` | Persisted ingress registrations |
 | `CLUSTER_ENGINE` | `k3d` | Cluster engine (`k3d` or `kind`) |
 | `ENV_FILE` | `.devcontainer/.env` | Secrets file path |
@@ -420,16 +462,18 @@ deployMyApp() {
 | Use repo path | `$REPO_PATH` is exported by `source_framework.sh` |
 
 !!! warning "Don't hardcode NodePort numbers"
-    Older repos in the fleet use `kubectl patch service ... nodePort: 30100`. With K3d and nginx ingress, ports 80/443 are the only necessary host ports. Use `registerApp` to create an Ingress instead, then assert the app with `assertRunningApp <name>`.
+    Older repos in the fleet used `kubectl patch service ... nodePort: 30100` and forwarded that port from the container. With K3d + nginx ingress, **port 80 is the single entry point**. Use `registerApp` to create the Ingress (including the catch-all rule for Codespaces), and expose only port 80 in `devcontainer.json`.
 
 ```bash
-# Old pattern (broken on K3d + ingress)
+# Old pattern — broken on K3d (NodePort 30100 not guaranteed; no Codespaces routing)
 kubectl patch service frontend --type='json' \
   --patch='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30100}]'
+# devcontainer.json had: "forwardPorts": [30100]
 
-# New pattern
+# New pattern — works in VS Code, Codespaces, and Orbital
 registerApp "myapp" "myapp" "frontend" 80
-# Then in integration.sh:
+# devcontainer.json: "forwardPorts": [80]
+# integration.sh:
 assertRunningApp "myapp"
 ```
 

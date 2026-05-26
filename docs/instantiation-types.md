@@ -33,7 +33,8 @@ The following steps apply to both scenarios:
 		2. **CPU & Memory:** Requirements depend on your workloads. As a guideline, refer to the `hostRequirements` section in `.devcontainer.json`. A typical setup with 4 CPU cores and 16 GB RAM is sufficient for most use cases.
 		3. **Network Ports:** Ensure the following ports are open for inbound connections:
 			1. `22` (SSH)
-			2. `80` and `443` — nginx ingress; apps are exposed via nginx ingress + sslip.io magic DNS (e.g. `todoapp.<your-ip>.sslip.io`)
+			2. `80` — nginx ingress HTTP; all apps exposed via nginx ingress + sslip.io magic DNS (e.g. `http://todoapp.<your-ip>.sslip.io`)
+			3. `443` — nginx ingress HTTPS (optional; required for TLS-terminated routes)
 
 2. **SSH into the host**
 
@@ -107,11 +108,25 @@ The following steps apply to both scenarios:
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?template_repository=dynatrace-wwse/codespaces-framework)
 
+#### Accessing apps in Codespaces
+
+Port **80** is forwarded automatically from the container. Once `post-create.sh` finishes, open the forwarded port in the Ports panel or use the URL shown in the terminal:
+
+```
+https://{codespacename}-80.app.github.dev
+```
+
+The nginx ingress has a **catch-all rule** (no Host restriction) that routes all unmatched traffic to the primary app deployed in that Codespace. Multi-app repos register apps in order; the last one registered owns the catch-all. Secondary apps are still reachable via their sslip.io URL (e.g. `http://bugzapper.127.0.0.1.sslip.io`).
+
+!!! info "Why `127.0.0.1` in sslip.io URLs inside Codespaces"
+    `detectIP()` returns `127.0.0.1` inside a Codespace. The sslip.io hostname `todoapp.127.0.0.1.sslip.io` resolves to `127.0.0.1` (the container's loopback), so the sslip.io Host-header rule also works inside the Codespace terminal.
+
 ### 2. 🖥️ VS Code Dev Containers
 
 - Use the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) for a seamless local experience in VS Code
 - All configuration is in `.devcontainer/devcontainer.json`
 - Supports secrets, port forwarding, and post-create hooks
+- Apps are accessible at `http://<app>.<your-ip>.sslip.io` (port 80 forwarded)
 
 
 ### 3. 🐳 Local Container
@@ -120,6 +135,7 @@ The following steps apply to both scenarios:
 - Easiest way: just run `make start` in the `.devcontainer` folder.
 - This will build and launch the container if needed, or attach to it if already running.
 - All ports, volumes, and environment variables are set up for you automatically.
+- Apps are accessible at `http://<app>.<your-ip>.sslip.io` — the host's port 80 routes to the nginx ingress inside the container.
 
 
 
