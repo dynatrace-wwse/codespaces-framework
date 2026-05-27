@@ -413,7 +413,11 @@ async def execute_daemon(
     await _git_clone(head_repo, ref, repo_dir)
     await _make_world_writable(repo_dir)
     dt_env_overrides: dict[str, str] | None = job.get("dt_env") or None
-    _write_env_file(repo_dir / ".devcontainer" / ".env", overrides=dt_env_overrides)
+    _write_env_file(
+        repo_dir / ".devcontainer" / ".env",
+        overrides=dt_env_overrides,
+        orbital_job_id=job_id,
+    )
 
     start_time = time.time()
     workspace = f"/workspaces/{repo_name}"
@@ -712,7 +716,11 @@ def _redact(token: str) -> str:
     return token[:14] + "***REDACTED***"
 
 
-def _write_env_file(env_path: Path, overrides: dict[str, str] | None = None):
+def _write_env_file(
+    env_path: Path,
+    overrides: dict[str, str] | None = None,
+    orbital_job_id: str = "",
+):
     """Write .devcontainer/.env with DT credentials."""
     env_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = {
@@ -720,6 +728,8 @@ def _write_env_file(env_path: Path, overrides: dict[str, str] | None = None):
         "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
         "DT_INGEST_TOKEN":   DT_INGEST_TOKEN,
     }
+    if orbital_job_id:
+        resolved["ORBITAL_JOB_ID"] = orbital_job_id
     if overrides:
         resolved.update(overrides)
     env_path.write_text("".join(f"{k}={v}\n" for k, v in resolved.items() if v))
