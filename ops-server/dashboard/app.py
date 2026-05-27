@@ -2199,12 +2199,20 @@ async def _find_job_by_subdomain(subdomain: str) -> tuple[str, dict, dict]:
         if app_info:
             return job_prefix, meta, app_info
 
-    # Prefix scan for truncated long job IDs
+    # Prefix scan for truncated long job IDs.
+    # The slug normalises the job_id (lowercases, strips non-[a-z0-9-] chars like _,
+    # then truncates), so we must apply the same transform before comparing.
+    import re as _re
+    def _slug_normalize(s: str) -> str:
+        return _re.sub(r'[^a-z0-9-]', '', s.lower())
+
+    norm_prefix = _slug_normalize(job_prefix)
     keys = await pool.keys("job:running:*")
     for raw_key in keys:
         key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
         job_id = key.removeprefix("job:running:")
-        if not job_id.startswith(job_prefix):
+        norm_id = _slug_normalize(job_id)
+        if not norm_id.startswith(norm_prefix):
             continue
         meta = await pool.hgetall(key)
         if not meta:
