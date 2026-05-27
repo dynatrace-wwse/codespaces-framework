@@ -153,33 +153,45 @@ Every app gets a dedicated HTTPS URL derived from the job ID:
 https://{appname}--{job_slug}.autonomous-enablements.whydevslovedynatrace.com
 ```
 
-`job_slug` is the first 52 characters of the job ID, lower-cased, with non-`[a-z0-9-]`
-characters removed (e.g. `_` in `x86_64` is stripped). The total subdomain label stays
-within the 63-character DNS limit.
+`job_slug` is derived from the job ID with the verbose worker prefix shortened:
 
-**Example:**
+- Worker jobs: `worker-x86_64-34ea2d-...` → `34ea2d-...` (6-char hex replaces `worker-{arch}-`)
+- Master jobs: `master-...` stays as-is
+
+The result is then lower-cased, non-`[a-z0-9-]` characters stripped, and truncated so the
+full DNS label (`{appname}--{slug}`) stays within the 63-character limit.
+
+**Examples:**
 
 ```
-https://astroshop--worker-x8664-a99883-codespaces-framework-1779883231.autonomous-enablements.whydevslovedynatrace.com
+# AMD worker job
+https://astroshop--34ea2d-codespaces-framework-1779883231-abc123.autonomous-enablements.whydevslovedynatrace.com
+
+# Master job
+https://astroshop--master-codespaces-framework-1779883231-abc123.autonomous-enablements.whydevslovedynatrace.com
 ```
 
 #### How routing works
+
+Works with both `k3d` and `kind` cluster engines — the outer proxy layer is
+engine-agnostic; only the inner nginx ingress provider differs (`cloud` for k3d,
+`kind` for kind).
 
 ```
 Browser → nginx (wildcard TLS block)
          → FastAPI /proxy-subdomain/{path}
          → _find_job_by_subdomain() [Redis lookup via normalized prefix scan]
          → http://{worker_ip}:{app_proxy_port}/{path}
-              Host: {app}.{worker_ip}.sslip.io   ← k3d nginx-ingress routes on this
-         → k3d nginx-ingress → Envoy / service
+              Host: {app}.{worker_ip}.sslip.io   ← nginx ingress routes on this
+         → nginx ingress → Envoy / service
 ```
 
 Key points:
 
 - **No HTML/CSS rewriting.** Every app is served at root `/` so Next.js, SPAs, and
   static asset resolvers all work without `basePath` hacks.
-- The k3d ingress always uses the sslip.io host internally. The public wildcard URL
-  is a separate nginx front-end that sets the `Host` header for k3d.
+- The nginx ingress always uses the sslip.io host internally. The public wildcard URL
+  is a separate nginx front-end that sets the `Host` header for the ingress.
 - `app_proxy_port` is a fixed host port (32000–32005) published by the Sysbox
   container and stored in Redis on job start.
 

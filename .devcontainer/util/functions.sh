@@ -1813,17 +1813,28 @@ detectHostname() {
 computeOrbitalSubdomain() {
   # Returns the wildcard subdomain label for an app running in Orbital.
   # Format: {appname}--{job_slug}
-  # where job_slug is a sanitized, length-capped slice of ORBITAL_JOB_ID.
+  # where job_slug replaces the verbose worker prefix with a short ID:
+  #   worker-x86_64-34ea2d-repo-ts-hex  →  34ea2d-repo-ts-hex
+  #   master-repo-ts-hex                →  master-repo-ts-hex
   # The full label must fit in 63 chars (DNS label limit).
   # Used by getAppURL and registerApp to build the canonical URL
   # https://{appname}--{slug}.autonomous-enablements.whydevslovedynatrace.com
   local app_name="$1"
   local jid="${ORBITAL_JOB_ID:-}"
   if [[ -z "$jid" ]]; then echo ""; return 0; fi
+
+  # Shorten: strip "worker-{arch}-" prefix, keeping only the 6-char hex + rest
+  local slug_base
+  if [[ "$jid" =~ ^worker-[^-]+-([a-f0-9]{6})-(.+)$ ]]; then
+    slug_base="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+  else
+    slug_base="$jid"
+  fi
+
   # Max label = 63; separator "--" = 2; leave remainder for job slug
   local max_slug=$(( 61 - ${#app_name} ))
   if [[ $max_slug -lt 4 ]]; then max_slug=4; fi
-  local slug="${jid:0:$max_slug}"
+  local slug="${slug_base:0:$max_slug}"
   # Sanitize: only lowercase alphanum and hyphens; strip trailing hyphens
   slug=$(echo "$slug" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | sed 's/-*$//')
   echo "${app_name}--${slug}"

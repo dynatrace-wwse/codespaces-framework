@@ -2199,20 +2199,32 @@ async def _find_job_by_subdomain(subdomain: str) -> tuple[str, dict, dict]:
         if app_info:
             return job_prefix, meta, app_info
 
-    # Prefix scan for truncated long job IDs.
-    # The slug normalises the job_id (lowercases, strips non-[a-z0-9-] chars like _,
-    # then truncates), so we must apply the same transform before comparing.
+    # Prefix scan for truncated/shortened job IDs.
+    # computeOrbitalSubdomain in functions.sh:
+    #   1. strips "worker-{arch}-" prefix, keeping "{hex6}-{rest}"  (or keeps "master-{rest}")
+    #   2. lowercases + strips non-[a-z0-9-] chars (e.g. _ in x86_64)
+    #   3. truncates to DNS label budget
+    # We must apply the same transform to each job_id before comparing.
     import re as _re
     def _slug_normalize(s: str) -> str:
         return _re.sub(r'[^a-z0-9-]', '', s.lower())
+
+    def _slug_short(s: str) -> str:
+        """Mirror computeOrbitalSubdomain: strip worker-{arch}- prefix."""
+        m = _re.match(r'^worker-[^-]+-([a-f0-9]{6})-(.+)$', s)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}"
+        return s
 
     norm_prefix = _slug_normalize(job_prefix)
     keys = await pool.keys("job:running:*")
     for raw_key in keys:
         key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
         job_id = key.removeprefix("job:running:")
-        norm_id = _slug_normalize(job_id)
-        if not norm_id.startswith(norm_prefix):
+        # Try full normalized ID first, then shortened form (worker-arch- stripped)
+        norm_short = _slug_normalize(_slug_short(job_id))
+        norm_full  = _slug_normalize(job_id)
+        if not (norm_short.startswith(norm_prefix) or norm_full.startswith(norm_prefix)):
             continue
         meta = await pool.hgetall(key)
         if not meta:
