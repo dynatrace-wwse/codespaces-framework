@@ -138,6 +138,71 @@ The nginx ingress has a **catch-all rule** (no Host restriction) that routes all
 - Apps are accessible at `http://<app>.<your-ip>.sslip.io` — the host's port 80 routes to the nginx ingress inside the container.
 
 
+### 4. 🛰️ Orbital (Sysbox / Training delivery)
+
+Orbital is the Dynatrace WWSE self-service training platform. Each job runs inside a
+[Sysbox](https://github.com/nestybox/sysbox) container (Docker-in-Docker without
+`--privileged`) on an EC2 worker. Orbital is the only instantiation type that uses
+**wildcard subdomains** instead of port forwarding.
+
+#### How apps are exposed in Orbital
+
+Every app gets a dedicated HTTPS URL derived from the job ID:
+
+```
+https://{appname}--{job_slug}.autonomous-enablements.whydevslovedynatrace.com
+```
+
+`job_slug` is the first 52 characters of the job ID, lower-cased, with non-`[a-z0-9-]`
+characters removed (e.g. `_` in `x86_64` is stripped). The total subdomain label stays
+within the 63-character DNS limit.
+
+**Example:**
+
+```
+https://astroshop--worker-x8664-a99883-codespaces-framework-1779883231.autonomous-enablements.whydevslovedynatrace.com
+```
+
+#### How routing works
+
+```
+Browser → nginx (wildcard TLS block)
+         → FastAPI /proxy-subdomain/{path}
+         → _find_job_by_subdomain() [Redis lookup via normalized prefix scan]
+         → http://{worker_ip}:{app_proxy_port}/{path}
+              Host: {app}.{worker_ip}.sslip.io   ← k3d nginx-ingress routes on this
+         → k3d nginx-ingress → Envoy / service
+```
+
+Key points:
+
+- **No HTML/CSS rewriting.** Every app is served at root `/` so Next.js, SPAs, and
+  static asset resolvers all work without `basePath` hacks.
+- The k3d ingress always uses the sslip.io host internally. The public wildcard URL
+  is a separate nginx front-end that sets the `Host` header for k3d.
+- `app_proxy_port` is a fixed host port (32000–32005) published by the Sysbox
+  container and stored in Redis on job start.
+
+#### Environment signals
+
+| Variable | Value | Set by |
+|---|---|---|
+| `ORBITAL_ENVIRONMENT` | `true` | executor.py (injected into all Orbital container jobs) |
+| `ORBITAL_JOB_ID` | `<job_id>` | executor.py (daemon/integration-test; used to compute subdomain slug) |
+| `INSTANTIATION_TYPE` | `orbital` | `variables.sh` (reads `ORBITAL_ENVIRONMENT`) |
+
+`detectRunEnvironment()` returns `"orbital"` when `ORBITAL_ENVIRONMENT=true`, which
+`getAppURL()` and `registerApp()` use to build the wildcard subdomain URL instead of
+the sslip.io or Codespaces URL.
+
+!!! info "DNS & TLS requirements"
+    The wildcard subdomain requires:
+
+    - DNS: `*.autonomous-enablements.whydevslovedynatrace.com A 18.134.158.252` (Google Cloud DNS)
+    - TLS: a Let's Encrypt wildcard cert for `*.autonomous-enablements.whydevslovedynatrace.com`
+      issued via DNS-01 challenge (manual renewal every 90 days)
+    - nginx: `server_names_hash_bucket_size 128` in `/etc/nginx/nginx.conf`
+
 
 ## ⚡ Quick Comparison
 
@@ -146,6 +211,7 @@ The nginx ingress has a **catch-all rule** (no Host restriction) that routes all
 | ☁️ Codespaces         | GitHub Cloud         | ❌             | ✅         | ❌           | Auto-injected   | Auto            | Quick onboarding, demos   |
 | 🖥️ VS Code DevContainer | Provided Infrastructure | ✅             | ✅         | ✅           | Auto/manual     | Auto            | Full-featured local dev   |
 | 🐳 Local Container    | Provided Infrastructure | ❌             | ✅         | ✅           | Manual/`.env`   | Manual/Makefile | Reproducible local dev    |
+| 🛰️ Orbital            | EC2 Sysbox Workers   | ❌             | ✅         | ❌           | Auto-injected   | Wildcard subdomain | Training delivery      |
 
 
 ## 🔐 Secrets & Environment

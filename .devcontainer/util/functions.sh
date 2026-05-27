@@ -2849,6 +2849,9 @@ verifyCodespaceCreation(){
     if [ -n "$containername" ]; then
       raw_errors=$(docker logs "$containername" 2>&1 | grep -i -E 'error|failed' || true)
     fi
+  elif [[ $INSTANTIATION_TYPE == "orbital" ]]; then
+    # Inside Orbital Sysbox; executor streams logs to Redis — no extra collection needed.
+    true
   else
     printWarn "Unknown instantiation type: $INSTANTIATION_TYPE"
   fi
