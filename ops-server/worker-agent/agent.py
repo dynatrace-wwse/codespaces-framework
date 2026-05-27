@@ -221,6 +221,10 @@ class SysboxPool:
         # Wipe inner docker state without touching the outer Sysbox or its image cache.
         for cmd in [
             ["docker", "exec", slot.sb_name, "docker", "rm", "-fv", "dt"],
+            # Remove all remaining containers (k3d nodes, etc.) left from the previous job.
+            # Must run after dt removal so the rm -fv dt succeeds by name first.
+            ["docker", "exec", slot.sb_name, "sh", "-c",
+             "docker ps -aq | xargs -r docker rm -f 2>/dev/null; true"],
             ["docker", "exec", slot.sb_name, "docker", "volume", "prune", "-f"],
             ["docker", "exec", slot.sb_name, "docker", "network", "prune", "-f"],
         ]:
