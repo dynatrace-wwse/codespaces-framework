@@ -875,7 +875,7 @@ class WorkerManager:
         log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id)
 
         # Sysbox-isolated nested containers (see executor.py for the same
         # architecture): outer Sysbox container runs docker:25-dind; inner
@@ -1096,7 +1096,7 @@ class WorkerManager:
         log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id)
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -1379,7 +1379,7 @@ class WorkerManager:
         log.info("Cloning %s @ %s for framework-sysbox %s (%s)", repo, ref, suite, job_id)
         await self._git_clone(repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64")
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id)
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -1729,7 +1729,7 @@ class WorkerManager:
         )
         return content
 
-    def _write_env_file(self, env_path: Path, arch: str):
+    def _write_env_file(self, env_path: Path, arch: str, job_id: str = ""):
         """Mirror the GHA workflow's .env writing.
 
         Adds K3D_* port overrides so the in-container k3d cluster doesn't
@@ -1739,6 +1739,9 @@ class WorkerManager:
         registerApp's hostname-based ingress route is stable across parallel
         workers (otherwise each worker's dt container would use its own
         random container hostname).
+
+        ORBITAL_JOB_ID is passed so the framework can compute the wildcard
+        subdomain URL for each app (e.g. astroshop--<slug>.autonomous-enablements.*).
         """
         import socket
         external_hostname = os.environ.get("EXTERNAL_HOSTNAME") or socket.gethostname()
@@ -1754,6 +1757,7 @@ class WorkerManager:
             f"K3D_API_PORT=6444\n"
             f"EXTERNAL_HOSTNAME={external_hostname}\n"
             f"ORBITAL_ENVIRONMENT=true\n"
+            f"ORBITAL_JOB_ID={job_id}\n"
         )
 
     async def _git_clone(self, repo: str, ref: str, dest: Path):

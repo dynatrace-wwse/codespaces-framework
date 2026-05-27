@@ -595,10 +595,14 @@ class WorkerAgent:
                 healthy = False
             finally:
                 self._job_slots.pop(job_id, None)
-                # Release slot back to pool (re-init if unhealthy).
-                await self.sysbox_pool.release(slot, healthy=healthy)
+                # Terminated daemon jobs have their Sysbox force-removed externally.
+                # docker wait returns normally (no exception), so healthy stays True.
+                # We must release as unhealthy so _init_slot gets a fresh container;
+                # otherwise the dead slot re-enters the pool and the next git clone fails.
+                was_terminated = job_id in self._terminated_jobs
+                await self.sysbox_pool.release(slot, healthy=healthy and not was_terminated)
 
-                if job_id in self._terminated_jobs:
+                if was_terminated:
                     job["status"] = "terminated"
                     job["result"] = job.get("result") or {}
                     job["result"]["terminated"] = True

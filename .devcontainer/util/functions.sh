@@ -1810,6 +1810,25 @@ detectHostname() {
   fi
 }
 
+computeOrbitalSubdomain() {
+  # Returns the wildcard subdomain label for an app running in Orbital.
+  # Format: {appname}--{job_slug}
+  # where job_slug is a sanitized, length-capped slice of ORBITAL_JOB_ID.
+  # The full label must fit in 63 chars (DNS label limit).
+  # Used by getAppURL and registerApp to build the canonical URL
+  # https://{appname}--{slug}.autonomous-enablements.whydevslovedynatrace.com
+  local app_name="$1"
+  local jid="${ORBITAL_JOB_ID:-}"
+  if [[ -z "$jid" ]]; then echo ""; return 0; fi
+  # Max label = 63; separator "--" = 2; leave remainder for job slug
+  local max_slug=$(( 61 - ${#app_name} ))
+  if [[ $max_slug -lt 4 ]]; then max_slug=4; fi
+  local slug="${jid:0:$max_slug}"
+  # Sanitize: only lowercase alphanum and hyphens; strip trailing hyphens
+  slug=$(echo "$slug" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | sed 's/-*$//')
+  echo "${app_name}--${slug}"
+}
+
 installIngressController() {
   # Installs the nginx ingress controller in the Kind cluster.
   # Installs the nginx ingress controller.
@@ -1846,11 +1865,17 @@ installIngressController() {
 getAppURL() {
   # Returns the user-facing URL for an app based on environment type.
   # Usage: getAppURL <app-name>
+  # Orbital:    wildcard subdomain {appname}--{job_slug}.autonomous-enablements.*
   # Codespaces: port 80 is forwarded; catch-all ingress rule routes the request.
+  # Local/other: magic-DNS sslip.io URL
   local app_name="$1"
   local detected_ip
 
-  if [[ "$CODESPACES" == true ]]; then
+  if [[ "$(detectRunEnvironment)" == "orbital" ]] && [[ -n "${ORBITAL_JOB_ID:-}" ]]; then
+    local subdomain
+    subdomain=$(computeOrbitalSubdomain "$app_name")
+    echo "https://${subdomain}.autonomous-enablements.whydevslovedynatrace.com"
+  elif [[ "$CODESPACES" == true ]]; then
     echo "https://${CODESPACE_NAME}-80.app.github.dev"
   else
     detected_ip=$(detectIP)
@@ -1944,9 +1969,15 @@ INGRESSEOF
   # cs_port stays empty — Codespaces uses port 80 via the catch-all ingress rule
   local cs_port=""
 
-  # Write to app registry
+  # Compute the Orbital wildcard subdomain (empty when not in Orbital or no ORBITAL_JOB_ID)
+  local orbital_subdomain=""
+  if [[ "$(detectRunEnvironment)" == "orbital" ]] && [[ -n "${ORBITAL_JOB_ID:-}" ]]; then
+    orbital_subdomain=$(computeOrbitalSubdomain "$app_name")
+  fi
+
+  # Write to app registry — field 7 is the Orbital subdomain label (empty outside Orbital)
   mkdir -p "$(dirname "$APP_REGISTRY")"
-  echo "${app_name}|${namespace}|${service_name}|${service_port}|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+  echo "${app_name}|${namespace}|${service_name}|${service_port}|${ingress_host}|${cs_port}|${orbital_subdomain}" >> "$APP_REGISTRY"
 
   local app_url
   app_url=$(getAppURL "$app_name" "$cs_port")
@@ -2028,11 +2059,18 @@ ASTROINGRESSEOF
 
   # cs_port stays empty — Codespaces uses port 80 via catch-all ingress rule
   local cs_port=""
+
+  # Compute the Orbital wildcard subdomain (empty when not in Orbital)
+  local orbital_subdomain=""
+  if [[ "$(detectRunEnvironment)" == "orbital" ]] && [[ -n "${ORBITAL_JOB_ID:-}" ]]; then
+    orbital_subdomain=$(computeOrbitalSubdomain "astroshop")
+  fi
+
   mkdir -p "$(dirname "$APP_REGISTRY")"
   # Remove old entry if exists
   grep -v "^astroshop|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
   mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
-  echo "astroshop|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+  echo "astroshop|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}|${orbital_subdomain}" >> "$APP_REGISTRY"
 
   local app_url
   app_url=$(getAppURL "astroshop" "$cs_port")

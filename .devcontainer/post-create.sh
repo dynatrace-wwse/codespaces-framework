@@ -1,30 +1,30 @@
 #!/bin/bash
-#loading functions to script
+# TEST BRANCH: minimal post-create for wildcard-subdomain astroshop verification.
+# Brings up k3d + astroshop only (no DT Operator, no OneAgent).
+# This post-create is intentionally stripped down for the fix/wildcard-subdomain-app-routing branch.
 export SECONDS=0
 source .devcontainer/util/source_framework.sh
 
 setUpTerminal
-
-# Start Kubernetes cluster (K3s by default, or Kind if CLUSTER_ENGINE=kind)
-startCluster
-
+startK3dCluster
 installK9s
 
-# Dynatrace Operator is deployed automatically, secrets are read from the env.
-dynatraceDeployOperator
+if [[ "$ARCH" != "x86_64" ]]; then
+  printWarn "Astroshop only supports x86_64 — skipping deployment"
+  finalizePostCreation
+  exit 0
+fi
 
-# You can deploy CNFS (for CNFS use Kind) or AppOnly (use k3d)
-#deployCloudNative
-deployApplicationMonitoring
+printInfoSection "Deploying Astroshop (wildcard subdomain test — no DT components)"
 
-# The TODO App will be deployed as a sample
-deployTodoApp
+kubectl create ns astroshop 2>/dev/null || true
+kubectl apply -n astroshop -f "$FRAMEWORK_APPS_PATH/astroshop/yaml/astroshop-deployment.yaml"
+kubectl -n astroshop create secret generic dt-credentials \
+  --from-literal="DT_API_TOKEN=test-only" \
+  --from-literal="DT_ENDPOINT=http://localhost:4318" 2>/dev/null || true
 
-# If you want to deploy your own App, just create a function in the functions.sh file and call it here.
-# deployMyCustomApp
+waitForAllReadyPods "astroshop"
+registerAstroshopIngress "astroshop"
 
-# This step is needed, do not remove it
-# it'll verify if there are error in the logs and will show them in the greeting as well a monitoring 
 finalizePostCreation
-
-printInfoSection "Your dev container finished creating"
+printInfoSection "Astroshop ready — verify images at: $(getAppURL astroshop)images/products/LensCleaningKit.jpg"
