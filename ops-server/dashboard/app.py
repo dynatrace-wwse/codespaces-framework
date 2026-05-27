@@ -2585,10 +2585,11 @@ async def proxy_subdomain_app(request: Request, path: str):
         "Host": app_info["ingress_host"],
     }
     for h in ("accept", "accept-language", "cookie",
-               "content-type", "cache-control", "x-requested-with",
-               "accept-encoding"):
+               "content-type", "cache-control", "x-requested-with"):
         if h in request.headers:
             forward_headers[h] = request.headers[h]
+    # accept-encoding intentionally not forwarded — we need plain bytes to
+    # rewrite localhost URLs in HTML without re-compressing the body.
 
     body = await request.body()
 
@@ -2608,25 +2609,31 @@ async def proxy_subdomain_app(request: Request, path: str):
     skip = {"transfer-encoding", "connection", "keep-alive", "upgrade",
             "proxy-authenticate", "proxy-authorization", "te", "trailers",
             "x-frame-options", "content-security-policy",
-            "content-security-policy-report-only"}
+            "content-security-policy-report-only",
+            "content-encoding", "content-length"}
     resp_headers = {
         k: v for k, v in upstream.headers.items()
         if k.lower() not in skip
     }
 
-    # Rewrite Location redirects to stay on the same subdomain (no path prefix needed)
-    location = resp_headers.get("location", "")
-    if location:
-        if location.startswith("http://") or location.startswith("https://"):
-            # Absolute redirect — preserve as-is (app is at root, no prefix to fix)
-            pass
-        # Root-relative redirects are correct because basePath is /
+    content = upstream.content
+    content_type = upstream.headers.get("content-type", "")
+
+    # Rewrite hardcoded localhost:8080 in HTML bodies.
+    # Next.js imageLoader uses NEXT_PUBLIC_FRONTEND_ADDR which is baked to
+    # http://localhost:8080 at image build time; browsers can't reach that.
+    if "text/html" in content_type and b"localhost:8080" in content:
+        public_host = request.headers.get("host", "")
+        if public_host:
+            pub = f"https://{public_host}".encode()
+            content = content.replace(b"http://localhost:8080", pub)
+            content = content.replace(b"https://localhost:8080", pub)
 
     return PlainResponse(
-        content=upstream.content,
+        content=content,
         status_code=upstream.status_code,
         headers=resp_headers,
-        media_type=upstream.headers.get("content-type") or None,
+        media_type=content_type or None,
     )
 
 
