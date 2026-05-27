@@ -146,10 +146,10 @@ async def run_nightly(
     log.info("All %d repos queued for nightly run %s", len(schedule), run_id)
 
     if include_framework:
-        log.info("Queueing framework tests (bats on arm64, k3d-basic + k3d-apps on amd64)…")
+        log.info("Queueing framework tests (bats arm64; engines+k3d-apps+dt-apponly+dt-cnfs arm64+amd64)…")
         fw_timestamp = datetime.now(timezone.utc).isoformat()
         fw_nightly_id = f"framework-nightly-{run_id}"
-        # bats unit tests — run on ARM master (no Sysbox needed)
+        # bats unit tests — ARM master only (no Sysbox needed)
         await pool.rpush("queue:test:arm64", json.dumps({
             "type": "framework-test",
             "suite": "bats",
@@ -163,24 +163,28 @@ async def run_nightly(
             "trigger": "nightly",
             "nightly_run_id": fw_nightly_id,
         }))
-        # k3d-basic and k3d-apps — run on AMD64 workers (need Sysbox)
+        # Sysbox suites — run on BOTH arm64 (master Sysbox) and amd64 (AMD workers)
+        # dt-apponly / dt-cnfs: uses COE tenant creds; validates DT modules per arch
         for suite_id, script in [
-            ("k3d-basic", "bash .devcontainer/test/integration_k3d_basic.sh"),
-            ("k3d-apps",  "bash .devcontainer/test/integration_k3d_apps.sh"),
+            ("engines",    "bash .devcontainer/test/integration_engines.sh"),
+            ("k3d-apps",   "bash .devcontainer/test/integration_k3d_apps.sh"),
+            ("dt-apponly", "bash .devcontainer/test/integration_appmon_k3d_todoapp.sh"),
+            ("dt-cnfs",    "bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh"),
         ]:
-            await pool.rpush("queue:test:amd64", json.dumps({
-                "type": "framework-test",
-                "suite": suite_id,
-                "test_script": script,
-                "framework_suite": suite_id,
-                "repo": "dynatrace-wwse/codespaces-framework",
-                "arch": "amd64",
-                "queue": "test:amd64",
-                "ref": "main",
-                "timestamp": fw_timestamp,
-                "trigger": "nightly",
-                "nightly_run_id": fw_nightly_id,
-            }))
+            for target_arch in ("arm64", "amd64"):
+                await pool.rpush(f"queue:test:{target_arch}", json.dumps({
+                    "type": "framework-test",
+                    "suite": suite_id,
+                    "test_script": script,
+                    "framework_suite": suite_id,
+                    "repo": "dynatrace-wwse/codespaces-framework",
+                    "arch": target_arch,
+                    "queue": f"test:{target_arch}",
+                    "ref": "main",
+                    "timestamp": fw_timestamp,
+                    "trigger": "nightly",
+                    "nightly_run_id": fw_nightly_id,
+                }))
         log.info("Framework test jobs queued under %s", fw_nightly_id)
 
     await pool.aclose()

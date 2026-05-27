@@ -79,10 +79,15 @@ printRunningApplications(){
 
     # Ingress mode: show apps from registry
     if [[ "$USE_LEGACY_PORTS" != "true" ]] && [[ -f "$APP_REGISTRY" ]] && [[ -s "$APP_REGISTRY" ]]; then
-        while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port; do
+        local _greet_env
+        _greet_env=$(detectRunEnvironment)
+        local _fwd_domain="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
+        while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port orbital_subdomain; do
             running_app=true
-            if [[ $CODESPACES == true && -n "$cs_port" ]]; then
-                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-${cs_port}.app.github.dev"
+            if [[ "$_greet_env" == "orbital" && -n "$orbital_subdomain" ]]; then
+                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${orbital_subdomain}.autonomous-enablements.whydevslovedynatrace.com"
+            elif [[ $CODESPACES == true ]]; then
+                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-80.${_fwd_domain}"
             else
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}http://${ingress_host}"
             fi

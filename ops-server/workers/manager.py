@@ -1356,8 +1356,10 @@ class WorkerManager:
 
         suite     = job.get("suite", "engines")
         script_map = {
-            "engines":   "bash .devcontainer/test/integration_engines.sh",
-            "k3d-apps":  "bash .devcontainer/test/integration_k3d_apps.sh",
+            "engines":    "bash .devcontainer/test/integration_engines.sh",
+            "k3d-apps":   "bash .devcontainer/test/integration_k3d_apps.sh",
+            "dt-apponly": "bash .devcontainer/test/integration_appmon_k3d_todoapp.sh",
+            "dt-cnfs":    "bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh",
         }
         test_script = script_map.get(suite)
         if not test_script:

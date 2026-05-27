@@ -2308,7 +2308,7 @@ async function _loadShellAppTabs(jobId) {
             const btn = document.createElement('button');
             btn.className = 'btn btn-small btn-secondary shell-tab-btn';
             btn.dataset.tab = app.name;
-            btn.dataset.proxyUrl = app.proxy_url;
+            btn.dataset.proxyUrl = app.subdomain_url || app.proxy_url;
             btn.textContent = `⬡ ${app.name}`;
             tabBar.appendChild(btn);
         }
@@ -2349,7 +2349,8 @@ function _switchShellTab(tab, proxyUrl) {
         terminal.style.display = 'none';
         empty.style.display = 'none';
         frame.style.display = '';
-        if (frame.src !== location.origin + proxyUrl) {
+        const absUrl = proxyUrl.startsWith('http') ? proxyUrl : location.origin + proxyUrl;
+        if (frame.src !== absUrl) {
             frame.src = proxyUrl;
         }
     }
@@ -2393,7 +2394,7 @@ async function _loadLivelogAppTabs(jobId) {
             const btn = document.createElement('button');
             btn.className = 'btn btn-small btn-secondary livelog-tab-btn';
             btn.dataset.tab = app.name;
-            btn.dataset.proxyUrl = app.proxy_url;
+            btn.dataset.proxyUrl = app.subdomain_url || app.proxy_url;
             btn.textContent = `⬡ ${app.name}`;
             tabBar.appendChild(btn);
         }
@@ -2434,7 +2435,8 @@ function _switchLivelogTab(tab, proxyUrl) {
         pre.style.display = 'none';
         empty.style.display = 'none';
         frame.style.display = '';
-        if (frame.src !== location.origin + proxyUrl) {
+        const absUrl = proxyUrl.startsWith('http') ? proxyUrl : location.origin + proxyUrl;
+        if (frame.src !== absUrl) {
             frame.src = proxyUrl;
         }
     }
@@ -2525,7 +2527,7 @@ document.addEventListener('click', e => {
         if (!shellJobId) return;
         // Open blank popup immediately (sync with click → bypasses popup blocker)
         const popup = window.open('', '_blank',
-            'width=1280,height=800,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes');
+            'width=1280,height=1200,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes');
         if (!popup) return;
         const winTitle = document.getElementById('shell-modal-title')?.textContent || 'Shell';
         popup.document.write(shellPopupHtml(shellJobId, winTitle));

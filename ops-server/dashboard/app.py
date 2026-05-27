@@ -3461,7 +3461,7 @@ async function pollApps() {{
           <div class="app-name">${{a.name}}</div>
           <div class="app-sub">port ${{a.port}}</div>
         </div>
-        <a class="app-btn" href="${{BASE_URL}}${{a.proxy_url}}" target="_blank" rel="noopener">Open ↗</a>
+        <a class="app-btn" href="${{a.subdomain_url || (BASE_URL + a.proxy_url)}}" target="_blank" rel="noopener">Open ↗</a>
       </div>`).join('');
   }} catch {{}}
 }}
@@ -3602,8 +3602,8 @@ FRAMEWORK_SUITES = [
     {"id": "bats",      "name": "Unit Tests (bats)",         "description": "Shell unit tests — static, no cluster needed", "arch": "arm64", "needs_creds": False, "test_script": "cd .devcontainer && bats test/unit/"},
     {"id": "engines",   "name": "Engine Tests",              "description": "k3d + Kind (AMD64; Kind skipped on Orbital)",   "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_engines.sh"},
     {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_k3d_apps.sh"},
-    {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Dynatrace operator + CSI injection",            "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "test_script": None},
-    {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "OneAgent DaemonSet — needs bare-metal VM",      "arch": "amd64", "needs_creds": True,  "status": "coming_soon", "requires_native": True, "test_script": None},
+    {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Operator + ActiveGate + CSI code injection + todo-app (K3d, AMD64+ARM64)",          "arch": "both", "needs_creds": True,  "test_script": "bash .devcontainer/test/integration_appmon_k3d_todoapp.sh"},
+    {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "CNFS dynakube + K3d — OneAgent crash expected on container nodes (AMD64+ARM64)", "arch": "both", "needs_creds": True,  "requires_native": True, "test_script": "bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh"},
 ]
 
 @app.get("/api/framework/suites")
