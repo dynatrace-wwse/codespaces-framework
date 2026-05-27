@@ -2172,10 +2172,69 @@ async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
                 "service": parts[2],
                 "port": parts[3],
                 "ingress_host": parts[4],
+                # field 7: orbital subdomain label e.g. "astroshop--enablement-674b15115240"
+                "orbital_subdomain": parts[6].strip() if len(parts) >= 7 else "",
             })
 
     await pool.set(cache_key, json.dumps(apps), ex=60)
     return apps
+
+
+async def _find_job_by_subdomain(subdomain: str) -> tuple[str, dict, dict]:
+    """Find a running job and app info from a wildcard subdomain label.
+
+    subdomain format: {appname}--{job_id_prefix}
+    Returns (job_id, job_meta, app_info) or ("", {}, {}) if not found.
+    """
+    if "--" not in subdomain:
+        return "", {}, {}
+
+    appname, job_prefix = subdomain.split("--", 1)
+
+    # Direct lookup first (covers arena job IDs which fit untruncated)
+    meta = await pool.hgetall(f"job:running:{job_prefix}")
+    if meta:
+        apps = await _read_app_registry(job_prefix, meta)
+        app_info = next((a for a in apps if a["name"] == appname), None)
+        if app_info:
+            return job_prefix, meta, app_info
+
+    # Prefix scan for truncated/shortened job IDs.
+    # computeOrbitalSubdomain in functions.sh:
+    #   1. strips "worker-{arch}-" prefix, keeping "{hex6}-{rest}"  (or keeps "master-{rest}")
+    #   2. lowercases + strips non-[a-z0-9-] chars (e.g. _ in x86_64)
+    #   3. truncates to DNS label budget
+    # We must apply the same transform to each job_id before comparing.
+    import re as _re
+    def _slug_normalize(s: str) -> str:
+        return _re.sub(r'[^a-z0-9-]', '', s.lower())
+
+    def _slug_short(s: str) -> str:
+        """Mirror computeOrbitalSubdomain: strip worker-{arch}- prefix."""
+        m = _re.match(r'^worker-[^-]+-([a-f0-9]{6})-(.+)$', s)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}"
+        return s
+
+    norm_prefix = _slug_normalize(job_prefix)
+    keys = await pool.keys("job:running:*")
+    for raw_key in keys:
+        key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+        job_id = key.removeprefix("job:running:")
+        # Try full normalized ID first, then shortened form (worker-arch- stripped)
+        norm_short = _slug_normalize(_slug_short(job_id))
+        norm_full  = _slug_normalize(job_id)
+        if not (norm_short.startswith(norm_prefix) or norm_full.startswith(norm_prefix)):
+            continue
+        meta = await pool.hgetall(key)
+        if not meta:
+            continue
+        apps = await _read_app_registry(job_id, meta)
+        app_info = next((a for a in apps if a["name"] == appname), None)
+        if app_info:
+            return job_id, meta, app_info
+
+    return "", {}, {}
 
 
 @app.get("/api/jobs/{job_id}/apps")
@@ -2186,12 +2245,16 @@ async def api_job_apps(job_id: str):
         raise HTTPException(status_code=404, detail="job not running")
 
     apps = await _read_app_registry(job_id, meta)
-    return {
-        "apps": [
-            {**a, "proxy_url": f"/apps/{job_id}/{a['name']}/"}
-            for a in apps
-        ]
-    }
+    result = []
+    for a in apps:
+        entry = {**a, "proxy_url": f"/apps/{job_id}/{a['name']}/"}
+        if a.get("orbital_subdomain"):
+            entry["subdomain_url"] = (
+                f"https://{a['orbital_subdomain']}"
+                ".autonomous-enablements.whydevslovedynatrace.com/"
+            )
+        result.append(entry)
+    return {"apps": result}
 
 
 def _rewrite_proxy_body(content: bytes, base_path: str, content_type: str) -> bytes:
@@ -2458,6 +2521,116 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
     from fastapi.responses import Response as PlainResponse
     return PlainResponse(
         content=body,
+        status_code=upstream.status_code,
+        headers=resp_headers,
+        media_type=content_type or None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wildcard-subdomain app proxy
+# ---------------------------------------------------------------------------
+# Handles requests routed via nginx from wildcard subdomains:
+#   {appname}--{job_slug}.autonomous-enablements.whydevslovedynatrace.com
+#
+# nginx rewrites the path to /proxy-subdomain/<original-path> and sets
+# the X-App-Subdomain header to the subdomain label before forwarding here.
+# Unlike /apps/{job_id}/{app_name}/ there is NO HTML rewriting — the app
+# runs at root so all asset paths resolve correctly without patching.
+# ---------------------------------------------------------------------------
+
+@app.api_route(
+    "/proxy-subdomain/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+async def proxy_subdomain_app(request: Request, path: str):
+    """Reverse-proxy to an app via its wildcard subdomain URL.
+
+    No HTML/CSS rewriting — the app is served at root (/), so all relative
+    asset paths resolve naturally without a basePath shim.
+    """
+    from fastapi.responses import Response as PlainResponse
+
+    subdomain = request.headers.get("x-app-subdomain", "")
+    if not subdomain or "--" not in subdomain:
+        raise HTTPException(status_code=400, detail="missing or invalid X-App-Subdomain header")
+
+    job_id, meta, app_info = await _find_job_by_subdomain(subdomain)
+    if not job_id:
+        raise HTTPException(status_code=404, detail=f"no running job found for subdomain '{subdomain}'")
+
+    app_proxy_port = meta.get("app_proxy_port")
+    if not app_proxy_port:
+        return HTMLResponse(
+            "<html><body style='font-family:sans-serif;padding:32px;background:#050810;color:#d0d7de'>"
+            "<h3 style='color:#f0b429'>App proxy not available</h3>"
+            "<p>This job was started before app port forwarding was added.</p>"
+            "<p>Terminate and start a new session to enable app preview.</p>"
+            "</body></html>",
+            status_code=503,
+        )
+
+    worker_id = meta.get("worker_id", "")
+    if worker_id.startswith("worker-"):
+        worker_hash = await pool.hgetall(f"worker:{worker_id}")
+        target_ip = worker_hash.get("host", "127.0.0.1")
+    else:
+        target_ip = "127.0.0.1"
+
+    target_url = f"http://{target_ip}:{app_proxy_port}/{path}"
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    forward_headers = {
+        "Host": app_info["ingress_host"],
+    }
+    for h in ("accept", "accept-language", "cookie",
+               "content-type", "cache-control", "x-requested-with"):
+        if h in request.headers:
+            forward_headers[h] = request.headers[h]
+    # accept-encoding intentionally not forwarded — we need plain bytes to
+    # rewrite localhost URLs in HTML without re-compressing the body.
+
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            upstream = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                content=body,
+            )
+    except httpx.ConnectError:
+        raise HTTPException(status_code=502, detail="could not connect to app")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="upstream app timed out")
+
+    skip = {"transfer-encoding", "connection", "keep-alive", "upgrade",
+            "proxy-authenticate", "proxy-authorization", "te", "trailers",
+            "x-frame-options", "content-security-policy",
+            "content-security-policy-report-only",
+            "content-encoding", "content-length"}
+    resp_headers = {
+        k: v for k, v in upstream.headers.items()
+        if k.lower() not in skip
+    }
+
+    content = upstream.content
+    content_type = upstream.headers.get("content-type", "")
+
+    # Rewrite hardcoded localhost:8080 in HTML bodies.
+    # Next.js imageLoader uses NEXT_PUBLIC_FRONTEND_ADDR which is baked to
+    # http://localhost:8080 at image build time; browsers can't reach that.
+    if "text/html" in content_type and b"localhost:8080" in content:
+        public_host = request.headers.get("host", "")
+        if public_host:
+            pub = f"https://{public_host}".encode()
+            content = content.replace(b"http://localhost:8080", pub)
+            content = content.replace(b"https://localhost:8080", pub)
+
+    return PlainResponse(
+        content=content,
         status_code=upstream.status_code,
         headers=resp_headers,
         media_type=content_type or None,
@@ -3299,15 +3472,20 @@ async function pollApps() {{
 
 class ArenaExecRequest(BaseModel):
     command: str
+    # When True, run inside an interactive zsh (-i) so .zshrc / my_functions.sh are sourced.
+    # Use for STEP_SETUP commands that call shell functions. Default False (faster, no profile).
+    interactive: bool = False
 
 
 @app.post("/api/arena/sessions/{job_id}/exec")
 async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
-    """Run a non-interactive command inside the training container.
+    """Run a command inside the training container.
 
-    Uses the same SSH→docker-exec chain as the PTY bridge but without a TTY,
-    so the output can be captured and returned as JSON for shell-validation
-    question types.
+    Uses the same SSH→docker-exec chain as the PTY bridge but without a TTY.
+    Set interactive=True to load .zshrc (required for shell functions defined
+    in my_functions.sh, e.g. dynatraceEvalReadSaveCredentials, generateDynakube).
+
+    All executions are appended to job:exec-log:{job_id} in Redis for auditing.
 
     Returns: { stdout, stderr, exitCode }
     """
@@ -3322,15 +3500,14 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
     worker_id = meta.get("worker_id", "")
     repo = meta.get("repo", "")
-    # repo is stored as "org/repo-name"; workspace only uses the repo-name part
     repo_name = repo.split("/")[-1] if "/" in repo else repo
     container = meta.get("sb_name") or f"sb-{job_id[-32:]}"
 
-    # Match PTY bridge pattern: no outer shell wrapper — Sysbox container has docker but not bash.
-    # PTY: docker exec sb-{id} docker exec -it -w /workspaces/{repo} dt zsh
+    # interactive=True: zsh -i loads .zshrc so my_functions.sh functions are available
+    zsh_flag = "-ic" if body.interactive else "-c"
     cmd_args = ["docker", "exec", container,
                 "docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
-                "zsh", "-c", body.command]
+                "zsh", zsh_flag, body.command]
 
     worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
     ssh_host = worker_rec.get("ssh_host", "")
@@ -3340,6 +3517,7 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
     else:
         full_cmd = cmd_args
 
+    ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     try:
         proc = await _asyncio.create_subprocess_exec(
             *full_cmd,
@@ -3347,15 +3525,75 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
             stderr=_asyncio.subprocess.PIPE,
         )
         stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
-        return {
+        result = {
             "stdout": stdout_b.decode("utf-8", errors="replace"),
             "stderr": stderr_b.decode("utf-8", errors="replace"),
             "exitCode": proc.returncode,
         }
     except _asyncio.TimeoutError:
-        return {"stdout": "", "stderr": "Command timed out after 120 seconds", "exitCode": -1}
+        result = {"stdout": "", "stderr": "Command timed out after 120 seconds", "exitCode": -1}
     except Exception as exc:
-        return {"stdout": "", "stderr": str(exc), "exitCode": -1}
+        result = {"stdout": "", "stderr": str(exc), "exitCode": -1}
+
+    # Append to per-job exec audit log (capped at 500 entries, 24h TTL)
+    log_key = f"job:exec-log:{job_id}"
+    entry = json.dumps({
+        "ts": ts,
+        "command": body.command,
+        "interactive": body.interactive,
+        "exitCode": result["exitCode"],
+        "stdout": result["stdout"][:2000],
+        "stderr": result["stderr"][:500],
+    })
+    try:
+        await pool.rpush(log_key, entry)
+        await pool.ltrim(log_key, -500, -1)
+        await pool.expire(log_key, 86400)
+    except Exception as log_err:
+        log.warning("Could not write exec-log for %s: %s", job_id, log_err)
+
+    return result
+
+
+@app.post("/api/arena/sessions/{job_id}/terminate")
+async def api_arena_terminate(job_id: str):
+    """Terminate a training session from the Arena app (no oauth2-proxy auth required).
+
+    Publishes on ``ops:terminate`` — the worker kills the Sysbox container and
+    cleans up Redis state. Mirrors /api/jobs/{job_id}/terminate but skips the
+    writer-role check so the Dynatrace app function can call it with just the
+    ORBITAL_TOKEN Bearer header.
+
+    Returns 404 if the job is not currently running.
+    """
+    if not await pool.exists(f"job:running:{job_id}"):
+        in_completed = await pool.exists(f"job:log:{job_id}")
+        detail = (
+            f"Job {job_id} has already completed."
+            if in_completed else
+            f"Job {job_id} is not running."
+        )
+        raise HTTPException(404, detail)
+
+    # Best-effort: revoke provisioned DT tokens
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
+        from provisioning import DTTokenProvisioner
+        try:
+            token_ids = json.loads(meta["dt_token_ids"])
+            provisioner = DTTokenProvisioner(
+                tenant_url=meta["dt_tenant_url"],
+                api_token=meta.get("dt_auth_token", ""),
+                oauth_client_id=meta.get("dt_oauth_client_id", ""),
+                oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+            )
+            asyncio.create_task(provisioner.revoke_tokens(token_ids))
+        except Exception as exc:
+            log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+
+    await pool.publish("ops:terminate", job_id)
+    log.info("Arena termination requested for %s", job_id)
+    return {"status": "termination_requested", "job_id": job_id}
 
 
 # ── Framework test suites ─────────────────────────────────────────────────────

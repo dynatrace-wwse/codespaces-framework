@@ -69,13 +69,15 @@ if [ -z "$GITHUB_REPOSITORY" ]; then
 fi
 
 # Calculating instantiation type
-if [[ $CODESPACES == true ]]; then
+if [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]]; then
+  INSTANTIATION_TYPE="orbital"
+elif [[ $CODESPACES == true ]]; then
   INSTANTIATION_TYPE="github-codespaces"
 elif [[ $REMOTE_CONTAINERS == true ]]; then
   INSTANTIATION_TYPE="remote-container"
 elif [[ -n $GITHUB_WORKFLOW ]] || [[ -n $GITHUB_STEP_SUMMARY ]]; then
   INSTANTIATION_TYPE="github-workflow"
-else 
+else
   INSTANTIATION_TYPE="local-docker-container"
 fi
 export INSTANTIATION_TYPE=$INSTANTIATION_TYPE
