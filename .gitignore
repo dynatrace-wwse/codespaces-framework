@@ -206,3 +206,9 @@ dist-ssr
 .gstack/
 .devcontainer/.cache/
 __pycache__/
+
+# Tool-generated directories and files (Claude Code, Graphify)
+graphify*
+.claude/
+sync-cli
+CLAUDE.md
