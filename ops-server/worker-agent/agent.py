@@ -443,6 +443,7 @@ class WorkerAgent:
             metrics["mem_used_gb"] = str(round(vm.used / 1024 ** 3, 2))
             metrics["mem_total_gb"] = str(round(vm.total / 1024 ** 3, 2))
         except ImportError:
+            # psutil not yet installed — read procfs directly
             try:
                 with open("/proc/loadavg") as f:
                     load1 = float(f.read().split()[0])

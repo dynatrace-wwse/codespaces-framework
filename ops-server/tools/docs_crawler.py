@@ -135,6 +135,7 @@ def _extract_steps(soup: BeautifulSoup) -> list[Step]:
             if re.search(r"\{your-[^}]+\}|<your-[^>]+>|\{your_[^}]+\}", code_text):
                 continue
 
+
             steps.append(Step(type="shell", content=code_text))
             continue
 
