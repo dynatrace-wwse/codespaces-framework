@@ -125,6 +125,166 @@ Unit tests live in `.devcontainer/test/unit/`. The framework ships with 78+ unit
 
 ---
 
+## 🚀 Framework CI Test Suites
+
+Beyond per-repo integration tests, the framework maintains its **own CI test suite** — a set of end-to-end tests that validate the framework itself across different cluster engines, app deployments, and Dynatrace monitoring modes. Tests run inside Sysbox containers on the [Orbital ops platform](ops-platform.md), on both AMD64 and ARM64 workers.
+
+### Test suite catalog
+
+| Suite ID | Name | Arch | Description | Requires credentials |
+|---|---|---|---|---|
+| `bats` | Unit Tests | ARM64 | Shell unit tests — no cluster needed | No |
+| `engines` | Engine Tests | AMD64 + ARM64 | K3d + Kind dual-engine ingress validation (Kind skipped on Orbital/Sysbox) | No |
+| `k3d-apps` | K3d App Exposure | AMD64 + ARM64 | All demo apps deployed and exposed via ingress on K3d | No |
+| `dt-apponly` | DT Application Monitoring | AMD64 + ARM64 | Full Dynatrace operator + ActiveGate + CSI code injection + todo-app on K3d | **Yes** |
+| `dt-cnfs` | DT CloudNative FullStack | AMD64 + ARM64 | CNFS dynakube + K3d — validates operator, ActiveGate, dynakube spec, app | **Yes** |
+
+Credentialed tests (`dt-apponly`, `dt-cnfs`) run against the **COE tenant** (`geu80787.apps.dynatrace.com`). Credentials are injected per-job from the ops server's environment.
+
+---
+
+### DT Application Monitoring test (`dt-apponly`)
+
+**File:** `.devcontainer/test/integration_appmon_k3d_todoapp.sh`
+
+Tests Dynatrace `ApplicationMonitoring` (apponly) mode end-to-end on a fresh K3d cluster:
+
+1. Credential pre-check (`DT_ENVIRONMENT`, `DT_OPERATOR_TOKEN`, `DT_INGEST_TOKEN`)
+2. Start K3d cluster
+3. Deploy Dynatrace Operator (`dynatraceDeployOperator`)
+4. Deploy ApplicationMonitoring (`deployApplicationMonitoring`)
+5. Deploy todo-app (`deployTodoApp`)
+6. Assert operator, activegate, todo-app pods running
+7. Assert todo-app reachable via ingress (`assertRunningApp`)
+8. Assert dynakube YAML contains `applicationMonitoring:` spec
+9. Delete cluster
+
+Runs on **both AMD64 and AMD workers** — the DT code module (CSI init container) differs per CPU architecture; this test validates the correct image is pulled and injected on each.
+
+---
+
+### DT CloudNative FullStack test (`dt-cnfs`)
+
+**File:** `.devcontainer/test/integration_cnfs_k3d_todoapp.sh`
+
+Tests Dynatrace `CloudNativeFullStack` mode on K3d. Same sequence as `dt-apponly` but uses `deployCloudNative`.
+
+!!! warning "Known limitation — OneAgent DaemonSet on K3d"
+    K3d nodes are Docker containers. OneAgent's host init module requires access to real kernel interfaces (`/proc`, `/sys`) unavailable inside container nodes. The DaemonSet will be in **CrashLoopBackOff** — this is expected and **the test passes despite it**.
+
+    On Orbital/Sysbox, Sysbox adds an additional restriction on host-level syscalls.
+
+    **What IS validated:** Operator running, ActiveGate running, dynakube `cloudNativeFullStack:` spec, todo-app deployed and reachable.  
+    **What is NOT validated:** OneAgent DaemonSet running state.
+
+    **Future:** Full OneAgent validation requires real VM nodes. Tracked for when training environments migrate off Sysbox containers to bare-metal VMs.
+
+---
+
+### Triggering suites
+
+=== "Orbital Dashboard"
+
+    Navigate to `https://autonomous-enablements.whydevslovedynatrace.com` → **Framework** tab.  
+    Select a suite and click **Trigger**. Results stream live in the log viewer.
+
+=== "API"
+
+    ```bash
+    # Single suite — AMD64
+    curl -s -X POST https://autonomous-enablements.whydevslovedynatrace.com/api/framework/trigger \
+      -H "Content-Type: application/json" \
+      -d '{"suite": "dt-apponly", "ref": "main", "arch": "amd64"}'
+
+    # Single suite — ARM64
+    curl -s -X POST ... -d '{"suite": "dt-apponly", "ref": "main", "arch": "arm64"}'
+
+    # All suites (both arches)
+    curl -s -X POST ... -d '{"suite": "all", "ref": "main"}'
+    ```
+
+=== "Local (in container)"
+
+    ```bash
+    # Requires .devcontainer/.env with DT credentials
+    bash .devcontainer/test/integration_appmon_k3d_todoapp.sh
+    bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh
+    ```
+
+### Checking last results
+
+Last-run result per suite is stored in Redis and exposed via the API:
+
+```bash
+# All suites with last-run status
+curl https://autonomous-enablements.whydevslovedynatrace.com/api/framework/suites | jq .
+
+# Recent runs (last 20)
+curl https://autonomous-enablements.whydevslovedynatrace.com/api/framework/runs | jq .
+```
+
+Or directly via Redis:
+```bash
+redis-cli hgetall framework:suite:dt-apponly:last
+redis-cli hgetall framework:suite:dt-cnfs:last
+```
+
+---
+
+## 🌙 Nightly Builds
+
+The framework runs a **nightly scheduled job** that tests every enabled repository and the framework's own CI suites. This catches regressions introduced by upstream changes (new DT operator versions, K3d releases, base image updates) even without a PR.
+
+### What runs nightly
+
+| Target | Queue | Suites |
+|---|---|---|
+| All 27 enabled repos | `queue:test:arm64` + `queue:test:amd64` | Per-repo `integration.sh` |
+| Framework: unit tests | `queue:test:arm64` | `bats` |
+| Framework: engine + app tests | `queue:test:arm64` + `queue:test:amd64` | `engines`, `k3d-apps` |
+| Framework: DT tests | `queue:test:arm64` + `queue:test:amd64` | `dt-apponly`, `dt-cnfs` |
+
+Jobs are staggered to avoid saturating worker capacity simultaneously.
+
+### Nightly schedule
+
+The nightly scheduler runs via systemd timer on the ops server:
+
+```
+ops-nightly.timer  →  ops-nightly.service  →  scheduler.py
+```
+
+Check the next scheduled run:
+```bash
+sudo systemctl list-timers ops-nightly
+sudo journalctl -u ops-nightly --since "24 hours ago" --no-pager | tail -20
+```
+
+### Manual trigger (with framework tests)
+
+```bash
+# On the ops server
+cd /home/ops/enablement-framework/codespaces-framework/ops-server/nightly
+sudo -u ops python3 scheduler.py --include-framework
+
+# Dry run (shows what would be queued, no actual jobs)
+sudo -u ops python3 scheduler.py --include-framework --dry-run
+
+# Single repo only
+sudo -u ops python3 scheduler.py --repo codespaces-framework
+```
+
+### Monitoring nightly results
+
+All nightly runs are tagged with a `nightly_run_id` and visible in:
+
+- **Orbital dashboard** → Builds tab → filter by trigger `nightly`
+- **Redis:** `LRANGE jobs:completed 0 50` (capped at 500 entries)
+- **Framework suites:** `/api/framework/runs` (last 20 framework suite results)
+- **COE DT tenant** → CI/CD & Orbital dashboard — BizEvents with `trigger=nightly`
+
+---
+
 ## Git Strategy
 
 !!! example "Git Strategy & GitHub Actions Workflow"
