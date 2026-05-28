@@ -125,6 +125,17 @@ repos:
     is_template: true
     duration: "1h"
 
+  - name: enablement-app-training-template
+    repo: dynatrace-wwse/enablement-app-training-template
+    status: active
+    maintainer: "@shinojosa"
+    description: "Trainer-authoring scaffold for building interactive Dynatrace in-app enablement trainings on Orbital. Includes runnable examples for every interactive block type: shell verification, kubectl, DQL, assessments, and custom functions."
+    tags: [devops, orbital, dynatrace-app]
+    title: "App Training Template"
+    primary_tag: devops
+    is_template: true
+    duration: "30min"
+
   - name: enablement-kubernetes-opentelemetry-openpipeline
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry-openpipeline
     status: active
