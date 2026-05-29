@@ -17,8 +17,8 @@ dynatraceDeployOperator
 #deployCloudNative
 deployApplicationMonitoring
 
-# The TODO App will be deployed as a sample
-deployTodoApp
+# Deploy Astroshop for capacity stress testing
+deployApp astroshop
 
 # If you want to deploy your own App, just create a function in the functions.sh file and call it here.
 # deployMyCustomApp
