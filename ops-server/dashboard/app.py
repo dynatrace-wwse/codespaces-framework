@@ -3604,6 +3604,7 @@ FRAMEWORK_SUITES = [
     {"id": "k3d-apps",  "name": "K3d App Exposure",          "description": "All demo apps deployed + exposed via ingress",  "arch": "amd64", "needs_creds": False, "test_script": "bash .devcontainer/test/integration_k3d_apps.sh"},
     {"id": "dt-apponly","name": "DT Application Monitoring", "description": "Operator + ActiveGate + CSI code injection + todo-app (K3d, AMD64+ARM64)",          "arch": "both", "needs_creds": True,  "test_script": "bash .devcontainer/test/integration_appmon_k3d_todoapp.sh"},
     {"id": "dt-cnfs",   "name": "DT CloudNative FullStack",  "description": "CNFS dynakube + K3d — OneAgent crash expected on container nodes (AMD64+ARM64)", "arch": "both", "needs_creds": True,  "requires_native": True, "test_script": "bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh"},
+    {"id": "k3d-aitraveladvisor", "name": "AI Travel Advisor", "description": "Ollama + Weaviate + app on K3d — verifies local-path PVC and ingress (AMD64, needs DT_LLM_TOKEN)", "arch": "amd64", "needs_creds": True, "test_script": "bash .devcontainer/test/integration_k3d_aitraveladvisor.sh"},
 ]
 
 @app.get("/api/framework/suites")

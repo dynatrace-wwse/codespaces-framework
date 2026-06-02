@@ -42,6 +42,7 @@ from .config import (
     DT_ENVIRONMENT,
     DT_OPERATOR_TOKEN,
     DT_INGEST_TOKEN,
+    DT_LLM_TOKEN,
     TEST_TIMEOUT,
     TEST_IMAGE,
     WORKER_ARCH,
@@ -732,6 +733,7 @@ def _write_env_file(
         "DT_ENVIRONMENT":    DT_ENVIRONMENT,
         "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
         "DT_INGEST_TOKEN":   DT_INGEST_TOKEN,
+        "DT_LLM_TOKEN":      DT_LLM_TOKEN,
     }
     if orbital_job_id:
         resolved["ORBITAL_JOB_ID"] = orbital_job_id
