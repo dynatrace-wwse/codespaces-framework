@@ -785,12 +785,15 @@ for c in clusters:
 startK3sCluster() { startK3dCluster "$@"; }
 
 installK3d() {
-  # Installs K3d if not already present
+  # Installs K3d if not already present.
+  # Version pinned: v5.9.0 shipped 2026-06-02 with a missing ghcr.io proxy
+  # image (manifest unknown). Pin to last known-good release.
   if command -v k3d &>/dev/null; then
     return 0
   fi
-  printInfo "Installing K3d..."
-  curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  local K3D_VERSION="${K3D_VERSION:-v5.8.3}"
+  printInfo "Installing K3d ${K3D_VERSION}..."
+  curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=${K3D_VERSION} bash
   k3d version
 }
 
