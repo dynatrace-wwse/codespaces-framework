@@ -235,9 +235,12 @@ repos:
   # ── Other framework-managed ──
   - name: ace-integration
     repo: dynatrace-wwse/ace-integration
-    status: active
+    status: archived
+    sync_managed: false
+    listed: false
+    ci: false
     maintainer: "@shinojosa"
-    description: "ACE integration patterns with Dynatrace. Connect Autonomous Cloud Enablement tools and workflows into the Dynatrace platform."
+    description: "R&D only — archived. Was used to explore ACE framework integration patterns. Not for training or production use."
     tags: [sandbox, demo]
     title: "ACE Integration"
     primary_tag: workflows
