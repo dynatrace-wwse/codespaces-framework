@@ -42,6 +42,7 @@ SLOT_BASE_DIR = Path(os.environ.get("SLOT_BASE_DIR", str(WORKDIR / "slots")))
 DT_ENVIRONMENT = os.environ.get("DT_ENVIRONMENT", "")
 DT_OPERATOR_TOKEN = os.environ.get("DT_OPERATOR_TOKEN", "")
 DT_INGEST_TOKEN = os.environ.get("DT_INGEST_TOKEN", "")
+DT_LLM_TOKEN = os.environ.get("DT_LLM_TOKEN", "")
 
 # Timeouts
 TEST_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "900"))  # 15 min

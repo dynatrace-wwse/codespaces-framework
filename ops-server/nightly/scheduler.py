@@ -166,10 +166,11 @@ async def run_nightly(
         # Sysbox suites — run on BOTH arm64 (master Sysbox) and amd64 (AMD workers)
         # dt-apponly / dt-cnfs: uses COE tenant creds; validates DT modules per arch
         for suite_id, script in [
-            ("engines",    "bash .devcontainer/test/integration_engines.sh"),
-            ("k3d-apps",   "bash .devcontainer/test/integration_k3d_apps.sh"),
-            ("dt-apponly", "bash .devcontainer/test/integration_appmon_k3d_todoapp.sh"),
-            ("dt-cnfs",    "bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh"),
+            ("engines",             "bash .devcontainer/test/integration_engines.sh"),
+            ("k3d-apps",            "bash .devcontainer/test/integration_k3d_apps.sh"),
+            ("dt-apponly",          "bash .devcontainer/test/integration_appmon_k3d_todoapp.sh"),
+            ("dt-cnfs",             "bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh"),
+            ("k3d-aitraveladvisor", "bash .devcontainer/test/integration_k3d_aitraveladvisor.sh"),
         ]:
             for target_arch in ("arm64", "amd64"):
                 await pool.rpush(f"queue:test:{target_arch}", json.dumps({
