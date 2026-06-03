@@ -2983,3 +2983,36 @@ setInterval(() => {
     if (active === 'running') loadRunningDetail();
     if (active === 'agentic') loadAgenticRunning();
 }, 5000);
+
+// ── Help modal ───────────────────────────────────────────────────────────────
+
+function openHelp() {
+    document.getElementById('help-modal').hidden = false;
+}
+
+function closeHelp() {
+    document.getElementById('help-modal').hidden = true;
+}
+
+document.getElementById('help-btn').addEventListener('click', openHelp);
+document.getElementById('help-close').addEventListener('click', closeHelp);
+
+// Close on backdrop click
+document.getElementById('help-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('help-modal')) closeHelp();
+});
+
+// Keyboard: ? opens, Esc closes
+document.addEventListener('keydown', e => {
+    const inInput = ['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);
+    if (!inInput && e.key === '?' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        document.getElementById('help-modal').hidden
+            ? openHelp()
+            : closeHelp();
+        return;
+    }
+    if (e.key === 'Escape' && !document.getElementById('help-modal').hidden) {
+        closeHelp();
+    }
+});

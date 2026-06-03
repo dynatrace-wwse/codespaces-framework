@@ -1403,3 +1403,59 @@ a.spark-bar:hover { opacity: .75; }
     flex-wrap: wrap;
 }
 .audit-header { color: var(--accent); font-weight: 700; }
+
+/* ── Help modal ─────────────────────────────────────────────────────────────*/
+.tab-help {
+    margin-left: auto;
+    font-weight: 700;
+    font-size: 1rem;
+    padding: 4px 10px;
+    opacity: 0.7;
+}
+.tab-help:hover { opacity: 1; }
+
+.help-section {
+    margin-bottom: 24px;
+}
+.help-section h4 {
+    color: var(--accent);
+    font-size: 0.82rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin: 0 0 8px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+}
+.help-note {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin: 0 0 8px;
+}
+.help-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+}
+.help-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 600;
+    padding: 4px 8px 4px 0;
+    border-bottom: 1px solid var(--border);
+}
+.help-table td {
+    padding: 5px 8px 5px 0;
+    vertical-align: top;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+}
+.help-table td:first-child { white-space: nowrap; padding-right: 16px; }
+kbd {
+    display: inline-block;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.8rem;
+    background: var(--surface-2, #1a2035);
+    color: var(--text);
+}

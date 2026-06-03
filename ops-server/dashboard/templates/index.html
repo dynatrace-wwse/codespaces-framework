@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=25">
+    <link rel="stylesheet" href="/static/style.css?v=26">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -50,6 +50,7 @@
             <button class="tab" data-view="workers">Workers</button>
             <button class="tab" data-view="framework">Framework</button>
             <button class="tab" data-view="nightly">Nightly</button>
+            <button class="tab tab-help" id="help-btn" title="Help &amp; keyboard shortcuts (?)">?</button>
         </div>
     </nav>
 
@@ -662,8 +663,95 @@
         </div>
     </div>
 
+    <!-- ── Help modal ──────────────────────────────────────────────────── -->
+    <div id="help-modal" class="modal" hidden>
+        <div class="modal-inner" style="max-width:780px;max-height:88vh;overflow-y:auto">
+            <div class="modal-header">
+                <h3>Help &amp; Reference</h3>
+                <div class="modal-actions">
+                    <button class="btn btn-small btn-secondary" id="help-close">✕ Close</button>
+                </div>
+            </div>
+
+            <div class="help-section">
+                <h4>Keyboard shortcuts</h4>
+                <table class="help-table">
+                    <tr><td><kbd>?</kbd></td><td>Open this help panel</td></tr>
+                    <tr><td><kbd>Esc</kbd></td><td>Close any open modal</td></tr>
+                    <tr><td><kbd>/</kbd></td><td>Focus log search (when log modal open)</td></tr>
+                    <tr><td><kbd>W</kbd></td><td>Toggle line-wrap in log (when log modal open)</td></tr>
+                </table>
+            </div>
+
+            <div class="help-section">
+                <h4>Sync CLI — commands not in the UI</h4>
+                <p class="help-note">Run from <code>/home/ops/enablement-framework/codespaces-framework</code> as <code>ops</code> user, or via the Synchronizer tab for the commands that are wired up.</p>
+                <table class="help-table">
+                    <tr><th>Command</th><th>Description</th></tr>
+                    <tr><td><code>sync push-update --framework-version X.Y.Z</code></td><td>Create version-bump PRs across the entire fleet</td></tr>
+                    <tr><td><code>sync tag --framework-version X.Y.Z</code></td><td>Create combined version tags on all consumer repos</td></tr>
+                    <tr><td><code>sync release</code></td><td>Create a GitHub Release for the current framework version</td></tr>
+                    <tr><td><code>sync cleanup-branches</code></td><td>Delete merged branches (local + remote) across fleet</td></tr>
+                    <tr><td><code>sync protect-main</code></td><td>Enable branch protection on main for all repos</td></tr>
+                    <tr><td><code>sync checkout</code></td><td>Checkout main across all repos and show status</td></tr>
+                    <tr><td><code>sync revert</code></td><td>Revert uncommitted local changes in repos</td></tr>
+                    <tr><td><code>sync generate-registry</code></td><td>Regenerate the Hub HTML registry page</td></tr>
+                    <tr><td><code>sync generate-json</code></td><td>Regenerate repos.json for the org GitHub Pages registry</td></tr>
+                    <tr><td><code>sync migrate-mkdocs</code></td><td>Migrate mkdocs.yaml to INHERIT pattern across repos</td></tr>
+                    <tr><td><code>sync bump-repo-version</code></td><td>Bump repo-level version component</td></tr>
+                    <tr><td><code>sync list-pr --approve</code></td><td>Approve all passing framework-update PRs</td></tr>
+                    <tr><td><code>sync list-pr --merge</code></td><td>Merge all passing framework-update PRs</td></tr>
+                </table>
+            </div>
+
+            <div class="help-section">
+                <h4>API endpoints not exposed in the UI</h4>
+                <table class="help-table">
+                    <tr><th>Method + Path</th><th>Body / notes</th></tr>
+                    <tr><td><code>POST /api/framework/trigger</code></td><td><code>{"suite":"k3d-apps","ref":"main","arch":"amd64"}</code> — trigger specific framework test suite</td></tr>
+                    <tr><td><code>POST /api/ghpages/trigger</code></td><td><code>{"repo":"dynatrace-wwse/X","branch":"main"}</code> — deploy GitHub Pages for one repo</td></tr>
+                    <tr><td><code>POST /api/ghpages/trigger-fleet</code></td><td><code>{"branch":"main"}</code> — deploy GitHub Pages for all repos</td></tr>
+                    <tr><td><code>POST /api/builds/rerun/{job_id}</code></td><td>Re-queue a completed job with the same parameters</td></tr>
+                    <tr><td><code>POST /api/queue/clear</code></td><td><code>{"arch":"amd64"}</code> or <code>{"arch":"all"}</code> — drain job queue</td></tr>
+                    <tr><td><code>GET  /api/queue</code></td><td>List all jobs currently waiting in both queues</td></tr>
+                    <tr><td><code>POST /api/sync/prs/invalidate</code></td><td>Force-refresh the open-PR cache</td></tr>
+                    <tr><td><code>POST /api/sync/issues/invalidate</code></td><td>Force-refresh the open-issues cache</td></tr>
+                </table>
+            </div>
+
+            <div class="help-section">
+                <h4>Redis — direct queue operations</h4>
+                <pre style="margin:0;font-size:0.78rem">REDIS_PASS="50258583a5c8d515dc8a553a26e1a17d"
+
+# Inspect queues
+redis-cli -a $REDIS_PASS LLEN queue:test:amd64
+redis-cli -a $REDIS_PASS LRANGE queue:test:amd64 0 -1
+
+# Running jobs
+redis-cli -a $REDIS_PASS KEYS "job:running:*"
+
+# Workers
+redis-cli -a $REDIS_PASS KEYS "worker:*"
+redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
+            </div>
+
+            <div class="help-section">
+                <h4>Framework test suites</h4>
+                <table class="help-table">
+                    <tr><th>Suite ID</th><th>Arch</th><th>Description</th></tr>
+                    <tr><td><code>bats</code></td><td>arm64</td><td>Shell unit tests — no cluster needed</td></tr>
+                    <tr><td><code>engines</code></td><td>amd64</td><td>K3d + Kind cluster engine smoke tests</td></tr>
+                    <tr><td><code>k3d-apps</code></td><td>amd64</td><td>All demo apps deployed and exposed via ingress</td></tr>
+                    <tr><td><code>dt-apponly</code></td><td>both</td><td>DT ApplicationMonitoring + todo-app</td></tr>
+                    <tr><td><code>dt-cnfs</code></td><td>both</td><td>DT CloudNative FullStack dynakube</td></tr>
+                    <tr><td><code>k3d-aitraveladvisor</code></td><td>amd64</td><td>AI Travel Advisor stack — needs DT_LLM_TOKEN</td></tr>
+                </table>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=24"></script>
+    <script src="/static/app.js?v=25"></script>
 </body>
 </html>
