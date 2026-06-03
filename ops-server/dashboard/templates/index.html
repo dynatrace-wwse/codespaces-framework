@@ -721,9 +721,7 @@
 
             <div class="help-section">
                 <h4>Redis — direct queue operations</h4>
-                <pre style="margin:0;font-size:0.78rem">REDIS_PASS="50258583a5c8d515dc8a553a26e1a17d"
-
-# Inspect queues
+                <pre style="margin:0;font-size:0.78rem"># Inspect queues
 redis-cli -a $REDIS_PASS LLEN queue:test:amd64
 redis-cli -a $REDIS_PASS LRANGE queue:test:amd64 0 -1
 
