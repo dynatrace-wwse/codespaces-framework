@@ -24,8 +24,8 @@ getDockerEnvsFromEnvFile
 CMD="./.devcontainer/post-create.sh; ./.devcontainer/post-start.sh; zsh"
 
 # Ports to map to the host, add as many as wanted
-# Port 80/443 for ingress, 30100-30300 for legacy NodePort, 8000 for mkdocs
-PORTS="-p 80:80 -p 443:443 -p 30100:30100 -p 30200:30200 -p 30300:30300 -p 8000:8000"
+# Port 80/443 for ingress, 8000 for mkdocs
+PORTS="-p 80:80 -p 443:443 -p 8000:8000"
 
 VOLUMEMOUNTS="-v /var/run/docker.sock:/var/run/docker.sock -v /lib/modules:/lib/modules -v $(dirname "$PWD"):/workspaces/$RepositoryName"
 
