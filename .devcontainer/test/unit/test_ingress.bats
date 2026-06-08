@@ -16,8 +16,6 @@ setup() {
   export RepositoryName="test-enablement"
   export ENV_FILE="$FAKE_REPO/.devcontainer/.env"
   export APP_REGISTRY="$TEST_DIR/app-registry"
-  export INGRESS_CS_PORT_START=8080
-  export USE_LEGACY_PORTS="false"
   export MAGIC_DOMAIN="sslip.io"
 
   # Create minimal stubs
@@ -40,9 +38,7 @@ export ENV_FILE
 COUNT_FILE="$REPO_PATH/.devcontainer/util/.count"
 export COUNT_FILE
 INSTANTIATION_TYPE="local-docker-container"
-export USE_LEGACY_PORTS="${USE_LEGACY_PORTS:-false}"
 export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"
-export INGRESS_CS_PORT_START="${INGRESS_CS_PORT_START:-8080}"
 export INGRESS_NGINX_VERSION="1.12.1"
 export MAGIC_DOMAIN="${MAGIC_DOMAIN:-sslip.io}"
 VARSEOF
@@ -131,13 +127,15 @@ source_functions() {
   [ "$result" = "http://todoapp.10.0.0.1.sslip.io" ]
 }
 
-@test "getAppURL: returns Codespaces URL with port" {
+@test "getAppURL: Codespaces ignores port arg, always returns port 80 (catch-all ingress)" {
   source_functions
   export CODESPACES=true
   export CODESPACE_NAME="myspace"
 
+  # A port arg may still be passed by legacy callers — it must be ignored.
+  # Codespaces forwards only port 80; the catch-all ingress rule routes the request.
   result=$(getAppURL "todoapp" "8080")
-  [ "$result" = "https://myspace-8080.app.github.dev" ]
+  [ "$result" = "https://myspace-80.app.github.dev" ]
 }
 
 @test "getAppURL: returns Codespaces port 80 URL when no port given" {
@@ -149,26 +147,47 @@ source_functions() {
   [ "$result" = "https://myspace-80.app.github.dev" ]
 }
 
+@test "getAppURL: returns Orbital wildcard subdomain URL" {
+  source_functions
+  unset CODESPACES
+  export ORBITAL_ENVIRONMENT=true
+  export ORBITAL_JOB_ID="worker-x86_64-34ea2d-k8s-101-1717000000-abc"
+
+  result=$(getAppURL "todoapp")
+  [[ "$result" == "https://todoapp--"*".autonomous-enablements.whydevslovedynatrace.com" ]]
+}
+
+# ============================================================
+# computeOrbitalSubdomain tests (canonical Orbital exposure path)
+# ============================================================
+
+@test "computeOrbitalSubdomain: builds {app}--{slug} and strips worker prefix" {
+  source_functions
+  export ORBITAL_JOB_ID="worker-x86_64-34ea2d-k8s-101-ts-hex"
+
+  result=$(computeOrbitalSubdomain "todoapp")
+  [[ "$result" == "todoapp--34ea2d-k8s-101-ts-hex" ]]
+}
+
+@test "computeOrbitalSubdomain: empty when ORBITAL_JOB_ID unset" {
+  source_functions
+  unset ORBITAL_JOB_ID
+
+  result=$(computeOrbitalSubdomain "todoapp")
+  [ -z "$result" ]
+}
+
+@test "computeOrbitalSubdomain: label stays within 63-char DNS limit" {
+  source_functions
+  export ORBITAL_JOB_ID="worker-x86_64-34ea2d-$(printf 'x%.0s' {1..120})"
+
+  result=$(computeOrbitalSubdomain "astroshop")
+  [ "${#result}" -le 63 ]
+}
+
 # ============================================================
 # App registry tests
 # ============================================================
-
-@test "getNextCodespacesPort: returns start port when registry is empty" {
-  source_functions
-
-  result=$(getNextCodespacesPort)
-  [ "$result" = "8080" ]
-}
-
-@test "getNextCodespacesPort: increments from last used port" {
-  source_functions
-  mkdir -p "$(dirname "$APP_REGISTRY")"
-  echo "app1|ns1|svc1|80|host1|8080" > "$APP_REGISTRY"
-  echo "app2|ns2|svc2|80|host2|8081" >> "$APP_REGISTRY"
-
-  result=$(getNextCodespacesPort)
-  [ "$result" = "8082" ]
-}
 
 @test "registerApp: creates registry entry" {
   source_functions
@@ -238,7 +257,6 @@ source_functions() {
 
 @test "deployTodoApp: uses registerApp in ingress mode" {
   source_functions
-  export USE_LEGACY_PORTS="false"
   export EXTERNAL_IP="10.0.0.1"
 
   # Mock kubectl for deployment
@@ -269,44 +287,9 @@ source_functions() {
   [[ "$output" == *"todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io"* ]]
 }
 
-@test "deployTodoApp: legacy mode uses getNextFreeAppPort (not registerApp)" {
-  source_functions
-  export USE_LEGACY_PORTS="true"
-  export NODE_PORTS="30100 30200 30300"
-
-  # In legacy mode, getNextFreeAppPort is called. We verify the code path
-  # by testing that registerApp is NOT called (no registry file created).
-  # We mock getNextFreeAppPort directly to avoid kubectl dependency.
-  getNextFreeAppPort() {
-    if [[ "$1" == "true" ]]; then return 0; fi
-    echo "30100"
-    return 0
-  }
-  export -f getNextFreeAppPort
-
-  kubectl() { return 0; }
-  export -f kubectl
-
-  waitForAllReadyPods() { return 0; }
-  export -f waitForAllReadyPods
-
-  waitAppCanHandleRequests() { return 0; }
-  export -f waitAppCanHandleRequests
-
-  deployTodoApp
-
-  # Registry should NOT exist in legacy mode
-  [ ! -f "$APP_REGISTRY" ] || [ ! -s "$APP_REGISTRY" ]
-}
-
 # ============================================================
-# Backward compatibility
+# Ingress-only exposure
 # ============================================================
-
-@test "USE_LEGACY_PORTS defaults to false" {
-  source_functions
-  [ "$USE_LEGACY_PORTS" = "false" ]
-}
 
 @test "kind-cluster.yml has port 80 mapping" {
   run cat "$BATS_TEST_DIRNAME/../../yaml/kind/kind-cluster.yml"
@@ -314,7 +297,22 @@ source_functions() {
   [[ "$output" == *"containerPort: 80"* ]]
 }
 
-@test "kind-cluster.yml still has legacy port 30100" {
+@test "kind-cluster.yml has no legacy NodePort mappings (30100-30300)" {
   run cat "$BATS_TEST_DIRNAME/../../yaml/kind/kind-cluster.yml"
-  [[ "$output" == *"hostPort: 30100"* ]]
+  [[ "$output" != *"30100"* ]]
+  [[ "$output" != *"30200"* ]]
+  [[ "$output" != *"30300"* ]]
+}
+
+@test "functions.sh has no NodePort helpers (getNextFreeAppPort / getNextCodespacesPort)" {
+  run cat "$BATS_TEST_DIRNAME/../../util/functions.sh"
+  [[ "$output" != *"getNextFreeAppPort"* ]]
+  [[ "$output" != *"getNextCodespacesPort"* ]]
+}
+
+@test "functions.sh deploy functions contain no NodePort logic" {
+  run cat "$BATS_TEST_DIRNAME/../../util/functions.sh"
+  [[ "$output" != *"USE_LEGACY_PORTS"* ]]
+  [[ "$output" != *"--type=NodePort"* ]]
+  [[ "$output" != *"nodePort"* ]]
 }

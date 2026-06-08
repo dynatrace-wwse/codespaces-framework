@@ -192,10 +192,18 @@ create_partial_cache() {
 }
 
 # ============================================================
-# Test: FRAMEWORK_VERSION defaults to 1.2.0 when not set
+# Test: FRAMEWORK_VERSION falls back to the version baked into source_framework.sh
 # ============================================================
-@test "FRAMEWORK_VERSION defaults to 1.3.2 when unset" {
+@test "FRAMEWORK_VERSION defaults to the baked-in version when unset" {
   unset FRAMEWORK_VERSION
+
+  # Derive the expected default from source instead of pinning a literal —
+  # this stays correct across version bumps (no per-release test edit).
+  local expected
+  expected=$(grep -oE 'FRAMEWORK_VERSION:-[0-9]+\.[0-9]+\.[0-9]+' \
+    "$BATS_TEST_DIRNAME/../../util/source_framework.sh" \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+  [ -n "$expected" ]
 
   cd "$FAKE_REPO"
   run bash -c '
@@ -205,7 +213,7 @@ create_partial_cache() {
   '
 
   # It will fail (no matching tag for remote clone) but should set the variable
-  [[ "$output" == *"VER=1.3.2"* ]]
+  [[ "$output" == *"VER=${expected}"* ]]
 }
 
 # ============================================================

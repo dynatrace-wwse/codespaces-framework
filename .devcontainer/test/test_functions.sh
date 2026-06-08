@@ -177,23 +177,18 @@ assertIngressRoute(){
 }
 
 assertAppDeployed(){
-  # Assert a full app stack: pod running + service exists + ingress route (or NodePort)
-  # Usage: assertAppDeployed <app-name> <namespace> [port]
+  # Assert a full app stack: pod running + service exists + ingress route
+  # Usage: assertAppDeployed <app-name> <namespace>
   local app_name="$1"
   local namespace="${2:-$1}"
-  local port="$3"
 
   printInfoSection "Asserting full deployment of '$app_name'"
 
   # Check pod
   assertRunningPod "$namespace" "$app_name"
 
-  # Check exposure method
-  if [[ "$USE_LEGACY_PORTS" == "true" && -n "$port" ]]; then
-    assertRunningApp "$port"
-  elif [[ "$USE_LEGACY_PORTS" != "true" ]]; then
-    assertIngressRoute "$app_name" "$namespace"
-  fi
+  # Check exposure — apps are reachable exclusively via ingress
+  assertIngressRoute "$app_name" "$namespace"
 
   printInfo "✅ App '$app_name' fully deployed and accessible"
 }

@@ -216,7 +216,6 @@ K3d port configuration (env vars for `createK3dCluster`):
 | `K3D_LB_HTTP_PORT` | `80` | Host port for ingress port 80 |
 | `K3D_LB_HTTPS_PORT` | `443` | Host port for ingress port 443 |
 | `K3D_API_PORT` | `6443` | Kubernetes API port |
-| `K3D_NODEPORT_BASE` | `30100` | First NodePort exposed |
 
 ```bash
 # On ops-server where nginx owns 80/443:
@@ -278,11 +277,9 @@ The framework routes apps via nginx ingress with magic DNS (`sslip.io`), elimina
 | `detectIP` | `detectIP` | Returns the host IP used for DNS subdomains (auto-detects: Codespaces/public/local) |
 | `detectHostname` | `detectHostname` | Returns the machine hostname used as a secondary ingress host |
 | `getAppURL` | `getAppURL <app-name> [port]` | Returns the user-facing URL for an app (Codespaces vs. sslip.io) |
-| `registerApp` | `registerApp <name> <ns> <svc> <port> [annotations]` | Creates an Ingress, registers in the app registry, sets up Codespaces port-forward |
-| `unregisterApp` | `unregisterApp <app-name> <namespace>` | Deletes the Ingress, removes port-forward, removes from registry |
+| `registerApp` | `registerApp <name> <ns> <svc> <port> [annotations]` | Creates an Ingress and registers the app in the app registry |
+| `unregisterApp` | `unregisterApp <app-name> <namespace>` | Deletes the Ingress and removes the app from the registry |
 | `listApps` | `listApps` | Lists all registered apps with their accessible URLs |
-| `getNextCodespacesPort` | `getNextCodespacesPort` | Returns the next unused port starting at `INGRESS_CS_PORT_START` |
-| `getNextFreeAppPort` | `getNextFreeAppPort` | Returns the next free NodePort from `NODE_PORTS` (legacy mode only) |
 | `registerMkdocs` | `registerMkdocs` | Registers the mkdocs dev server (port 8000) through the ingress |
 | `registerAstroshopIngress` | `registerAstroshopIngress [namespace]` | Creates a multi-path ingress for Astroshop (OTel routes + frontend) |
 | `registerOpentelemetryDemoIngress` | `registerOpentelemetryDemoIngress [namespace]` | Creates a multi-path ingress for the CNCF OTel Demo |
@@ -339,7 +336,7 @@ Available apps:
 | `deployOpentelemetryDemo` | Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained) |
 | `undeployOpentelemetryDemo` | Removes the OTel Demo and its namespace |
 
-All deploy functions handle both ingress mode (default) and legacy NodePort mode (`USE_LEGACY_PORTS=true`).
+All deploy functions expose apps exclusively via nginx ingress (`registerApp`). The legacy NodePort path has been removed.
 
 ---
 

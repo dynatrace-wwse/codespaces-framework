@@ -222,15 +222,15 @@ waitForAllReadyPods() {
 }
 
 waitAppCanHandleRequests(){
-  # Function to verify app can handle requests on a given port
-  # First parameter: PORT (default: 30100)
+  # Function to verify app can handle requests on a given port (localhost:PORT).
+  # First parameter: PORT (default: 80, the ingress port)
   # Second parameter: RETRY_MAX (default: 5)
   # Usage examples:
-  #   waitAppCanHandleRequests          - uses default port 30100 and 5 retries
+  #   waitAppCanHandleRequests          - uses default port 80 and 5 retries
   #   waitAppCanHandleRequests 8080     - uses port 8080 and 5 retries
   #   waitAppCanHandleRequests 8080 10  - uses port 8080 and 10 retries
   if [[ $# -eq 0 ]]; then
-    PORT="30100"
+    PORT="80"
     RETRY_MAX=5
   elif [[ $# -eq 1 ]]; then
     PORT="$1"
@@ -239,7 +239,7 @@ waitAppCanHandleRequests(){
     PORT="$1"
     RETRY_MAX="$2"
   else
-    PORT="30100"
+    PORT="80"
     RETRY_MAX=5
   fi
   
@@ -684,10 +684,8 @@ startKindCluster(){
     printInfo "No $KINDIMAGE was found, creating a new one..."
     createKindCluster
   fi
-  # Install ingress controller if not using legacy ports
-  if [[ "$USE_LEGACY_PORTS" != "true" ]]; then
-    installIngressController
-  fi
+  # Install ingress controller — sole app-exposure mechanism
+  installIngressController
 
   printInfo "Kind reachable under:"
   kubectl cluster-info --context kind-kind
@@ -769,10 +767,8 @@ for c in clusters:
     createK3dCluster
   fi
 
-  # Install ingress controller
-  if [[ "$USE_LEGACY_PORTS" != "true" ]]; then
-    installIngressController
-  fi
+  # Install ingress controller — sole app-exposure mechanism
+  installIngressController
 
   printInfo "K3d cluster reachable under:"
   kubectl cluster-info
@@ -805,7 +801,6 @@ createK3dCluster() {
   #   K3D_LB_HTTP_PORT      host port for ingress :80 (default: 80)
   #   K3D_LB_HTTPS_PORT     host port for ingress :443 (default: 443)
   #   K3D_API_PORT          host port for k8s API     (default: 6443)
-  #   K3D_NODEPORT_BASE     first NodePort exposed    (default: 30100)
   #
   # On the ops server (where 80/443 are nginx's), set:
   #   export K3D_LB_HTTP_PORT=30080 K3D_LB_HTTPS_PORT=30443 K3D_API_PORT=6444
@@ -813,24 +808,16 @@ createK3dCluster() {
   : "${K3D_LB_HTTP_PORT:=80}"
   : "${K3D_LB_HTTPS_PORT:=443}"
   : "${K3D_API_PORT:=6443}"
-  : "${K3D_NODEPORT_BASE:=30100}"
 
   printInfoSection "Creating K3d cluster ($K3D_CLUSTER_NAME)"
-  printInfo "Ports — http:$K3D_LB_HTTP_PORT  https:$K3D_LB_HTTPS_PORT  api:$K3D_API_PORT  nodeports:$K3D_NODEPORT_BASE..+200"
+  printInfo "Ports — http:$K3D_LB_HTTP_PORT  https:$K3D_LB_HTTPS_PORT  api:$K3D_API_PORT"
 
   installK3d
-
-  local NP1=$K3D_NODEPORT_BASE
-  local NP2=$((K3D_NODEPORT_BASE + 100))
-  local NP3=$((K3D_NODEPORT_BASE + 200))
 
   k3d cluster create "$K3D_CLUSTER_NAME" \
     --api-port "$K3D_API_PORT" \
     -p "${K3D_LB_HTTP_PORT}:80@loadbalancer" \
     -p "${K3D_LB_HTTPS_PORT}:443@loadbalancer" \
-    -p "${NP1}:${NP1}@server:0" \
-    -p "${NP2}:${NP2}@server:0" \
-    -p "${NP3}:${NP3}@server:0" \
     --k3s-arg "--disable=traefik@server:0" \
     --wait
 
@@ -1736,8 +1723,8 @@ exposeMkdocs(){
   printInfo "Exposing Mkdocs in your dev.container in port 8000 & running in the background, type 'jobs' to show the process."
   nohup mkdocs serve --dev-addr=0.0.0.0:8000 --watch-theme --dirtyreload --livereload > /dev/null 2>&1 &
 
-  # Register mkdocs with ingress if available and not using legacy ports
-  if [[ "$USE_LEGACY_PORTS" != "true" ]] && kubectl get ns ingress-nginx &>/dev/null; then
+  # Register mkdocs with ingress if the controller is available
+  if kubectl get ns ingress-nginx &>/dev/null; then
     registerMkdocs
   else
     local url
@@ -2107,20 +2094,6 @@ unregisterApp() {
   printInfo "$app_name unregistered"
 }
 
-getNextCodespacesPort() {
-  # Returns the next available port for Codespaces port-forwarding.
-  # Starts at INGRESS_CS_PORT_START (8080) and increments.
-  local port=$INGRESS_CS_PORT_START
-  if [[ -f "$APP_REGISTRY" ]]; then
-    local max_port
-    max_port=$(awk -F'|' '{print $6}' "$APP_REGISTRY" | grep -v '^$' | sort -n | tail -1)
-    if [[ -n "$max_port" ]]; then
-      port=$((max_port + 1))
-    fi
-  fi
-  echo "$port"
-}
-
 listApps() {
   # Lists all registered apps with their URLs.
   if [[ ! -f "$APP_REGISTRY" ]] || [[ ! -s "$APP_REGISTRY" ]]; then
@@ -2214,48 +2187,6 @@ MKDOCSEOF
   printInfo "Mkdocs registered and accessible at: $url"
 }
 
-getNextFreeAppPort() {
-  # When print_log == true, then log is printed out but the 
-  # variable is not echoed out, this way is not printed in the log. If print_log =0 false, then the variable is echoed out 
-  # so the value can be catched as return vaue and stored.
-  local print_log="$1"
-  if [ -z "$print_log" ]; then
-    # As default no log is printed out. 
-    print_log=false
-  fi
-
-  printInfo "Iterating over NODE_PORTS: $NODE_PORTS" $print_log
-
-  # Reconstruct array (portable for Bash and Zsh)
-  PORT_ARRAY=()
-  for port in $(echo "$NODE_PORTS"); do
-    PORT_ARRAY+=("$port")
-  done
-
-  for port in "${PORT_ARRAY[@]}"; do
-    printInfo "Verifying if $port is free in Kubernetes Cluster..." $print_log
-
-    # Searching for services attached to a NodePort
-    allocated_app=$(kubectl get svc --all-namespaces -o wide | grep "$port")
-    
-    if [[ "$?" == '0' ]]; then
-      printWarn "Port $port is allocated by: $allocated_app" $print_log
-      app_deployed=true
-    else
-      printInfo "Port $port is free, allocating to app" $print_log
-      if [[ $app_deployed ]]; then
-        printWarn "You already have applications deployed, be careful with the sizing of your Kubernetes Cluster ;)" $print_log
-      fi 
-      # Use echo to return the value (functions can't use `return` for strings/numbers reliably)
-      echo "$port"
-      return 0
-    fi
-  done
-  printWarn "No NodePort is free for deploying apps in your container, please delete some apps before deploying more." $print_log
-  return 1
-}
-
-
 deployAITravelAdvisorApp(){
   [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
 
@@ -2268,16 +2199,6 @@ deployAITravelAdvisorApp(){
   printInfo "Evaluating credentials"
 
   dynatraceEvalReadSaveCredentials
-
-  local PORT=""
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-  fi
 
   kubectl apply -f $FRAMEWORK_APPS_PATH/ai-travel-advisor/k8s/namespace.yaml
 
@@ -2310,13 +2231,7 @@ deployAITravelAdvisorApp(){
   kubectl -n ai-travel-advisor wait --for=condition=Ready pod --all --timeout=10m
   printInfo "AI Travel Advisor is ready"
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    kubectl patch service ai-travel-advisor --namespace=ai-travel-advisor --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    waitAppCanHandleRequests $PORT 20
-    printInfo "AI Travel Advisor is available via NodePort=$PORT"
-  else
-    registerApp "ai-travel-advisor" "ai-travel-advisor" "ai-travel-advisor" 80
-  fi
+  registerApp "ai-travel-advisor" "ai-travel-advisor" "ai-travel-advisor" 80
 }
 
 deployTodoApp(){
@@ -2328,25 +2243,9 @@ deployTodoApp(){
   # Create deployment of todoApp
   kubectl -n todoapp create deploy todoapp --image=shinojosa/todoapp:1.0.1
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    # Legacy NodePort mode
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-    kubectl -n todoapp expose deployment todoapp --type=NodePort --name=todoapp --port=8080 --target-port=8080
-    kubectl patch service todoapp --namespace=todoapp --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    waitForAllReadyPods todoapp
-    waitAppCanHandleRequests $PORT
-    printInfoSection "TodoApp is available via NodePort=$PORT"
-  else
-    # Ingress mode
-    kubectl -n todoapp expose deployment todoapp --type=ClusterIP --name=todoapp --port=8080 --target-port=8080 2>/dev/null || true
-    waitForAllReadyPods todoapp
-    registerApp "todoapp" "todoapp" "todoapp" 8080
-  fi
+  kubectl -n todoapp expose deployment todoapp --type=ClusterIP --name=todoapp --port=8080 --target-port=8080 2>/dev/null || true
+  waitForAllReadyPods todoapp
+  registerApp "todoapp" "todoapp" "todoapp" 8080
 }
 
 deployAstroshop(){
@@ -2376,22 +2275,9 @@ deployAstroshop(){
 
   printInfo "Waiting for pods of $NAMESPACE to be scheduled (this can take a while)"
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-    kubectl patch service frontend-proxy --namespace=$NAMESPACE --patch='{"spec": {"type": "NodePort"}}'
-    kubectl patch service frontend-proxy --namespace=$NAMESPACE --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    waitAppCanHandleRequests $PORT 60
-    printInfo "Astroshop deployed and available via NodePort=$PORT"
-  else
-    # Astroshop needs custom ingress: otel-collector paths + frontend-proxy catch-all
-    waitForAllReadyPods "$NAMESPACE"
-    registerAstroshopIngress "$NAMESPACE"
-  fi
+  # Astroshop needs custom ingress: otel-collector paths + frontend-proxy catch-all
+  waitForAllReadyPods "$NAMESPACE"
+  registerAstroshopIngress "$NAMESPACE"
 }
 
 deployBugZapperApp(){
@@ -2402,23 +2288,9 @@ deployBugZapperApp(){
   kubectl create ns bugzapper 2>/dev/null || true
   kubectl -n bugzapper create deploy bugzapper --image=jhendrick/bugzapper-game:latest
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-    kubectl -n bugzapper expose deployment bugzapper --type=NodePort --name=bugzapper --port=3000 --target-port=3000
-    kubectl patch service bugzapper --namespace=bugzapper --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    waitForAllReadyPods bugzapper
-    waitAppCanHandleRequests $PORT
-    printInfoSection "Bugzapper is available via NodePort=$PORT"
-  else
-    kubectl -n bugzapper expose deployment bugzapper --type=ClusterIP --name=bugzapper --port=3000 --target-port=3000 2>/dev/null || true
-    waitForAllReadyPods bugzapper
-    registerApp "bugzapper" "bugzapper" "bugzapper" 3000
-  fi
+  kubectl -n bugzapper expose deployment bugzapper --type=ClusterIP --name=bugzapper --port=3000 --target-port=3000 2>/dev/null || true
+  waitForAllReadyPods bugzapper
+  registerApp "bugzapper" "bugzapper" "bugzapper" 3000
 }
 
 # deploy easytrade from manifests
@@ -2440,19 +2312,7 @@ deployEasyTrade() {
   printInfo "Waiting for all pods to start"
   waitForAllPods easytrade
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-    kubectl patch service frontendreverseproxy-easytrade --namespace=easytrade --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    waitAppCanHandleRequests $PORT
-    printInfo "EasyTrade is available via NodePort=$PORT"
-  else
-    registerApp "easytrade" "easytrade" "frontendreverseproxy-easytrade" 80
-  fi
+  registerApp "easytrade" "easytrade" "frontendreverseproxy-easytrade" 80
 }
 
 # deploy hipstershop from manifests
@@ -2474,19 +2334,7 @@ deployHipsterShop() {
   printInfo "Waiting for all pods to start"
   waitForAllPods hipstershop
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-    kubectl patch service frontend-external --namespace=hipstershop --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    waitAppCanHandleRequests $PORT
-    printInfo "HipsterShop is available via NodePort=$PORT"
-  else
-    registerApp "hipstershop" "hipstershop" "frontend-external" 80
-  fi
+  registerApp "hipstershop" "hipstershop" "frontend-external" 80
 }
 
 deployUnguard(){
@@ -2516,17 +2364,7 @@ deployUnguard(){
   printInfo "Installing Unguard"
   helm install unguard oci://ghcr.io/dynatrace-oss/unguard/chart/unguard --version 0.12.0 --namespace unguard
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed, all NodePorts are busy"
-      return 1
-    fi
-    kubectl patch service unguard-envoy-proxy --namespace=unguard --patch="{\"spec\": {\"type\": \"NodePort\", \"ports\": [{\"port\": 8080, \"nodePort\": $PORT }]}}"
-  else
-    registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080
-  fi
+  registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080
 }
 
 undeployUnguard() {
@@ -2553,21 +2391,9 @@ deployOpentelemetryDemo(){
 
   printWarn "OpenTelemetry Demo is heavy — pods may take a while to schedule"
 
-  if [[ "$USE_LEGACY_PORTS" == "true" ]]; then
-    getNextFreeAppPort true
-    PORT=$(getNextFreeAppPort)
-    if [[ $? -ne 0 ]]; then
-      printWarn "Application can't be deployed"
-      return 1
-    fi
-    kubectl patch service frontend-proxy --namespace="$NAMESPACE" --patch='{"spec": {"type": "NodePort"}}'
-    kubectl patch service frontend-proxy --namespace="$NAMESPACE" --type='json' --patch="[{\"op\": \"replace\", \"path\": \"/spec/ports/0/nodePort\", \"value\":$PORT}]"
-    printInfo "OpenTelemetry Demo available via NodePort=$PORT"
-  else
-    # Same multi-path ingress pattern as astroshop — otel-collector + frontend-proxy
-    waitForAllReadyPods "$NAMESPACE"
-    registerOpentelemetryDemoIngress "$NAMESPACE"
-  fi
+  # Same multi-path ingress pattern as astroshop — otel-collector + frontend-proxy
+  waitForAllReadyPods "$NAMESPACE"
+  registerOpentelemetryDemoIngress "$NAMESPACE"
 }
 
 registerOpentelemetryDemoIngress() {
@@ -2639,19 +2465,20 @@ ${otel_paths}
 ${otel_paths}
 OTELINGRESSEOF
 
-  # Register in app registry
+  # Register in app registry (same 7-field layout as registerApp).
+  # cs_port stays empty — Codespaces uses port 80 via the catch-all ingress rule.
   local cs_port=""
-  if [[ "$CODESPACES" == true ]]; then
-    cs_port=$(getNextCodespacesPort)
-    kubectl port-forward -n "$namespace" "svc/frontend-proxy" "${cs_port}:8080" &>/dev/null &
+  local orbital_subdomain=""
+  if [[ "$(detectRunEnvironment)" == "orbital" ]] && [[ -n "${ORBITAL_JOB_ID:-}" ]]; then
+    orbital_subdomain=$(computeOrbitalSubdomain "otel-demo")
   fi
   mkdir -p "$(dirname "$APP_REGISTRY")"
   grep -v "^otel-demo|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
   mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
-  echo "otel-demo|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}" >> "$APP_REGISTRY"
+  echo "otel-demo|${namespace}|frontend-proxy|8080|${ingress_host}|${cs_port}|${orbital_subdomain}" >> "$APP_REGISTRY"
 
   local app_url
-  app_url=$(getAppURL "otel-demo" "$cs_port")
+  app_url=$(getAppURL "otel-demo")
   printInfo "OpenTelemetry Demo registered and accessible at: $app_url"
 }
 

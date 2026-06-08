@@ -77,8 +77,8 @@ printRunningApplications(){
 
     local running_app=false
 
-    # Ingress mode: show apps from registry
-    if [[ "$USE_LEGACY_PORTS" != "true" ]] && [[ -f "$APP_REGISTRY" ]] && [[ -s "$APP_REGISTRY" ]]; then
+    # Apps are exposed via ingress — show them from the registry
+    if [[ -f "$APP_REGISTRY" ]] && [[ -s "$APP_REGISTRY" ]]; then
         local _greet_env
         _greet_env=$(detectRunEnvironment)
         local _fwd_domain="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
@@ -92,26 +92,6 @@ printRunningApplications(){
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}http://${ingress_host}"
             fi
         done < "$APP_REGISTRY"
-    fi
-
-    # Legacy NodePort mode: check ports
-    if [[ "$USE_LEGACY_PORTS" == "true" ]] || [[ $running_app == false ]]; then
-        PORT_ARRAY=()
-        for port in $(echo "$NODE_PORTS"); do
-            PORT_ARRAY+=("$port")
-        done
-        for port in "${PORT_ARRAY[@]}"; do
-            svc_output=$(kubectl get svc --all-namespaces -o wide 2>/dev/null | grep "$port")
-            if [[ "$?" == '0' ]]; then
-                running_app=true
-                ns_as_name=$(echo $svc_output | awk '{print $1}')
-                if [[ $CODESPACES == true ]]; then
-                    echo -e "${CYAN}   $ns_as_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-$port.app.github.dev"
-                else
-                    echo -e "${CYAN}   $ns_as_name ${NORMAL}is reachable under ${RESET}http://${HOSTNAME}:$port"
-                fi
-            fi
-        done
     fi
 
     if [[ $running_app == false ]]; then

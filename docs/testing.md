@@ -83,7 +83,7 @@ assertRunningHttp 8000 /health      # direct port check (MkDocs, etc.)
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `assertIngressRoute` | `assertIngressRoute <app-name> <namespace>` | Verifies an Ingress resource named `<app-name>-ingress` exists in the namespace and has a host rule. |
-| `assertAppDeployed` | `assertAppDeployed <app-name> <namespace> [port]` | Full stack check: pod running + ingress route (or NodePort if USE_LEGACY_PORTS=true). |
+| `assertAppDeployed` | `assertAppDeployed <app-name> <namespace>` | Full stack check: pod running + ingress route. |
 
 ```bash
 assertIngressRoute todoapp todoapp        # checks Ingress resource

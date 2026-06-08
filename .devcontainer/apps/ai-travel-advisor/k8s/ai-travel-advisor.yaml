@@ -46,7 +46,7 @@ metadata:
   name: ai-travel-advisor
   namespace: ai-travel-advisor
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     name: ai-travel-advisor
   ports:
