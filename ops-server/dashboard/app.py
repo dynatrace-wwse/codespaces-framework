@@ -49,6 +49,66 @@ app = FastAPI(title="Enablement Ops Dashboard", version="2.0.0")
 from dashboard.content_service import router as content_router  # noqa: E402
 app.include_router(content_router)
 
+_PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
+<title>Content Profiles</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
+header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
+main{max-width:920px;margin:0 auto;padding:22px}
+.p{border:1px solid #30363d;border-radius:8px;margin:14px 0;background:#161b22}
+.p h3{margin:0;padding:12px 16px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center}
+textarea{width:100%;box-sizing:border-box;min-height:240px;font-family:ui-monospace,monospace;font-size:12px;
+  background:#0d1117;color:#e6edf3;border:0;border-radius:0 0 8px 8px;padding:12px;resize:vertical}
+button{background:#6c6cff;color:#fff;border:0;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:600}
+button.sec{background:#30363d}
+.msg{font-size:12px;margin-left:10px;opacity:.8}
+.bar{padding:10px 16px;border-top:1px solid #30363d;display:flex;gap:8px;align-items:center}
+input{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px}
+</style></head><body>
+<header>Content Profiles — curate what each tenant receives</header>
+<main>
+<div id=list>Loading…</div>
+<div class=p><div class=bar>
+  <input id=newid placeholder="new-profile-id">
+  <button onclick="addProfile()">+ New profile</button>
+</div></div>
+</main>
+<script>
+const API="/api/content/admin/profiles";
+async function load(){
+  const r=await fetch(API);
+  if(!r.ok){document.getElementById('list').innerHTML='<p>Sign in as an org member to manage profiles.</p>';return;}
+  const {profiles}=await r.json();
+  document.getElementById('list').innerHTML=profiles.map(p=>card(p)).join('')||'<p>No profiles.</p>';
+}
+function card(p){
+  const id=p.profileId;
+  return `<div class=p><h3><span>${id}</span>
+    <span><button onclick="save('${id}')">Save</button>
+    ${id==='all'||id==='default'?'':`<button class=sec onclick="del('${id}')">Delete</button>`}
+    <span class=msg id="m-${id}"></span></span></h3>
+    <textarea id="t-${id}">${JSON.stringify(p,null,2).replace(/</g,'&lt;')}</textarea></div>`;
+}
+async function save(id){
+  let body; try{body=JSON.parse(document.getElementById('t-'+id).value);}catch(e){return msg(id,'Invalid JSON');}
+  const r=await fetch(API+'/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json(); msg(id, r.ok?`saved (${j.sources} sources)`:(j.detail||'error'));
+}
+async function del(id){ if(!confirm('Delete '+id+'?'))return; await fetch(API+'/'+id,{method:'DELETE'}); load(); }
+function addProfile(){
+  const id=document.getElementById('newid').value.trim(); if(!id)return;
+  const tmpl={profileId:id,description:"",sources:[{key:"",category:"",categoryLabel:"",repo:"dynatrace-wwse/REPO",branch:"main"}]};
+  fetch(API+'/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(tmpl)}).then(load);
+}
+function msg(id,t){const e=document.getElementById('m-'+id);if(e)e.textContent=t;}
+load();
+</script></body></html>"""
+
+
+@app.get("/profiles", response_class=HTMLResponse)
+async def profiles_page():
+    """Profile management UI. The page is public; its API calls are writer-gated."""
+    return HTMLResponse(_PROFILES_PAGE)
+
 DASHBOARD_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")

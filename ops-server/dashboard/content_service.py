@@ -49,9 +49,20 @@ def _require_key(content_key: str | None) -> None:
         raise HTTPException(401, "Invalid or missing X-Content-Key.")
 
 
+def _require_writer(x_auth_user: str | None) -> None:
+    """Profile management is org-member-only. nginx sets X-Auth-User only after
+    oauth2-proxy validates org membership (auth_request), so presence ⇒ writer."""
+    if not x_auth_user:
+        raise HTTPException(401, "Writer authentication required.")
+
+
+def _valid_id(profile_id: str) -> bool:
+    return bool(profile_id) and profile_id.replace("-", "").replace("_", "").isalnum()
+
+
 def _load_profile(profile_id: str) -> dict:
     # Reject path traversal in the profile id.
-    if not profile_id.replace("-", "").replace("_", "").isalnum():
+    if not _valid_id(profile_id):
         raise HTTPException(400, "Invalid profile id.")
     path = PROFILES_DIR / f"{profile_id}.json"
     if not path.is_file():
@@ -145,3 +156,57 @@ async def proxy_raw(
     # Pass content through as-is (markdown / yaml / etc).
     from fastapi.responses import Response
     return Response(content=r.content, media_type=r.headers.get("content-type", "text/plain"))
+
+
+# ── Profile management (writer-gated; org members only, via nginx X-Auth-User) ──
+
+@router.get("/admin/profiles")
+async def list_profiles(x_auth_user: str | None = Header(default=None)):
+    """List all profiles (id, description, sources) for the management UI."""
+    _require_writer(x_auth_user)
+    profiles = []
+    if PROFILES_DIR.is_dir():
+        for f in sorted(PROFILES_DIR.glob("*.json")):
+            try:
+                profiles.append(json.loads(f.read_text()))
+            except Exception as exc:
+                log.warning("Bad profile %s: %s", f.name, exc)
+    return {"profiles": profiles}
+
+
+@router.put("/admin/profiles/{profile_id}")
+async def put_profile(profile_id: str, body: dict, x_auth_user: str | None = Header(default=None)):
+    """Create or update a profile JSON file. Validates each source has a valid repo."""
+    _require_writer(x_auth_user)
+    if not _valid_id(profile_id):
+        raise HTTPException(400, "Invalid profile id (use [a-z0-9-_]).")
+    sources = body.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise HTTPException(400, "Profile must have a non-empty 'sources' array.")
+    clean = []
+    for s in sources:
+        if not isinstance(s, dict) or "/" not in str(s.get("repo", "")):
+            raise HTTPException(400, "Each source needs a 'repo' as owner/repo.")
+        clean.append({
+            "key": s.get("key") or s["repo"].split("/")[-1],
+            "category": s.get("category") or "uncategorized",
+            "categoryLabel": s.get("categoryLabel") or s.get("category") or "Content",
+            "repo": s["repo"],
+            "branch": s.get("branch") or "main",
+        })
+    profile = {"profileId": profile_id, "description": body.get("description", ""), "sources": clean}
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    (PROFILES_DIR / f"{profile_id}.json").write_text(json.dumps(profile, indent=2) + "\n")
+    log.info("Profile '%s' saved by %s (%d sources)", profile_id, x_auth_user, len(clean))
+    return {"ok": True, "profileId": profile_id, "sources": len(clean)}
+
+
+@router.delete("/admin/profiles/{profile_id}")
+async def delete_profile(profile_id: str, x_auth_user: str | None = Header(default=None)):
+    _require_writer(x_auth_user)
+    if not _valid_id(profile_id) or profile_id in ("all", "default"):
+        raise HTTPException(400, "Cannot delete this profile.")
+    path = PROFILES_DIR / f"{profile_id}.json"
+    if path.is_file():
+        path.unlink()
+    return {"ok": True}
