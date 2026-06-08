@@ -77,16 +77,29 @@ printRunningApplications(){
 
     local running_app=false
 
-    # Apps are exposed via ingress — show them from the registry
+    # Determine the run environment from raw signals. greeting.sh runs as a
+    # standalone bash process that sources only variables.sh — functions.sh
+    # (and detectRunEnvironment) is NOT available here, so detect inline using
+    # the same signals detectRunEnvironment uses:
+    #   orbital    → ORBITAL_ENVIRONMENT=true or K3D_CLUSTER_NAME=master-*
+    #   codespaces → CODESPACE_NAME set
+    #   local      → fallback (magic-DNS sslip.io)
+    local _greet_env="local"
+    if [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]] || [[ "${K3D_CLUSTER_NAME:-}" == master-* ]]; then
+        _greet_env="orbital"
+    elif [[ -n "${CODESPACE_NAME:-}" ]]; then
+        _greet_env="codespaces"
+    fi
+
+    # Apps are exposed via ingress — show them from the registry, with the URL
+    # form matching the run environment.
     if [[ -f "$APP_REGISTRY" ]] && [[ -s "$APP_REGISTRY" ]]; then
-        local _greet_env
-        _greet_env=$(detectRunEnvironment)
         local _fwd_domain="${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
         while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port orbital_subdomain; do
             running_app=true
             if [[ "$_greet_env" == "orbital" && -n "$orbital_subdomain" ]]; then
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${orbital_subdomain}.autonomous-enablements.whydevslovedynatrace.com"
-            elif [[ $CODESPACES == true ]]; then
+            elif [[ "$_greet_env" == "codespaces" ]]; then
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-80.${_fwd_domain}"
             else
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}http://${ingress_host}"
