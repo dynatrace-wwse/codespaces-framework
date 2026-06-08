@@ -507,9 +507,14 @@ class WorkerAgent:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
 
     async def _consume_queue(self):
-        """Pull jobs from the arch-specific test queue with semaphore back-pressure."""
+        """Pull jobs from the arch-specific test queue with semaphore back-pressure.
+
+        Also listens on queue:direct:{WORKER_ID} (higher priority) for jobs
+        targeted at this specific worker (e.g. capacity stress tests).
+        """
         queue_key = f"queue:test:{WORKER_ARCH}"
-        log.info("Consuming from %s", queue_key)
+        direct_key = f"queue:direct:{WORKER_ID}"
+        log.info("Consuming from %s and %s", queue_key, direct_key)
 
         while self._running:
             try:
@@ -517,7 +522,7 @@ class WorkerAgent:
                     await asyncio.sleep(1)
                     continue
 
-                result = await self.pool.blpop(queue_key, timeout=5)
+                result = await self.pool.blpop([direct_key, queue_key], timeout=5)
                 if result is None:
                     continue
 

@@ -43,6 +43,72 @@ log = logging.getLogger("ops-dashboard")
 
 app = FastAPI(title="Enablement Ops Dashboard", version="2.0.0")
 
+# Content distribution service (multi-tenant content delivery, Phase 1):
+# serves curated profiles + proxies private-repo content with the Orbital
+# GitHub token, gated by a per-tenant X-Content-Key.
+from dashboard.content_service import router as content_router  # noqa: E402
+app.include_router(content_router)
+
+_PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
+<title>Content Profiles</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
+header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
+main{max-width:920px;margin:0 auto;padding:22px}
+.p{border:1px solid #30363d;border-radius:8px;margin:14px 0;background:#161b22}
+.p h3{margin:0;padding:12px 16px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center}
+textarea{width:100%;box-sizing:border-box;min-height:240px;font-family:ui-monospace,monospace;font-size:12px;
+  background:#0d1117;color:#e6edf3;border:0;border-radius:0 0 8px 8px;padding:12px;resize:vertical}
+button{background:#6c6cff;color:#fff;border:0;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:600}
+button.sec{background:#30363d}
+.msg{font-size:12px;margin-left:10px;opacity:.8}
+.bar{padding:10px 16px;border-top:1px solid #30363d;display:flex;gap:8px;align-items:center}
+input{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px}
+</style></head><body>
+<header>Content Profiles — curate what each tenant receives</header>
+<main>
+<div id=list>Loading…</div>
+<div class=p><div class=bar>
+  <input id=newid placeholder="new-profile-id">
+  <button onclick="addProfile()">+ New profile</button>
+</div></div>
+</main>
+<script>
+const API="/api/content/admin/profiles";
+async function load(){
+  const r=await fetch(API);
+  if(!r.ok){document.getElementById('list').innerHTML='<p>Sign in as an org member to manage profiles.</p>';return;}
+  const {profiles}=await r.json();
+  document.getElementById('list').innerHTML=profiles.map(p=>card(p)).join('')||'<p>No profiles.</p>';
+}
+function card(p){
+  const id=p.profileId;
+  return `<div class=p><h3><span>${id}</span>
+    <span><button onclick="save('${id}')">Save</button>
+    ${id==='all'||id==='default'?'':`<button class=sec onclick="del('${id}')">Delete</button>`}
+    <span class=msg id="m-${id}"></span></span></h3>
+    <textarea id="t-${id}">${JSON.stringify(p,null,2).replace(/</g,'&lt;')}</textarea></div>`;
+}
+async function save(id){
+  let body; try{body=JSON.parse(document.getElementById('t-'+id).value);}catch(e){return msg(id,'Invalid JSON');}
+  const r=await fetch(API+'/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json(); msg(id, r.ok?`saved (${j.sources} sources)`:(j.detail||'error'));
+}
+async function del(id){ if(!confirm('Delete '+id+'?'))return; await fetch(API+'/'+id,{method:'DELETE'}); load(); }
+function addProfile(){
+  const id=document.getElementById('newid').value.trim(); if(!id)return;
+  const tmpl={profileId:id,description:"",sources:[{key:"",category:"",categoryLabel:"",repo:"dynatrace-wwse/REPO",branch:"main"}]};
+  fetch(API+'/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(tmpl)}).then(load);
+}
+function msg(id,t){const e=document.getElementById('m-'+id);if(e)e.textContent=t;}
+load();
+</script></body></html>"""
+
+
+@app.get("/profiles", response_class=HTMLResponse)
+async def profiles_page():
+    """Profile management UI. The page is public; its API calls are writer-gated."""
+    return HTMLResponse(_PROFILES_PAGE)
+
 DASHBOARD_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")
@@ -189,6 +255,23 @@ async def index(request: Request):
 # ── API Routes ───────────────────────────────────────────────────────────────
 
 
+def _tag_str(v) -> str:
+    """Extract the tag from a fleet:release-tags value (new dict or legacy str)."""
+    if isinstance(v, dict):
+        return v.get("tag", "")
+    return v or ""
+
+
+def _tag_ts(v) -> float:
+    """Extract the fetch timestamp; legacy str values have no ts → 0 (always stale)."""
+    if isinstance(v, dict):
+        try:
+            return float(v.get("ts", 0))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 @app.get("/api/repos")
 async def api_repos():
     """List all repos with the latest build matrix.
@@ -257,7 +340,13 @@ async def api_repos():
             pass
         return repo_full, ""
 
-    release_map: dict[str, str] = {}
+    # Per-repo tag cache: {repo: {"tag": str, "ts": epoch_seconds}}.
+    # Stale entries (older than the refresh window) are re-fetched so a new
+    # GitHub release surfaces within the window instead of waiting out the 24 h
+    # key TTL. Legacy plain-string values are tolerated (treated as stale).
+    FLEET_TAG_REFRESH_S = 1800  # 30 min
+
+    release_map: dict = {}
     try:
         cached_tags = await pool.get("fleet:release-tags")
         if cached_tags:
@@ -265,19 +354,32 @@ async def api_repos():
     except Exception:
         pass
 
+    # Fleet shows only sync-managed repos. sync_managed: false repos (e.g.
+    # workshop-destination-automation) are not part of Orbital/CI/sync — they
+    # can still appear on the GitHub Pages registry via generate-json.
     displayed_repos = [
         r["repo"] for r in data.get("repos", [])
-        if r.get("status") == "active" and r.get("listed") is not False
+        if r.get("status") == "active"
+        and r.get("listed") is not False
+        and r.get("sync_managed") is not False
     ]
 
-    # Full fetch when cache is empty; targeted fetch for repos missing from cache.
+    # Re-fetch repos missing from cache OR whose cached tag has gone stale.
     if GH_TOKEN:
-        missing = [rp for rp in displayed_repos if rp not in release_map]
-        if missing:
-            results = await asyncio.gather(*[_fetch_latest_tag(rp) for rp in missing])
-            new_tags = {repo: tag for repo, tag in results if tag}
-            if new_tags:
-                release_map.update(new_tags)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        stale = [
+            rp for rp in displayed_repos
+            if rp not in release_map
+            or (now_ts - _tag_ts(release_map.get(rp))) > FLEET_TAG_REFRESH_S
+        ]
+        if stale:
+            results = await asyncio.gather(*[_fetch_latest_tag(rp) for rp in stale])
+            updated = False
+            for repo, tag in results:
+                if tag:
+                    release_map[repo] = {"tag": tag, "ts": now_ts}
+                    updated = True
+            if updated:
                 try:
                     await pool.set("fleet:release-tags", json.dumps(release_map), ex=86400)
                 except Exception:
@@ -288,6 +390,8 @@ async def api_repos():
         if r.get("status") != "active":
             continue
         if r.get("listed") is False:
+            continue
+        if r.get("sync_managed") is False:
             continue
         repo_full = r["repo"]
         builds: dict[str, dict] = dict(local_matrix.get(repo_full, {}))
@@ -317,7 +421,7 @@ async def api_repos():
             "ci": r.get("ci", True),
             "builds": builds,
             "history": history_matrix.get(repo_full, {}),
-            "latest_tag": release_map.get(repo_full, ""),
+            "latest_tag": _tag_str(release_map.get(repo_full)),
         })
 
     return {"repos": repos_out, "total": len(repos_out)}
@@ -1344,8 +1448,9 @@ async def api_sync_status_summary():
         payload = json.loads(cached)
         # Back-fill fleet:release-tags if it's missing (e.g. after a restart).
         if not await pool.exists("fleet:release-tags"):
+            now_ts = datetime.now(timezone.utc).timestamp()
             release_tags = {
-                row["repo"]: row.get("latest_tag", "")
+                row["repo"]: {"tag": row["latest_tag"], "ts": now_ts}
                 for row in payload.get("rows", [])
                 if row.get("repo") and row.get("latest_tag")
             }
@@ -1381,8 +1486,9 @@ async def api_sync_status_summary():
     await pool.set(cache_key, json.dumps(payload), ex=300)
     # Also persist a long-lived repo→tag map used by /api/repos (survives the
     # 5-min status cache so the fleet page always shows release tags).
+    now_ts = datetime.now(timezone.utc).timestamp()
     release_tags = {
-        row["repo"]: row.get("latest_tag", "")
+        row["repo"]: {"tag": row["latest_tag"], "ts": now_ts}
         for row in rows
         if row.get("repo") and row.get("latest_tag")
     }

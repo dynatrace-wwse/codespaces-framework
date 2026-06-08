@@ -1,0 +1,167 @@
+{
+  "profileId": "all",
+  "description": "All delivered content \u2014 hands-on trainings + Learning Bytes + SE Onboarding.",
+  "sources": [
+    {
+      "key": "log-ingest-101",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-dynatrace-log-ingest-101",
+      "branch": "main"
+    },
+    {
+      "key": "live-debugger",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-live-debugger-bug-hunting",
+      "branch": "main"
+    },
+    {
+      "key": "gen-ai-llm",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-gen-ai-llm-observability",
+      "branch": "main"
+    },
+    {
+      "key": "dql-fundamentals",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-dql-fundamentals",
+      "branch": "main"
+    },
+    {
+      "key": "business-observability",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-business-observability",
+      "branch": "main"
+    },
+    {
+      "key": "kubernetes-101",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-kubernetes-101",
+      "branch": "main"
+    },
+    {
+      "key": "kubernetes-opentelemetry",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-kubernetes-opentelemetry",
+      "branch": "main"
+    },
+    {
+      "key": "ai-mcp",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-dynatrace-ai-mcp",
+      "branch": "main"
+    },
+    {
+      "key": "dql-301",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-dql-301",
+      "branch": "main"
+    },
+    {
+      "key": "browser-dem-biz",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-browser-dem-biz-observability",
+      "branch": "main"
+    },
+    {
+      "key": "workflow-essentials",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-workflow-essentials",
+      "branch": "main"
+    },
+    {
+      "key": "azure-webapp-otel",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-azure-webapp-otel",
+      "branch": "main"
+    },
+    {
+      "key": "kubernetes-otel-openpipeline",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-kubernetes-opentelemetry-openpipeline",
+      "branch": "main"
+    },
+    {
+      "key": "log-analytics",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/workshop-dynatrace-log-analytics",
+      "branch": "main"
+    },
+    {
+      "key": "destination-automation",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/workshop-destination-automation",
+      "branch": "main"
+    },
+    {
+      "key": "agentic-ai-nvidia",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/demo-agentic-ai-with-nvidia",
+      "branch": "main"
+    },
+    {
+      "key": "mcp-unguard",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/demo-mcp-unguard",
+      "branch": "main"
+    },
+    {
+      "key": "opentelemetry-demo",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/demo-opentelemetry",
+      "branch": "main"
+    },
+    {
+      "key": "astroshop-runtime",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/demo-astroshop-runtime-optimization",
+      "branch": "main"
+    },
+    {
+      "key": "astroshop-problems",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/demo-astroshop-problems",
+      "branch": "main"
+    },
+    {
+      "key": "bug-busters",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/bug-busters",
+      "branch": "main"
+    },
+    {
+      "key": "learning-bytes",
+      "category": "learning-byte",
+      "categoryLabel": "Learning Bytes",
+      "repo": "dynatrace-wwse/enablement-learning-bytes",
+      "branch": "main"
+    },
+    {
+      "key": "se-onboarding",
+      "category": "onboarding",
+      "categoryLabel": "SE Onboarding",
+      "repo": "dynatrace-wwse/enablement-se-onboarding",
+      "branch": "main"
+    }
+  ]
+}
