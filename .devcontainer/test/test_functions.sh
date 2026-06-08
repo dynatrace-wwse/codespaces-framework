@@ -16,9 +16,11 @@ assertDynatraceCloudNative(){
 }
 
 assertRunningApp(){
-  # Assert an app is reachable via BOTH ingress hosts:
+  # Assert an app is reachable via its ingress hosts:
   #   1. magic-DNS public IP host: <app>.<detected-ip>.<MAGIC_DOMAIN>
   #   2. server hostname host:     <app>.<detected-hostname>
+  #   3. Orbital only: wildcard subdomain host
+  #        <app>--<job-slug>.autonomous-enablements.whydevslovedynatrace.com
   # Probes localhost on the configured ingress port (K3D_LB_HTTP_PORT, default 80).
   # Required for parallel-worker testing where each worker's k3d binds to a
   # non-default port (e.g. 30080) and is reachable only via Host-header curl.
@@ -32,13 +34,32 @@ assertRunningApp(){
   local name_host="${app_name}.${detected_hostname}"
   local target="http://localhost:${port}"
 
-  printInfoSection "Testing app via ingress on ${target}"
+  # Build the list of hosts to probe. In Orbital, also assert the app answers
+  # on its wildcard subdomain host (the URL users actually hit). The host-less
+  # catch-all ingress rule routes a Host-header curl on localhost.
+  local hosts=("$ip_host" "$name_host")
+  if [[ "$(detectRunEnvironment)" == "orbital" ]]; then
+    local osd=""
+    if [[ -f "$APP_REGISTRY" ]]; then
+      osd=$(awk -F'|' -v a="$app_name" '$1==a {print $7}' "$APP_REGISTRY" 2>/dev/null | grep -v '^$' | tail -1)
+    fi
+    if [[ -z "$osd" && -n "${ORBITAL_JOB_ID:-}" ]]; then
+      osd=$(computeOrbitalSubdomain "$app_name")
+    fi
+    if [[ -n "$osd" ]]; then
+      hosts+=("${osd}.autonomous-enablements.whydevslovedynatrace.com")
+    else
+      printWarn "Orbital env but no subdomain found for '$app_name' — skipping subdomain probe"
+    fi
+  fi
+
+  printInfoSection "Testing app via ingress on ${target} (hosts: ${hosts[*]})"
 
   # Retry — ingress-nginx needs a moment to reconcile a freshly-created
   # Ingress resource. In parallel-worker runs the curl can race the
   # controller, so probe up to 8 times with 3s spacing per host.
   local h failed=0
-  for h in "$ip_host" "$name_host"; do
+  for h in "${hosts[@]}"; do
     local ok=0 i
     for i in $(seq 1 8); do
       if curl --silent --fail --max-time 5 -H "Host: $h" "$target" > /dev/null; then
