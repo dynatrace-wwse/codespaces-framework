@@ -43,6 +43,12 @@ log = logging.getLogger("ops-dashboard")
 
 app = FastAPI(title="Enablement Ops Dashboard", version="2.0.0")
 
+# Content distribution service (multi-tenant content delivery, Phase 1):
+# serves curated profiles + proxies private-repo content with the Orbital
+# GitHub token, gated by a per-tenant X-Content-Key.
+from dashboard.content_service import router as content_router  # noqa: E402
+app.include_router(content_router)
+
 DASHBOARD_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")
@@ -189,6 +195,23 @@ async def index(request: Request):
 # ── API Routes ───────────────────────────────────────────────────────────────
 
 
+def _tag_str(v) -> str:
+    """Extract the tag from a fleet:release-tags value (new dict or legacy str)."""
+    if isinstance(v, dict):
+        return v.get("tag", "")
+    return v or ""
+
+
+def _tag_ts(v) -> float:
+    """Extract the fetch timestamp; legacy str values have no ts → 0 (always stale)."""
+    if isinstance(v, dict):
+        try:
+            return float(v.get("ts", 0))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 @app.get("/api/repos")
 async def api_repos():
     """List all repos with the latest build matrix.
@@ -257,7 +280,13 @@ async def api_repos():
             pass
         return repo_full, ""
 
-    release_map: dict[str, str] = {}
+    # Per-repo tag cache: {repo: {"tag": str, "ts": epoch_seconds}}.
+    # Stale entries (older than the refresh window) are re-fetched so a new
+    # GitHub release surfaces within the window instead of waiting out the 24 h
+    # key TTL. Legacy plain-string values are tolerated (treated as stale).
+    FLEET_TAG_REFRESH_S = 1800  # 30 min
+
+    release_map: dict = {}
     try:
         cached_tags = await pool.get("fleet:release-tags")
         if cached_tags:
@@ -265,19 +294,32 @@ async def api_repos():
     except Exception:
         pass
 
+    # Fleet shows only sync-managed repos. sync_managed: false repos (e.g.
+    # workshop-destination-automation) are not part of Orbital/CI/sync — they
+    # can still appear on the GitHub Pages registry via generate-json.
     displayed_repos = [
         r["repo"] for r in data.get("repos", [])
-        if r.get("status") == "active" and r.get("listed") is not False
+        if r.get("status") == "active"
+        and r.get("listed") is not False
+        and r.get("sync_managed") is not False
     ]
 
-    # Full fetch when cache is empty; targeted fetch for repos missing from cache.
+    # Re-fetch repos missing from cache OR whose cached tag has gone stale.
     if GH_TOKEN:
-        missing = [rp for rp in displayed_repos if rp not in release_map]
-        if missing:
-            results = await asyncio.gather(*[_fetch_latest_tag(rp) for rp in missing])
-            new_tags = {repo: tag for repo, tag in results if tag}
-            if new_tags:
-                release_map.update(new_tags)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        stale = [
+            rp for rp in displayed_repos
+            if rp not in release_map
+            or (now_ts - _tag_ts(release_map.get(rp))) > FLEET_TAG_REFRESH_S
+        ]
+        if stale:
+            results = await asyncio.gather(*[_fetch_latest_tag(rp) for rp in stale])
+            updated = False
+            for repo, tag in results:
+                if tag:
+                    release_map[repo] = {"tag": tag, "ts": now_ts}
+                    updated = True
+            if updated:
                 try:
                     await pool.set("fleet:release-tags", json.dumps(release_map), ex=86400)
                 except Exception:
@@ -288,6 +330,8 @@ async def api_repos():
         if r.get("status") != "active":
             continue
         if r.get("listed") is False:
+            continue
+        if r.get("sync_managed") is False:
             continue
         repo_full = r["repo"]
         builds: dict[str, dict] = dict(local_matrix.get(repo_full, {}))
@@ -317,7 +361,7 @@ async def api_repos():
             "ci": r.get("ci", True),
             "builds": builds,
             "history": history_matrix.get(repo_full, {}),
-            "latest_tag": release_map.get(repo_full, ""),
+            "latest_tag": _tag_str(release_map.get(repo_full)),
         })
 
     return {"repos": repos_out, "total": len(repos_out)}
@@ -1344,8 +1388,9 @@ async def api_sync_status_summary():
         payload = json.loads(cached)
         # Back-fill fleet:release-tags if it's missing (e.g. after a restart).
         if not await pool.exists("fleet:release-tags"):
+            now_ts = datetime.now(timezone.utc).timestamp()
             release_tags = {
-                row["repo"]: row.get("latest_tag", "")
+                row["repo"]: {"tag": row["latest_tag"], "ts": now_ts}
                 for row in payload.get("rows", [])
                 if row.get("repo") and row.get("latest_tag")
             }
@@ -1381,8 +1426,9 @@ async def api_sync_status_summary():
     await pool.set(cache_key, json.dumps(payload), ex=300)
     # Also persist a long-lived repo→tag map used by /api/repos (survives the
     # 5-min status cache so the fleet page always shows release tags).
+    now_ts = datetime.now(timezone.utc).timestamp()
     release_tags = {
-        row["repo"]: row.get("latest_tag", "")
+        row["repo"]: {"tag": row["latest_tag"], "ts": now_ts}
         for row in rows
         if row.get("repo") and row.get("latest_tag")
     }

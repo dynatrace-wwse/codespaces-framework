@@ -1,0 +1,20 @@
+{
+  "profileId": "default",
+  "description": "Default profile — Learning Bytes + SE Onboarding self-paced content.",
+  "sources": [
+    {
+      "key": "learning-bytes",
+      "category": "learning-byte",
+      "categoryLabel": "Learning Bytes",
+      "repo": "dynatrace-wwse/enablement-learning-bytes",
+      "branch": "main"
+    },
+    {
+      "key": "se-onboarding",
+      "category": "onboarding",
+      "categoryLabel": "SE Onboarding",
+      "repo": "dynatrace-wwse/enablement-se-onboarding",
+      "branch": "main"
+    }
+  ]
+}
