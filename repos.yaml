@@ -246,6 +246,19 @@ repos:
     primary_tag: workflows
     duration: "2h"
 
+  - name: enablement-openpipeline-segments-iam
+    repo: dynatrace-wwse/enablement-openpipeline-segments-iam
+    status: archived
+    sync_managed: false
+    listed: false
+    ci: false
+    maintainer: "@shinojosa"
+    description: "Archived. ArgoCD/Backstage platform-engineering demo with its own NodePort scheme (cluster_installer.py: ArgoCD 30100, Backstage 30105). Not migrated to the ingress-only model in framework 1.5.0; left at its prior pin. Not for training or production use."
+    tags: [sandbox, demo]
+    title: "OpenPipeline, Segments & IAM"
+    primary_tag: openpipeline
+    duration: "2h"
+
   - name: bizobs-journey-simulator
     repo: dynatrace-wwse/bizobs-journey-simulator
     status: active
