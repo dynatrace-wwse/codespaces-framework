@@ -21,6 +21,11 @@ def _detect_host_ip() -> str:
 WORKER_ID = os.environ.get("WORKER_ID", f"worker-{platform.machine()}-{uuid.uuid4().hex[:6]}")
 WORKER_ARCH = os.environ.get("WORKER_ARCH", "arm64" if platform.machine() in ("aarch64", "arm64") else "amd64")
 WORKER_CAPACITY = int(os.environ.get("WORKER_CAPACITY", "6"))
+# Weighted scheduler overrides (optional; derived from WORKER_CAPACITY when unset).
+# WORKER_COST_BUDGET  — total in-flight cost units the worker admits at once.
+# WORKER_MAX_HEAVY    — max concurrent heavy-lane jobs (e.g. dt-cnfs).
+WORKER_COST_BUDGET = int(os.environ["WORKER_COST_BUDGET"]) if os.environ.get("WORKER_COST_BUDGET") else None
+WORKER_MAX_HEAVY = int(os.environ["WORKER_MAX_HEAVY"]) if os.environ.get("WORKER_MAX_HEAVY") else None
 # Private IP of this worker (auto-detected; override via WORKER_HOST env var).
 WORKER_HOST = os.environ.get("WORKER_HOST") or _detect_host_ip()
 # Optional SSH alias the master uses to reach this worker (defaults to WORKER_HOST).
