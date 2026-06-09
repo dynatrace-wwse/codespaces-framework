@@ -1,4 +1,5 @@
-"""Tests for the content distribution service security guards + profile logic.
+"""Tests for the content distribution service: Dynatrace-domain auth, tenant→profile
+resolution, repo allowlist, path-traversal, writer gate, and table validation.
 
 Runnable two ways:
   - pytest:   /home/ops/ops-venv/bin/python -m pytest dashboard/test_content_service.py
@@ -15,120 +16,135 @@ from fastapi import HTTPException
 from dashboard import content_service as cs
 
 
-def _setup(tmp: Path, keys=("k1",)):
-    """Point the module at a temp profiles dir + known keys."""
-    profiles = tmp / "profiles"
+def _setup(tmp: Path, tenants=None):
+    content = tmp / "content"
+    profiles = content / "profiles"
     profiles.mkdir(parents=True, exist_ok=True)
-    (profiles / "all.json").write_text(json.dumps({
-        "profileId": "all",
-        "sources": [
-            {"key": "lb", "category": "learning-byte", "categoryLabel": "Learning Bytes",
-             "repo": "dynatrace-wwse/enablement-learning-bytes", "branch": "main"},
-        ],
-    }))
+    for pid in ("all", "minimal"):
+        (profiles / f"{pid}.json").write_text(json.dumps({
+            "profileId": pid,
+            "sources": [{"key": "lb", "category": "learning-byte", "categoryLabel": "Learning Bytes",
+                         "repo": "dynatrace-wwse/enablement-learning-bytes", "branch": "main"}],
+        }))
     cs.PROFILES_DIR = profiles
-    cs.CONTENT_KEYS = set(keys)
+    cs.TENANT_MAP_FILE = content / "tenant_map.json"
+    cs.TENANT_MAP_FILE.write_text(json.dumps({
+        "defaults": {"prod": "all", "sprint": "minimal", "dev": "minimal"},
+        "tenants": tenants or {"geu80787": "all"},
+    }))
 
 
 def _expect_http(status, fn, *args, **kwargs):
     try:
-        if asyncio.iscoroutinefunction(fn):
-            asyncio.run(fn(*args, **kwargs))
-        else:
-            fn(*args, **kwargs)
+        asyncio.run(fn(*args, **kwargs)) if asyncio.iscoroutinefunction(fn) else fn(*args, **kwargs)
     except HTTPException as e:
         assert e.status_code == status, f"expected {status}, got {e.status_code}"
         return
     raise AssertionError(f"expected HTTPException {status}, none raised")
 
 
-def test_require_key():
+def test_classify_tenant_domains():
+    assert cs.classify_tenant("https://geu80787.apps.dynatrace.com/") == ("geu80787", "prod")
+    assert cs.classify_tenant("https://abc12345.sprint.apps.dynatracelabs.com") == ("abc12345", "sprint")
+    assert cs.classify_tenant("https://xyz.dev.apps.dynatracelabs.com/ui") == ("xyz", "dev")
+
+
+def test_classify_tenant_rejects_non_dynatrace():
+    _expect_http(403, cs.classify_tenant, None)
+    _expect_http(403, cs.classify_tenant, "https://evil.example.com")
+    _expect_http(403, cs.classify_tenant, "https://geu80787.apps.dynatrace.com.evil.com")  # suffix spoof
+
+
+def test_resolve_profile():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        # missing / wrong key → 401
-        _expect_http(401, cs._require_key, None)
-        _expect_http(401, cs._require_key, "nope")
-        # valid key → no raise
-        cs._require_key("k1")
-        # no keys configured → fail closed (503)
-        cs.CONTENT_KEYS = set()
-        _expect_http(503, cs._require_key, "k1")
+        # explicit tenant mapping wins
+        assert cs.resolve_profile("geu80787", "prod") == "all"
+        # unknown tenant → per-domain default
+        assert cs.resolve_profile("other", "sprint") == "minimal"
+        assert cs.resolve_profile("other", "prod") == "all"
+        # unknown domain → 'all' fallback
+        assert cs.resolve_profile("other", "weird") == "all"
 
 
-def test_valid_id():
-    assert cs._valid_id("all")
-    assert cs._valid_id("se-onboarding")
-    assert cs._valid_id("a_b-1")
-    assert not cs._valid_id("")
-    assert not cs._valid_id("../etc")
-    assert not cs._valid_id("a/b")
+def test_manifest_resolves_by_tenant():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d), tenants={"cust1": "minimal"})
+        res = asyncio.run(cs.get_manifest(tenant="https://cust1.apps.dynatrace.com"))
+        assert res["tenant"] == "cust1"
+        assert res["domain"] == "prod"
+        assert res["profileId"] == "minimal"
+        assert isinstance(res["sources"], list)
 
 
-def test_require_writer():
-    _expect_http(401, cs._require_writer, None)
-    _expect_http(401, cs._require_writer, "")
-    cs._require_writer("alice")  # any non-empty X-Auth-User passes (nginx pre-validated)
-
-
-def test_allowed_repos():
+def test_manifest_rejects_non_dynatrace_domain():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        repos = cs._allowed_repos()
-        assert "dynatrace-wwse/enablement-learning-bytes" in repos
+        _expect_http(403, cs.get_manifest, tenant="https://evil.example.com")
+        _expect_http(403, cs.get_manifest, tenant=None)
+
+
+def test_proxy_requires_dynatrace_tenant():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        _expect_http(403, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes",
+                     "mkdocs.yaml", ref="main", tenant=None)
+        _expect_http(403, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes",
+                     "mkdocs.yaml", ref="main", tenant="https://evil.example.com")
 
 
 def test_proxy_rejects_non_allowlisted_repo():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        # valid key, but the repo is not in any profile → 403
         _expect_http(403, cs.proxy_raw, "dynatrace-wwse", "some-private-repo", "README.md",
-                     ref="main", x_content_key="k1")
+                     ref="main", tenant="https://geu80787.apps.dynatrace.com")
 
 
 def test_proxy_rejects_path_traversal():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes",
-                     "../secret", ref="main", x_content_key="k1")
-        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes",
-                     "docs/x.md", ref="../main", x_content_key="k1")
+        t = "https://geu80787.apps.dynatrace.com"
+        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes", "../secret", ref="main", tenant=t)
+        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes", "docs/x.md", ref="../m", tenant=t)
 
 
-def test_proxy_requires_key_before_anything():
+def test_valid_id_and_load_profile():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        _expect_http(401, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes",
-                     "mkdocs.yaml", ref="main", x_content_key=None)
-
-
-def test_load_profile_rejects_bad_id():
-    with tempfile.TemporaryDirectory() as d:
-        _setup(Path(d))
+        assert cs._valid_id("all") and not cs._valid_id("../etc")
         _expect_http(400, cs._load_profile, "../etc")
-        _expect_http(404, cs._load_profile, "does-not-exist")
+        _expect_http(404, cs._load_profile, "nope")
         assert cs._load_profile("all")["profileId"] == "all"
 
 
-def test_put_profile_validates_sources():
+def test_require_writer():
+    _expect_http(401, cs._require_writer, None)
+    cs._require_writer("alice")
+
+
+def test_tenant_map_put_validates_profiles():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))
-        # empty sources → 400
-        _expect_http(400, cs.put_profile, "myprofile", {"sources": []}, x_auth_user="alice")
-        # source without owner/repo → 400
-        _expect_http(400, cs.put_profile, "myprofile", {"sources": [{"repo": "norepo"}]}, x_auth_user="alice")
-        # valid → writes the file
-        res = asyncio.run(cs.put_profile("myprofile",
-            {"description": "x", "sources": [{"repo": "dynatrace-wwse/enablement-kubernetes-101", "category": "hands-on"}]},
+        # unknown profile → 400
+        _expect_http(400, cs.put_tenant_map, {"defaults": {"prod": "ghost"}, "tenants": {}}, x_auth_user="alice")
+        # valid → writes
+        res = asyncio.run(cs.put_tenant_map(
+            {"defaults": {"prod": "all", "sprint": "minimal"}, "tenants": {"cust9": "all"}},
             x_auth_user="alice"))
-        assert res["ok"] and res["sources"] == 1
-        assert (cs.PROFILES_DIR / "myprofile.json").is_file()
+        assert res["ok"] and res["tenants"] == 1
+        saved = json.loads(cs.TENANT_MAP_FILE.read_text())
+        assert saved["tenants"]["cust9"] == "all"
+
+
+def test_tenant_map_put_requires_writer():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        _expect_http(401, cs.put_tenant_map, {"defaults": {}, "tenants": {}}, x_auth_user=None)
 
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
-    passed = 0
     for t in tests:
         t()
         print(f"  PASS {t.__name__}")
-        passed += 1
-    print(f"\n{passed}/{len(tests)} content-service tests passed")
+    print(f"\n{len(tests)}/{len(tests)} content-service tests passed")

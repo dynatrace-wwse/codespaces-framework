@@ -109,6 +109,83 @@ async def profiles_page():
     """Profile management UI. The page is public; its API calls are writer-gated."""
     return HTMLResponse(_PROFILES_PAGE)
 
+
+_TENANTS_PAGE = """<!doctype html><html><head><meta charset=utf-8>
+<title>Content Delivery</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
+header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
+header a{color:#9d9dff;margin-left:14px;font-weight:400;font-size:14px}
+main{max-width:760px;margin:0 auto;padding:22px}
+h3{border-bottom:1px solid #30363d;padding-bottom:6px}
+table{width:100%;border-collapse:collapse;margin:8px 0}
+td,th{padding:6px 8px;border-bottom:1px solid #21262d;text-align:left}
+input{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px}
+select{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:6px 10px}
+button{background:#6c6cff;color:#fff;border:0;border-radius:6px;padding:7px 16px;cursor:pointer;font-weight:600}
+button.sec{background:#30363d}
+.msg{font-size:13px;margin-left:10px;opacity:.85}
+.hint{opacity:.6;font-size:13px}
+</style></head><body>
+<header>Content Delivery — which profile each tenant receives
+  <a href="/profiles">edit profiles →</a></header>
+<main>
+<p class=hint>Authentication is by Dynatrace domain. Defaults apply per environment class;
+a tenant id override wins. Tenant id = the subdomain (e.g. <code>geu80787</code>).</p>
+<h3>Domain defaults</h3>
+<table id=defaults></table>
+<h3>Tenant overrides</h3>
+<table id=tenants><tbody></tbody></table>
+<div style="margin:8px 0">
+  <input id=newtid placeholder="tenant-id (e.g. geu80787)" size=24>
+  <select id=newpid></select>
+  <button class=sec onclick="addRow()">+ Add tenant</button>
+</div>
+<div style="margin-top:18px">
+  <button onclick="save()">Save delivery table</button>
+  <span class=msg id=msg></span>
+</div>
+</main>
+<script>
+const API="/api/content/admin/tenant-map";
+let PROFILES=[], DOMAINS=[];
+function opts(sel){return PROFILES.map(p=>`<option ${p===sel?'selected':''}>${p}</option>`).join('');}
+async function load(){
+  const r=await fetch(API);
+  if(!r.ok){document.body.innerHTML='<p style=padding:22px>Sign in as an org member to manage delivery.</p>';return;}
+  const {map,profiles,domains}=await r.json(); PROFILES=profiles; DOMAINS=domains;
+  document.getElementById('newpid').innerHTML=opts(profiles[0]);
+  document.getElementById('defaults').innerHTML='<tr><th>Domain</th><th>Default profile</th></tr>'+
+    domains.map(d=>`<tr><td>${d}</td><td><select id="d-${d}">${opts((map.defaults||{})[d])}</select></td></tr>`).join('');
+  const tb=document.querySelector('#tenants tbody'); tb.innerHTML='';
+  Object.entries(map.tenants||{}).forEach(([t,p])=>tb.appendChild(row(t,p)));
+}
+function row(tid,pid){
+  const tr=document.createElement('tr');
+  tr.innerHTML=`<td><code>${tid}</code></td><td><select>${opts(pid)}</select></td>
+    <td><button class=sec onclick="this.closest('tr').remove()">remove</button></td>`;
+  tr.dataset.tid=tid; return tr;
+}
+function addRow(){
+  const tid=document.getElementById('newtid').value.trim(); if(!tid)return;
+  document.querySelector('#tenants tbody').appendChild(row(tid,document.getElementById('newpid').value));
+  document.getElementById('newtid').value='';
+}
+async function save(){
+  const defaults={}; DOMAINS.forEach(d=>defaults[d]=document.getElementById('d-'+d).value);
+  const tenants={}; document.querySelectorAll('#tenants tbody tr').forEach(tr=>{
+    tenants[tr.dataset.tid]=tr.querySelector('select').value;});
+  const r=await fetch(API,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({defaults,tenants})});
+  const j=await r.json(); document.getElementById('msg').textContent=r.ok?`saved (${j.tenants} tenant override(s))`:(j.detail||'error');
+}
+load();
+</script></body></html>"""
+
+
+@app.get("/tenants", response_class=HTMLResponse)
+async def tenants_page():
+    """Delivery-table UI (tenant → profile). Page public; API writer-gated."""
+    return HTMLResponse(_TENANTS_PAGE)
+
 DASHBOARD_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")
