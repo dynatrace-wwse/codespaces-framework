@@ -24,6 +24,7 @@ Results written to stress-test-direct-<timestamp>.json
 """
 from __future__ import annotations
 
+import os
 import argparse
 import json
 import sys
@@ -42,7 +43,7 @@ except ImportError:
 ORBITAL_API = "https://autonomous-enablements.whydevslovedynatrace.com"
 REDIS_HOST = "127.0.0.1"
 REDIS_PORT = 6379
-REDIS_PASSWORD = "50258583a5c8d515dc8a553a26e1a17d"
+REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD") or sys.exit("REDIS_PASSWORD not set in environment")
 
 CPU_SAT_PCT   = 90.0   # AMD worker saturation threshold
 MEM_SAT_PCT   = 90.0   # AMD worker saturation threshold

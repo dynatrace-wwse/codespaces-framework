@@ -8,7 +8,7 @@ TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATE="$(date -u +%Y%m%d-%H%M)"
 LOG_DIR="/tmp/stress-suite-$DATE"
 WORKER_ID="worker-x86_64-amd001"
-REDIS_AUTH="50258583a5c8d515dc8a553a26e1a17d"
+REDIS_AUTH="${REDIS_PASSWORD:?REDIS_PASSWORD not set - source /home/ops/.env}"
 PYTHON="python3"
 
 mkdir -p "$LOG_DIR"
