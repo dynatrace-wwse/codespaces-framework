@@ -126,6 +126,17 @@ def test_missing_scopes_detects_insufficient_permissions():
     assert dep._missing_scopes("undeploy", "app-engine:apps:delete") == []
 
 
+def test_token_deploy_guards():
+    # no auth → 401
+    _expect_http(401, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t"}, x_auth_user=None))
+    # bad action → 400
+    _expect_http(400, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t", "action": "nuke"}, x_auth_user="a"))
+    # non-Dynatrace tenant → 403
+    _expect_http(403, dep.deploy_with_token({"tenant": "https://evil.example.com", "token": "t"}, x_auth_user="a"))
+    # Dynatrace tenant but no token → 400
+    _expect_http(400, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+
+
 def test_deploy_missing_repo_returns_127():
     saved = dep.APP_REPO_DIR
     dep.APP_REPO_DIR = "/nonexistent/app/repo"

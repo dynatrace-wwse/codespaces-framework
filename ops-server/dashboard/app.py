@@ -68,16 +68,44 @@ td,th{padding:5px 8px;border-bottom:1px solid #21262d;text-align:left}
 <main>
 <p class=hint>You sign in with <b>your</b> Dynatrace SSO; the app is installed into the entered
 tenant only. No app token is stored. We log user + tenant + action, never credentials.</p>
+<h3>Deploy with your Dynatrace SSO</h3>
+<p class=hint>Best for tenants in your own account (COE, SE prod, sprint, dev). No secret stored.</p>
 <div>
   <input id=tenant placeholder="https://abc12345.apps.dynatrace.com">
   <button onclick="go('deploy')">Sign in &amp; Deploy</button>
   <button class=sec onclick="go('undeploy')">Undeploy</button>
 </div>
+
+<h3>Deploy with a platform token (any tenant)</h3>
+<p class=hint>For customer / prospect / free-trial / cross-account tenants. Create a platform token in
+the <b>target</b> tenant (Settings &rarr; Platform tokens) with <code>app-engine:apps:install</code>,
+<code>:run</code>, <code>:delete</code>. Used once, never stored.</p>
+<div>
+  <input id=ttenant placeholder="https://abc12345.apps.dynatrace.com"><br>
+  <input id=ttoken type=password placeholder="dt0s16.XXXX.YYYY" style="margin-top:6px"><br>
+  <button style="margin-top:8px" onclick="goToken('deploy')">Deploy</button>
+  <button class=sec style="margin-top:8px" onclick="goToken('undeploy')">Undeploy</button>
+  <span class=msg id=tmsg></span>
+</div>
+
 <h3>Recent deploy activity</h3>
 <table id=audit><tbody><tr><td class=hint>loading…</td></tr></tbody></table>
 <script>
 function go(action){const t=document.getElementById('tenant').value.trim();if(!t)return;
   location.href='/api/deploy/start?action='+action+'&tenant='+encodeURIComponent(t);}
+async function goToken(action){
+  const t=document.getElementById('ttenant').value.trim(), k=document.getElementById('ttoken').value.trim();
+  const m=document.getElementById('tmsg'); if(!t||!k){m.textContent='tenant + token required';return;}
+  m.textContent=action+'ing…';
+  try{
+    const r=await fetch('/api/deploy/token',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action,tenant:t,token:k})});
+    const j=await r.json();
+    if(r.ok){document.getElementById('ttoken').value='';
+      m.innerHTML=action==='deploy'?`✓ deployed v${j.version} — <a href="${j.url}">${j.url}</a>`+(j.profile?` · profile ${j.profile}`:''):'✓ undeployed';}
+    else m.textContent='✗ '+(j.detail||'failed');
+  }catch(e){m.textContent='✗ '+e;}
+}
 fetch('/api/deploy/audit?limit=30').then(r=>r.ok?r.json():{audit:[]}).then(({audit})=>{
   const b=document.querySelector('#audit tbody');
   b.innerHTML=audit.length?audit.map(a=>`<tr><td>${a.ts}</td><td>${a.user}</td><td>${a.tenant}</td><td>${a.action}</td><td>${a.result}</td></tr>`).join(''):'<tr><td class=hint>none yet</td></tr>';

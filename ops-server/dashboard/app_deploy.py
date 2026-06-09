@@ -319,6 +319,42 @@ async def deploy_callback(request: Request):
            if profile else "Tenant registered for content delivery."), ok=True))
 
 
+@router.post("/api/deploy/token")
+async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Override path for ANY tenant (customer / prospect / free trial / cross-account): the
+    caller supplies a platform token created IN the target tenant (scopes apps:install/run/
+    delete). That credential carries the target account's authority, so no SSO/account binding
+    is needed. The token is used once and discarded — never logged or persisted. Writer-gated."""
+    user = _require_writer(x_auth_user)
+    action = body.get("action", "deploy")
+    if action not in ("deploy", "undeploy"):
+        raise HTTPException(400, "action must be deploy or undeploy.")
+    tenant = (body.get("tenant") or "").strip()
+    token = (body.get("token") or "").strip()
+    tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    if not token:
+        raise HTTPException(400, "Platform token required.")
+
+    if action == "undeploy":
+        ok, msg = await _run_undeploy(token, tenant)
+        del token
+        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error", via="token", detail=msg)
+        if not ok:
+            raise HTTPException(502, f"Undeploy failed: {msg}")
+        return {"ok": True, "tenant": tenant_id, "action": "undeploy"}
+
+    rc, out = await _run_deploy(token, tenant)
+    del token
+    if rc != 0:
+        await _audit(user, tenant_id, "deploy", "deploy-error", via="token", rc=rc)
+        raise HTTPException(502, f"Deploy failed (exit {rc}): {out}")
+    reg = await _register_in_content_service(user, tenant)
+    profile = (reg or {}).get("profile")
+    url = _app_url(tenant)
+    await _audit(user, tenant_id, "deploy", "deployed", via="token", version=_app_version(), url=url, profile=profile)
+    return {"ok": True, "tenant": tenant_id, "url": url, "profile": profile, "version": _app_version()}
+
+
 @router.get("/api/deploy/audit")
 async def deploy_audit(limit: int = 50, x_auth_user: str | None = Header(default=None)):
     _require_writer(x_auth_user)
