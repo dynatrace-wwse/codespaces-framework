@@ -3,13 +3,14 @@
 Terminate all running daemon jobs on a specific worker and wait for it to go idle.
 Usage: python3 cleanup_worker.py <worker_id>
 """
+import os
 import asyncio
 import sys
 import time
 
 import redis.asyncio as aioredis
 
-REDIS_PWD   = "50258583a5c8d515dc8a553a26e1a17d"
+REDIS_PWD   = os.environ.get("REDIS_PASSWORD") or sys.exit("REDIS_PASSWORD not set in environment")
 REDIS_URL   = f"redis://:{REDIS_PWD}@localhost:6379/0"
 IDLE_TIMEOUT = 300   # max 5 min to drain
 SLOT_TIMEOUT = 180   # max 3 min for slots to re-initialise

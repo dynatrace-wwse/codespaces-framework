@@ -23,7 +23,7 @@ _dt_env_raw = os.environ.get("DT_ENVIRONMENT", "").rstrip("/")
 # Metrics ingest API is on the live domain, not the apps domain.
 DT_ENV = _dt_env_raw.replace(".apps.dynatrace.com", ".live.dynatrace.com")
 DT_TOKEN = os.environ.get("DT_INGEST_TOKEN", "")
-REDIS_AUTH = "50258583a5c8d515dc8a553a26e1a17d"
+REDIS_AUTH = os.environ.get("REDIS_PASSWORD") or sys.exit("REDIS_PASSWORD not set in environment")
 HOST = socket.gethostname().split(".")[0]  # short hostname
 
 

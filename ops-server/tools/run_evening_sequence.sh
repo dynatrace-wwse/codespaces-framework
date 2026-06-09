@@ -10,7 +10,7 @@ OPS_VENV="/home/ops/ops-venv/bin/python"
 PYTHON="python3"
 DATE="$(date -u +%Y%m%d)"
 LOG_DIR="/tmp/evening-$DATE"
-REDIS_PWD="50258583a5c8d515dc8a553a26e1a17d"
+REDIS_PWD="${REDIS_PASSWORD:?REDIS_PASSWORD not set - source /home/ops/.env}"
 ORBITAL_API="https://autonomous-enablements.whydevslovedynatrace.com"
 
 mkdir -p "$LOG_DIR"

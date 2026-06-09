@@ -17,6 +17,7 @@ Usage:
   python3 capacity_stress_test.py --variant astroshop --dry-run
 """
 
+import os
 import argparse
 import asyncio
 import json
@@ -33,7 +34,7 @@ from typing import Optional
 import redis.asyncio as aioredis
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REDIS_PWD    = "50258583a5c8d515dc8a553a26e1a17d"
+REDIS_PWD    = os.environ.get("REDIS_PASSWORD") or sys.exit("REDIS_PASSWORD not set in environment")
 REDIS_URL    = f"redis://:{REDIS_PWD}@localhost:6379/0"
 ORBITAL_BASE = "https://autonomous-enablements.whydevslovedynatrace.com"
 
