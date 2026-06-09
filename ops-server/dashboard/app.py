@@ -77,13 +77,21 @@ tenant only. No app token is stored. We log user + tenant + action, never creden
 </div>
 
 <h3>Deploy with a platform token (any tenant)</h3>
-<p class=hint>For customer / prospect / free-trial / cross-account tenants. Create a platform token in
-the <b>target</b> tenant (Settings &rarr; Platform tokens) with <code>app-engine:apps:install</code>,
-<code>:run</code>, <code>:delete</code>. Used once, never stored.</p>
+<p class=hint>For customer / prospect / free-trial / cross-account tenants — anywhere SSO can't reach.
+The token is used once and never stored.</p>
+<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 14px;margin:6px 0;font-size:13px">
+  <b>Required scopes</b> — create a platform token in the <b>target</b> tenant
+  (Settings &rarr; Platform tokens) with:
+  <ul style="margin:6px 0 0 0;padding-left:18px">
+    <li><code>app-engine:apps:install</code> — install/upgrade the app</li>
+    <li><code>app-engine:apps:run</code> — run the app's functions</li>
+    <li><code>app-engine:apps:delete</code> — only needed for Undeploy</li>
+  </ul>
+</div>
 <div>
   <input id=ttenant placeholder="https://abc12345.apps.dynatrace.com"><br>
   <input id=ttoken type=password placeholder="dt0s16.XXXX.YYYY" style="margin-top:6px"><br>
-  <button style="margin-top:8px" onclick="goToken('deploy')">Deploy</button>
+  <button style="margin-top:8px" onclick="goToken('deploy')">Deploy / Upgrade</button>
   <button class=sec style="margin-top:8px" onclick="goToken('undeploy')">Undeploy</button>
   <span class=msg id=tmsg></span>
 </div>
@@ -102,7 +110,10 @@ async function goToken(action){
       body:JSON.stringify({action,tenant:t,token:k})});
     const j=await r.json();
     if(r.ok){document.getElementById('ttoken').value='';
-      m.innerHTML=action==='deploy'?`✓ deployed v${j.version} — <a href="${j.url}">${j.url}</a>`+(j.profile?` · profile ${j.profile}`:''):'✓ undeployed';}
+      if(action!=='deploy'){m.textContent='✓ undeployed';}
+      else{const s=j.status==='up-to-date'?`already up-to-date (v${j.version})`
+        :j.status==='upgraded'?`upgraded v${j.from} → v${j.version}`:`installed v${j.version}`;
+        m.innerHTML=`✓ ${s} — <a href="${j.url}">${j.url}</a>`+(j.profile?` · profile ${j.profile}`:'');}}
     else m.textContent='✗ '+(j.detail||'failed');
   }catch(e){m.textContent='✗ '+e;}
 }

@@ -171,6 +171,33 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     return proc.returncode or 0, out.decode(errors="replace")[-1500:]
 
 
+async def _get_installed(token: str, tenant_url: str) -> str | None:
+    """Return the installed app version on the tenant, or None if not installed."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_registry_url(tenant_url, APP_ID), headers={"Authorization": f"Bearer {token}"})
+        if r.status_code == 200:
+            j = r.json()
+            return j.get("version") or j.get("appVersion")
+        return None  # 404 → not installed
+    except Exception as exc:
+        log.warning("installed-version check failed for %s: %s", tenant_url, exc)
+        return None
+
+
+async def _deploy_with_status(token: str, tenant_url: str) -> dict:
+    """Idempotent deploy: check what's installed; skip if already current, else install/upgrade.
+    Returns {status: up-to-date|installed|upgraded|error, from, to, output}."""
+    installed = await _get_installed(token, tenant_url)
+    ours = _app_version()
+    if installed and installed == ours:
+        return {"status": "up-to-date", "to": ours}
+    rc, out = await _run_deploy(token, tenant_url)
+    if rc != 0:
+        return {"status": "error", "rc": rc, "output": out, "from": installed}
+    return {"status": "upgraded" if installed else "installed", "from": installed, "to": _app_version()}
+
+
 async def _run_undeploy(token: str, tenant_url: str) -> tuple[bool, str]:
     """Uninstall via the registry API directly (no packaging needed)."""
     try:
@@ -289,7 +316,6 @@ async def deploy_callback(request: Request):
 
     tenant_url = flow["tenant"]
     app_url = _app_url(tenant_url)
-    version = _app_version()
 
     if action == "undeploy":
         ok, msg = await _run_undeploy(token, tenant_url)
@@ -300,21 +326,27 @@ async def deploy_callback(request: Request):
             else f"Undeploy failed for <b>{tenant_id}</b>: {msg}", ok=ok),
             status_code=200 if ok else 502)
 
-    # deploy
-    rc, out = await _run_deploy(token, tenant_url)
+    # deploy — idempotent: skip if up-to-date, else install/upgrade
+    res = await _deploy_with_status(token, tenant_url)
     del token  # discard the credential before doing anything else
-    if rc != 0:
-        await _audit(user, tenant_id, "deploy", "deploy-error", version=version, rc=rc)
+    if res["status"] == "error":
+        await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
         return HTMLResponse(_page(
-            f"Deploy to <b>{tenant_id}</b> failed (exit {rc}).<br><br>"
-            f"<pre style='white-space:pre-wrap;color:#f0c674'>{out}</pre>", ok=False), status_code=502)
+            f"Deploy to <b>{tenant_id}</b> failed (exit {res.get('rc')}).<br><br>"
+            f"<pre style='white-space:pre-wrap;color:#f0c674'>{res.get('output','')}</pre>", ok=False), status_code=502)
 
     reg = await _register_in_content_service(user, tenant_url)
     profile = (reg or {}).get("profile")
-    await _audit(user, tenant_id, "deploy", "deployed", version=version, url=app_url, profile=profile)
+    await _audit(user, tenant_id, "deploy", res["status"],
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile)
+    if res["status"] == "up-to-date":
+        head = f"App already up-to-date on <b>{tenant_id}</b> (v{res.get('to')}) — nothing to do."
+    elif res["status"] == "upgraded":
+        head = f"App upgraded on <b>{tenant_id}</b>: v{res.get('from')} → v{res.get('to')}."
+    else:
+        head = f"App installed on <b>{tenant_id}</b> (v{res.get('to')})."
     return HTMLResponse(_page(
-        f"App deployed successfully to <b>{tenant_id}</b> (v{version}).<br><br>"
-        f"Open: <a href='{app_url}'>{app_url}</a><br>"
+        f"{head}<br><br>Open: <a href='{app_url}'>{app_url}</a><br>"
         + (f"Content profile: <b>{profile}</b> — open the app and Refresh to load it."
            if profile else "Tenant registered for content delivery."), ok=True))
 
@@ -343,16 +375,18 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
             raise HTTPException(502, f"Undeploy failed: {msg}")
         return {"ok": True, "tenant": tenant_id, "action": "undeploy"}
 
-    rc, out = await _run_deploy(token, tenant)
+    res = await _deploy_with_status(token, tenant)
     del token
-    if rc != 0:
-        await _audit(user, tenant_id, "deploy", "deploy-error", via="token", rc=rc)
-        raise HTTPException(502, f"Deploy failed (exit {rc}): {out}")
+    if res["status"] == "error":
+        await _audit(user, tenant_id, "deploy", "deploy-error", via="token", rc=res.get("rc"))
+        raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
-    await _audit(user, tenant_id, "deploy", "deployed", via="token", version=_app_version(), url=url, profile=profile)
-    return {"ok": True, "tenant": tenant_id, "url": url, "profile": profile, "version": _app_version()}
+    await _audit(user, tenant_id, "deploy", res["status"], via="token",
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile)
+    return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
+            "version": res.get("to"), "url": url, "profile": profile}
 
 
 @router.get("/api/deploy/audit")

@@ -126,6 +126,39 @@ def test_missing_scopes_detects_insufficient_permissions():
     assert dep._missing_scopes("undeploy", "app-engine:apps:delete") == []
 
 
+def test_deploy_with_status_skips_when_up_to_date():
+    # installed == ours → up-to-date, no deploy run
+    saved_ver = dep._app_version
+    saved_inst = dep._get_installed
+    saved_run = dep._run_deploy
+    ran = {"called": False}
+    async def fake_installed(t, u): return "1.2.3"
+    async def fake_run(t, u): ran["called"] = True; return 0, ""
+    dep._app_version = lambda: "1.2.3"
+    dep._get_installed = fake_installed
+    dep._run_deploy = fake_run
+    try:
+        res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
+        assert res == {"status": "up-to-date", "to": "1.2.3"}
+        assert ran["called"] is False
+    finally:
+        dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
+
+
+def test_deploy_with_status_upgrades_when_older():
+    saved_ver = dep._app_version; saved_inst = dep._get_installed; saved_run = dep._run_deploy
+    async def fake_installed(t, u): return "1.0.0"
+    async def fake_run(t, u): return 0, "ok"
+    dep._app_version = lambda: "1.2.0"
+    dep._get_installed = fake_installed
+    dep._run_deploy = fake_run
+    try:
+        res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
+        assert res == {"status": "upgraded", "from": "1.0.0", "to": "1.2.0"}
+    finally:
+        dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
+
+
 def test_token_deploy_guards():
     # no auth → 401
     _expect_http(401, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t"}, x_auth_user=None))
