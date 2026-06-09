@@ -122,6 +122,69 @@ then prepends `ssh -t -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host}`.
 
 **Important:** shell sessions into `integration-test` jobs disconnect when the test finishes and the container is torn down.  Use `daemon` jobs for interactive training sessions — the container stays alive until manually terminated.
 
+## Weighted scheduling & lane routing (worker-agent only)
+
+Lives in `worker-agent/scheduler.py` (`WeightedScheduler`). It gates every job
+**before** it claims a physical Sysbox slot, so heavy jobs can't co-schedule and
+OOM the worker while cheap jobs keep filling spare capacity. Pure, dependency-free
+(asyncio only) → unit-tested in `worker-agent/test_scheduler.py` with no Redis/Docker.
+
+> **Scope:** this applies to the remote AMD `worker-agent` (`ops-worker-agent.service`).
+> The master's co-located `workers.manager` does **not** use it.
+
+### The two gates
+
+1. **Cost budget** — each job has an integer cost: `light=1`, `medium=2`, `heavy=4`.
+   Jobs are admitted while the sum of in-flight costs stays within `budget`. Heavy
+   jobs reserve more, so fewer run at once; cheap jobs fill the headroom.
+2. **Heavy lane** — jobs classified `heavy` additionally need a permit from a lane
+   of `max_heavy` concurrent slots. Light jobs never touch this lane, so they are
+   never blocked by it.
+
+Both reservations are released in `_run_job`'s `finally` on **every** exit path
+(ok / fail / timeout / terminated). The physical slot pool (`WORKER_CAPACITY`)
+remains the hard cap on simultaneous jobs — the scheduler only decides *which*
+queued job claims a slot next.
+
+### Cost & lane classification
+
+| Input (precedence order) | Cost | Lane |
+|--------------------------|------|------|
+| explicit `job["cost"]` (floored to ≥1) | as given | — |
+| suite `bats` | 1 | light |
+| suite `engines` / `k3d-apps` / `dt-apponly` / `k3d-aitraveladvisor` | 2 | light |
+| suite `dt-cnfs` (Operator+ActiveGate+k3d, ~3-4 GB) | 4 | **heavy** |
+| `requires_native: true` or cost ≥ 4 | — | **heavy** |
+| job type `integration-test` / `daemon` / `framework-test` | 2 | light |
+| explicit `job["lane"]` = `heavy`/`light` | — | as given |
+
+No enqueue change is needed for the heavy suite — `dt-cnfs` jobs already carry
+`suite` + `requires_native` from the dashboard's `FRAMEWORK_SUITES`.
+
+### Tuning
+
+`WeightedScheduler.from_capacity(cap)` defaults: `budget = cap × 2`,
+`max_heavy = cap // 3` (min 1). A 6-slot worker → budget **12**, heavy lane **2**
+(e.g. one `dt-cnfs` + eight `bats`, or ≤2 `dt-cnfs` concurrent).
+
+Override per worker via env (`config.py`):
+
+```bash
+WORKER_COST_BUDGET=10   # total in-flight cost units admitted at once
+WORKER_MAX_HEAVY=1      # max concurrent heavy-lane jobs (e.g. dt-cnfs)
+```
+
+The heartbeat publishes `sched_budget`, `sched_in_flight_cost`, `sched_max_heavy`,
+`sched_heavy_in_flight` on `worker:{id}` for observability.
+
+Run the tests:
+
+```bash
+cd ops-server
+/home/ops/ops-venv/bin/python -m worker-agent.test_scheduler   # standalone runner
+# or, if pytest is installed: python -m pytest worker-agent/test_scheduler.py
+```
+
 ### Path layout — canonical
 
 Both master and AMD worker use the same layout under the `ops` user:
