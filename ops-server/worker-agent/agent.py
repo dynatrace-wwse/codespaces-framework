@@ -35,6 +35,8 @@ from .config import (
     WORKER_ID,
     WORKER_ARCH,
     WORKER_CAPACITY,
+    WORKER_COST_BUDGET,
+    WORKER_MAX_HEAVY,
     WORKER_HOST,
     WORKER_SSH_HOST,
     MASTER_REDIS_URL,
@@ -54,6 +56,7 @@ from .executor import (
     _wait_for_inner_docker,
     _pipe_image_to_sysbox,
 )
+from .scheduler import WeightedScheduler, classify
 
 LOCK_TTL_SECONDS = 7200
 
@@ -291,6 +294,13 @@ class WorkerAgent:
         self.pool: redis.Redis | None = None
         self.active_jobs: dict[str, dict] = {}
         self.semaphore = asyncio.Semaphore(WORKER_CAPACITY)
+        # Weighted admission + heavy-lane routing in front of the physical slot
+        # pool. Light jobs still fill every slot; heavy jobs (dt-cnfs) are
+        # throttled by cost budget and a bounded heavy lane so they cannot OOM
+        # the worker by co-scheduling.
+        self.scheduler = WeightedScheduler.from_capacity(
+            WORKER_CAPACITY, WORKER_COST_BUDGET, WORKER_MAX_HEAVY
+        )
         self._running = True
         self._terminated_jobs: set[str] = set()
         self._shutdown = False
@@ -309,6 +319,10 @@ class WorkerAgent:
         log.info(
             "Connected to master Redis. Worker: %s (arch=%s, capacity=%d)",
             WORKER_ID, WORKER_ARCH, WORKER_CAPACITY,
+        )
+        log.info(
+            "Weighted scheduler: budget=%d cost units, heavy lane=%d concurrent",
+            self.scheduler.budget, self.scheduler.max_heavy,
         )
 
         await self._register()
@@ -498,6 +512,7 @@ class WorkerAgent:
                     "active_jobs": str(len(self.active_jobs)),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "status": "ready" if len(self.active_jobs) < WORKER_CAPACITY else "busy",
+                    **{k: str(v) for k, v in self.scheduler.stats().items()},
                     **metrics,
                 })
                 await self.pool.expire(worker_key, REGISTRATION_TTL)
@@ -583,6 +598,14 @@ class WorkerAgent:
             ttl = 86400 if job.get("type") == "daemon" else LOCK_TTL_SECONDS
             await self.pool.expire(running_key, ttl)
 
+            # Weighted admission: block until the cost budget + heavy lane
+            # allow this job. Cheap jobs pass immediately; heavy jobs (dt-cnfs)
+            # wait for a heavy-lane permit so they never co-schedule into an OOM.
+            cost, lane = classify(job)
+            await self.scheduler.acquire(job)
+            log.info("Admitted %s: cost=%d lane=%s | %s", job_id, cost, lane,
+                     self.scheduler.stats())
+
             # Acquire a pre-warmed slot. Blocks if all capacity is in use.
             slot = await self.sysbox_pool.acquire()
             self._job_slots[job_id] = slot
@@ -604,6 +627,9 @@ class WorkerAgent:
                 job["status"] = "failed"
                 healthy = False
             finally:
+                # Release the weighted reservation (cost + heavy lane) on every
+                # exit path — ok, fail, timeout, or terminated.
+                await self.scheduler.release(job)
                 self._job_slots.pop(job_id, None)
                 # Terminated daemon jobs have their Sysbox force-removed externally.
                 # docker wait returns normally (no exception), so healthy stays True.
