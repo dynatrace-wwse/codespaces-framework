@@ -237,6 +237,7 @@ async def execute_integration_test(
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
             "-e", "ORBITAL_ENVIRONMENT=true",
+            "-e", f"ORBITAL_JOB_ID={job_id}",
             "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE,
             "sleep", "infinity",
@@ -323,14 +324,21 @@ async def execute_integration_test(
                 await asyncio.wait_for(kill_proc.wait(), timeout=60)
             except Exception:
                 pass
-            try:
-                vol_proc = await asyncio.create_subprocess_exec(
-                    "docker", "volume", "prune", "-f",
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                )
-                await asyncio.wait_for(vol_proc.wait(), timeout=30)
-            except Exception:
-                pass
+            # Volumes then networks. k3d creates a `k3d-<cluster>` docker network
+            # per cluster; without Sysbox isolation these accumulate on the host
+            # and clutter the worker. Prune regardless of exit status.
+            for prune_args in (
+                ["docker", "volume", "prune", "-f"],
+                ["docker", "network", "prune", "-f"],
+            ):
+                try:
+                    prune_proc = await asyncio.create_subprocess_exec(
+                        *prune_args,
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(prune_proc.wait(), timeout=30)
+                except Exception:
+                    pass
             shutil.rmtree(work_dir, ignore_errors=True)
 
     duration = int(time.time() - start_time)
@@ -488,6 +496,7 @@ async def execute_daemon(
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
             "-e", "ORBITAL_ENVIRONMENT=true",
+            "-e", f"ORBITAL_JOB_ID={job_id}",
             "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE, "sleep", "infinity",
         ]

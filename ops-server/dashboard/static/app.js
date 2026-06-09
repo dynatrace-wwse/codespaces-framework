@@ -1247,19 +1247,25 @@ function renderFrameworkRuns(runs) {
 }
 
 async function triggerFrameworkSuite(suiteId, ref) {
-    if (!isWriter()) { alert('Sign in as a writer to trigger tests.'); return; }
+    if (!isWriter()) { showToast('⚠️ Sign in as a writer to trigger tests.'); return; }
     ref = ref || document.getElementById('framework-ref')?.value || 'main';
+    const label = suiteId === 'all' ? 'all suites' : suiteId;
+    showToast(`⏳ Firing ${label} on ${ref}…`);
     try {
         const res = await fetch(`${API}/api/framework/trigger`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ suite: suiteId, ref, arch: suiteId === 'bats' ? 'arm64' : 'amd64' }),
         });
-        if (!res.ok) { alert(`Error ${res.status}: ${await res.text()}`); return; }
+        if (!res.ok) { showToast(`❌ Error ${res.status}: ${await res.text()}`, 6000); return; }
         const data = await res.json();
-        alert(`Queued: ${data.jobs.map(j => `${j.suite} (${j.arch})`).join(', ')}`);
+        if (!data.jobs || !data.jobs.length) {
+            showToast('⚠️ Nothing queued (suite coming soon or unknown).', 6000);
+            return;
+        }
+        showToast(`✅ Scheduled on ${data.ref}: ${data.jobs.map(j => `${j.suite} (${j.arch})`).join(', ')}`, 6000);
         setTimeout(loadFramework, 2000);
-    } catch (e) { alert(`Error: ${e}`); }
+    } catch (e) { showToast(`❌ Error: ${e}`, 6000); }
 }
 
 // Framework tab events

@@ -49,6 +49,47 @@ app = FastAPI(title="Enablement Ops Dashboard", version="2.0.0")
 from dashboard.content_service import router as content_router  # noqa: E402
 app.include_router(content_router)
 
+# SSO-delegated app deploy (Phase 1: OAuth flow + audit).
+from dashboard.app_deploy import router as deploy_router  # noqa: E402
+app.include_router(deploy_router)
+
+_DEPLOY_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Deploy app to a tenant</title>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}
+header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
+main{max-width:680px;margin:0 auto;padding:24px}
+input{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:8px 12px;width:380px}
+button{background:#6c6cff;color:#fff;border:0;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600;margin-left:6px}
+button.sec{background:#30363d}
+.hint{opacity:.6;font-size:13px}
+table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13px}
+td,th{padding:5px 8px;border-bottom:1px solid #21262d;text-align:left}
+</style></head><body>
+<header>Deploy the Enablement App to a Dynatrace tenant</header>
+<main>
+<p class=hint>You sign in with <b>your</b> Dynatrace SSO; the app is installed into the entered
+tenant only. No app token is stored. We log user + tenant + action, never credentials.</p>
+<div>
+  <input id=tenant placeholder="https://abc12345.apps.dynatrace.com">
+  <button onclick="go('deploy')">Sign in &amp; Deploy</button>
+  <button class=sec onclick="go('undeploy')">Undeploy</button>
+</div>
+<h3>Recent deploy activity</h3>
+<table id=audit><tbody><tr><td class=hint>loading…</td></tr></tbody></table>
+<script>
+function go(action){const t=document.getElementById('tenant').value.trim();if(!t)return;
+  location.href='/api/deploy/start?action='+action+'&tenant='+encodeURIComponent(t);}
+fetch('/api/deploy/audit?limit=30').then(r=>r.ok?r.json():{audit:[]}).then(({audit})=>{
+  const b=document.querySelector('#audit tbody');
+  b.innerHTML=audit.length?audit.map(a=>`<tr><td>${a.ts}</td><td>${a.user}</td><td>${a.tenant}</td><td>${a.action}</td><td>${a.result}</td></tr>`).join(''):'<tr><td class=hint>none yet</td></tr>';
+}).catch(()=>{});
+</script></main></body></html>"""
+
+
+@app.get("/deploy", response_class=HTMLResponse)
+async def deploy_page():
+    """Deploy UI. Page public; /api/deploy/* is writer-gated by nginx."""
+    return HTMLResponse(_DEPLOY_PAGE)
+
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Content Profiles</title><style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
