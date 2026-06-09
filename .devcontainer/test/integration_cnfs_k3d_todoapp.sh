@@ -47,6 +47,20 @@ k3d cluster list -o json 2>/dev/null \
   | python3 -c "import sys,json; [print(c['name']) for c in json.load(sys.stdin)]" 2>/dev/null \
   | xargs -r k3d cluster delete 2>/dev/null || true
 
+# Guaranteed teardown on ANY exit (success, failure, timeout, SIGTERM).
+# Deletes the K3d cluster (and its docker network/volumes) so the worker host
+# is never left cluttered regardless of how the test ends.
+_cnfs_cleanup() {
+  printInfoSection "Cleanup trap: tearing down K3d cluster + k3d-* networks"
+  deleteK3dCluster 2>/dev/null || true
+  k3d cluster list -o json 2>/dev/null \
+    | python3 -c "import sys,json; [print(c['name']) for c in json.load(sys.stdin)]" 2>/dev/null \
+    | xargs -r k3d cluster delete 2>/dev/null || true
+  docker network prune -f 2>/dev/null || true
+  docker volume prune -f 2>/dev/null || true
+}
+trap _cnfs_cleanup EXIT INT TERM
+
 # 1. Start K3d cluster
 printInfoSection "1/5  Starting K3d cluster"
 export CLUSTER_ENGINE=k3d
