@@ -95,6 +95,24 @@ def test_undeploy_calls_registry_delete_with_bearer(monkeypatch=None):
     assert captured["auth"] == "Bearer tok123"
 
 
+def test_client_for_resolves_per_realm_with_fallback(monkeypatch=None):
+    import os
+    saved = dict(os.environ)
+    saved_g = dep.DEPLOY_CLIENT_ID
+    try:
+        dep.DEPLOY_CLIENT_ID = "global-cid"
+        os.environ.pop("DEPLOY_CLIENT_ID_PROD", None)
+        os.environ["DEPLOY_CLIENT_ID_SPRINT"] = "sprint-cid"
+        os.environ["DEPLOY_CLIENT_SECRET_SPRINT"] = "sprint-sec"
+        # sprint has its own client
+        assert dep._client_for("sprint") == ("sprint-cid", "sprint-sec")
+        # prod falls back to the global client
+        assert dep._client_for("prod")[0] == "global-cid"
+    finally:
+        os.environ.clear(); os.environ.update(saved)
+        dep.DEPLOY_CLIENT_ID = saved_g
+
+
 def test_missing_scopes_detects_insufficient_permissions():
     # user has all deploy scopes → nothing missing
     assert dep._missing_scopes("deploy", "app-engine:apps:install app-engine:apps:run storage:logs:read") == []

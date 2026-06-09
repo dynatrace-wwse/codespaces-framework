@@ -121,6 +121,15 @@ async def _audit(user: str, tenant: str, action: str, result: str, **extra) -> N
     log.info("DEPLOY-AUDIT %s", {k: v for k, v in rec.items()})
 
 
+def _client_for(domain: str) -> tuple[str, str]:
+    """The OAuth client for a domain class (prod/sprint/dev). Each is a separate SSO realm,
+    so each can have its own client: DEPLOY_CLIENT_ID_PROD / _SPRINT / _DEV (+ _SECRET_*).
+    Falls back to the global DEPLOY_CLIENT_ID/SECRET when no per-realm client is set."""
+    cid = os.environ.get(f"DEPLOY_CLIENT_ID_{domain.upper()}") or DEPLOY_CLIENT_ID
+    sec = os.environ.get(f"DEPLOY_CLIENT_SECRET_{domain.upper()}") or DEPLOY_CLIENT_SECRET
+    return cid, sec
+
+
 def _missing_scopes(action: str, granted: str | None) -> list[str]:
     """Required IAM scopes for the action minus what the user's token actually granted."""
     return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
@@ -193,19 +202,21 @@ async def deploy_start(tenant: str, action: str = "deploy", x_auth_user: str | N
     if action not in ("deploy", "undeploy"):
         raise HTTPException(400, "action must be deploy or undeploy.")
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
-    if not DEPLOY_CLIENT_ID:
-        raise HTTPException(503, "Deploy not configured: register the Orbital OAuth client and set DEPLOY_CLIENT_ID.")
+    client_id, _ = _client_for(domain)
+    if not client_id:
+        raise HTTPException(503, f"Deploy not configured for the {domain} realm: register an OAuth "
+                                 f"client there and set DEPLOY_CLIENT_ID_{domain.upper()} (or DEPLOY_CLIENT_ID).")
 
     sso = await discover_sso(tenant)
     verifier, challenge = _pkce()
     state = secrets.token_urlsafe(24)
     await _pool().setex(
         f"deploy:flow:{state}", FLOW_TTL,
-        json.dumps({"tenant": tenant, "tenant_id": tenant_id, "domain": domain,
+        json.dumps({"tenant": tenant, "tenant_id": tenant_id, "domain": domain, "client_id": client_id,
                     "verifier": verifier, "user": user, "action": action, "sso": sso}),
     )
     authorize = f"{sso}/oauth2/authorize?" + urlencode({
-        "client_id": DEPLOY_CLIENT_ID,
+        "client_id": client_id,
         "redirect_uri": DEPLOY_REDIRECT_URI,
         "response_type": "code",
         "code_challenge_method": "S256",
@@ -240,15 +251,18 @@ async def deploy_callback(request: Request):
 
     # Exchange the code (public client + PKCE, no secret) for the delegated token.
     try:
+        # Use the same per-realm client the flow started with; re-resolve its secret from env.
+        client_id = flow.get("client_id") or DEPLOY_CLIENT_ID
+        _, client_secret = _client_for(flow.get("domain", ""))
         form = {
             "grant_type": "authorization_code",
-            "client_id": DEPLOY_CLIENT_ID,
+            "client_id": client_id,
             "code": code,
             "redirect_uri": DEPLOY_REDIRECT_URI,
             "code_verifier": flow["verifier"],
         }
-        if DEPLOY_CLIENT_SECRET:  # confidential client (self-created) — secret stays server-side
-            form["client_secret"] = DEPLOY_CLIENT_SECRET
+        if client_secret:  # confidential client (self-created) — secret stays server-side
+            form["client_secret"] = client_secret
         async with httpx.AsyncClient(timeout=15) as c:
             tok = await c.post(f"{flow['sso']}/sso/oauth2/token", data=form,
                                headers={"Content-Type": "application/x-www-form-urlencoded"})
