@@ -95,6 +95,19 @@ def test_undeploy_calls_registry_delete_with_bearer(monkeypatch=None):
     assert captured["auth"] == "Bearer tok123"
 
 
+def test_missing_scopes_detects_insufficient_permissions():
+    # user has all deploy scopes → nothing missing
+    assert dep._missing_scopes("deploy", "app-engine:apps:install app-engine:apps:run storage:logs:read") == []
+    # user lacks install → reported
+    assert dep._missing_scopes("deploy", "app-engine:apps:run") == ["app-engine:apps:install"]
+    # empty / None grant → all required missing
+    assert dep._missing_scopes("deploy", "") == ["app-engine:apps:install", "app-engine:apps:run"]
+    assert dep._missing_scopes("deploy", None) == ["app-engine:apps:install", "app-engine:apps:run"]
+    # undeploy needs delete
+    assert dep._missing_scopes("undeploy", "app-engine:apps:run") == ["app-engine:apps:delete"]
+    assert dep._missing_scopes("undeploy", "app-engine:apps:delete") == []
+
+
 def test_deploy_missing_repo_returns_127():
     saved = dep.APP_REPO_DIR
     dep.APP_REPO_DIR = "/nonexistent/app/repo"

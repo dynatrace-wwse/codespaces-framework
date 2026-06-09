@@ -57,6 +57,13 @@ APP_ID = "my.dynatrace.enablements"
 DEFAULT_SSO = "https://sso.dynatrace.com"
 FLOW_TTL = 600  # seconds a started flow stays valid
 AUDIT_KEY = "audit:deploy"
+# IAM permissions the signed-in user must actually hold (reflected in the token's granted
+# scope) for each action. If missing, the deploy would 403 at the registry — we check up
+# front and report it clearly instead.
+REQUIRED_SCOPES = {
+    "deploy": {"app-engine:apps:install", "app-engine:apps:run"},
+    "undeploy": {"app-engine:apps:delete"},
+}
 # Local checkout of the app repo (has node_modules/dt-app) used to build + deploy.
 APP_REPO_DIR = os.environ.get("APP_REPO_DIR", "/home/ops/enablement-framework/dynatrace-app-enablements")
 DEPLOY_TIMEOUT = int(os.environ.get("DEPLOY_TIMEOUT", "600"))
@@ -112,6 +119,11 @@ async def _audit(user: str, tenant: str, action: str, result: str, **extra) -> N
         log.warning("audit write failed: %s", exc)
     # token is never part of `rec`
     log.info("DEPLOY-AUDIT %s", {k: v for k, v in rec.items()})
+
+
+def _missing_scopes(action: str, granted: str | None) -> list[str]:
+    """Required IAM scopes for the action minus what the user's token actually granted."""
+    return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
 
 
 def _app_url(tenant_url: str) -> str:
@@ -243,10 +255,23 @@ async def deploy_callback(request: Request):
         if tok.status_code != 200:
             await _audit(user, tenant_id, action, "token-error", status=tok.status_code)
             return HTMLResponse(_page(f"Token exchange failed (HTTP {tok.status_code}).", ok=False), status_code=502)
-        token = tok.json().get("access_token", "")  # held in memory only, never logged/stored
+        payload_t = tok.json()
+        token = payload_t.get("access_token", "")  # held in memory only, never logged/stored
+        granted = payload_t.get("scope", "")
     except Exception as exc:
         await _audit(user, tenant_id, action, "token-error", message=str(exc))
         return HTMLResponse(_page(f"Token exchange error: {exc}", ok=False), status_code=502)
+
+    # Validate the signed-in user actually holds the IAM permissions for this action.
+    # SSO only grants scopes the user is entitled to, so a missing scope ⇒ no permission.
+    missing = _missing_scopes(action, granted)
+    if missing:
+        del token
+        await _audit(user, tenant_id, action, "insufficient-permissions", missing=missing)
+        return HTMLResponse(_page(
+            f"<b>{user}</b> lacks permission to {action} apps on <b>{tenant_id}</b>.<br><br>"
+            f"Missing IAM permission(s): <b>{', '.join(missing)}</b>.<br>"
+            f"Ask a tenant administrator to grant them, then try again.", ok=False), status_code=403)
 
     tenant_url = flow["tenant"]
     app_url = _app_url(tenant_url)
