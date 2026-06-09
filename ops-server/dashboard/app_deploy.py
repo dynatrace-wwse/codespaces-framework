@@ -40,8 +40,11 @@ from dashboard.content_service import classify_tenant, register_tenant
 
 log = logging.getLogger("ops-dashboard.deploy")
 
-# Registered Orbital public OAuth client (dt0s12-type, PKCE, no secret). Set in /home/ops/.env.
+# Registered Orbital OAuth client (auth-code grant + redirect URI). Set in /home/ops/.env.
+# A self-created Dynatrace client is confidential → also set DEPLOY_CLIENT_SECRET (held only
+# on Orbital, server-side; never shared with tenants/users). PKCE is still used.
 DEPLOY_CLIENT_ID = os.environ.get("DEPLOY_CLIENT_ID", "")
+DEPLOY_CLIENT_SECRET = os.environ.get("DEPLOY_CLIENT_SECRET", "")
 DEPLOY_REDIRECT_URI = os.environ.get(
     "DEPLOY_REDIRECT_URI",
     "https://autonomous-enablements.whydevslovedynatrace.com/auth/dt-callback",
@@ -225,14 +228,18 @@ async def deploy_callback(request: Request):
 
     # Exchange the code (public client + PKCE, no secret) for the delegated token.
     try:
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": DEPLOY_CLIENT_ID,
+            "code": code,
+            "redirect_uri": DEPLOY_REDIRECT_URI,
+            "code_verifier": flow["verifier"],
+        }
+        if DEPLOY_CLIENT_SECRET:  # confidential client (self-created) — secret stays server-side
+            form["client_secret"] = DEPLOY_CLIENT_SECRET
         async with httpx.AsyncClient(timeout=15) as c:
-            tok = await c.post(f"{flow['sso']}/sso/oauth2/token", data={
-                "grant_type": "authorization_code",
-                "client_id": DEPLOY_CLIENT_ID,
-                "code": code,
-                "redirect_uri": DEPLOY_REDIRECT_URI,
-                "code_verifier": flow["verifier"],
-            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            tok = await c.post(f"{flow['sso']}/sso/oauth2/token", data=form,
+                               headers={"Content-Type": "application/x-www-form-urlencoded"})
         if tok.status_code != 200:
             await _audit(user, tenant_id, action, "token-error", status=tok.status_code)
             return HTMLResponse(_page(f"Token exchange failed (HTTP {tok.status_code}).", ok=False), status_code=502)
