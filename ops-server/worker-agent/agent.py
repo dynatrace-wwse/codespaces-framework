@@ -22,6 +22,7 @@ stay alive. If a slot becomes unhealthy it is automatically re-initialized.
 import asyncio
 import json
 import logging
+import secrets
 import shutil
 import signal
 import subprocess
@@ -56,6 +57,30 @@ from .executor import (
 )
 
 LOCK_TTL_SECONDS = 7200
+
+
+def _b36(n: int) -> str:
+    """Encode a non-negative int in base36 (0-9a-z)."""
+    if n <= 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(digits[r])
+    return "".join(reversed(out))
+
+
+def _new_job_id() -> str:
+    """Canonical job id: base36(epoch_ms)-<4hex>  (e.g. "mk3p9aqz-7f3a").
+
+    Globally unique, chronologically sortable by plain string compare, and a
+    valid DNS label. It is the single source of truth: the Redis key
+    (job:running:{id}), the log filename, and the app subdomain tail
+    ({app}--{id}). Worker, repo, tenant, and user are stored in the job record
+    and resolved by this id (and shipped to Grail for long-term history).
+    """
+    return f"{_b36(int(time.time() * 1000))}-{secrets.token_hex(2)}"
 
 
 def _branch_of(job: dict) -> str:
@@ -528,12 +553,8 @@ class WorkerAgent:
 
                 _, job_json = result
                 job = json.loads(job_json)
-                import uuid
                 if not job.get("job_id"):
-                    job["job_id"] = (
-                        f"{WORKER_ID}-{job['repo'].split('/')[-1]}"
-                        f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
-                    )
+                    job["job_id"] = _new_job_id()
                 job["worker_id"] = WORKER_ID
                 job["worker_arch"] = WORKER_ARCH
 
@@ -571,14 +592,19 @@ class WorkerAgent:
 
             running_key = f"job:running:{job_id}"
             await self.pool.hset(running_key, mapping={
-                "job_id":     job_id,
-                "repo":       job["repo"],
-                "branch":     _branch_of(job),
-                "arch":       arch,
-                "ref":        _branch_of(job),
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "worker_id":  WORKER_ID,
-                "type":       job.get("type", "integration-test"),
+                "job_id":      job_id,
+                "repo":        job["repo"],
+                "branch":      _branch_of(job),
+                "arch":        arch,
+                "ref":         _branch_of(job),
+                "started_at":  datetime.now(timezone.utc).isoformat(),
+                "worker_id":   WORKER_ID,
+                "type":        job.get("type", "integration-test"),
+                # Provenance — a job id resolves to who/where/which-tenant in
+                # history (set at enqueue; shipped to Grail for long retention).
+                "user":        job.get("user", ""),
+                "tenant":      job.get("tenant", ""),
+                "tenant_user": job.get("tenant_user", ""),
             })
             ttl = 86400 if job.get("type") == "daemon" else LOCK_TTL_SECONDS
             await self.pool.expire(running_key, ttl)
