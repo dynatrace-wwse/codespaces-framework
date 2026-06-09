@@ -1,0 +1,20 @@
+{
+  "profileId": "core",
+  "description": "Production default — Learning Bytes (micro-labs) + Kubernetes 101.",
+  "sources": [
+    {
+      "key": "learning-bytes",
+      "category": "learning-byte",
+      "categoryLabel": "Learning Bytes",
+      "repo": "dynatrace-wwse/enablement-learning-bytes",
+      "branch": "main"
+    },
+    {
+      "key": "kubernetes-101",
+      "category": "hands-on",
+      "categoryLabel": "Hands-On Trainings",
+      "repo": "dynatrace-wwse/enablement-kubernetes-101",
+      "branch": "main"
+    }
+  ]
+}

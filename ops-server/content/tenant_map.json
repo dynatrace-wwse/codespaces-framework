@@ -1,0 +1,10 @@
+{
+  "defaults": {
+    "prod": "core",
+    "sprint": "all",
+    "dev": "all"
+  },
+  "tenants": {
+    "geu80787": "all"
+  }
+}

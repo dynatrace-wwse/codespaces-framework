@@ -1,25 +1,33 @@
-"""Content distribution service (Phase 1 of multi-tenant content delivery).
+"""Content distribution service (multi-tenant content delivery).
 
 Orbital is the ONLY place that holds the GitHub token. Tenants pull curated
-*profiles* and proxied repo content from here using a per-install *content key*
-(header ``X-Content-Key``) — never a GitHub token, never a per-user secret.
+*profiles* and proxied repo content from here. Authentication is by **Dynatrace
+domain**: content can only be pulled by a Dynatrace tenant (production, sprint, or
+development apps domain). The caller passes its tenant URL; the service validates the
+domain suffix, derives the tenant id, and resolves which profile to deliver from a
+tenant→profile table (with per-domain defaults). No per-tenant key.
 
 Security model (important): the raw proxy injects the Orbital GitHub token, so it
-would otherwise be an open read of every private dynatrace-wwse repo. Two guards:
-  1. A valid content key is REQUIRED on every endpoint.
+would otherwise be an open read of every private dynatrace-wwse repo. Guards:
+  1. The caller must present a Dynatrace tenant URL (prod/sprint/dev domain suffix).
   2. The raw proxy only serves ``owner/repo`` pairs referenced by a profile
      (allowlist), and rejects path traversal.
+  Note: the tenant URL is a claim (server-to-server call from AppEngine). The content
+  is internal enablement material; for stronger isolation, restrict by AppEngine egress
+  IPs at the edge. The domain suffix check stops arbitrary internet callers.
 
 Routes (mounted under /api/content, reachable server-to-server via the nginx
 catch-all, same as /api/arena/*):
-  GET /api/content/profiles/{profile_id}
-  GET /api/content/repos/{owner}/{repo}/raw/{path}
+  GET /api/content/manifest?tenant=<tenantUrl>        — resolves the tenant's profile
+  GET /api/content/repos/{owner}/{repo}/raw/{path}?tenant=<tenantUrl>
+  GET/PUT /api/content/admin/profiles, /api/content/admin/tenant-map  (writer-gated)
 """
 
 import json
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException
@@ -30,23 +38,61 @@ GH_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
 GH_API = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
 
-# Comma-separated allowed content keys. Tenants present one as X-Content-Key.
-# These gate access to the proxy (which holds the GitHub token) — keep them set.
-CONTENT_KEYS = {
-    k.strip() for k in os.environ.get("CONTENT_KEYS", "").split(",") if k.strip()
+# Allowed Dynatrace apps-domain suffixes → environment class. Env-overridable
+# (CONTENT_DOMAIN_SUFFIXES="suffix:class,suffix:class").
+_DEFAULT_DOMAINS = {
+    ".apps.dynatrace.com": "prod",
+    ".sprint.apps.dynatracelabs.com": "sprint",
+    ".dev.apps.dynatracelabs.com": "dev",
 }
+def _load_domain_suffixes() -> dict:
+    raw = os.environ.get("CONTENT_DOMAIN_SUFFIXES", "")
+    if not raw:
+        return dict(_DEFAULT_DOMAINS)
+    out = {}
+    for pair in raw.split(","):
+        suffix, _, cls = pair.strip().partition(":")
+        if suffix and cls:
+            out[suffix] = cls
+    return out or dict(_DEFAULT_DOMAINS)
+DOMAIN_SUFFIXES = _load_domain_suffixes()
 
 PROFILES_DIR = Path(__file__).parent.parent / "content" / "profiles"
+TENANT_MAP_FILE = Path(__file__).parent.parent / "content" / "tenant_map.json"
 
 router = APIRouter(prefix="/api/content", tags=["content"])
 
 
-def _require_key(content_key: str | None) -> None:
-    if not CONTENT_KEYS:
-        # Fail closed: with no keys configured the proxy must not be reachable.
-        raise HTTPException(503, "Content service not configured (no CONTENT_KEYS).")
-    if not content_key or content_key not in CONTENT_KEYS:
-        raise HTTPException(401, "Invalid or missing X-Content-Key.")
+def classify_tenant(tenant_url: str | None) -> tuple[str, str]:
+    """Validate a Dynatrace tenant URL and return (tenant_id, domain_class).
+    Raises 403 if the domain is not a recognised Dynatrace apps domain."""
+    if not tenant_url:
+        raise HTTPException(403, "Missing tenant URL.")
+    host = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}").hostname or ""
+    host = host.lower()
+    for suffix, cls in DOMAIN_SUFFIXES.items():
+        if host.endswith(suffix):
+            tenant_id = host[: -len(suffix)].split(".")[0]
+            if tenant_id:
+                return tenant_id, cls
+    raise HTTPException(403, "Content is only served to Dynatrace tenants (prod/sprint/dev).")
+
+
+def _load_tenant_map() -> dict:
+    if TENANT_MAP_FILE.is_file():
+        try:
+            return json.loads(TENANT_MAP_FILE.read_text())
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Bad tenant_map.json: %s", exc)
+    return {"defaults": {"prod": "all", "sprint": "all", "dev": "all"}, "tenants": {}}
+
+
+def resolve_profile(tenant_id: str, domain_class: str) -> str:
+    """tenant-specific mapping wins; else the per-domain default; else 'all'."""
+    m = _load_tenant_map()
+    return (m.get("tenants", {}).get(tenant_id)
+            or m.get("defaults", {}).get(domain_class)
+            or "all")
 
 
 def _require_writer(x_auth_user: str | None) -> None:
@@ -99,12 +145,8 @@ async def _latest_sha(owner: str, repo: str, branch: str) -> str | None:
     return None
 
 
-@router.get("/profiles/{profile_id}")
-async def get_profile(profile_id: str, x_content_key: str | None = Header(default=None)):
-    """Return a profile manifest: its sources plus each repo's latest commit sha
-    (so the tenant app can diff and refresh)."""
-    _require_key(x_content_key)
-    profile = _load_profile(profile_id)
+async def _build_sources(profile: dict) -> list[dict]:
+    """Expand a profile's sources with each repo's latest commit sha."""
     sources = []
     for src in profile.get("sources", []):
         repo_full = src.get("repo", "")
@@ -119,7 +161,26 @@ async def get_profile(profile_id: str, x_content_key: str | None = Header(defaul
             "branch": branch,
             "version": sha,
         })
-    return {"profileId": profile.get("profileId", profile_id), "sources": sources}
+    return sources
+
+
+@router.get("/manifest")
+async def get_manifest(tenant: str | None = None):
+    """Resolve the calling tenant's profile (by tenant id + domain) and return its
+    sources + commit shas. The app calls this with its own environment URL as `tenant`."""
+    tenant_id, domain_class = classify_tenant(tenant)
+    profile_id = resolve_profile(tenant_id, domain_class)
+    profile = _load_profile(profile_id)
+    log.info("Manifest: tenant=%s (%s) → profile=%s", tenant_id, domain_class, profile_id)
+    return {"profileId": profile_id, "tenant": tenant_id, "domain": domain_class,
+            "sources": await _build_sources(profile)}
+
+
+@router.get("/profiles/{profile_id}")
+async def get_profile(profile_id: str, tenant: str | None = None):
+    """Return a specific profile's manifest (tenant-domain gated). Mostly for preview."""
+    classify_tenant(tenant)
+    return {"profileId": profile_id, "sources": await _build_sources(_load_profile(profile_id))}
 
 
 @router.get("/repos/{owner}/{repo}/raw/{path:path}")
@@ -128,11 +189,11 @@ async def proxy_raw(
     repo: str,
     path: str,
     ref: str = "main",
-    x_content_key: str | None = Header(default=None),
+    tenant: str | None = None,
 ):
     """Proxy a raw file from a profile-allowlisted private repo, injecting the
-    Orbital GitHub token. The tenant never sees the token."""
-    _require_key(x_content_key)
+    Orbital GitHub token. The tenant never sees the token. Domain-gated."""
+    classify_tenant(tenant)
 
     repo_full = f"{owner}/{repo}".lower()
     if repo_full not in _allowed_repos():
@@ -210,3 +271,54 @@ async def delete_profile(profile_id: str, x_auth_user: str | None = Header(defau
     if path.is_file():
         path.unlink()
     return {"ok": True}
+
+
+# ── Tenant → profile mapping (the delivery table; writer-gated) ──────────────
+
+@router.get("/admin/tenant-map")
+async def get_tenant_map(x_auth_user: str | None = Header(default=None)):
+    """The delivery table: per-domain defaults + per-tenant overrides, plus the
+    available profile ids and recognised domain classes for the editor."""
+    _require_writer(x_auth_user)
+    profiles = sorted(p.stem for p in PROFILES_DIR.glob("*.json")) if PROFILES_DIR.is_dir() else []
+    return {"map": _load_tenant_map(), "profiles": profiles, "domains": sorted(set(DOMAIN_SUFFIXES.values()))}
+
+
+@router.put("/admin/tenant-map")
+async def put_tenant_map(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Replace the tenant→profile table. Validates referenced profiles exist."""
+    _require_writer(x_auth_user)
+    defaults = body.get("defaults") or {}
+    tenants = body.get("tenants") or {}
+    if not isinstance(defaults, dict) or not isinstance(tenants, dict):
+        raise HTTPException(400, "Expected {defaults:{}, tenants:{}}.")
+    known = {p.stem for p in PROFILES_DIR.glob("*.json")} if PROFILES_DIR.is_dir() else set()
+    for who, pid in [*defaults.items(), *tenants.items()]:
+        if pid and pid not in known:
+            raise HTTPException(400, f"Unknown profile '{pid}' for '{who}'.")
+    clean = {
+        "defaults": {str(k): str(v) for k, v in defaults.items() if v},
+        "tenants": {str(k): str(v) for k, v in tenants.items() if v},
+    }
+    TENANT_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TENANT_MAP_FILE.write_text(json.dumps(clean, indent=2) + "\n")
+    log.info("Tenant map saved by %s (%d tenant override(s))", x_auth_user, len(clean["tenants"]))
+    return {"ok": True, "tenants": len(clean["tenants"])}
+
+
+@router.post("/admin/register-tenant")
+async def register_tenant(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Auto-register a tenant when the app is deployed there, so its content can be
+    managed. Adds the tenant with its per-domain default profile if not already present
+    (an existing override is left untouched). Returns the resolved profile."""
+    _require_writer(x_auth_user)
+    tenant_id, domain_class = classify_tenant(body.get("tenant"))
+    m = _load_tenant_map()
+    tenants = m.setdefault("tenants", {})
+    added = tenant_id not in tenants
+    if added:
+        tenants[tenant_id] = m.get("defaults", {}).get(domain_class, "all")
+        TENANT_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TENANT_MAP_FILE.write_text(json.dumps(m, indent=2) + "\n")
+        log.info("Registered tenant %s (%s) → profile %s by %s", tenant_id, domain_class, tenants[tenant_id], x_auth_user)
+    return {"ok": True, "tenant": tenant_id, "domain": domain_class, "profile": tenants[tenant_id], "added": added}
