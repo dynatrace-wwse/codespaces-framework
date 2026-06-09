@@ -26,7 +26,7 @@ pool: redis.Redis | None = None
 async def startup():
     global pool
     pool = redis.from_url(REDIS_URL, decode_responses=True)
-    log.info("Connected to Redis at %s", REDIS_URL)
+    log.info("Connected to Redis")
 
 
 @app.on_event("shutdown")
