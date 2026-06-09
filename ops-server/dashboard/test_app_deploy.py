@@ -61,6 +61,50 @@ async def _raise_writer(u):
     dep._require_writer(u)
 
 
+def test_url_helpers():
+    assert dep._app_url("https://geu80787.apps.dynatrace.com/") == "https://geu80787.apps.dynatrace.com/ui/apps/my.dynatrace.enablements"
+    assert dep._registry_url("https://t.apps.dynatrace.com") == "https://t.apps.dynatrace.com/platform/app-engine/registry/v1/apps"
+    assert dep._registry_url("https://t.apps.dynatrace.com/", "my.dynatrace.enablements").endswith("/registry/v1/apps/my.dynatrace.enablements")
+
+
+def test_undeploy_calls_registry_delete_with_bearer(monkeypatch=None):
+    import httpx
+    captured = {}
+
+    class _Resp:
+        status_code = 204
+        text = ""
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def delete(self, url, headers=None):
+            captured["url"] = url
+            captured["auth"] = (headers or {}).get("Authorization")
+            return _Resp()
+
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = _Client
+    try:
+        ok, msg = asyncio.run(dep._run_undeploy("tok123", "https://t.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig
+    assert ok is True
+    assert captured["url"].endswith("/registry/v1/apps/my.dynatrace.enablements")
+    assert captured["auth"] == "Bearer tok123"
+
+
+def test_deploy_missing_repo_returns_127():
+    saved = dep.APP_REPO_DIR
+    dep.APP_REPO_DIR = "/nonexistent/app/repo"
+    try:
+        rc, out = asyncio.run(dep._run_deploy("tok", "https://t.apps.dynatrace.com"))
+    finally:
+        dep.APP_REPO_DIR = saved
+    assert rc == 127 and "dt-app not found" in out
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

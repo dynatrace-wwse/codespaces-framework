@@ -237,6 +237,7 @@ async def execute_integration_test(
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
             "-e", "ORBITAL_ENVIRONMENT=true",
+            "-e", f"ORBITAL_JOB_ID={job_id}",
             "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE,
             "sleep", "infinity",
@@ -495,6 +496,7 @@ async def execute_daemon(
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
             "-e", "GIT_CONFIG_VALUE_0=*",
             "-e", "ORBITAL_ENVIRONMENT=true",
+            "-e", f"ORBITAL_JOB_ID={job_id}",
             "-e", f"ARCH={WORKER_ARCH}",
             TEST_IMAGE, "sleep", "infinity",
         ]
