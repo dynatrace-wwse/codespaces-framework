@@ -1,6 +1,6 @@
 {
   "defaults": {
-    "prod": "all",
+    "prod": "core",
     "sprint": "all",
     "dev": "all"
   },

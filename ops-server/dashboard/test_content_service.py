@@ -16,11 +16,11 @@ from fastapi import HTTPException
 from dashboard import content_service as cs
 
 
-def _setup(tmp: Path, tenants=None):
+def _setup(tmp: Path, tenants=None, defaults=None):
     content = tmp / "content"
     profiles = content / "profiles"
     profiles.mkdir(parents=True, exist_ok=True)
-    for pid in ("all", "minimal"):
+    for pid in ("all", "minimal", "core"):
         (profiles / f"{pid}.json").write_text(json.dumps({
             "profileId": pid,
             "sources": [{"key": "lb", "category": "learning-byte", "categoryLabel": "Learning Bytes",
@@ -29,7 +29,7 @@ def _setup(tmp: Path, tenants=None):
     cs.PROFILES_DIR = profiles
     cs.TENANT_MAP_FILE = content / "tenant_map.json"
     cs.TENANT_MAP_FILE.write_text(json.dumps({
-        "defaults": {"prod": "all", "sprint": "minimal", "dev": "minimal"},
+        "defaults": defaults or {"prod": "core", "sprint": "all", "dev": "all"},
         "tenants": tenants or {"geu80787": "all"},
     }))
 
@@ -60,11 +60,35 @@ def test_resolve_profile():
         _setup(Path(d))
         # explicit tenant mapping wins
         assert cs.resolve_profile("geu80787", "prod") == "all"
-        # unknown tenant → per-domain default
-        assert cs.resolve_profile("other", "sprint") == "minimal"
-        assert cs.resolve_profile("other", "prod") == "all"
+        # unknown tenant → per-domain default: prod→core, sprint/dev→all
+        assert cs.resolve_profile("other", "prod") == "core"
+        assert cs.resolve_profile("other", "sprint") == "all"
+        assert cs.resolve_profile("other", "dev") == "all"
         # unknown domain → 'all' fallback
         assert cs.resolve_profile("other", "weird") == "all"
+
+
+def test_register_tenant():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d), tenants={})
+        # a prod tenant registers with the prod default (core)
+        r = asyncio.run(cs.register_tenant({"tenant": "https://cust1.apps.dynatrace.com"}, x_auth_user="alice"))
+        assert r == {"ok": True, "tenant": "cust1", "domain": "prod", "profile": "core", "added": True}
+        # idempotent: second register does not change an existing entry
+        r2 = asyncio.run(cs.register_tenant({"tenant": "https://cust1.apps.dynatrace.com"}, x_auth_user="alice"))
+        assert r2["added"] is False and r2["profile"] == "core"
+        # a sprint tenant registers with 'all'
+        rs = asyncio.run(cs.register_tenant({"tenant": "https://x.sprint.apps.dynatracelabs.com"}, x_auth_user="alice"))
+        assert rs["domain"] == "sprint" and rs["profile"] == "all"
+        # persisted
+        assert json.loads(cs.TENANT_MAP_FILE.read_text())["tenants"]["cust1"] == "core"
+
+
+def test_register_tenant_requires_writer_and_dt_domain():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        _expect_http(401, cs.register_tenant, {"tenant": "https://x.apps.dynatrace.com"}, x_auth_user=None)
+        _expect_http(403, cs.register_tenant, {"tenant": "https://evil.example.com"}, x_auth_user="alice")
 
 
 def test_manifest_resolves_by_tenant():

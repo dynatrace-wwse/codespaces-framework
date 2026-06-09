@@ -304,3 +304,21 @@ async def put_tenant_map(body: dict, x_auth_user: str | None = Header(default=No
     TENANT_MAP_FILE.write_text(json.dumps(clean, indent=2) + "\n")
     log.info("Tenant map saved by %s (%d tenant override(s))", x_auth_user, len(clean["tenants"]))
     return {"ok": True, "tenants": len(clean["tenants"])}
+
+
+@router.post("/admin/register-tenant")
+async def register_tenant(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Auto-register a tenant when the app is deployed there, so its content can be
+    managed. Adds the tenant with its per-domain default profile if not already present
+    (an existing override is left untouched). Returns the resolved profile."""
+    _require_writer(x_auth_user)
+    tenant_id, domain_class = classify_tenant(body.get("tenant"))
+    m = _load_tenant_map()
+    tenants = m.setdefault("tenants", {})
+    added = tenant_id not in tenants
+    if added:
+        tenants[tenant_id] = m.get("defaults", {}).get(domain_class, "all")
+        TENANT_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TENANT_MAP_FILE.write_text(json.dumps(m, indent=2) + "\n")
+        log.info("Registered tenant %s (%s) → profile %s by %s", tenant_id, domain_class, tenants[tenant_id], x_auth_user)
+    return {"ok": True, "tenant": tenant_id, "domain": domain_class, "profile": tenants[tenant_id], "added": added}
