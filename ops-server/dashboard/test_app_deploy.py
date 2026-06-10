@@ -159,6 +159,33 @@ def test_deploy_with_status_upgrades_when_older():
         dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
 
 
+def test_is_coe():
+    saved = dep.COE_TENANT_URL
+    dep.COE_TENANT_URL = "https://geu80787.apps.dynatrace.com"
+    try:
+        assert dep._is_coe("https://geu80787.apps.dynatrace.com")
+        assert dep._is_coe("https://geu80787.apps.dynatrace.com/ui/apps")
+        assert not dep._is_coe("https://other.apps.dynatrace.com")
+    finally:
+        dep.COE_TENANT_URL = saved
+
+
+def test_coe_auto_without_creds_503():
+    saved = (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_TENANT_URL)
+    dep.COE_CLIENT_ID = ""; dep.COE_CLIENT_SECRET = ""
+    dep.COE_TENANT_URL = "https://geu80787.apps.dynatrace.com"
+    try:
+        # COE tenant, no token, no creds configured → 503
+        _expect_http(503, dep.deploy_with_token({"tenant": "https://geu80787.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+    finally:
+        dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_TENANT_URL = saved
+
+
+def test_non_coe_without_token_400():
+    # any non-COE Dynatrace tenant without a token → 400 (token required)
+    _expect_http(400, dep.deploy_with_token({"tenant": "https://other.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+
+
 def test_token_deploy_guards():
     # no auth → 401
     _expect_http(401, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t"}, x_auth_user=None))

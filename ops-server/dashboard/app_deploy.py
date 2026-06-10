@@ -68,6 +68,13 @@ REQUIRED_SCOPES = {
 APP_REPO_DIR = os.environ.get("APP_REPO_DIR", "/home/ops/enablement-framework/dynatrace-app-enablements")
 DEPLOY_TIMEOUT = int(os.environ.get("DEPLOY_TIMEOUT", "600"))
 
+# COE tenant — the one tenant in the COE account. Orbital holds its client credentials, so a
+# deploy to COE needs NO pasted token (auto). Every other tenant requires a token.
+COE_TENANT_URL = os.environ.get("COE_TENANT_URL", "https://geu80787.apps.dynatrace.com")
+COE_CLIENT_ID = os.environ.get("COE_CLIENT_ID", "")
+COE_CLIENT_SECRET = os.environ.get("COE_CLIENT_SECRET", "")
+COE_RESOURCE = os.environ.get("COE_RESOURCE", "")  # urn:dtaccount:...
+
 router = APIRouter(tags=["deploy"])
 _redis: redis.Redis | None = None
 
@@ -214,6 +221,32 @@ async def _run_undeploy(token: str, tenant_url: str) -> tuple[bool, str]:
         return False, f"HTTP {r.status_code}: {r.text[:300]}"
     except Exception as exc:
         return False, str(exc)
+
+
+def _is_coe(tenant_url: str) -> bool:
+    h1 = (urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}").hostname or "").lower()
+    h2 = (urlparse(COE_TENANT_URL).hostname or "").lower()
+    return bool(h2) and h1 == h2
+
+
+async def _mint_coe_token(action: str) -> str | None:
+    """Mint a bearer for the COE tenant from Orbital's COE client credentials (server-side).
+    Scope by action so we never request a scope the client lacks."""
+    if not (COE_CLIENT_ID and COE_CLIENT_SECRET):
+        return None
+    scope = "app-engine:apps:delete" if action == "undeploy" else "app-engine:apps:install app-engine:apps:run"
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post("https://sso.dynatrace.com/sso/oauth2/token", data={
+                "grant_type": "client_credentials", "client_id": COE_CLIENT_ID,
+                "client_secret": COE_CLIENT_SECRET, "resource": COE_RESOURCE, "scope": scope,
+            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if r.status_code == 200:
+            return r.json().get("access_token")
+        log.warning("COE token mint HTTP %s", r.status_code)
+    except Exception as exc:
+        log.warning("COE token mint failed: %s", exc)
+    return None
 
 
 async def _register_in_content_service(user: str, tenant_url: str) -> dict | None:
@@ -368,13 +401,23 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     tenant = (body.get("tenant") or "").strip()
     token = (body.get("token") or "").strip()
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    coe_auto = False
     if not token:
-        raise HTTPException(400, "Platform token required.")
+        # COE is the one tenant Orbital can deploy on its own (it holds COE's credentials).
+        if _is_coe(tenant):
+            token = await _mint_coe_token(action) or ""
+            coe_auto = True
+            if not token:
+                raise HTTPException(503, "COE auto-deploy not configured (set COE_CLIENT_ID/SECRET/RESOURCE).")
+        else:
+            raise HTTPException(400, "A valid platform token is required for this tenant. "
+                                     "Auto-deploy (no token) is only available for the COE tenant.")
 
+    via = "coe-auto" if coe_auto else "token"
     if action == "undeploy":
         ok, msg = await _run_undeploy(token, tenant)
         del token
-        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error", via="token", detail=msg)
+        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error", via=via, detail=msg)
         if not ok:
             raise HTTPException(502, f"Undeploy failed: {msg}")
         return {"ok": True, "tenant": tenant_id, "action": "undeploy"}
@@ -382,12 +425,12 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     res = await _deploy_with_status(token, tenant)
     del token
     if res["status"] == "error":
-        await _audit(user, tenant_id, "deploy", "deploy-error", via="token", rc=res.get("rc"))
+        await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"))
         raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
-    await _audit(user, tenant_id, "deploy", res["status"], via="token",
+    await _audit(user, tenant_id, "deploy", res["status"], via=via,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile}

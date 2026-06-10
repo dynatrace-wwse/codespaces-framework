@@ -66,31 +66,23 @@ td,th{padding:5px 8px;border-bottom:1px solid #21262d;text-align:left}
 </style></head><body>
 <header>Deploy the Enablement App to a Dynatrace tenant</header>
 <main>
-<p class=hint>You sign in with <b>your</b> Dynatrace SSO; the app is installed into the entered
-tenant only. No app token is stored. We log user + tenant + action, never credentials.</p>
-<h3>Deploy with your Dynatrace SSO</h3>
-<p class=hint>Best for tenants in your own account (COE, SE prod, sprint, dev). No secret stored.</p>
-<div>
-  <input id=tenant placeholder="https://abc12345.apps.dynatrace.com">
-  <button onclick="go('deploy')">Sign in &amp; Deploy</button>
-  <button class=sec onclick="go('undeploy')">Undeploy</button>
-</div>
+<p class=hint>Install / upgrade the app into a Dynatrace tenant with a platform token. The token is
+used once and never stored. We log user + tenant + action, never the token.</p>
 
-<h3>Deploy with a platform token (any tenant)</h3>
-<p class=hint>For customer / prospect / free-trial / cross-account tenants — anywhere SSO can't reach.
-The token is used once and never stored.</p>
 <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 14px;margin:6px 0;font-size:13px">
-  <b>Required scopes</b> — create a platform token in the <b>target</b> tenant
+  <b>Platform token scopes</b> — create one in the <b>target</b> tenant
   (Settings &rarr; Platform tokens) with:
   <ul style="margin:6px 0 0 0;padding-left:18px">
-    <li><code>app-engine:apps:install</code> — install/upgrade the app</li>
+    <li><code>app-engine:apps:install</code> — install / upgrade the app</li>
     <li><code>app-engine:apps:run</code> — run the app's functions</li>
     <li><code>app-engine:apps:delete</code> — only needed for Undeploy</li>
   </ul>
+  <div style="margin-top:8px;opacity:.8"><b>COE tenant</b> (geu80787): leave the token blank — Orbital
+  deploys it automatically. Any other tenant needs a token.</div>
 </div>
 <div>
   <input id=ttenant placeholder="https://abc12345.apps.dynatrace.com"><br>
-  <input id=ttoken type=password placeholder="dt0s16.XXXX.YYYY" style="margin-top:6px"><br>
+  <input id=ttoken type=password placeholder="platform token — blank for COE" style="margin-top:6px"><br>
   <button style="margin-top:8px" onclick="goToken('deploy')">Deploy / Upgrade</button>
   <button class=sec style="margin-top:8px" onclick="goToken('undeploy')">Undeploy</button>
   <span class=msg id=tmsg></span>
@@ -99,12 +91,10 @@ The token is used once and never stored.</p>
 <h3>Recent deploy activity</h3>
 <table id=audit><tbody><tr><td class=hint>loading…</td></tr></tbody></table>
 <script>
-function go(action){const t=document.getElementById('tenant').value.trim();if(!t)return;
-  location.href='/api/deploy/start?action='+action+'&tenant='+encodeURIComponent(t);}
 async function goToken(action){
   const t=document.getElementById('ttenant').value.trim(), k=document.getElementById('ttoken').value.trim();
-  const m=document.getElementById('tmsg'); if(!t||!k){m.textContent='tenant + token required';return;}
-  m.textContent=action+'ing…';
+  const m=document.getElementById('tmsg'); if(!t){m.textContent='tenant required';return;}
+  m.textContent=action+'ing… (deploy can take a minute)';
   try{
     const r=await fetch('/api/deploy/token',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action,tenant:t,token:k})});
