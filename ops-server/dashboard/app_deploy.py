@@ -146,7 +146,8 @@ def _registry_url(tenant_url: str, app_id: str | None = None) -> str:
 
 def _app_version() -> str:
     try:
-        return json.loads((Path(APP_REPO_DIR) / "app.config.json").read_text()).get("version", "?")
+        cfg = json.loads((Path(APP_REPO_DIR) / "app.config.json").read_text())
+        return cfg.get("app", {}).get("version") or cfg.get("version") or "?"
     except Exception:
         return "?"
 
@@ -159,7 +160,10 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     if not binary.exists():
         return 127, f"dt-app not found in {APP_REPO_DIR} (is the app repo checked out with node_modules?)"
     env = {**os.environ, "DT_APP_PLATFORM_TOKEN": token, "DT_APP_ENVIRONMENT_URL": tenant_url,
-           "DT_APP_DEACTIVATE_SPINNER": "1", "CI": "1"}
+           "DT_APP_DEACTIVATE_SPINNER": "1", "CI": "1",
+           # node lives in /usr/local/bin (symlink); ensure it's on PATH for the systemd service
+           "PATH": "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", ""),
+           "HOME": os.environ.get("HOME", "/home/ops")}
     proc = await asyncio.create_subprocess_exec(
         str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
