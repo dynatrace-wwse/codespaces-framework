@@ -548,6 +548,17 @@ class WorkerManager:
                 await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 await self.pool.ltrim("jobs:completed", -500, -1)
+                # Terminal-status record that OUTLIVES job:running (deleted below),
+                # so session-status can report a failed creation and point the
+                # student at the retained log (job:log:{id}) instead of a bare
+                # "expired". TTL matches the log (7 days).
+                final_rec = {
+                    "status":      job.get("status", "completed"),
+                    "finished_at": job["finished_at"],
+                    "error":       str((job.get("result") or {}).get("error", ""))[:500],
+                }
+                await self.pool.hset(f"job:final:{job_id}", mapping=final_rec)
+                await self.pool.expire(f"job:final:{job_id}", 7 * 24 * 3600)
                 if running_key:
                     await self.pool.delete(running_key)
                 if lock_key:

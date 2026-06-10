@@ -1070,10 +1070,10 @@ variablesNeeded() {
     # Validate Dynatrace tokens (DT_*TOKEN pattern)
     if [[ "$var_name" == DT_*TOKEN ]]; then
       if [[ "$var_value" == dt0c01.* || "$var_value" == dt0s01.* ]] && [ ${#var_value} -gt 60 ]; then
-        printInfo "$var_name: valid Dynatrace token format (${var_value:0:14}xxx...)"
+        # Never echo the token value (or any prefix of it) — avoid leaking secrets to the console.
+        printInfo "$var_name: valid Dynatrace token format"
       else
-        printError "$var_name: invalid token format. Expected dt0c01.* or dt0s01.* with min 60 chars"
-        printError "  Got: ${var_value:0:20}... (length: ${#var_value})"
+        printError "$var_name: invalid token format. Expected dt0c01.* or dt0s01.* with min 60 chars (length: ${#var_value})"
         if [ "$required" = "true" ]; then
           has_errors=1
         fi

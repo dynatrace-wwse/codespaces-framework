@@ -3393,10 +3393,25 @@ async def api_arena_session_status(job_id: str):
       queued      → worker hasn't picked up the job yet
       provisioning → worker is running postCreate/postStart (cluster setup, ~5-15 min)
       ready       → "Daemon ready" appeared in livelog — shell is available
-      expired     → job:running key missing (terminated or TTL elapsed)
+      failed      → creation failed; the retained log explains why (logAvailable)
+      terminated  → explicitly terminated
+      expired     → job:running key missing and no terminal record (TTL elapsed)
     """
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
+        # job:running is gone — distinguish a FAILED creation (so the student can
+        # read the retained log) from a plain TTL-expiry. job:final outlives the
+        # running key (written by the worker's finally block, 7-day TTL).
+        final = await pool.hgetall(f"job:final:{job_id}")
+        fstatus = final.get("status")
+        if fstatus in ("failed", "terminated", "completed"):
+            return {
+                "jobId":        job_id,
+                "status":       fstatus,
+                "error":        final.get("error", ""),
+                "finishedAt":   final.get("finished_at", ""),
+                "logAvailable": bool(await pool.exists(f"job:log:{job_id}")),
+            }
         return {"jobId": job_id, "status": "expired"}
 
     # Check livelog for readiness signal written by execute_daemon
