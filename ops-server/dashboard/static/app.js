@@ -1772,6 +1772,7 @@ function renderSyncPRs() {
             if (ci.overall === 'pass')         ciBadge = '<span class="ci-badge pass">PASS</span>';
             else if (ci.overall === 'fail')    ciBadge = '<span class="ci-badge fail">FAIL</span>';
             else if (ci.overall === 'pending') ciBadge = '<span class="ci-badge pend">PEND</span>';
+            else if (ci.overall === 'unknown') ciBadge = `<span class="ci-badge unknown" title="${escapeHtml('CI status unavailable (GitHub API error) — refresh to retry: ' + (ci.error || ''))}">?</span>`;
             ciBadge = `<a href="${escapeHtml(checksUrl)}" target="_blank" rel="noopener" title="View PR checks on GitHub">${ciBadge}</a>`;
         }
         const showFix = isSergioUser && ci?.overall === 'fail';

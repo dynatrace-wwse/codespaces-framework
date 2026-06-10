@@ -1861,21 +1861,38 @@ async def _fetch_gha_failed_log(repo: str, branch: str) -> str:
     return log_text[-16384:] if len(log_text) > 16384 else log_text
 
 
-async def _gh_pr_ci(repo_nwo: str, pr_number: int) -> dict:
-    """Fetch statusCheckRollup + headRefName for one PR via gh pr view (no cache)."""
-    proc = await asyncio.create_subprocess_exec(
-        "gh", "pr", "view", str(pr_number), "-R", repo_nwo,
-        "--json", "statusCheckRollup,headRefName",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env={**os.environ},
-    )
-    stdout, _ = await proc.communicate()
-    if proc.returncode != 0:
-        return {}
-    try:
-        return json.loads(stdout.decode())
-    except Exception:
-        return {}
+# GitHub returns these on a burst of concurrent gh calls (secondary rate limit /
+# abuse detection) — transient, worth retrying with backoff.
+_GH_TRANSIENT_ERRORS = ("401", "Requires authentication", "rate limit", "secondary rate", "abuse")
+
+
+async def _gh_pr_ci(repo_nwo: str, pr_number: int, retries: int = 3) -> dict:
+    """Fetch statusCheckRollup + headRefName for one PR via gh pr view (no cache).
+
+    Retries on transient GitHub API failures (HTTP 401 / secondary rate limit),
+    which fire when many gh calls hit the API at once. Returns ``{"_error": ...}``
+    after exhausting retries so callers can tell 'CI fetch failed' apart from
+    'PR genuinely has no checks' (an empty rollup).
+    """
+    last_err = ""
+    for attempt in range(retries):
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "view", str(pr_number), "-R", repo_nwo,
+            "--json", "statusCheckRollup,headRefName",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env={**os.environ},
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            try:
+                return json.loads(stdout.decode())
+            except Exception:
+                return {}
+        last_err = stderr.decode(errors="replace")
+        if not any(s in last_err for s in _GH_TRANSIENT_ERRORS):
+            break  # non-transient failure — don't waste retries
+        await asyncio.sleep(1.5 * (attempt + 1))
+    return {"_error": last_err.strip()[:200] or "gh pr view failed"}
 
 
 @app.get("/api/sync/prs")
@@ -1906,12 +1923,23 @@ async def api_sync_prs():
 
     rows = data["rows"]
 
-    # Enrich each PR with GitHub CI status in parallel
+    # Bound concurrency: firing one gh call per PR all at once trips GitHub's
+    # secondary rate limit (HTTP 401), which dropped the CI chip for random PRs.
+    sem = asyncio.Semaphore(5)
+
+    # Enrich each PR with GitHub CI status (concurrency-capped)
     async def enrich(pr):
         repo_nwo = (pr.get("repository") or {}).get("nameWithOwner", "")
         if not repo_nwo:
             return
-        detail = await _gh_pr_ci(repo_nwo, pr["number"])
+        async with sem:
+            detail = await _gh_pr_ci(repo_nwo, pr["number"])
+        if detail.get("_error"):
+            # Fetch failed (transient API error) — surface as 'unknown', not a
+            # missing chip, so the UI shows the status is unavailable, not absent.
+            pr["headRefName"] = ""
+            pr["_ci"] = {"overall": "unknown", "error": detail["_error"]}
+            return
         checks = detail.get("statusCheckRollup") or []
         pr["headRefName"] = detail.get("headRefName", "")
         if not checks:
