@@ -249,6 +249,52 @@ async def _mint_coe_token(action: str) -> str | None:
     return None
 
 
+OUTBOUND_SCHEMA = "builtin:dt-javascript-runtime.allowed-outbound-connections"
+# Hosts the app's functions must reach for content delivery + manual GitHub imports.
+OUTBOUND_HOSTS = [
+    "autonomous-enablements.whydevslovedynatrace.com",
+    "raw.githubusercontent.com",
+    "api.github.com",
+]
+
+
+async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
+    """If the tenant enforces a JS-runtime outbound allowlist (sprint/dev do, prod usually
+    doesn't), add the content-delivery hosts so the app's functions can reach Orbital + GitHub.
+    Only ever adds hosts to an existing enforced list — never creates or tightens a restriction.
+    Best-effort; needs settings:objects:read+write on the token."""
+    base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
+    h = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(base, headers=h, params={
+                "schemaIds": OUTBOUND_SCHEMA, "scopes": "environment", "fields": "objectId,value"})
+            if r.status_code == 403:
+                return "skipped (token lacks settings:objects:read/write)"
+            if r.status_code != 200:
+                return f"skipped (settings read HTTP {r.status_code})"
+            items = r.json().get("items", [])
+            if not items:
+                return "no enforced allowlist (outbound open)"
+            obj = items[0]
+            aoc = (obj.get("value") or {}).get("allowedOutboundConnections", {})
+            if not aoc.get("enforced"):
+                return "outbound not enforced (open)"
+            hosts = list(aoc.get("hostList", []))
+            missing = [x for x in OUTBOUND_HOSTS if x not in hosts]
+            if not missing:
+                return "allowlist already complete"
+            hosts.extend(missing)
+            pr = await c.put(f"{base}/{obj['objectId']}", headers={**h, "Content-Type": "application/json"},
+                             json={"value": {"allowedOutboundConnections": {"enforced": True, "hostList": hosts}}})
+            if pr.status_code in (200, 201, 204):
+                return f"added {len(missing)} host(s) to the outbound allowlist"
+            return f"allowlist update failed (HTTP {pr.status_code})"
+    except Exception as exc:
+        log.warning("outbound allowlist for %s: %s", tenant_url, exc)
+        return f"allowlist error: {exc}"
+
+
 async def _register_in_content_service(user: str, tenant_url: str) -> dict | None:
     """Best-effort: add the tenant to the delivery table so its content can be managed."""
     try:
@@ -423,6 +469,9 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
         return {"ok": True, "tenant": tenant_id, "action": "undeploy"}
 
     res = await _deploy_with_status(token, tenant)
+    allowlist = ""
+    if res["status"] != "error":
+        allowlist = await _ensure_outbound_allowlist(token, tenant)  # use token before discarding
     del token
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"))
@@ -431,9 +480,9 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
-                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile)
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile, allowlist=allowlist)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
-            "version": res.get("to"), "url": url, "profile": profile}
+            "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist}
 
 
 @router.get("/api/deploy/audit")
