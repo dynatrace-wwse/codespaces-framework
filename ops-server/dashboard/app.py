@@ -281,6 +281,137 @@ async def tenants_page():
     """Delivery-table UI (tenant → profile). Page public; API writer-gated."""
     return HTMLResponse(_TENANTS_PAGE)
 
+
+_CONTENT_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Content Delivery</title><style>
+body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
+header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
+header a{color:#9d9dff;margin-left:14px;font-weight:400;font-size:14px}
+main{max-width:980px;margin:0 auto;padding:22px}
+h2{font-size:16px;border-bottom:1px solid #30363d;padding-bottom:6px;margin-top:30px}
+.card{border:1px solid #30363d;border-radius:8px;background:#161b22;padding:14px;margin:10px 0}
+input,select{background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:7px 10px}
+input{width:340px} table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:5px 8px;border-bottom:1px solid #21262d;text-align:left}
+button{background:#6c6cff;color:#fff;border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:600}
+button.sec{background:#30363d} button.danger{background:#8b2c2c} .hint{opacity:.6;font-size:13px}
+.chip{display:inline-block;background:#21262d;border-radius:10px;padding:2px 9px;margin:2px;font-size:12px}
+.repos{column-count:2;margin-top:8px} .repos label{display:block;font-size:13px;padding:2px 0}
+.msg{margin-left:10px;font-size:13px} pre{white-space:pre-wrap;background:#0d1117;padding:8px;border-radius:6px}
+</style></head><body>
+<header>Content Delivery — profiles · tenants · preview
+  <a href="/deploy">deploy app →</a></header>
+<main>
+<p class=hint>Profiles = named sets of training repos. The delivery table maps each domain
+(prod/sprint/dev) to a default profile, and lets you override any tenant. Resolution:
+tenant override &gt; domain default &gt; <code>all</code>.</p>
+
+<h2>① Preview — what does a tenant receive?</h2>
+<div class=card>
+  <input id=ptenant placeholder="https://abc12345.apps.dynatrace.com">
+  <button onclick="resolve()">Resolve</button><span class=msg id=pmsg></span>
+  <div id=presult></div>
+</div>
+
+<h2>② Delivery table</h2>
+<div class=card>
+  <b>Domain defaults</b>
+  <table id=defaults></table>
+  <b style="display:block;margin-top:12px">Tenant overrides</b>
+  <table id=tenants><tbody></tbody></table>
+  <div style="margin-top:8px">
+    <input id=newtid placeholder="tenant id (e.g. geu80787)" style="width:220px">
+    <select id=newtp></select>
+    <button class=sec onclick="addTenant()">+ tenant</button>
+  </div>
+  <div style="margin-top:12px"><button onclick="saveDelivery()">Save delivery table</button><span class=msg id=dmsg></span></div>
+</div>
+
+<h2>③ Profiles</h2>
+<div id=profiles></div>
+<div class=card>
+  <b>New / edit profile</b><br>
+  <input id=pfid placeholder="profile id (a-z0-9-_)" style="width:220px">
+  <input id=pfdesc placeholder="description" style="width:420px"><br>
+  <div class=repos id=pfrepos></div>
+  <div style="margin-top:8px"><button onclick="saveProfile()">Save profile</button><span class=msg id=fmsg></span></div>
+</div>
+</main>
+<script>
+let DATA={profiles:[],map:{defaults:{},tenants:{}},domains:[],catalog:[]};
+const opts=(sel)=>DATA.profiles.map(p=>`<option ${p.profileId===sel?'selected':''}>${p.profileId}</option>`).join('');
+async function load(){
+  const r=await fetch('/api/content/admin/overview');
+  if(!r.ok){document.body.innerHTML='<p style=padding:22px>Sign in as an org member to manage content.</p>';return;}
+  DATA=await r.json();
+  // delivery defaults
+  document.getElementById('defaults').innerHTML='<tr><th>Domain</th><th>Default profile</th></tr>'+
+    DATA.domains.map(d=>`<tr><td>${d}</td><td><select id="d-${d}">${opts((DATA.map.defaults||{})[d])}</select></td></tr>`).join('');
+  // tenant overrides
+  const tb=document.querySelector('#tenants tbody'); tb.innerHTML='';
+  Object.entries(DATA.map.tenants||{}).forEach(([t,p])=>tb.appendChild(trow(t,p)));
+  document.getElementById('newtp').innerHTML=opts(DATA.profiles[0]&&DATA.profiles[0].profileId);
+  // profiles list
+  document.getElementById('profiles').innerHTML=DATA.profiles.map(p=>{
+    const used=[...DATA.domains.filter(d=>(DATA.map.defaults||{})[d]===p.profileId).map(d=>d+' default'),
+      ...Object.entries(DATA.map.tenants||{}).filter(([,v])=>v===p.profileId).map(([t])=>t)];
+    return `<div class=card><b>${p.profileId}</b> <span class=hint>${p.description||''}</span>
+      <button class=sec style="float:right" onclick="editProfile('${p.profileId}')">edit</button>
+      ${p.profileId==='all'||p.profileId==='core'?'':`<button class=danger style="float:right;margin-right:6px" onclick="delProfile('${p.profileId}')">delete</button>`}
+      <div>${(p.sources||[]).map(s=>`<span class=chip>${s.repo.split('/').pop()}</span>`).join('')}</div>
+      ${used.length?`<div class=hint style="margin-top:6px">used by: ${used.join(', ')}</div>`:''}</div>`;
+  }).join('');
+  renderRepoPicker([]);
+}
+function trow(tid,pid){const tr=document.createElement('tr');
+  tr.innerHTML=`<td><code>${tid}</code></td><td><select>${opts(pid)}</select></td><td><button class=sec onclick="this.closest('tr').remove()">remove</button></td>`;
+  tr.dataset.tid=tid; return tr;}
+function addTenant(){const t=document.getElementById('newtid').value.trim();if(!t)return;
+  document.querySelector('#tenants tbody').appendChild(trow(t,document.getElementById('newtp').value));document.getElementById('newtid').value='';}
+async function saveDelivery(){
+  const defaults={}; DATA.domains.forEach(d=>defaults[d]=document.getElementById('d-'+d).value);
+  const tenants={}; document.querySelectorAll('#tenants tbody tr').forEach(tr=>tenants[tr.dataset.tid]=tr.querySelector('select').value);
+  const r=await fetch('/api/content/admin/tenant-map',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({defaults,tenants})});
+  const j=await r.json(); document.getElementById('dmsg').textContent=r.ok?`✓ saved (${j.tenants} override(s))`:('✗ '+(j.detail||'error')); if(r.ok) load();
+}
+function renderRepoPicker(selected){
+  document.getElementById('pfrepos').innerHTML=DATA.catalog.map(c=>{
+    const id='r_'+btoa(c.repo).replace(/=/g,'');
+    return `<label><input type=checkbox id="${id}" data-repo="${c.repo}" data-cat="${c.category}" data-label="${c.categoryLabel}" data-branch="${c.branch}" ${selected.includes(c.repo)?'checked':''}> ${c.repo.split('/').pop()} <span class=hint>(${c.category})</span></label>`;
+  }).join('');
+}
+function editProfile(id){const p=DATA.profiles.find(x=>x.profileId===id);
+  document.getElementById('pfid').value=p.profileId; document.getElementById('pfdesc').value=p.description||'';
+  renderRepoPicker((p.sources||[]).map(s=>s.repo)); window.scrollTo(0,document.body.scrollHeight);}
+async function saveProfile(){
+  const id=document.getElementById('pfid').value.trim(), desc=document.getElementById('pfdesc').value.trim();
+  if(!id){document.getElementById('fmsg').textContent='profile id required';return;}
+  const sources=[...document.querySelectorAll('#pfrepos input:checked')].map(c=>({repo:c.dataset.repo,category:c.dataset.cat,categoryLabel:c.dataset.label,branch:c.dataset.branch}));
+  if(!sources.length){document.getElementById('fmsg').textContent='pick at least one repo';return;}
+  const r=await fetch('/api/content/admin/profiles/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc,sources})});
+  const j=await r.json(); document.getElementById('fmsg').textContent=r.ok?`✓ saved (${j.sources} repos)`:('✗ '+(j.detail||'error'));
+  if(r.ok){document.getElementById('pfid').value='';document.getElementById('pfdesc').value='';load();}
+}
+async function delProfile(id){if(!confirm('Delete profile '+id+'?'))return;
+  const r=await fetch('/api/content/admin/profiles/'+id,{method:'DELETE'}); if(r.ok)load(); else document.getElementById('fmsg').textContent='✗ delete failed';}
+async function resolve(){
+  const t=document.getElementById('ptenant').value.trim(); if(!t)return;
+  document.getElementById('pmsg').textContent='resolving…'; document.getElementById('presult').innerHTML='';
+  const r=await fetch('/api/content/manifest?tenant='+encodeURIComponent(t));
+  const j=await r.json();
+  if(!r.ok){document.getElementById('pmsg').textContent='✗ '+(j.detail||'error');return;}
+  document.getElementById('pmsg').textContent='';
+  document.getElementById('presult').innerHTML=`<div style="margin-top:8px">tenant <b>${j.tenant}</b> · domain <b>${j.domain}</b> · profile <b>${j.profileId}</b> · ${j.sources.length} repo(s)</div>
+    <table style="margin-top:6px"><tr><th>repo</th><th>category</th><th>sha</th></tr>${j.sources.map(s=>`<tr><td>${s.repo}</td><td>${s.category||''}</td><td><code>${(s.version||'?').slice(0,8)}</code></td></tr>`).join('')}</table>`;
+}
+load();
+</script></body></html>"""
+
+
+@app.get("/content", response_class=HTMLResponse)
+async def content_page():
+    """Content delivery console — profiles + delivery table + preview. Page public; API writer-gated."""
+    return HTMLResponse(_CONTENT_PAGE)
+
 DASHBOARD_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")
