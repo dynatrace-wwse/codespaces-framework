@@ -89,28 +89,38 @@ used once and never stored. We log user + tenant + action, never the token.</p>
 </div>
 
 <h3>Recent deploy activity</h3>
-<table id=audit><tbody><tr><td class=hint>loading…</td></tr></tbody></table>
+<table id=audit><thead><tr><th>when</th><th>user</th><th>tenant</th><th>action</th><th>result</th><th>version</th><th>via</th></tr></thead>
+<tbody><tr><td class=hint>loading…</td></tr></tbody></table>
 <script>
 async function goToken(action){
   const t=document.getElementById('ttenant').value.trim(), k=document.getElementById('ttoken').value.trim();
   const m=document.getElementById('tmsg'); if(!t){m.textContent='tenant required';return;}
-  m.textContent=action+'ing… (deploy can take a minute)';
+  m.textContent=action+'ing… (a deploy can take a minute or two)';
   try{
     const r=await fetch('/api/deploy/token',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action,tenant:t,token:k})});
-    const j=await r.json();
+    const raw=await r.text();
+    let j={}; try{ j=JSON.parse(raw); }catch(_){ /* non-JSON (e.g. gateway error page) */ }
     if(r.ok){document.getElementById('ttoken').value='';
-      if(action!=='deploy'){m.textContent='✓ undeployed';}
-      else{const s=j.status==='up-to-date'?`already up-to-date (v${j.version})`
-        :j.status==='upgraded'?`upgraded v${j.from} → v${j.version}`:`installed v${j.version}`;
-        m.innerHTML=`✓ ${s} — <a href="${j.url}">${j.url}</a>`+(j.profile?` · profile ${j.profile}`:'');}}
-    else m.textContent='✗ '+(j.detail||'failed');
-  }catch(e){m.textContent='✗ '+e;}
+      if(action!=='deploy'){m.textContent='✓ undeployed '+(t);}
+      else{const v=j.version||'?';
+        const s=j.status==='up-to-date'?`already up-to-date (v${v})`
+          :j.status==='upgraded'?`upgraded v${j.from} → v${v}`:`installed v${v}`;
+        m.innerHTML=`✓ ${s} — <a href="${j.url}">${j.url}</a>`+(j.profile?` · content profile ${j.profile}`:'');}
+      loadAudit();
+    } else {
+      m.textContent='✗ '+(j.detail || `failed (HTTP ${r.status})`+(r.status>=502?' — the server may still be finishing; check the activity log':''));
+      loadAudit();
+    }
+  }catch(e){m.textContent='✗ network error: '+e;}
 }
-fetch('/api/deploy/audit?limit=30').then(r=>r.ok?r.json():{audit:[]}).then(({audit})=>{
-  const b=document.querySelector('#audit tbody');
-  b.innerHTML=audit.length?audit.map(a=>`<tr><td>${a.ts}</td><td>${a.user}</td><td>${a.tenant}</td><td>${a.action}</td><td>${a.result}</td></tr>`).join(''):'<tr><td class=hint>none yet</td></tr>';
-}).catch(()=>{});
+function loadAudit(){
+  fetch('/api/deploy/audit?limit=30').then(r=>r.ok?r.json():{audit:[]}).then(({audit})=>{
+    const b=document.querySelector('#audit tbody');
+    b.innerHTML=audit.length?audit.map(a=>`<tr><td>${(a.ts||'').replace('T',' ').slice(0,19)}</td><td>${a.user||''}</td><td>${a.tenant||''}</td><td>${a.action||''}</td><td>${a.result||''}</td><td>${a.to||a.version||''}</td><td>${a.via||''}</td></tr>`).join(''):'<tr><td class=hint>none yet</td></tr>';
+  }).catch(()=>{});
+}
+loadAudit();
 </script></main></body></html>"""
 
 
