@@ -327,6 +327,14 @@ class WorkerManager:
             if not self.active_jobs:
                 break
             await asyncio.sleep(1)
+        # Remove the master's worker record + port pool so they don't linger
+        # until TTL expiry (mirrors the worker-agent shutdown cleanup).
+        try:
+            await self.pool.delete(
+                "worker:master-arm64", "worker:master:app_ports_free"
+            )
+        except Exception as e:
+            log.warning("Could not delete master worker keys on shutdown: %s", e)
         log.info("Shutdown cleanup complete (active=%d)", len(self.active_jobs))
         # Don't sys.exit — let asyncio.gather unwind naturally so the systemd
         # restart cycle stays clean.

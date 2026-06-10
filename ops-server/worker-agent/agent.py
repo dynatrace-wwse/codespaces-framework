@@ -430,6 +430,15 @@ class WorkerAgent:
                 break
             await asyncio.sleep(1)
         await self.sysbox_pool.shutdown()
+        # Remove our Redis registration + legacy port pool so they don't linger
+        # until TTL expiry. Critically, a worker recommissioned under a new id
+        # would otherwise leave an orphaned port pool behind (the 68ec97 leak).
+        try:
+            await self.pool.delete(
+                f"worker:{WORKER_ID}", f"worker:{WORKER_ID}:app_ports_free"
+            )
+        except Exception as e:
+            log.warning("Could not delete worker keys on shutdown: %s", e)
         log.info("Shutdown cleanup complete (active=%d)", len(self.active_jobs))
         asyncio.get_running_loop().stop()
 
