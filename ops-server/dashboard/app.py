@@ -1232,7 +1232,10 @@ async def api_terminate_job(job_id: str, request: Request):
 
     # Revoke provisioned DT tokens for this session (best-effort, non-blocking)
     meta = await pool.hgetall(f"job:running:{job_id}")
-    if meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
+    # Only Orbital-minted tokens carry a stored auth cred here. App-minted tokens
+    # (multi-tenancy) are revoked by the app itself — Orbital holds no tenant cred.
+    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+            and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
         from provisioning import DTTokenProvisioner
         try:
             token_ids = json.loads(meta["dt_token_ids"])
@@ -3301,6 +3304,11 @@ class ArenaProvisionRequest(BaseModel):
     oauthClientId: str = ""
     oauthClientSecret: str = ""
     apiToken: str = ""          # existing token with apiTokens.write scope
+    # Preferred (multi-tenancy): the app self-mints per-tenant tokens and passes the
+    # VALUES here, so Orbital never holds a tenant minting credential. The app owns
+    # the lifecycle and revokes via its own identity on terminate.
+    dtEnv: dict[str, str] = {}   # env_var -> token value (DT_OPERATOR_TOKEN, ...)
+    dtTokenIds: list[str] = []   # ids the app will revoke (Orbital does not)
 
 
 @app.post("/api/arena/provision")
@@ -3334,7 +3342,15 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     token_provisioned = False
 
     tenant_url = body.tenantUrl.rstrip("/") if body.tenantUrl else ""
-    if tenant_url and (body.apiToken or (body.oauthClientId and body.oauthClientSecret)):
+    if body.dtEnv:
+        # Preferred: the app already minted per-tenant tokens with its own identity.
+        # Use the values directly; the app owns revocation (Orbital holds no tenant cred).
+        dt_env = dict(body.dtEnv)
+        provisioned_token_ids = list(body.dtTokenIds)
+        token_provisioned = True
+        if not tenant_url:
+            tenant_url = (dt_env.get("DT_ENVIRONMENT") or "").rstrip("/")
+    elif tenant_url and (body.apiToken or (body.oauthClientId and body.oauthClientSecret)):
         try:
             provisioner = DTTokenProvisioner(
                 tenant_url=tenant_url,
@@ -3373,6 +3389,10 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     }
     if dt_env:
         job["dt_env"] = dt_env
+    # Tenant the worker should bind to — drives the multi-tenancy guard in
+    # _write_env_file (CoE → static creds; non-CoE → minted only, never CoE).
+    if tenant_url:
+        job["tenant"] = tenant_url
 
     redis_meta = {
         "job_id":       job_id,
@@ -4023,7 +4043,10 @@ async def api_arena_terminate(job_id: str):
 
     # Best-effort: revoke provisioned DT tokens
     meta = await pool.hgetall(f"job:running:{job_id}")
-    if meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
+    # Only Orbital-minted tokens carry a stored auth cred here. App-minted tokens
+    # (multi-tenancy) are revoked by the app itself — Orbital holds no tenant cred.
+    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+            and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
         from provisioning import DTTokenProvisioner
         try:
             token_ids = json.loads(meta["dt_token_ids"])
