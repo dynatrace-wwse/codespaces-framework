@@ -100,6 +100,7 @@ function activateTab(view) {
     if (view === 'agentic') loadAgentic();
     if (view === 'framework') loadFramework();
     if (view === 'content') loadContent();
+    if (view === 'register') loadRegister();
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -3154,4 +3155,67 @@ async function loadContent() {
     } catch (e) {
         document.getElementById('content-profiles').innerHTML = '<p class="content-hint">Failed to load content overview.</p>';
     }
+}
+
+// ── Register Tenant tab (app deploy via platform token / COE auto) ────────────
+let regWired = false;
+
+function wireRegister() {
+    if (regWired) return; regWired = true;
+    document.getElementById('reg-deploy').addEventListener('click', () => goRegister('deploy'));
+    document.getElementById('reg-undeploy').addEventListener('click', () => goRegister('undeploy'));
+}
+
+function setRegBusy(b) {
+    document.getElementById('reg-spin').classList.toggle('busy', b);
+    document.getElementById('reg-bar').hidden = !b;
+    document.getElementById('reg-deploy').disabled = b;
+    document.getElementById('reg-undeploy').disabled = b;
+}
+
+async function goRegister(action) {
+    const t = document.getElementById('reg-tenant').value.trim();
+    const k = document.getElementById('reg-token').value.trim();
+    const m = document.getElementById('reg-msg');
+    if (!t) { m.textContent = 'tenant required'; return; }
+    m.textContent = ''; setRegBusy(true);
+    try {
+        const r = await fetch('/api/deploy/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, token: k }) });
+        const raw = await r.text();
+        let j = {}; try { j = JSON.parse(raw); } catch (_) { /* non-JSON gateway page */ }
+        if (r.ok) {
+            document.getElementById('reg-token').value = '';
+            if (action !== 'deploy') { m.textContent = '✓ undeployed ' + t; }
+            else {
+                const v = j.version || '?';
+                const s = j.status === 'up-to-date' ? `already up-to-date (v${v})` : j.status === 'upgraded' ? `upgraded v${j.from} → v${v}` : `installed v${v}`;
+                m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '');
+            }
+            loadRegisterAudit();
+        } else {
+            m.textContent = '✗ ' + (j.detail || (`failed (HTTP ${r.status})` + (r.status >= 502 ? ' — the server may still be finishing; check the activity log' : '')));
+            loadRegisterAudit();
+        }
+    } catch (e) {
+        m.textContent = '✗ network error: ' + e;
+    } finally {
+        setRegBusy(false);
+    }
+}
+
+async function loadRegisterAudit() {
+    try {
+        const r = await fetch('/api/deploy/audit?limit=30', { credentials: 'same-origin' });
+        const data = r.ok ? await r.json() : { audit: [] };
+        const audit = data.audit || [];
+        const b = document.querySelector('#reg-audit tbody');
+        b.innerHTML = audit.length
+            ? audit.map(a => `<tr><td>${escapeHtml((a.ts || '').replace('T', ' ').slice(0, 19))}</td><td>${escapeHtml(a.user || '')}</td><td>${escapeHtml(a.tenant || '')}</td><td>${escapeHtml(a.action || '')}</td><td>${escapeHtml(a.result || '')}</td><td>${escapeHtml(a.to || a.version || '')}</td><td>${escapeHtml(a.via || '')}</td></tr>`).join('')
+            : '<tr><td colspan="7" class="content-hint">none yet</td></tr>';
+    } catch (e) { /* ignore */ }
+}
+
+function loadRegister() {
+    wireRegister();
+    loadRegisterAudit();
 }
