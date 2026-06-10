@@ -261,7 +261,7 @@ assertAstroshopContent() {
   fi
 
   # 3. Static asset reachability — extract src/href pointing to relative asset paths
-  local assets asset_url status ok=0 fail=0
+  local assets asset_url http_status ok=0 fail=0
   assets=$(echo "$html" | \
     grep -oiE '(src|href)="(/[^"]+\.(png|jpg|jpeg|gif|webp|svg|css|js|woff2?))"' | \
     grep -oE '"[^"]+"' | tr -d '"' | sort -u | head -10)
@@ -270,16 +270,16 @@ assertAstroshopContent() {
     printWarn "No static asset URLs found in HTML — skipping asset HTTP checks"
   else
     while IFS= read -r asset_url; do
-      status=$(curl --silent --output /dev/null \
+      http_status=$(curl --silent --output /dev/null \
         --write-out "%{http_code}" \
         --max-time 10 \
         -H "Host: ${ip_host}" \
         "${target}${asset_url}" 2>/dev/null)
-      if [[ "$status" =~ ^(200|304)$ ]]; then
-        printInfo "✅ ${asset_url} → HTTP ${status}"
+      if [[ "$http_status" =~ ^(200|304)$ ]]; then
+        printInfo "✅ ${asset_url} → HTTP ${http_status}"
         ok=$((ok + 1))
       else
-        printWarn "⚠️  ${asset_url} → HTTP ${status}"
+        printWarn "⚠️  ${asset_url} → HTTP ${http_status}"
         fail=$((fail + 1))
       fi
     done <<< "$assets"
