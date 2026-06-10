@@ -1230,6 +1230,7 @@ a.spark-bar:hover { opacity: .75; }
 .ci-badge.term   { background: rgba(251,191,36,.1);  color: var(--amber); border-color: rgba(251,191,36,.3); }
 .ci-badge.pend   { background: rgba(251,191,36,.1);  color: var(--amber); border-color: rgba(251,191,36,.3); animation: pend-blink 1.2s ease-in-out infinite; }
 .ci-badge.none   { color: var(--text-3); border-color: transparent; background: transparent; }
+.ci-badge.unknown{ background: rgba(148,163,184,.12); color: var(--text-3); border-color: rgba(148,163,184,.3); }
 @keyframes pend-blink { 0%,100% { opacity:1; } 50% { opacity:.35; } }
 
 .instr-dot { font-size:.7rem; opacity:.6; cursor:default; margin-right:2px; }
