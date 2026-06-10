@@ -275,7 +275,20 @@ async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
                 return f"skipped (settings read HTTP {r.status_code})"
             items = r.json().get("items", [])
             if not items:
-                return "no enforced allowlist (outbound open)"
+                # No settings object. Sprint/dev default to DENY-ALL (enforced, empty list)
+                # so the app's functions are blocked until we CREATE the object with our
+                # hosts. Prod with no object means outbound is open → never create one
+                # there (that would tighten prod).
+                _, domain = classify_tenant(tenant_url)
+                if domain not in ("sprint", "dev"):
+                    return "no allowlist object (prod — outbound open)"
+                cr = await c.post(base, headers={**h, "Content-Type": "application/json"}, json=[{
+                    "schemaId": OUTBOUND_SCHEMA, "scope": "environment",
+                    "value": {"allowedOutboundConnections": {"enforced": True, "hostList": list(OUTBOUND_HOSTS)}},
+                }])
+                if cr.status_code in (200, 201):
+                    return f"created outbound allowlist with {len(OUTBOUND_HOSTS)} host(s)"
+                return f"allowlist create failed (HTTP {cr.status_code}: {cr.text[:120]})"
             obj = items[0]
             aoc = (obj.get("value") or {}).get("allowedOutboundConnections", {})
             if not aoc.get("enforced"):
