@@ -99,6 +99,7 @@ function activateTab(view) {
     if (view === 'sync') loadSyncTab();
     if (view === 'agentic') loadAgentic();
     if (view === 'framework') loadFramework();
+    if (view === 'content') loadContent();
 }
 
 document.querySelectorAll('.tab').forEach(tab => {
@@ -3022,3 +3023,135 @@ document.addEventListener('keydown', e => {
         closeHelp();
     }
 });
+
+// ── Content Service tab ──────────────────────────────────────────────────────
+const csState = { profiles: [], map: { defaults: {}, tenants: {} }, domains: [], catalog: [] };
+let csWired = false;
+
+const csProfileOpts = (sel) =>
+    csState.profiles.map(p => `<option ${p.profileId === sel ? 'selected' : ''}>${escapeHtml(p.profileId)}</option>`).join('');
+
+function wireContent() {
+    if (csWired) return; csWired = true;
+    document.querySelectorAll('.content-tab').forEach(t => t.addEventListener('click', () => {
+        document.querySelectorAll('.content-tab').forEach(x => x.classList.toggle('active', x === t));
+        document.querySelectorAll('.content-subview').forEach(v => { v.hidden = (v.id !== 'content-view-' + t.dataset.contentView); });
+    }));
+    document.getElementById('cs-save-profile').addEventListener('click', csSaveProfile);
+    document.getElementById('cs-clear-profile').addEventListener('click', () => csEditProfile(null));
+    document.getElementById('cs-resolve').addEventListener('click', csResolve);
+    document.getElementById('cs-add-tenant').addEventListener('click', csAddTenant);
+    document.getElementById('cs-save-delivery').addEventListener('click', csSaveDelivery);
+    document.getElementById('content-profiles').addEventListener('click', (e) => {
+        const ed = e.target.closest('[data-cs-edit]'); if (ed) { csEditProfile(ed.dataset.csEdit); return; }
+        const dl = e.target.closest('[data-cs-del]'); if (dl) { csDeleteProfile(dl.dataset.csDel); }
+    });
+}
+
+function csRenderProfiles() {
+    const used = (pid) => [
+        ...csState.domains.filter(d => (csState.map.defaults || {})[d] === pid).map(d => d + ' default'),
+        ...Object.entries(csState.map.tenants || {}).filter(([, v]) => v === pid).map(([t]) => t),
+    ];
+    document.getElementById('content-profiles').innerHTML = csState.profiles.map(p => {
+        const u = used(p.profileId);
+        const locked = p.profileId === 'all' || p.profileId === 'core';
+        return `<div class="content-profile-row"><div class="pr-head">
+            <strong>${escapeHtml(p.profileId)}</strong>
+            <span class="content-hint" style="margin:0">${escapeHtml(p.description || '')}</span>
+            <span class="pr-actions">
+              <button class="btn btn-small btn-secondary" data-cs-edit="${escapeHtml(p.profileId)}">edit</button>
+              ${locked ? '' : `<button class="btn btn-small btn-danger-muted" data-cs-del="${escapeHtml(p.profileId)}" data-action>delete</button>`}
+            </span></div>
+            <div style="margin-top:8px">${(p.sources || []).map(s => `<span class="content-chip">${escapeHtml(s.repo.split('/').pop())}</span>`).join('')}</div>
+            ${u.length ? `<div class="content-hint" style="margin:6px 0 0">used by: ${escapeHtml(u.join(', '))}</div>` : ''}
+        </div>`;
+    }).join('') || '<p class="content-hint">No profiles yet.</p>';
+}
+
+function csRenderRepoPicker(selected) {
+    document.getElementById('cs-pfrepos').innerHTML = csState.catalog.map(c =>
+        `<label><input type="checkbox" data-repo="${escapeHtml(c.repo)}" data-cat="${escapeHtml(c.category)}" data-label="${escapeHtml(c.categoryLabel)}" data-branch="${escapeHtml(c.branch)}" ${selected.includes(c.repo) ? 'checked' : ''}> ${escapeHtml(c.repo.split('/').pop())} <span class="content-hint" style="margin:0">(${escapeHtml(c.category)})</span></label>`
+    ).join('') || '<span class="content-hint">No repos in the catalog yet.</span>';
+}
+
+function csEditProfile(id) {
+    const p = id ? csState.profiles.find(x => x.profileId === id) : null;
+    document.getElementById('cs-pfid').value = p ? p.profileId : '';
+    document.getElementById('cs-pfdesc').value = p ? (p.description || '') : '';
+    csRenderRepoPicker(p ? (p.sources || []).map(s => s.repo) : []);
+    document.getElementById('cs-fmsg').textContent = '';
+}
+
+function csRenderDelivery() {
+    document.getElementById('cs-defaults').innerHTML = '<thead><tr><th>Domain</th><th>Default profile</th></tr></thead><tbody>' +
+        csState.domains.map(d => `<tr><td>${escapeHtml(d)}</td><td><select id="cs-d-${escapeHtml(d)}">${csProfileOpts((csState.map.defaults || {})[d])}</select></td></tr>`).join('') + '</tbody>';
+    const tb = document.querySelector('#cs-tenants tbody'); tb.innerHTML = '';
+    Object.entries(csState.map.tenants || {}).forEach(([t, p]) => tb.appendChild(csTenantRow(t, p)));
+    document.getElementById('cs-newtp').innerHTML = csProfileOpts(csState.profiles[0] && csState.profiles[0].profileId);
+}
+
+function csTenantRow(tid, pid) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><code>${escapeHtml(tid)}</code></td><td><select>${csProfileOpts(pid)}</select></td><td><button class="btn btn-small btn-secondary" type="button">remove</button></td>`;
+    tr.dataset.tid = tid;
+    tr.querySelector('button').addEventListener('click', () => tr.remove());
+    return tr;
+}
+
+function csAddTenant() {
+    const t = document.getElementById('cs-newtid').value.trim(); if (!t) return;
+    document.querySelector('#cs-tenants tbody').appendChild(csTenantRow(t, document.getElementById('cs-newtp').value));
+    document.getElementById('cs-newtid').value = '';
+}
+
+async function csSaveDelivery() {
+    const defaults = {}; csState.domains.forEach(d => defaults[d] = document.getElementById('cs-d-' + d).value);
+    const tenants = {}; document.querySelectorAll('#cs-tenants tbody tr').forEach(tr => tenants[tr.dataset.tid] = tr.querySelector('select').value);
+    const r = await fetch('/api/content/admin/tenant-map', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ defaults, tenants }) });
+    const j = await r.json().catch(() => ({}));
+    document.getElementById('cs-dmsg').textContent = r.ok ? `✓ saved (${j.tenants} override(s))` : ('✗ ' + (j.detail || 'error'));
+    if (r.ok) loadContent();
+}
+
+async function csSaveProfile() {
+    const id = document.getElementById('cs-pfid').value.trim(), desc = document.getElementById('cs-pfdesc').value.trim();
+    const msg = document.getElementById('cs-fmsg');
+    if (!id) { msg.textContent = 'profile id required'; return; }
+    const sources = [...document.querySelectorAll('#cs-pfrepos input:checked')].map(c => ({ repo: c.dataset.repo, category: c.dataset.cat, categoryLabel: c.dataset.label, branch: c.dataset.branch }));
+    if (!sources.length) { msg.textContent = 'pick at least one repo'; return; }
+    const r = await fetch('/api/content/admin/profiles/' + encodeURIComponent(id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ description: desc, sources }) });
+    const j = await r.json().catch(() => ({}));
+    msg.textContent = r.ok ? `✓ saved (${j.sources} repos)` : ('✗ ' + (j.detail || 'error'));
+    if (r.ok) { csEditProfile(null); loadContent(); }
+}
+
+async function csDeleteProfile(id) {
+    if (!confirm('Delete profile ' + id + '?')) return;
+    const r = await fetch('/api/content/admin/profiles/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'same-origin' });
+    if (r.ok) loadContent(); else document.getElementById('cs-fmsg').textContent = '✗ delete failed';
+}
+
+async function csResolve() {
+    const t = document.getElementById('cs-ptenant').value.trim(); if (!t) return;
+    document.getElementById('cs-pmsg').textContent = 'resolving…'; document.getElementById('cs-presult').innerHTML = '';
+    const r = await fetch('/api/content/manifest?tenant=' + encodeURIComponent(t));
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { document.getElementById('cs-pmsg').textContent = '✗ ' + (j.detail || 'error'); return; }
+    document.getElementById('cs-pmsg').textContent = '';
+    document.getElementById('cs-presult').innerHTML = `<div style="margin-top:10px">tenant <strong>${escapeHtml(j.tenant)}</strong> · domain <strong>${escapeHtml(j.domain)}</strong> · profile <strong>${escapeHtml(j.profileId)}</strong> · ${j.sources.length} repo(s)</div>
+        <table style="margin-top:8px"><thead><tr><th>repo</th><th>category</th><th>sha</th></tr></thead><tbody>${j.sources.map(s => `<tr><td>${escapeHtml(s.repo)}</td><td>${escapeHtml(s.category || '')}</td><td><code>${escapeHtml((s.version || '?').slice(0, 8))}</code></td></tr>`).join('')}</tbody></table>`;
+}
+
+async function loadContent() {
+    wireContent();
+    try {
+        const r = await fetch('/api/content/admin/overview', { credentials: 'same-origin' });
+        if (!r.ok) { document.getElementById('content-profiles').innerHTML = '<p class="content-hint">Sign in as an org member to manage content.</p>'; return; }
+        Object.assign(csState, await r.json());
+        csRenderProfiles();
+        csRenderDelivery();
+    } catch (e) {
+        document.getElementById('content-profiles').innerHTML = '<p class="content-hint">Failed to load content overview.</p>';
+    }
+}
