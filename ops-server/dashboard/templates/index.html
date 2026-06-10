@@ -51,7 +51,7 @@
             <button class="tab" data-view="framework">Framework</button>
             <button class="tab" data-view="nightly">Nightly</button>
             <button class="tab tab-writer-only" data-view="content" id="tab-content">Content Service</button>
-            <button class="tab tab-writer-only" data-view="register" id="tab-register">Register Tenant</button>
+            <button class="tab" data-view="register" id="tab-register">Register Tenant</button>
             <button class="tab tab-help" id="help-btn" title="Help &amp; keyboard shortcuts (?)">?</button>
         </div>
     </nav>
@@ -709,12 +709,11 @@
                     <li><code>app-engine:apps:run</code> — run the app's functions</li>
                     <li><code>app-engine:apps:delete</code> — only needed for Undeploy</li>
                 </ul>
-                <p class="content-hint" style="margin:8px 0 0"><strong>COE tenant</strong> (geu80787): leave the token blank — Orbital deploys it automatically. Any other tenant needs a token.</p>
             </div>
             <div class="content-card">
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
                     <input type="text" id="reg-tenant" placeholder="https://abc12345.apps.dynatrace.com" style="width:340px">
-                    <input type="password" id="reg-token" placeholder="platform token — blank for COE" style="width:300px">
+                    <input type="password" id="reg-token" placeholder="platform token (dt0s16.…)" style="width:300px">
                 </div>
                 <div style="display:flex;align-items:center;gap:10px">
                     <button class="btn btn-small" id="reg-deploy" data-action>Deploy / Upgrade</button>

@@ -205,7 +205,7 @@ main {
 
 .controls input[type="text"],
 .controls select,
-input[type="text"], select {
+input[type="text"], input[type="password"], select {
     background: var(--surface-2);
     border: 1px solid var(--border-soft);
     color: var(--text);
