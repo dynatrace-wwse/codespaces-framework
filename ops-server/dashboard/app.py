@@ -63,6 +63,13 @@ button.sec{background:#30363d}
 .hint{opacity:.6;font-size:13px}
 table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13px}
 td,th{padding:5px 8px;border-bottom:1px solid #21262d;text-align:left}
+button:disabled{opacity:.5;cursor:not-allowed}
+#tspin{display:none;align-items:center;gap:10px;margin-top:12px;font-size:14px}
+.spin{width:18px;height:18px;border:3px solid #30363d;border-top-color:#6c6cff;border-radius:50%;animation:sp 0.8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.bar{height:4px;background:#30363d;border-radius:3px;overflow:hidden;margin-top:8px}
+.bar > i{display:block;height:100%;width:30%;background:#6c6cff;border-radius:3px;animation:slide 1.4s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
 </style></head><body>
 <header>Deploy the Enablement App to a Dynatrace tenant</header>
 <main>
@@ -83,19 +90,26 @@ used once and never stored. We log user + tenant + action, never the token.</p>
 <div>
   <input id=ttenant placeholder="https://abc12345.apps.dynatrace.com"><br>
   <input id=ttoken type=password placeholder="platform token — blank for COE" style="margin-top:6px"><br>
-  <button style="margin-top:8px" onclick="goToken('deploy')">Deploy / Upgrade</button>
-  <button class=sec style="margin-top:8px" onclick="goToken('undeploy')">Undeploy</button>
+  <button id=bdep style="margin-top:8px" onclick="goToken('deploy')">Deploy / Upgrade</button>
+  <button id=bund class=sec style="margin-top:8px" onclick="goToken('undeploy')">Undeploy</button>
   <span class=msg id=tmsg></span>
+  <div id=tspin><div class=spin></div><span>Working… building &amp; deploying the app. This can take a minute or two — <b>please don't refresh or close this page.</b></span></div>
+  <div id=tbarwrap class=bar style="display:none"><i></i></div>
 </div>
 
 <h3>Recent deploy activity</h3>
 <table id=audit><thead><tr><th>when</th><th>user</th><th>tenant</th><th>action</th><th>result</th><th>version</th><th>via</th></tr></thead>
 <tbody><tr><td class=hint>loading…</td></tr></tbody></table>
 <script>
+function setBusy(b){
+  document.getElementById('tspin').style.display=b?'flex':'none';
+  document.getElementById('tbarwrap').style.display=b?'block':'none';
+  document.getElementById('bdep').disabled=b; document.getElementById('bund').disabled=b;
+}
 async function goToken(action){
   const t=document.getElementById('ttenant').value.trim(), k=document.getElementById('ttoken').value.trim();
   const m=document.getElementById('tmsg'); if(!t){m.textContent='tenant required';return;}
-  m.textContent=action+'ing… (a deploy can take a minute or two)';
+  m.textContent=''; setBusy(true);
   try{
     const r=await fetch('/api/deploy/token',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action,tenant:t,token:k})});
@@ -113,6 +127,7 @@ async function goToken(action){
       loadAudit();
     }
   }catch(e){m.textContent='✗ network error: '+e;}
+  finally{ setBusy(false); }
 }
 function loadAudit(){
   fetch('/api/deploy/audit?limit=30').then(r=>r.ok?r.json():{audit:[]}).then(({audit})=>{
