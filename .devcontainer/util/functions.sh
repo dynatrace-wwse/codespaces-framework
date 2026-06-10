@@ -742,8 +742,8 @@ startK3dCluster(){
 
   # Check if K3d cluster exists
   if k3d cluster list 2>/dev/null | grep -q "enablement"; then
-    local status
-    status=$(k3d cluster list -o json 2>/dev/null | python3 -c "
+    local cluster_state
+    cluster_state=$(k3d cluster list -o json 2>/dev/null | python3 -c "
 import sys, json
 clusters = json.load(sys.stdin)
 for c in clusters:
@@ -754,7 +754,7 @@ for c in clusters:
         break
 " 2>/dev/null)
 
-    if [[ "$status" == "running" ]]; then
+    if [[ "$cluster_state" == "running" ]]; then
       printWarn "K3d cluster already running, attaching..."
       attachK3dCluster
     else
@@ -808,17 +808,35 @@ createK3dCluster() {
   : "${K3D_LB_HTTP_PORT:=80}"
   : "${K3D_LB_HTTPS_PORT:=443}"
   : "${K3D_API_PORT:=6443}"
+  : "${K3D_DOCKER_VOLUMES_PATH:=/var/lib/docker/volumes}"
 
   printInfoSection "Creating K3d cluster ($K3D_CLUSTER_NAME)"
   printInfo "Ports — http:$K3D_LB_HTTP_PORT  https:$K3D_LB_HTTPS_PORT  api:$K3D_API_PORT"
 
   installK3d
 
+  local volume_args=()
+  if [[ ! -d "$K3D_DOCKER_VOLUMES_PATH" ]]; then
+    # k3d validates bind source paths from the current shell environment first.
+    # In devcontainers this path may be absent even when DockerRootDir uses it.
+    if sudo -n mkdir -p "$K3D_DOCKER_VOLUMES_PATH" 2>/dev/null || mkdir -p "$K3D_DOCKER_VOLUMES_PATH" 2>/dev/null; then
+      printWarn "Created local path for k3d bind validation: $K3D_DOCKER_VOLUMES_PATH"
+    else
+      printWarn "Skipping Docker volumes mount (path unavailable): $K3D_DOCKER_VOLUMES_PATH"
+      printWarn "OneAgent CloudNativeFullStack may fail without this mount"
+    fi
+  fi
+
+  if [[ -d "$K3D_DOCKER_VOLUMES_PATH" ]]; then
+    volume_args=(--volume "${K3D_DOCKER_VOLUMES_PATH}:/var/lib/docker/volumes@server:*")
+  fi
+
   k3d cluster create "$K3D_CLUSTER_NAME" \
     --api-port "$K3D_API_PORT" \
     -p "${K3D_LB_HTTP_PORT}:80@loadbalancer" \
     -p "${K3D_LB_HTTPS_PORT}:443@loadbalancer" \
     --k3s-arg "--disable=traefik@server:0" \
+    "${volume_args[@]}" \
     --wait
 
   if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME} "; then
