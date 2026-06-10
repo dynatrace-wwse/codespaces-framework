@@ -50,6 +50,7 @@
             <button class="tab" data-view="workers">Workers</button>
             <button class="tab" data-view="framework">Framework</button>
             <button class="tab" data-view="nightly">Nightly</button>
+            <button class="tab tab-writer-only" data-view="content" id="tab-content">Content Service</button>
             <button class="tab tab-help" id="help-btn" title="Help &amp; keyboard shortcuts (?)">?</button>
         </div>
     </nav>
@@ -640,6 +641,61 @@
                     <tr><td colspan="6" class="loading">—</td></tr>
                 </tbody>
             </table>
+        </section>
+
+        <section id="view-content" class="view">
+            <nav class="content-subnav">
+                <button class="content-tab active" data-content-view="profiles">Profiles</button>
+                <button class="content-tab" data-content-view="tenants">Tenants &amp; delivery</button>
+            </nav>
+
+            <!-- Profiles sub-view -->
+            <div id="content-view-profiles" class="content-subview">
+                <p class="content-hint">A profile is a named set of training repos. Map profiles to domains and tenants in the Tenants tab.</p>
+                <div id="content-profiles"><p class="loading">Loading profiles…</p></div>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">New / edit profile</h3>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                        <input type="text" id="cs-pfid" placeholder="profile id (a-z0-9-_)" style="width:220px">
+                        <input type="text" id="cs-pfdesc" placeholder="description" style="flex:1;min-width:260px">
+                    </div>
+                    <div id="cs-pfrepos" class="content-repos"></div>
+                    <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+                        <button class="btn btn-small" id="cs-save-profile" data-action>Save profile</button>
+                        <button class="btn btn-small btn-secondary" id="cs-clear-profile">Clear</button>
+                        <span id="cs-fmsg" class="content-msg"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tenants & delivery sub-view -->
+            <div id="content-view-tenants" class="content-subview" hidden>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">Preview — what does a tenant receive?</h3>
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                        <input type="text" id="cs-ptenant" placeholder="https://abc12345.apps.dynatrace.com" style="width:340px">
+                        <button class="btn btn-small" id="cs-resolve">Resolve</button>
+                        <span id="cs-pmsg" class="content-msg"></span>
+                    </div>
+                    <div id="cs-presult"></div>
+                </div>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">Delivery table</h3>
+                    <strong class="content-sub">Domain defaults</strong>
+                    <table id="cs-defaults"></table>
+                    <strong class="content-sub" style="display:block;margin-top:14px">Tenant overrides</strong>
+                    <table id="cs-tenants"><tbody></tbody></table>
+                    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                        <input type="text" id="cs-newtid" placeholder="tenant id (e.g. geu80787)" style="width:220px">
+                        <select id="cs-newtp"></select>
+                        <button class="btn btn-small btn-secondary" id="cs-add-tenant" data-action>+ tenant</button>
+                    </div>
+                    <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+                        <button class="btn btn-small" id="cs-save-delivery" data-action>Save delivery table</button>
+                        <span id="cs-dmsg" class="content-msg"></span>
+                    </div>
+                </div>
+            </div>
         </section>
     </main>
 
