@@ -3192,6 +3192,8 @@ async function goRegister(action) {
                 m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '');
             }
             loadRegisterAudit();
+        } else if (r.status === 401) {
+            m.textContent = '✗ Sign in as a GitHub org member to deploy.';
         } else {
             m.textContent = '✗ ' + (j.detail || (`failed (HTTP ${r.status})` + (r.status >= 502 ? ' — the server may still be finishing; check the activity log' : '')));
             loadRegisterAudit();
