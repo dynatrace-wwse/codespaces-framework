@@ -275,6 +275,30 @@ async def delete_profile(profile_id: str, x_auth_user: str | None = Header(defau
 
 # ── Tenant → profile mapping (the delivery table; writer-gated) ──────────────
 
+@router.get("/admin/overview")
+async def admin_overview(x_auth_user: str | None = Header(default=None)):
+    """One call for the content console: all profiles, the delivery table, domain classes, and
+    a repo catalog (union of repos across profiles) for the profile picker."""
+    _require_writer(x_auth_user)
+    profiles = []
+    if PROFILES_DIR.is_dir():
+        for f in sorted(PROFILES_DIR.glob("*.json")):
+            try:
+                profiles.append(json.loads(f.read_text()))
+            except Exception as exc:
+                log.warning("Bad profile %s: %s", f.name, exc)
+    # Catalog = unique sources across all profiles (repo → category/label/branch), for the picker.
+    catalog: dict[str, dict] = {}
+    for p in profiles:
+        for s in p.get("sources", []):
+            if s.get("repo") and s["repo"] not in catalog:
+                catalog[s["repo"]] = {"repo": s["repo"], "category": s.get("category", "uncategorized"),
+                                      "categoryLabel": s.get("categoryLabel", ""), "branch": s.get("branch", "main")}
+    return {"profiles": profiles, "map": _load_tenant_map(),
+            "domains": sorted(set(DOMAIN_SUFFIXES.values())),
+            "catalog": [catalog[k] for k in sorted(catalog)]}
+
+
 @router.get("/admin/tenant-map")
 async def get_tenant_map(x_auth_user: str | None = Header(default=None)):
     """The delivery table: per-domain defaults + per-tenant overrides, plus the
