@@ -256,6 +256,46 @@ source_functions() {
   [[ "$output" == *"MY_CUSTOM_VAR is set"* ]]
 }
 
+# A repo declares a required token (e.g. via devcontainer.json secrets +
+# post-create's `variablesNeeded DT_OPERATOR_TOKEN:true`) but the secret is not
+# injected at runtime — creation must fail loudly by NAME, never silently.
+@test "variablesNeeded: declared-but-undefined required token fails by name" {
+  source_functions
+  unset DT_OPERATOR_TOKEN
+
+  run variablesNeeded DT_OPERATOR_TOKEN:true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DT_OPERATOR_TOKEN is required but not set"* ]]
+  [[ "$output" == *"Missing required variables: DT_OPERATOR_TOKEN"* ]]
+}
+
+# Security: a valid token value (or any prefix of it) must never be echoed —
+# the validator confirms format without leaking the secret to the console/logs.
+@test "variablesNeeded: never leaks the token value to output" {
+  source_functions
+  local secret="dt0c01.ABCDEFGHIJKLMNOPQRSTUVWX.SECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSECRETSE"
+  export DT_OPERATOR_TOKEN="$secret"
+
+  run variablesNeeded DT_OPERATOR_TOKEN:true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"valid Dynatrace token format"* ]]
+  # No part of the public id or secret leaks (check the distinctive segments).
+  [[ "$output" != *"ABCDEFGHIJKLMNOPQRSTUVWX"* ]]
+  [[ "$output" != *"SECRETSECRET"* ]]
+  [[ "$output" != *"dt0c01.ABC"* ]]
+}
+
+# An invalid declared token must fail without printing the bad value either.
+@test "variablesNeeded: invalid token fails without leaking the value" {
+  source_functions
+  export DT_OPERATOR_TOKEN="dt0c01.SHOULDNOTLEAKTHISVALUE12345"
+
+  run variablesNeeded DT_OPERATOR_TOKEN:true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid token format"* ]]
+  [[ "$output" != *"SHOULDNOTLEAKTHISVALUE"* ]]
+}
+
 # ============================================================
 # enableMCP / disableMCP tests
 # ============================================================
