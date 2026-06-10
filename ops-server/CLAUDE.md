@@ -20,10 +20,22 @@ Worker agents (worker-agent/agent.py)  ←──── Redis ──────�
   └─▶ executor.py — pulls jobs, runs Sysbox containers, publishes logs
 ```
 
+**Job id (canonical):** `base36(epoch_ms)-<4hex>` (e.g. `mk3p9aqz-7f3a`) —
+globally unique, chronologically sortable, DNS-safe. Single source of truth:
+Redis key, log filename, and app subdomain tail (`{app}--{job_id}`). Generated
+by `_new_job_id()` (duplicated in `workers/manager.py`, `worker-agent/agent.py`,
+`dashboard/app.py`). Worker/repo/tenant/user are NOT in the id — they live in
+the record, resolved by job id (and shipped to Grail for long-term history).
+
+**Worker id:** `w{amd|arm}{NNN}` (e.g. `wamd001`), ephemeral/recommissionable;
+set per box via `WORKER_INSTANCE` (or full `WORKER_ID` override). `master` is
+the only non-worker id — the dashboard treats any `worker_id != "master"` as a
+remote SSH worker.
+
 **Redis key space (important ones):**
 - `queue:test:{arch}` — FIFO job queue per arch
-- `job:running:{job_id}` — hash: repo, branch, arch, started_at, worker_id
-- `jobs:completed` — list (capped 500) of JSON job records
+- `job:running:{job_id}` — hash: repo, branch, arch, started_at, worker_id, user, tenant, tenant_user, type
+- `jobs:completed` — list (capped 500; long history via Grail) of JSON job records
 - `worker:{worker_id}` — hash: arch, capacity, active_jobs, host, ssh_host
 - `job:log:{job_id}` — raw log text, 7-day TTL
 - `shell:token:{token}` — single-use WebSocket auth token, 60-second TTL
@@ -99,15 +111,17 @@ subprocess: ssh -t {worker} docker exec -it sb-{id} docker exec -it -w /workspac
 ### Container naming
 
 The Sysbox outer container is always named `sb-{job_id[-32:]}` (last 32 chars
-of job_id). The inner DinD container is always named `dt`. Full exec chain:
+of job_id; short canonical ids fit whole). The inner DinD container is always
+named `dt`. Full exec chain:
 
 ```
 docker exec -it sb-{id} docker exec -it -w /workspaces/{repo} dt zsh
 ```
 
-For **remote workers** (AMD): `job:running:{id}` has `worker_id` starting with
-`worker-`. FastAPI looks up `worker:{worker_id}` in Redis to get `ssh_host`,
-then prepends `ssh -t -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host}`.
+For **remote workers** (AMD): `job:running:{id}` has `worker_id != "master"`.
+FastAPI looks up `worker:{worker_id}` in Redis to get `ssh_host`, then prepends
+`ssh -t -o StrictHostKeyChecking=no -o ConnectTimeout=10 {host}`. (master jobs
+have `worker_id == "master"` and run locally — no SSH.)
 
 ---
 

@@ -17,8 +17,17 @@ def _detect_host_ip() -> str:
     except Exception:
         return _socket.gethostname()
 
-# Worker identity
-WORKER_ID = os.environ.get("WORKER_ID", f"worker-{platform.machine()}-{uuid.uuid4().hex[:6]}")
+# Worker identity — ephemeral, recommissionable. Format: w{amd|arm}{NNN}
+# (e.g. wamd001). Operators set WORKER_INSTANCE (e.g. "001") per box; if unset,
+# a random 3-char suffix keeps it unique. A full WORKER_ID env override wins.
+# The worker id is recorded in each job record (searchable by job id) and is
+# NOT encoded in the app subdomain. master is the only non-"w…" worker id;
+# the dashboard treats any worker_id != "master" as a remote SSH worker.
+def _arch_family() -> str:
+    return "arm" if platform.machine() in ("aarch64", "arm64") else "amd"
+
+_WORKER_INSTANCE = os.environ.get("WORKER_INSTANCE") or uuid.uuid4().hex[:3]
+WORKER_ID = os.environ.get("WORKER_ID", f"w{_arch_family()}{_WORKER_INSTANCE}")
 WORKER_ARCH = os.environ.get("WORKER_ARCH", "arm64" if platform.machine() in ("aarch64", "arm64") else "amd64")
 WORKER_CAPACITY = int(os.environ.get("WORKER_CAPACITY", "6"))
 # Weighted scheduler overrides (optional; derived from WORKER_CAPACITY when unset).

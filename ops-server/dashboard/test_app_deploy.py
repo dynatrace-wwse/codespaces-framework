@@ -95,6 +95,108 @@ def test_undeploy_calls_registry_delete_with_bearer(monkeypatch=None):
     assert captured["auth"] == "Bearer tok123"
 
 
+def test_client_for_resolves_per_realm_with_fallback(monkeypatch=None):
+    import os
+    saved = dict(os.environ)
+    saved_g = dep.DEPLOY_CLIENT_ID
+    try:
+        dep.DEPLOY_CLIENT_ID = "global-cid"
+        os.environ.pop("DEPLOY_CLIENT_ID_PROD", None)
+        os.environ["DEPLOY_CLIENT_ID_SPRINT"] = "sprint-cid"
+        os.environ["DEPLOY_CLIENT_SECRET_SPRINT"] = "sprint-sec"
+        # sprint has its own client
+        assert dep._client_for("sprint") == ("sprint-cid", "sprint-sec")
+        # prod falls back to the global client
+        assert dep._client_for("prod")[0] == "global-cid"
+    finally:
+        os.environ.clear(); os.environ.update(saved)
+        dep.DEPLOY_CLIENT_ID = saved_g
+
+
+def test_missing_scopes_detects_insufficient_permissions():
+    # user has all deploy scopes → nothing missing
+    assert dep._missing_scopes("deploy", "app-engine:apps:install app-engine:apps:run storage:logs:read") == []
+    # user lacks install → reported
+    assert dep._missing_scopes("deploy", "app-engine:apps:run") == ["app-engine:apps:install"]
+    # empty / None grant → all required missing
+    assert dep._missing_scopes("deploy", "") == ["app-engine:apps:install", "app-engine:apps:run"]
+    assert dep._missing_scopes("deploy", None) == ["app-engine:apps:install", "app-engine:apps:run"]
+    # undeploy needs delete
+    assert dep._missing_scopes("undeploy", "app-engine:apps:run") == ["app-engine:apps:delete"]
+    assert dep._missing_scopes("undeploy", "app-engine:apps:delete") == []
+
+
+def test_deploy_with_status_skips_when_up_to_date():
+    # installed == ours → up-to-date, no deploy run
+    saved_ver = dep._app_version
+    saved_inst = dep._get_installed
+    saved_run = dep._run_deploy
+    ran = {"called": False}
+    async def fake_installed(t, u): return "1.2.3"
+    async def fake_run(t, u): ran["called"] = True; return 0, ""
+    dep._app_version = lambda: "1.2.3"
+    dep._get_installed = fake_installed
+    dep._run_deploy = fake_run
+    try:
+        res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
+        assert res == {"status": "up-to-date", "to": "1.2.3"}
+        assert ran["called"] is False
+    finally:
+        dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
+
+
+def test_deploy_with_status_upgrades_when_older():
+    saved_ver = dep._app_version; saved_inst = dep._get_installed; saved_run = dep._run_deploy
+    async def fake_installed(t, u): return "1.0.0"
+    async def fake_run(t, u): return 0, "ok"
+    dep._app_version = lambda: "1.2.0"
+    dep._get_installed = fake_installed
+    dep._run_deploy = fake_run
+    try:
+        res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
+        assert res == {"status": "upgraded", "from": "1.0.0", "to": "1.2.0"}
+    finally:
+        dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
+
+
+def test_is_coe():
+    saved = dep.COE_TENANT_URL
+    dep.COE_TENANT_URL = "https://geu80787.apps.dynatrace.com"
+    try:
+        assert dep._is_coe("https://geu80787.apps.dynatrace.com")
+        assert dep._is_coe("https://geu80787.apps.dynatrace.com/ui/apps")
+        assert not dep._is_coe("https://other.apps.dynatrace.com")
+    finally:
+        dep.COE_TENANT_URL = saved
+
+
+def test_coe_auto_without_creds_503():
+    saved = (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_TENANT_URL)
+    dep.COE_CLIENT_ID = ""; dep.COE_CLIENT_SECRET = ""
+    dep.COE_TENANT_URL = "https://geu80787.apps.dynatrace.com"
+    try:
+        # COE tenant, no token, no creds configured → 503
+        _expect_http(503, dep.deploy_with_token({"tenant": "https://geu80787.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+    finally:
+        dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_TENANT_URL = saved
+
+
+def test_non_coe_without_token_400():
+    # any non-COE Dynatrace tenant without a token → 400 (token required)
+    _expect_http(400, dep.deploy_with_token({"tenant": "https://other.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+
+
+def test_token_deploy_guards():
+    # no auth → 401
+    _expect_http(401, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t"}, x_auth_user=None))
+    # bad action → 400
+    _expect_http(400, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t", "action": "nuke"}, x_auth_user="a"))
+    # non-Dynatrace tenant → 403
+    _expect_http(403, dep.deploy_with_token({"tenant": "https://evil.example.com", "token": "t"}, x_auth_user="a"))
+    # Dynatrace tenant but no token → 400
+    _expect_http(400, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+
+
 def test_deploy_missing_repo_returns_127():
     saved = dep.APP_REPO_DIR
     dep.APP_REPO_DIR = "/nonexistent/app/repo"

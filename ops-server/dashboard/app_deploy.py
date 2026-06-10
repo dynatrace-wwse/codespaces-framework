@@ -40,8 +40,11 @@ from dashboard.content_service import classify_tenant, register_tenant
 
 log = logging.getLogger("ops-dashboard.deploy")
 
-# Registered Orbital public OAuth client (dt0s12-type, PKCE, no secret). Set in /home/ops/.env.
+# Registered Orbital OAuth client (auth-code grant + redirect URI). Set in /home/ops/.env.
+# A self-created Dynatrace client is confidential → also set DEPLOY_CLIENT_SECRET (held only
+# on Orbital, server-side; never shared with tenants/users). PKCE is still used.
 DEPLOY_CLIENT_ID = os.environ.get("DEPLOY_CLIENT_ID", "")
+DEPLOY_CLIENT_SECRET = os.environ.get("DEPLOY_CLIENT_SECRET", "")
 DEPLOY_REDIRECT_URI = os.environ.get(
     "DEPLOY_REDIRECT_URI",
     "https://autonomous-enablements.whydevslovedynatrace.com/auth/dt-callback",
@@ -54,9 +57,23 @@ APP_ID = "my.dynatrace.enablements"
 DEFAULT_SSO = "https://sso.dynatrace.com"
 FLOW_TTL = 600  # seconds a started flow stays valid
 AUDIT_KEY = "audit:deploy"
+# IAM permissions the signed-in user must actually hold (reflected in the token's granted
+# scope) for each action. If missing, the deploy would 403 at the registry — we check up
+# front and report it clearly instead.
+REQUIRED_SCOPES = {
+    "deploy": {"app-engine:apps:install", "app-engine:apps:run"},
+    "undeploy": {"app-engine:apps:delete"},
+}
 # Local checkout of the app repo (has node_modules/dt-app) used to build + deploy.
 APP_REPO_DIR = os.environ.get("APP_REPO_DIR", "/home/ops/enablement-framework/dynatrace-app-enablements")
 DEPLOY_TIMEOUT = int(os.environ.get("DEPLOY_TIMEOUT", "600"))
+
+# COE tenant — the one tenant in the COE account. Orbital holds its client credentials, so a
+# deploy to COE needs NO pasted token (auto). Every other tenant requires a token.
+COE_TENANT_URL = os.environ.get("COE_TENANT_URL", "https://geu80787.apps.dynatrace.com")
+COE_CLIENT_ID = os.environ.get("COE_CLIENT_ID", "")
+COE_CLIENT_SECRET = os.environ.get("COE_CLIENT_SECRET", "")
+COE_RESOURCE = os.environ.get("COE_RESOURCE", "")  # urn:dtaccount:...
 
 router = APIRouter(tags=["deploy"])
 _redis: redis.Redis | None = None
@@ -111,6 +128,20 @@ async def _audit(user: str, tenant: str, action: str, result: str, **extra) -> N
     log.info("DEPLOY-AUDIT %s", {k: v for k, v in rec.items()})
 
 
+def _client_for(domain: str) -> tuple[str, str]:
+    """The OAuth client for a domain class (prod/sprint/dev). Each is a separate SSO realm,
+    so each can have its own client: DEPLOY_CLIENT_ID_PROD / _SPRINT / _DEV (+ _SECRET_*).
+    Falls back to the global DEPLOY_CLIENT_ID/SECRET when no per-realm client is set."""
+    cid = os.environ.get(f"DEPLOY_CLIENT_ID_{domain.upper()}") or DEPLOY_CLIENT_ID
+    sec = os.environ.get(f"DEPLOY_CLIENT_SECRET_{domain.upper()}") or DEPLOY_CLIENT_SECRET
+    return cid, sec
+
+
+def _missing_scopes(action: str, granted: str | None) -> list[str]:
+    """Required IAM scopes for the action minus what the user's token actually granted."""
+    return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
+
+
 def _app_url(tenant_url: str) -> str:
     return f"{tenant_url.rstrip('/')}/ui/apps/{APP_ID}"
 
@@ -122,7 +153,8 @@ def _registry_url(tenant_url: str, app_id: str | None = None) -> str:
 
 def _app_version() -> str:
     try:
-        return json.loads((Path(APP_REPO_DIR) / "app.config.json").read_text()).get("version", "?")
+        cfg = json.loads((Path(APP_REPO_DIR) / "app.config.json").read_text())
+        return cfg.get("app", {}).get("version") or cfg.get("version") or "?"
     except Exception:
         return "?"
 
@@ -135,7 +167,10 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     if not binary.exists():
         return 127, f"dt-app not found in {APP_REPO_DIR} (is the app repo checked out with node_modules?)"
     env = {**os.environ, "DT_APP_PLATFORM_TOKEN": token, "DT_APP_ENVIRONMENT_URL": tenant_url,
-           "DT_APP_DEACTIVATE_SPINNER": "1", "CI": "1"}
+           "DT_APP_DEACTIVATE_SPINNER": "1", "CI": "1",
+           # node lives in /usr/local/bin (symlink); ensure it's on PATH for the systemd service
+           "PATH": "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", ""),
+           "HOME": os.environ.get("HOME", "/home/ops")}
     proc = await asyncio.create_subprocess_exec(
         str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -145,6 +180,33 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
         proc.kill()
         return 124, "deploy timed out"
     return proc.returncode or 0, out.decode(errors="replace")[-1500:]
+
+
+async def _get_installed(token: str, tenant_url: str) -> str | None:
+    """Return the installed app version on the tenant, or None if not installed."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(_registry_url(tenant_url, APP_ID), headers={"Authorization": f"Bearer {token}"})
+        if r.status_code == 200:
+            j = r.json()
+            return j.get("version") or j.get("appVersion")
+        return None  # 404 → not installed
+    except Exception as exc:
+        log.warning("installed-version check failed for %s: %s", tenant_url, exc)
+        return None
+
+
+async def _deploy_with_status(token: str, tenant_url: str) -> dict:
+    """Idempotent deploy: check what's installed; skip if already current, else install/upgrade.
+    Returns {status: up-to-date|installed|upgraded|error, from, to, output}."""
+    installed = await _get_installed(token, tenant_url)
+    ours = _app_version()
+    if installed and installed == ours:
+        return {"status": "up-to-date", "to": ours}
+    rc, out = await _run_deploy(token, tenant_url)
+    if rc != 0:
+        return {"status": "error", "rc": rc, "output": out, "from": installed}
+    return {"status": "upgraded" if installed else "installed", "from": installed, "to": _app_version()}
 
 
 async def _run_undeploy(token: str, tenant_url: str) -> tuple[bool, str]:
@@ -159,6 +221,32 @@ async def _run_undeploy(token: str, tenant_url: str) -> tuple[bool, str]:
         return False, f"HTTP {r.status_code}: {r.text[:300]}"
     except Exception as exc:
         return False, str(exc)
+
+
+def _is_coe(tenant_url: str) -> bool:
+    h1 = (urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}").hostname or "").lower()
+    h2 = (urlparse(COE_TENANT_URL).hostname or "").lower()
+    return bool(h2) and h1 == h2
+
+
+async def _mint_coe_token(action: str) -> str | None:
+    """Mint a bearer for the COE tenant from Orbital's COE client credentials (server-side).
+    Scope by action so we never request a scope the client lacks."""
+    if not (COE_CLIENT_ID and COE_CLIENT_SECRET):
+        return None
+    scope = "app-engine:apps:delete" if action == "undeploy" else "app-engine:apps:install app-engine:apps:run"
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post("https://sso.dynatrace.com/sso/oauth2/token", data={
+                "grant_type": "client_credentials", "client_id": COE_CLIENT_ID,
+                "client_secret": COE_CLIENT_SECRET, "resource": COE_RESOURCE, "scope": scope,
+            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if r.status_code == 200:
+            return r.json().get("access_token")
+        log.warning("COE token mint HTTP %s", r.status_code)
+    except Exception as exc:
+        log.warning("COE token mint failed: %s", exc)
+    return None
 
 
 async def _register_in_content_service(user: str, tenant_url: str) -> dict | None:
@@ -178,19 +266,21 @@ async def deploy_start(tenant: str, action: str = "deploy", x_auth_user: str | N
     if action not in ("deploy", "undeploy"):
         raise HTTPException(400, "action must be deploy or undeploy.")
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
-    if not DEPLOY_CLIENT_ID:
-        raise HTTPException(503, "Deploy not configured: register the Orbital OAuth client and set DEPLOY_CLIENT_ID.")
+    client_id, _ = _client_for(domain)
+    if not client_id:
+        raise HTTPException(503, f"Deploy not configured for the {domain} realm: register an OAuth "
+                                 f"client there and set DEPLOY_CLIENT_ID_{domain.upper()} (or DEPLOY_CLIENT_ID).")
 
     sso = await discover_sso(tenant)
     verifier, challenge = _pkce()
     state = secrets.token_urlsafe(24)
     await _pool().setex(
         f"deploy:flow:{state}", FLOW_TTL,
-        json.dumps({"tenant": tenant, "tenant_id": tenant_id, "domain": domain,
+        json.dumps({"tenant": tenant, "tenant_id": tenant_id, "domain": domain, "client_id": client_id,
                     "verifier": verifier, "user": user, "action": action, "sso": sso}),
     )
     authorize = f"{sso}/oauth2/authorize?" + urlencode({
-        "client_id": DEPLOY_CLIENT_ID,
+        "client_id": client_id,
         "redirect_uri": DEPLOY_REDIRECT_URI,
         "response_type": "code",
         "code_challenge_method": "S256",
@@ -225,25 +315,44 @@ async def deploy_callback(request: Request):
 
     # Exchange the code (public client + PKCE, no secret) for the delegated token.
     try:
+        # Use the same per-realm client the flow started with; re-resolve its secret from env.
+        client_id = flow.get("client_id") or DEPLOY_CLIENT_ID
+        _, client_secret = _client_for(flow.get("domain", ""))
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "code": code,
+            "redirect_uri": DEPLOY_REDIRECT_URI,
+            "code_verifier": flow["verifier"],
+        }
+        if client_secret:  # confidential client (self-created) — secret stays server-side
+            form["client_secret"] = client_secret
         async with httpx.AsyncClient(timeout=15) as c:
-            tok = await c.post(f"{flow['sso']}/sso/oauth2/token", data={
-                "grant_type": "authorization_code",
-                "client_id": DEPLOY_CLIENT_ID,
-                "code": code,
-                "redirect_uri": DEPLOY_REDIRECT_URI,
-                "code_verifier": flow["verifier"],
-            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            tok = await c.post(f"{flow['sso']}/sso/oauth2/token", data=form,
+                               headers={"Content-Type": "application/x-www-form-urlencoded"})
         if tok.status_code != 200:
             await _audit(user, tenant_id, action, "token-error", status=tok.status_code)
             return HTMLResponse(_page(f"Token exchange failed (HTTP {tok.status_code}).", ok=False), status_code=502)
-        token = tok.json().get("access_token", "")  # held in memory only, never logged/stored
+        payload_t = tok.json()
+        token = payload_t.get("access_token", "")  # held in memory only, never logged/stored
+        granted = payload_t.get("scope", "")
     except Exception as exc:
         await _audit(user, tenant_id, action, "token-error", message=str(exc))
         return HTMLResponse(_page(f"Token exchange error: {exc}", ok=False), status_code=502)
 
+    # Validate the signed-in user actually holds the IAM permissions for this action.
+    # SSO only grants scopes the user is entitled to, so a missing scope ⇒ no permission.
+    missing = _missing_scopes(action, granted)
+    if missing:
+        del token
+        await _audit(user, tenant_id, action, "insufficient-permissions", missing=missing)
+        return HTMLResponse(_page(
+            f"<b>{user}</b> lacks permission to {action} apps on <b>{tenant_id}</b>.<br><br>"
+            f"Missing IAM permission(s): <b>{', '.join(missing)}</b>.<br>"
+            f"Ask a tenant administrator to grant them, then try again.", ok=False), status_code=403)
+
     tenant_url = flow["tenant"]
     app_url = _app_url(tenant_url)
-    version = _app_version()
 
     if action == "undeploy":
         ok, msg = await _run_undeploy(token, tenant_url)
@@ -254,23 +363,77 @@ async def deploy_callback(request: Request):
             else f"Undeploy failed for <b>{tenant_id}</b>: {msg}", ok=ok),
             status_code=200 if ok else 502)
 
-    # deploy
-    rc, out = await _run_deploy(token, tenant_url)
+    # deploy — idempotent: skip if up-to-date, else install/upgrade
+    res = await _deploy_with_status(token, tenant_url)
     del token  # discard the credential before doing anything else
-    if rc != 0:
-        await _audit(user, tenant_id, "deploy", "deploy-error", version=version, rc=rc)
+    if res["status"] == "error":
+        await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
         return HTMLResponse(_page(
-            f"Deploy to <b>{tenant_id}</b> failed (exit {rc}).<br><br>"
-            f"<pre style='white-space:pre-wrap;color:#f0c674'>{out}</pre>", ok=False), status_code=502)
+            f"Deploy to <b>{tenant_id}</b> failed (exit {res.get('rc')}).<br><br>"
+            f"<pre style='white-space:pre-wrap;color:#f0c674'>{res.get('output','')}</pre>", ok=False), status_code=502)
 
     reg = await _register_in_content_service(user, tenant_url)
     profile = (reg or {}).get("profile")
-    await _audit(user, tenant_id, "deploy", "deployed", version=version, url=app_url, profile=profile)
+    await _audit(user, tenant_id, "deploy", res["status"],
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile)
+    if res["status"] == "up-to-date":
+        head = f"App already up-to-date on <b>{tenant_id}</b> (v{res.get('to')}) — nothing to do."
+    elif res["status"] == "upgraded":
+        head = f"App upgraded on <b>{tenant_id}</b>: v{res.get('from')} → v{res.get('to')}."
+    else:
+        head = f"App installed on <b>{tenant_id}</b> (v{res.get('to')})."
     return HTMLResponse(_page(
-        f"App deployed successfully to <b>{tenant_id}</b> (v{version}).<br><br>"
-        f"Open: <a href='{app_url}'>{app_url}</a><br>"
+        f"{head}<br><br>Open: <a href='{app_url}'>{app_url}</a><br>"
         + (f"Content profile: <b>{profile}</b> — open the app and Refresh to load it."
            if profile else "Tenant registered for content delivery."), ok=True))
+
+
+@router.post("/api/deploy/token")
+async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Override path for ANY tenant (customer / prospect / free trial / cross-account): the
+    caller supplies a platform token created IN the target tenant (scopes apps:install/run/
+    delete). That credential carries the target account's authority, so no SSO/account binding
+    is needed. The token is used once and discarded — never logged or persisted. Writer-gated."""
+    user = _require_writer(x_auth_user)
+    action = body.get("action", "deploy")
+    if action not in ("deploy", "undeploy"):
+        raise HTTPException(400, "action must be deploy or undeploy.")
+    tenant = (body.get("tenant") or "").strip()
+    token = (body.get("token") or "").strip()
+    tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    coe_auto = False
+    if not token:
+        # COE is the one tenant Orbital can deploy on its own (it holds COE's credentials).
+        if _is_coe(tenant):
+            token = await _mint_coe_token(action) or ""
+            coe_auto = True
+            if not token:
+                raise HTTPException(503, "COE auto-deploy not configured (set COE_CLIENT_ID/SECRET/RESOURCE).")
+        else:
+            raise HTTPException(400, "A valid platform token is required for this tenant. "
+                                     "Auto-deploy (no token) is only available for the COE tenant.")
+
+    via = "coe-auto" if coe_auto else "token"
+    if action == "undeploy":
+        ok, msg = await _run_undeploy(token, tenant)
+        del token
+        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error", via=via, detail=msg)
+        if not ok:
+            raise HTTPException(502, f"Undeploy failed: {msg}")
+        return {"ok": True, "tenant": tenant_id, "action": "undeploy"}
+
+    res = await _deploy_with_status(token, tenant)
+    del token
+    if res["status"] == "error":
+        await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"))
+        raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
+    reg = await _register_in_content_service(user, tenant)
+    profile = (reg or {}).get("profile")
+    url = _app_url(tenant)
+    await _audit(user, tenant_id, "deploy", res["status"], via=via,
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile)
+    return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
+            "version": res.get("to"), "url": url, "profile": profile}
 
 
 @router.get("/api/deploy/audit")

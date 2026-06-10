@@ -151,7 +151,7 @@ source_functions() {
   source_functions
   unset CODESPACES
   export ORBITAL_ENVIRONMENT=true
-  export ORBITAL_JOB_ID="worker-x86_64-34ea2d-k8s-101-1717000000-abc"
+  export ORBITAL_JOB_ID="mk3p9aqz-7f3a"
 
   result=$(getAppURL "todoapp")
   [[ "$result" == "https://todoapp--"*".autonomous-enablements.whydevslovedynatrace.com" ]]
@@ -161,12 +161,21 @@ source_functions() {
 # computeOrbitalSubdomain tests (canonical Orbital exposure path)
 # ============================================================
 
-@test "computeOrbitalSubdomain: builds {app}--{slug} and strips worker prefix" {
+@test "computeOrbitalSubdomain: builds {app}--{job_id} verbatim" {
   source_functions
-  export ORBITAL_JOB_ID="worker-x86_64-34ea2d-k8s-101-ts-hex"
+  # Canonical short id (base36 ts + hex) used as-is — no worker-prefix stripping.
+  export ORBITAL_JOB_ID="mk3p9aqz-7f3a"
 
   result=$(computeOrbitalSubdomain "todoapp")
-  [[ "$result" == "todoapp--34ea2d-k8s-101-ts-hex" ]]
+  [[ "$result" == "todoapp--mk3p9aqz-7f3a" ]]
+}
+
+@test "computeOrbitalSubdomain: preserves hyphenated app name before the -- separator" {
+  source_functions
+  export ORBITAL_JOB_ID="mk3p9aqz-7f3a"
+
+  result=$(computeOrbitalSubdomain "otel-demo")
+  [[ "$result" == "otel-demo--mk3p9aqz-7f3a" ]]
 }
 
 @test "computeOrbitalSubdomain: empty when ORBITAL_JOB_ID unset" {
@@ -179,7 +188,7 @@ source_functions() {
 
 @test "computeOrbitalSubdomain: label stays within 63-char DNS limit" {
   source_functions
-  export ORBITAL_JOB_ID="worker-x86_64-34ea2d-$(printf 'x%.0s' {1..120})"
+  export ORBITAL_JOB_ID="$(printf 'x%.0s' {1..120})"
 
   result=$(computeOrbitalSubdomain "astroshop")
   [ "${#result}" -le 63 ]

@@ -66,18 +66,47 @@ td,th{padding:5px 8px;border-bottom:1px solid #21262d;text-align:left}
 </style></head><body>
 <header>Deploy the Enablement App to a Dynatrace tenant</header>
 <main>
-<p class=hint>You sign in with <b>your</b> Dynatrace SSO; the app is installed into the entered
-tenant only. No app token is stored. We log user + tenant + action, never credentials.</p>
-<div>
-  <input id=tenant placeholder="https://abc12345.apps.dynatrace.com">
-  <button onclick="go('deploy')">Sign in &amp; Deploy</button>
-  <button class=sec onclick="go('undeploy')">Undeploy</button>
+<p class=hint>Install / upgrade the app into a Dynatrace tenant with a platform token. The token is
+used once and never stored. We log user + tenant + action, never the token.</p>
+
+<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 14px;margin:6px 0;font-size:13px">
+  <b>Platform token scopes</b> — create one in the <b>target</b> tenant
+  (Settings &rarr; Platform tokens) with:
+  <ul style="margin:6px 0 0 0;padding-left:18px">
+    <li><code>app-engine:apps:install</code> — install / upgrade the app</li>
+    <li><code>app-engine:apps:run</code> — run the app's functions</li>
+    <li><code>app-engine:apps:delete</code> — only needed for Undeploy</li>
+  </ul>
+  <div style="margin-top:8px;opacity:.8"><b>COE tenant</b> (geu80787): leave the token blank — Orbital
+  deploys it automatically. Any other tenant needs a token.</div>
 </div>
+<div>
+  <input id=ttenant placeholder="https://abc12345.apps.dynatrace.com"><br>
+  <input id=ttoken type=password placeholder="platform token — blank for COE" style="margin-top:6px"><br>
+  <button style="margin-top:8px" onclick="goToken('deploy')">Deploy / Upgrade</button>
+  <button class=sec style="margin-top:8px" onclick="goToken('undeploy')">Undeploy</button>
+  <span class=msg id=tmsg></span>
+</div>
+
 <h3>Recent deploy activity</h3>
 <table id=audit><tbody><tr><td class=hint>loading…</td></tr></tbody></table>
 <script>
-function go(action){const t=document.getElementById('tenant').value.trim();if(!t)return;
-  location.href='/api/deploy/start?action='+action+'&tenant='+encodeURIComponent(t);}
+async function goToken(action){
+  const t=document.getElementById('ttenant').value.trim(), k=document.getElementById('ttoken').value.trim();
+  const m=document.getElementById('tmsg'); if(!t){m.textContent='tenant required';return;}
+  m.textContent=action+'ing… (deploy can take a minute)';
+  try{
+    const r=await fetch('/api/deploy/token',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action,tenant:t,token:k})});
+    const j=await r.json();
+    if(r.ok){document.getElementById('ttoken').value='';
+      if(action!=='deploy'){m.textContent='✓ undeployed';}
+      else{const s=j.status==='up-to-date'?`already up-to-date (v${j.version})`
+        :j.status==='upgraded'?`upgraded v${j.from} → v${j.version}`:`installed v${j.version}`;
+        m.innerHTML=`✓ ${s} — <a href="${j.url}">${j.url}</a>`+(j.profile?` · profile ${j.profile}`:'');}}
+    else m.textContent='✗ '+(j.detail||'failed');
+  }catch(e){m.textContent='✗ '+e;}
+}
 fetch('/api/deploy/audit?limit=30').then(r=>r.ok?r.json():{audit:[]}).then(({audit})=>{
   const b=document.querySelector('#audit tbody');
   b.innerHTML=audit.length?audit.map(a=>`<tr><td>${a.ts}</td><td>${a.user}</td><td>${a.tenant}</td><td>${a.action}</td><td>${a.result}</td></tr>`).join(''):'<tr><td class=hint>none yet</td></tr>';
@@ -702,6 +731,9 @@ async def api_trigger_fleet(request: Request):
                 "trigger": "fleet",
                 "nightly_run_id": fleet_run_id,
                 "requested_by": role["user"],
+                # Provenance persisted into the job record (resolvable by job id).
+                "user": role["user"],
+                "tenant_user": request.headers.get("x-auth-email", ""),
             }
             await pool.rpush(f"queue:test:{a}", json.dumps(job))
             queued.append({"repo": repo, "arch": a})
@@ -1157,7 +1189,7 @@ async def api_rerun_job(job_id: str, request: Request):
     job_type = original.get("type", "integration-test")
     if job_type not in ("integration-test",):
         raise HTTPException(400, f"Re-run not supported for job type '{job_type}'")
-    new_job_id = str(uuid.uuid4())
+    new_job_id = _new_job_id()
     new_job = {
         "job_id":    new_job_id,
         "repo":      repo,
@@ -1166,6 +1198,8 @@ async def api_rerun_job(job_id: str, request: Request):
         "type":      job_type,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "trigger":   f"rerun-by-{role['user']}",
+        "user":        role["user"],
+        "tenant_user": request.headers.get("x-auth-email", ""),
     }
     await pool.rpush(f"queue:test:{arch}", json.dumps(new_job))
     log.info("Re-queued %s@%s (%s) as %s by %s", repo, ref, arch, new_job_id, role["user"])
@@ -2197,7 +2231,7 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
         "dt", "zsh",
     ]
 
-    if worker_id.startswith("worker-"):
+    if worker_id != "master":
         worker_hash = await pool.hgetall(f"worker:{worker_id}")
         ssh_host = worker_hash.get("ssh_host", "autonomous-enablements-worker")
         cmd = [
@@ -2361,7 +2395,7 @@ async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
     registry_path = "/home/vscode/.cache/dt-framework/app-registry"
 
     cmd = ["docker", "exec", sb_name, "docker", "exec", "dt", "cat", registry_path]
-    if worker_id.startswith("worker-"):
+    if worker_id != "master":
         worker_hash = await pool.hgetall(f"worker:{worker_id}")
         ssh_host = worker_hash.get("ssh_host", "")
         if ssh_host:
@@ -2404,60 +2438,49 @@ async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
     return apps
 
 
+def _b36(n: int) -> str:
+    """Encode a non-negative int in base36 (0-9a-z)."""
+    if n <= 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(digits[r])
+    return "".join(reversed(out))
+
+
+def _new_job_id() -> str:
+    """Canonical job id: base36(epoch_ms)-<4hex>  (e.g. "mk3p9aqz-7f3a").
+
+    Mirrors workers/manager.py and worker-agent/agent.py. Globally unique,
+    chronologically sortable, and a valid DNS label — used as the Redis key,
+    the log filename, and the app subdomain tail ({app}--{id}).
+    """
+    return f"{_b36(int(time.time() * 1000))}-{secrets.token_hex(2)}"
+
+
 async def _find_job_by_subdomain(subdomain: str) -> tuple[str, dict, dict]:
     """Find a running job and app info from a wildcard subdomain label.
 
-    subdomain format: {appname}--{job_id_prefix}
+    subdomain format: {appname}--{job_id}
+    The job_id is the canonical short id (base36 ts + hex) used verbatim as the
+    Redis key, so a direct job:running:{job_id} lookup always resolves it —
+    no prefix scanning or slug-shortening needed.
     Returns (job_id, job_meta, app_info) or ("", {}, {}) if not found.
     """
     if "--" not in subdomain:
         return "", {}, {}
 
-    appname, job_prefix = subdomain.split("--", 1)
+    appname, job_id = subdomain.split("--", 1)
 
-    # Direct lookup first (covers arena job IDs which fit untruncated)
-    meta = await pool.hgetall(f"job:running:{job_prefix}")
-    if meta:
-        apps = await _read_app_registry(job_prefix, meta)
-        app_info = next((a for a in apps if a["name"] == appname), None)
-        if app_info:
-            return job_prefix, meta, app_info
-
-    # Prefix scan for truncated/shortened job IDs.
-    # computeOrbitalSubdomain in functions.sh:
-    #   1. strips "worker-{arch}-" prefix, keeping "{hex6}-{rest}"  (or keeps "master-{rest}")
-    #   2. lowercases + strips non-[a-z0-9-] chars (e.g. _ in x86_64)
-    #   3. truncates to DNS label budget
-    # We must apply the same transform to each job_id before comparing.
-    import re as _re
-    def _slug_normalize(s: str) -> str:
-        return _re.sub(r'[^a-z0-9-]', '', s.lower())
-
-    def _slug_short(s: str) -> str:
-        """Mirror computeOrbitalSubdomain: strip worker-{arch}- prefix."""
-        m = _re.match(r'^worker-[^-]+-([a-f0-9]{6})-(.+)$', s)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
-        return s
-
-    norm_prefix = _slug_normalize(job_prefix)
-    keys = await pool.keys("job:running:*")
-    for raw_key in keys:
-        key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
-        job_id = key.removeprefix("job:running:")
-        # Try full normalized ID first, then shortened form (worker-arch- stripped)
-        norm_short = _slug_normalize(_slug_short(job_id))
-        norm_full  = _slug_normalize(job_id)
-        if not (norm_short.startswith(norm_prefix) or norm_full.startswith(norm_prefix)):
-            continue
-        meta = await pool.hgetall(key)
-        if not meta:
-            continue
-        apps = await _read_app_registry(job_id, meta)
-        app_info = next((a for a in apps if a["name"] == appname), None)
-        if app_info:
-            return job_id, meta, app_info
-
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        return "", {}, {}
+    apps = await _read_app_registry(job_id, meta)
+    app_info = next((a for a in apps if a["name"] == appname), None)
+    if app_info:
+        return job_id, meta, app_info
     return "", {}, {}
 
 
@@ -2675,7 +2698,7 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
         raise HTTPException(status_code=404, detail=f"app '{app_name}' not found in registry")
 
     worker_id = meta.get("worker_id", "")
-    if worker_id.startswith("worker-"):
+    if worker_id != "master":
         worker_hash = await pool.hgetall(f"worker:{worker_id}")
         target_ip = worker_hash.get("host", "127.0.0.1")
     else:
@@ -2795,7 +2818,7 @@ async def proxy_subdomain_app(request: Request, path: str):
         )
 
     worker_id = meta.get("worker_id", "")
-    if worker_id.startswith("worker-"):
+    if worker_id != "master":
         worker_hash = await pool.hgetall(f"worker:{worker_id}")
         target_ip = worker_hash.get("host", "127.0.0.1")
     else:
@@ -3733,7 +3756,7 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
                 "docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
                 "zsh", zsh_flag, body.command]
 
-    worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id.startswith("worker-") else {}
+    worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id != "master" else {}
     ssh_host = worker_rec.get("ssh_host", "")
     if ssh_host:
         full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",

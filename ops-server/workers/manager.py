@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import signal
 import subprocess
 import time
@@ -48,6 +49,30 @@ def _branch_of(job: dict) -> str:
 
 def _triple_of(job: dict) -> str:
     return f"{job['repo']}:{_branch_of(job)}:{job.get('arch', 'arm64')}"
+
+
+def _b36(n: int) -> str:
+    """Encode a non-negative int in base36 (0-9a-z)."""
+    if n <= 0:
+        return "0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(digits[r])
+    return "".join(reversed(out))
+
+
+def _new_job_id() -> str:
+    """Canonical job id: base36(epoch_ms)-<4hex>  (e.g. "mk3p9aqz-7f3a").
+
+    Globally unique, chronologically sortable by plain string compare, and a
+    valid DNS label. It is the single source of truth: the Redis key
+    (job:running:{id}), the log filename, and the app subdomain tail
+    ({app}--{id}). Worker, repo, tenant, and user are stored in the job record
+    and resolved by this id (and shipped to Grail for long-term history).
+    """
+    return f"{_b36(int(time.time() * 1000))}-{secrets.token_hex(2)}"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -362,15 +387,10 @@ class WorkerManager:
                 _, job_json = result
                 job = json.loads(job_json)
                 # Honor a pre-set job_id (e.g. from /api/sync/run); otherwise
-                # generate one with ms precision + 6-char random suffix so 3+
-                # jobs picked up within the same second can't collide.
+                # assign the canonical short id (base36 ts + hex) used as the
+                # Redis key, log filename, and app subdomain tail.
                 if not job.get("job_id"):
-                    import uuid
-                    job_id = (
-                        f"{job['type']}-{job['repo'].split('/')[-1]}"
-                        f"-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
-                    )
-                    job["job_id"] = job_id
+                    job["job_id"] = _new_job_id()
 
                 asyncio.create_task(self._run_with_semaphore(semaphore, job))
                 # Yield so the created task gets to acquire the semaphore
@@ -491,6 +511,15 @@ class WorkerManager:
                     )
                 except Exception as e:
                     log.warning("telemetry report_build_started failed: %s", e)
+
+            # Provenance — a job id resolves to who/where/which-tenant in
+            # history (set at enqueue; shipped to Grail for long retention).
+            if running_key:
+                await self.pool.hset(running_key, mapping={
+                    "user":        job.get("user", ""),
+                    "tenant":      job.get("tenant", "") or DT_ENVIRONMENT,
+                    "tenant_user": job.get("tenant_user", ""),
+                })
 
             try:
                 result = await self._dispatch(job)
