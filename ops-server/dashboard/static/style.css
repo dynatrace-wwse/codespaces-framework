@@ -1482,3 +1482,12 @@ body.role-writer .tab-writer-only { display: inline-block; }
 .content-profile-row .pr-head { display: flex; align-items: center; gap: 10px; }
 .content-profile-row .pr-actions { margin-left: auto; display: flex; gap: 6px; }
 @media (max-width: 700px) { .content-repos { column-count: 1; } }
+
+/* ─── Register Tenant tab ─────────────────────────────────────── */
+.reg-spin { display: none; align-items: center; gap: 10px; margin-top: 12px; font-size: 0.84rem; color: var(--text-2); }
+.reg-spin.busy { display: flex; }
+.reg-spinner { width: 18px; height: 18px; border: 3px solid var(--border-soft); border-top-color: var(--accent); border-radius: 50%; animation: reg-sp 0.8s linear infinite; flex-shrink: 0; }
+@keyframes reg-sp { to { transform: rotate(360deg); } }
+.reg-bar { height: 4px; background: var(--border-soft); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+.reg-bar > i { display: block; height: 100%; width: 30%; background: var(--accent); border-radius: 3px; animation: reg-slide 1.4s ease-in-out infinite; }
+@keyframes reg-slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
