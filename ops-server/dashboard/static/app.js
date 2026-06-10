@@ -3189,7 +3189,7 @@ async function goRegister(action) {
             else {
                 const v = j.version || '?';
                 const s = j.status === 'up-to-date' ? `already up-to-date (v${v})` : j.status === 'upgraded' ? `upgraded v${j.from} → v${v}` : `installed v${v}`;
-                m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '');
+                m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '') + (j.allowlist ? `<br><span class="content-hint">outbound: ${escapeHtml(j.allowlist)}</span>` : '');
             }
             loadRegisterAudit();
         } else if (r.status === 401) {
