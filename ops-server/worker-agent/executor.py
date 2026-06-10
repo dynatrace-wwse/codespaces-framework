@@ -427,6 +427,7 @@ async def execute_daemon(
         repo_dir / ".devcontainer" / ".env",
         overrides=dt_env_overrides,
         orbital_job_id=job_id,
+        tenant=job.get("tenant", ""),
     )
 
     start_time = time.time()
@@ -731,23 +732,45 @@ def _write_env_file(
     env_path: Path,
     overrides: dict[str, str] | None = None,
     orbital_job_id: str = "",
+    tenant: str = "",
 ):
     """Write .devcontainer/.env with DT credentials.
 
-    Uses per-session overrides (provisioned tokens) when provided, falls back
-    to the worker-level static env vars (used by integration tests).
+    Multi-tenancy hard rule: never write CoE tokens into a non-CoE tenant's .env.
+      - ``overrides`` present (app-minted per-tenant tokens) → use ONLY those DT
+        creds (never seed the static CoE values underneath them).
+      - tenant is CoE / unset (integration tests, COE trainings) → static CoE creds.
+      - non-CoE tenant with NO minted tokens → write the tenant URL but NO tokens
+        (fail closed). The repo's variablesNeeded fails the codespace loudly if it
+        needs them — CoE creds are never leaked to another tenant.
     """
+    from urllib.parse import urlparse
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    resolved = {
-        "DT_ENVIRONMENT":    DT_ENVIRONMENT,
-        "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
-        "DT_INGEST_TOKEN":   DT_INGEST_TOKEN,
-        "DT_LLM_TOKEN":      DT_LLM_TOKEN,
-    }
+    overrides = overrides or {}
+    coe_host = (urlparse(DT_ENVIRONMENT).hostname or "").lower()
+    job_host = ""
+    if tenant:
+        job_host = (urlparse(tenant if "://" in tenant else f"https://{tenant}").hostname or "").lower()
+    is_coe = (not job_host) or job_host == coe_host
+
+    if overrides:
+        resolved = dict(overrides)
+    elif is_coe:
+        resolved = {
+            "DT_ENVIRONMENT":    DT_ENVIRONMENT,
+            "DT_OPERATOR_TOKEN": DT_OPERATOR_TOKEN,
+            "DT_INGEST_TOKEN":   DT_INGEST_TOKEN,
+            "DT_LLM_TOKEN":      DT_LLM_TOKEN,
+        }
+    else:
+        log.warning(
+            "Daemon %s targets non-CoE tenant %s with no per-tenant tokens; writing "
+            ".env WITHOUT DT tokens (repo variablesNeeded will report if required).",
+            orbital_job_id, tenant)
+        resolved = {"DT_ENVIRONMENT": tenant or ""}
+
     if orbital_job_id:
         resolved["ORBITAL_JOB_ID"] = orbital_job_id
-    if overrides:
-        resolved.update(overrides)
     env_path.write_text("".join(f"{k}={v}\n" for k, v in resolved.items() if v))
 
 
