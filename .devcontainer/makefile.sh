@@ -77,14 +77,14 @@ run(){
 }
 
 start(){
-    status=$(docker inspect -f '{{.State.Status}}' "$IMAGENAME")
-    if [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+    container_state=$(docker inspect -f '{{.State.Status}}' "$IMAGENAME")
+    if [ "$container_state" = "exited" ] || [ "$container_state" = "dead" ]; then
         echo "Container is stopped removing container."
         # Add repository name to the environment variables for the container
         docker rm $IMAGENAME
         echo "Starting a new container"
         run 
-    elif  [ "$status" = "running" ]; then 
+    elif  [ "$container_state" = "running" ]; then
         echo "Container $IMAGENAME is running, attaching new shell to it"
         docker exec -it $IMAGENAME zsh 
     else
@@ -161,14 +161,14 @@ integration(){
     CMD_TEST=" ./.devcontainer/test/integration.sh"
     CMD+="$CMD_TEST"
     
-    status=$(docker inspect -f '{{.State.Status}}' "$IMAGENAME")
-    if [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+    container_state=$(docker inspect -f '{{.State.Status}}' "$IMAGENAME")
+    if [ "$container_state" = "exited" ] || [ "$container_state" = "dead" ]; then
         echo "Container is stopped removing container."
         # Add repository name to the environment variables for the container
         docker rm $IMAGENAME
         echo "Starting a new container"
         run 
-    elif  [ "$status" = "running" ]; then 
+    elif  [ "$container_state" = "running" ]; then
         # FIXME: Better to load test functions in framework or call the script from a function in the framework in an extra shell. 
         echo "Container $IMAGENAME is running, running the tests inside the running container (WIP)..."
         docker exec -t $IMAGENAME "zsh"

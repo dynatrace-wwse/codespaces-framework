@@ -742,8 +742,8 @@ startK3dCluster(){
 
   # Check if K3d cluster exists
   if k3d cluster list 2>/dev/null | grep -q "enablement"; then
-    local status
-    status=$(k3d cluster list -o json 2>/dev/null | python3 -c "
+    local cluster_state
+    cluster_state=$(k3d cluster list -o json 2>/dev/null | python3 -c "
 import sys, json
 clusters = json.load(sys.stdin)
 for c in clusters:
@@ -754,7 +754,7 @@ for c in clusters:
         break
 " 2>/dev/null)
 
-    if [[ "$status" == "running" ]]; then
+    if [[ "$cluster_state" == "running" ]]; then
       printWarn "K3d cluster already running, attaching..."
       attachK3dCluster
     else
