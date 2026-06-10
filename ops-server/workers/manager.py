@@ -923,7 +923,8 @@ class WorkerManager:
         log.info("Cloning %s @ %s for job %s", head_repo, ref, job_id)
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id)
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
+                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
 
         # Sysbox-isolated nested containers (see executor.py for the same
         # architecture): outer Sysbox container runs docker:25-dind; inner
@@ -1144,7 +1145,8 @@ class WorkerManager:
         log.info("Cloning %s @ %s for daemon %s", head_repo, ref, job_id)
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id)
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
+                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -1429,7 +1431,8 @@ class WorkerManager:
         log.info("Cloning %s @ %s for framework-sysbox %s (%s)", repo, ref, suite, job_id)
         await self._git_clone(repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
-        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id)
+        self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
+                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -1779,7 +1782,8 @@ class WorkerManager:
         )
         return content
 
-    def _write_env_file(self, env_path: Path, arch: str, job_id: str = ""):
+    def _write_env_file(self, env_path: Path, arch: str, job_id: str = "",
+                        dt_env: dict | None = None, tenant: str = ""):
         """Mirror the GHA workflow's .env writing.
 
         Adds K3D_* port overrides so the in-container k3d cluster doesn't
@@ -1792,16 +1796,54 @@ class WorkerManager:
 
         ORBITAL_JOB_ID is passed so the framework can compute the wildcard
         subdomain URL for each app (e.g. astroshop--<slug>.autonomous-enablements.*).
+
+        Multi-tenancy DT credentials (hard rule: never use CoE tokens on another
+        tenant):
+          - ``dt_env`` present  → the app minted per-tenant tokens; write THOSE.
+          - tenant is CoE / unset (internal framework tests, COE trainings) → the
+            static CoE creds are fine.
+          - non-CoE tenant with NO minted tokens → write the tenant URL but NO
+            tokens (fail closed). The repo's ``variablesNeeded`` then fails the
+            codespace loudly if it requires them — we never leak CoE creds.
         """
         import socket
+        from urllib.parse import urlparse
         external_hostname = os.environ.get("EXTERNAL_HOSTNAME") or socket.gethostname()
+
+        dt_env = dt_env or {}
+        coe_host = (urlparse(DT_ENVIRONMENT).hostname or "").lower()
+        job_host = ""
+        if tenant:
+            job_host = (urlparse(tenant if "://" in tenant else f"https://{tenant}").hostname or "").lower()
+        is_coe = (not job_host) or job_host == coe_host
+
+        if dt_env:
+            dt_environment = dt_env.get("DT_ENVIRONMENT") or tenant or DT_ENVIRONMENT
+            dt_operator = dt_env.get("DT_OPERATOR_TOKEN", "")
+            dt_ingest = dt_env.get("DT_INGEST_TOKEN", "")
+            dt_oneagent = dt_env.get("DT_ONEAGENT_TOKEN", "")
+        elif is_coe:
+            dt_environment, dt_operator, dt_ingest, dt_oneagent = (
+                DT_ENVIRONMENT, DT_OPERATOR_TOKEN, DT_INGEST_TOKEN, "")
+        else:
+            log.warning(
+                "Job %s targets non-CoE tenant %s but no per-tenant tokens were "
+                "provided; writing .env WITHOUT DT tokens (the repo's variablesNeeded "
+                "will report if any are required).", job_id, tenant)
+            dt_environment, dt_operator, dt_ingest, dt_oneagent = (tenant or ""), "", "", ""
+
+        dt_lines = (
+            f"DT_ENVIRONMENT={dt_environment}\n"
+            f"DT_OPERATOR_TOKEN={dt_operator}\n"
+            f"DT_INGEST_TOKEN={dt_ingest}\n"
+        )
+        if dt_oneagent:
+            dt_lines += f"DT_ONEAGENT_TOKEN={dt_oneagent}\n"
 
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(
-            f"DT_ENVIRONMENT={DT_ENVIRONMENT}\n"
-            f"DT_OPERATOR_TOKEN={DT_OPERATOR_TOKEN}\n"
-            f"DT_INGEST_TOKEN={DT_INGEST_TOKEN}\n"
-            f"K3D_CLUSTER_NAME=master-{arch}\n"
+            dt_lines
+            + f"K3D_CLUSTER_NAME=master-{arch}\n"
             f"K3D_LB_HTTP_PORT=30080\n"
             f"K3D_LB_HTTPS_PORT=30443\n"
             f"K3D_API_PORT=6444\n"
