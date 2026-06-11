@@ -46,7 +46,9 @@ app = FastAPI(title="Enablement Ops Dashboard", version="2.0.0")
 # Content distribution service (multi-tenant content delivery, Phase 1):
 # serves curated profiles + proxies private-repo content with the Orbital
 # GitHub token, gated by a per-tenant X-Content-Key.
-from dashboard.content_service import router as content_router  # noqa: E402
+from dashboard.content_service import (  # noqa: E402
+    router as content_router, classify_tenant, resolve_profile, _load_profile,
+)
 app.include_router(content_router)
 
 # SSO-delegated app deploy (Phase 1: OAuth flow + audit).
@@ -3279,18 +3281,40 @@ async def _fetch_arena_catalog() -> list[dict]:
     return trainings
 
 
+def _filter_trainings_by_profile(trainings: list[dict], tenant: str) -> list[dict]:
+    """Keep only the hands-on trainings whose repo is in the tenant's content profile.
+    The Arena catalog is the full set of hands-on repos; without this, every tenant
+    sees all of them regardless of its profile. Unknown/invalid tenant → no filter."""
+    try:
+        tenant_id, domain = classify_tenant(tenant)
+    except Exception:
+        return trainings
+    profile = _load_profile(resolve_profile(tenant_id, domain))
+    allowed = {(s.get("repo") or "").lower() for s in profile.get("sources", [])}
+    if not allowed:
+        return trainings
+
+    def repo_of(t: dict) -> str:
+        return "/".join((t.get("repoUrl") or "").rstrip("/").split("/")[-2:]).lower()
+
+    return [t for t in trainings if repo_of(t) in allowed]
+
+
 @app.get("/api/arena/trainings")
-async def api_arena_trainings():
+async def api_arena_trainings(tenant: str = ""):
     """Return available Arena trainings scraped from real repos.
 
     Titles come from mkdocs.yaml site_name. Cached in Redis for 5 minutes.
-    """
+    When `tenant` is given, the list is filtered to that tenant's content profile
+    (so e.g. a 'core' tenant only sees the hands-on trainings in 'core')."""
     cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
     if cached:
-        return json.loads(cached)
-
-    trainings = await _fetch_arena_catalog()
-    await pool.set(_ARENA_CATALOG_CACHE_KEY, json.dumps(trainings), ex=_ARENA_CATALOG_TTL)
+        trainings = json.loads(cached)
+    else:
+        trainings = await _fetch_arena_catalog()
+        await pool.set(_ARENA_CATALOG_CACHE_KEY, json.dumps(trainings), ex=_ARENA_CATALOG_TTL)
+    if tenant:
+        trainings = _filter_trainings_by_profile(trainings, tenant)
     return trainings
 
 
