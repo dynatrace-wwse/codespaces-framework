@@ -3532,6 +3532,11 @@ async def api_arena_session_status(job_id: str):
             }
         return {"jobId": job_id, "status": "expired"}
 
+    # Termination requested — report gone immediately even while the worker is still
+    # tearing the container down (slow). Stops the user from clicking Terminate twice.
+    if meta.get("terminating"):
+        return {"jobId": job_id, "status": "terminated"}
+
     # Check livelog for readiness signal written by execute_daemon
     livelog = await pool.get(f"job:livelog:{job_id}")
     if livelog and "Daemon ready" in livelog:
@@ -3567,6 +3572,8 @@ async def api_arena_user_session(userId: str, trainingId: str, tenant: str = "")
             meta = await pool.hgetall(key)
             if not meta:
                 continue
+            if meta.get("terminating"):
+                continue  # being torn down — treat as gone
             tenant_match = (not tenant) or tenant in (
                 meta.get("dt_tenant_url", ""), meta.get("arena_tenant", ""))
             if (meta.get("arena_user") == userId
@@ -4135,6 +4142,10 @@ async def api_arena_terminate(job_id: str):
         except Exception as exc:
             log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
 
+    # Mark terminating IMMEDIATELY so the UI sees the session gone right away — the
+    # worker's container teardown is slow, but session-status/find-session treat a
+    # terminating job as gone so the user doesn't have to click Terminate repeatedly.
+    await pool.hset(f"job:running:{job_id}", "terminating", "1")
     await pool.publish("ops:terminate", job_id)
     log.info("Arena termination requested for %s", job_id)
     return {"status": "termination_requested", "job_id": job_id}
