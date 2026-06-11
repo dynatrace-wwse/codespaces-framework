@@ -1,11 +1,12 @@
 """Tests for sync.commands.validate — repos.yaml + local validation."""
 
+import textwrap
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from sync.commands.validate import run
+from sync.commands.validate import run, check_post_create_credentials
 
 
 class TestValidateCommand:
@@ -123,3 +124,105 @@ class TestValidateCommand:
                     run(args)
                     out = capsys.readouterr().out
                     assert "All 1 repos accessible" in out
+
+
+def _pc(body):
+    return textwrap.dedent(body).lstrip("\n")
+
+
+class TestPostCreateCredentialGuard:
+    """The DEPLOYS-DT contract: a post-create.sh that calls
+    dynatraceDeployOperator must validate credentials with
+    `variablesNeeded ... DT_OPERATOR_TOKEN:true` first."""
+
+    def test_validate_before_deploy_passes(self):
+        content = _pc(
+            """
+            #!/bin/bash
+            source .devcontainer/util/source_framework.sh
+            variablesNeeded DT_ENVIRONMENT:true DT_OPERATOR_TOKEN:true DT_INGEST_TOKEN:false || exit 1
+            setUpTerminal
+            startK3dCluster
+            dynatraceDeployOperator
+            deployApplicationMonitoring
+            """
+        )
+        assert check_post_create_credentials(content) == []
+
+    def test_deploy_without_validate_fails(self):
+        content = _pc(
+            """
+            #!/bin/bash
+            source .devcontainer/util/source_framework.sh
+            setUpTerminal
+            dynatraceDeployOperator
+            deployApplicationMonitoring
+            """
+        )
+        issues = check_post_create_credentials(content)
+        assert len(issues) == 1
+        assert "never calls variablesNeeded" in issues[0]
+
+    def test_validate_after_deploy_fails(self):
+        content = _pc(
+            """
+            #!/bin/bash
+            source .devcontainer/util/source_framework.sh
+            dynatraceDeployOperator
+            variablesNeeded DT_OPERATOR_TOKEN:true || exit 1
+            """
+        )
+        issues = check_post_create_credentials(content)
+        assert len(issues) == 1
+        assert "after" in issues[0]
+
+    def test_no_deploy_is_not_applicable(self):
+        content = _pc(
+            """
+            #!/bin/bash
+            source .devcontainer/util/source_framework.sh
+            setUpTerminal
+            startK3dCluster
+            deployTodoApp
+            """
+        )
+        assert check_post_create_credentials(content) == []
+
+    def test_commented_deploy_does_not_trigger(self):
+        # k8s-101 ships dynatraceDeployOperator commented out (students run it
+        # manually as the lab) — the guard must not flag it.
+        content = _pc(
+            """
+            #!/bin/bash
+            source .devcontainer/util/source_framework.sh
+            #dynatraceDeployOperator
+            deployTodoApp
+            """
+        )
+        assert check_post_create_credentials(content) == []
+
+    def test_validate_requires_operator_token_true(self):
+        # A variablesNeeded that does not require the operator token does not
+        # satisfy the contract.
+        content = _pc(
+            """
+            #!/bin/bash
+            variablesNeeded DT_ENVIRONMENT:true
+            dynatraceDeployOperator
+            """
+        )
+        issues = check_post_create_credentials(content)
+        assert len(issues) == 1
+        assert "never calls variablesNeeded" in issues[0]
+
+    def test_indented_deploy_still_triggers(self):
+        content = _pc(
+            """
+            #!/bin/bash
+            if true; then
+                dynatraceDeployOperator
+            fi
+            """
+        )
+        issues = check_post_create_credentials(content)
+        assert len(issues) == 1

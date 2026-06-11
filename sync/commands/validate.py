@@ -75,11 +75,80 @@ def _validate_local(repo_entry, repo_path):
         else:
             print(f"  ⚠️  Makefile outdated — run sync migrate to update")
 
+    # Verify a DT-deploying post-create.sh validates credentials first
+    _validate_post_create(path)
+
     # Verify README badges and footer
     _validate_readme(repo_entry, path)
 
     # Verify docs structure
     _validate_docs(repo_entry, path)
+
+
+# Deploy functions that consume Dynatrace credentials (DT_OPERATOR_TOKEN) at
+# runtime. A post-create.sh that calls any of these MUST first declare the
+# credentials via variablesNeeded so a missing Codespaces secret fails loudly
+# instead of half-creating the container. dynatraceDeployOperator is always the
+# first DT step, so it is sufficient as the trigger.
+DT_DEPLOY_FUNCS = ("dynatraceDeployOperator",)
+
+
+def check_post_create_credentials(content):
+    """Guard: a DT-deploying post-create.sh must validate credentials first.
+
+    Returns a list of issue strings. Empty list means OK or not applicable
+    (the script does not actively deploy Dynatrace).
+
+    Rules (only active — uncommented — lines count):
+      - find the first line that calls a DT_DEPLOY_FUNCS function
+      - if none: no Dynatrace deploy, nothing to enforce -> []
+      - otherwise require an earlier `variablesNeeded ... DT_OPERATOR_TOKEN:true`
+        line; missing or positioned after the deploy is an issue.
+    """
+    deploy_re = re.compile(r"^\s*(" + "|".join(DT_DEPLOY_FUNCS) + r")\b")
+    validate_re = re.compile(r"^\s*variablesNeeded\b.*\bDT_OPERATOR_TOKEN:true\b")
+
+    deploy_line = None
+    validate_line = None
+    for i, line in enumerate(content.splitlines()):
+        if deploy_line is None and deploy_re.match(line):
+            deploy_line = i
+        if validate_line is None and validate_re.match(line):
+            validate_line = i
+
+    if deploy_line is None:
+        return []
+
+    if validate_line is None:
+        return [
+            "deploys Dynatrace (dynatraceDeployOperator) but never calls "
+            "variablesNeeded DT_OPERATOR_TOKEN:true — missing credentials would "
+            "half-create the container instead of failing loudly"
+        ]
+    if validate_line > deploy_line:
+        return [
+            "variablesNeeded DT_OPERATOR_TOKEN:true runs after "
+            "dynatraceDeployOperator — credential validation must come first"
+        ]
+    return []
+
+
+def _validate_post_create(path):
+    """Validate that a DT-deploying post-create.sh validates credentials first."""
+    from pathlib import Path
+
+    pc = Path(path) / ".devcontainer/post-create.sh"
+    if not pc.exists():
+        print(f"  ❌ post-create.sh missing")
+        return
+
+    issues = check_post_create_credentials(pc.read_text())
+    if issues:
+        print(f"  ⚠️  post-create credentials: {len(issues)} issue(s)")
+        for issue in issues:
+            print(f"    ❌ {issue}")
+    else:
+        print(f"  ✅ post-create credential validation")
 
 
 def _validate_docs(repo_entry, path):
