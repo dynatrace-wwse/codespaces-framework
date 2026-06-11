@@ -1100,6 +1100,11 @@ async def api_agent_fix_issue(request: Request):
     if not repo or not issue_number:
         raise HTTPException(400, "repo and issue_number are required")
 
+    # Fetch the issue title + body so the agent has the actual report to triage.
+    # Without this the prompt builder has no title/body (the failure that crashed
+    # fix-issue with KeyError: 'title').
+    meta = await _fetch_issue_meta(repo, issue_number)
+
     import uuid as _uuid
     ts = int(time.time() * 1000)
     repo_name = repo.split("/")[-1]
@@ -1116,11 +1121,15 @@ async def api_agent_fix_issue(request: Request):
         "git_author_email": "hj.sergio@gmail.com",
         "timestamp":     datetime.utcnow().isoformat(),
         "issue_number":  issue_number,
+        "title":         meta["title"],
+        "body":          meta["body"],
+        "issue_url":     meta["url"],
         "instructions":  instructions,
         "context":       "fix-issue",
     }
     await pool.rpush("queue:agent", json.dumps(job))
-    log.info("Queued fix-issue job %s for %s #%s by %s", job_id, repo, issue_number, user)
+    log.info("Queued fix-issue job %s for %s #%s (%r) by %s",
+             job_id, repo, issue_number, meta["title"][:60], user)
     return {"job_id": job_id, "status": "queued", "repo": repo, "issue_number": issue_number}
 
 
@@ -1861,6 +1870,43 @@ async def _fetch_gha_failed_log(repo: str, branch: str) -> str:
 
     log_text = stdout.decode(errors="replace")
     return log_text[-16384:] if len(log_text) > 16384 else log_text
+
+
+async def _fetch_issue_meta(repo: str, issue_number) -> dict:
+    """Fetch a GitHub issue's title + body at trigger time (uncached — must be fresh).
+
+    Returns {"title": str, "body": str, "state": str, "url": str}. On any failure
+    returns empty strings so the caller can still enqueue (the agent degrades to a
+    title-less prompt rather than the job crashing). Never raises.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "issue", "view", str(issue_number),
+        "--repo", repo,
+        "--json", "title,body,state,url",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except asyncio.TimeoutError:
+        proc.kill()
+        log.warning("gh issue view timed out for %s #%s", repo, issue_number)
+        return {"title": "", "body": "", "state": "", "url": ""}
+    if proc.returncode != 0:
+        log.warning("gh issue view failed for %s #%s: %s",
+                    repo, issue_number, stderr.decode(errors="replace")[:300])
+        return {"title": "", "body": "", "state": "", "url": ""}
+    try:
+        data = json.loads(stdout.decode())
+    except Exception:
+        log.warning("gh issue view JSON parse error for %s #%s", repo, issue_number)
+        return {"title": "", "body": "", "state": "", "url": ""}
+    return {
+        "title": data.get("title", "") or "",
+        "body":  data.get("body", "") or "",
+        "state": data.get("state", "") or "",
+        "url":   data.get("url", "") or "",
+    }
 
 
 # GitHub returns these on a burst of concurrent gh calls (secondary rate limit /
@@ -3486,6 +3532,11 @@ async def api_arena_session_status(job_id: str):
             }
         return {"jobId": job_id, "status": "expired"}
 
+    # Termination requested — report gone immediately even while the worker is still
+    # tearing the container down (slow). Stops the user from clicking Terminate twice.
+    if meta.get("terminating"):
+        return {"jobId": job_id, "status": "terminated"}
+
     # Check livelog for readiness signal written by execute_daemon
     livelog = await pool.get(f"job:livelog:{job_id}")
     if livelog and "Daemon ready" in livelog:
@@ -3506,11 +3557,13 @@ async def api_arena_session_status(job_id: str):
 
 
 @app.get("/api/arena/user-session")
-async def api_arena_user_session(userId: str, trainingId: str):
-    """Find an existing running session for a given user + training.
+async def api_arena_user_session(userId: str, trainingId: str, tenant: str = ""):
+    """Find an existing running session for a given user + training + tenant.
 
-    Scans job:running:enablement-* keys and returns the first match.
-    Returns 404 if none found.
+    Session uniqueness is (user, tenant, training): the SAME user may have a
+    separate environment per tenant, so a session in a DIFFERENT tenant must NOT
+    match. `tenant` is the caller's own environment URL (getEnvironmentUrl()),
+    compared against the job's stored tenant URL/id. Returns 404 if none found.
     """
     cursor = 0
     while True:
@@ -3519,7 +3572,12 @@ async def api_arena_user_session(userId: str, trainingId: str):
             meta = await pool.hgetall(key)
             if not meta:
                 continue
-            if meta.get("arena_user") == userId and meta.get("training_id") == trainingId:
+            if meta.get("terminating"):
+                continue  # being torn down — treat as gone
+            tenant_match = (not tenant) or tenant in (
+                meta.get("dt_tenant_url", ""), meta.get("arena_tenant", ""))
+            if (meta.get("arena_user") == userId
+                    and meta.get("training_id") == trainingId and tenant_match):
                 job_id = meta.get("job_id", key.split(":")[-1])
                 livelog = await pool.get(f"job:livelog:{job_id}")
                 if livelog and "Daemon ready" in livelog:
@@ -4084,6 +4142,10 @@ async def api_arena_terminate(job_id: str):
         except Exception as exc:
             log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
 
+    # Mark terminating IMMEDIATELY so the UI sees the session gone right away — the
+    # worker's container teardown is slow, but session-status/find-session treat a
+    # terminating job as gone so the user doesn't have to click Terminate repeatedly.
+    await pool.hset(f"job:running:{job_id}", "terminating", "1")
     await pool.publish("ops:terminate", job_id)
     log.info("Arena termination requested for %s", job_id)
     return {"status": "termination_requested", "job_id": job_id}
