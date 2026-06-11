@@ -378,6 +378,19 @@ async def execute_integration_test(
     }
 
 
+def daemon_provisioned(exit_code: int) -> bool:
+    """Whether a daemon's setup brought the environment up.
+
+    A daemon only "comes up" — emits the ``Daemon ready`` marker the Arena
+    session-status keys on, blocks on ``docker wait``, and reports passed — when
+    its postCreate/postStart exited 0. A non-zero exit (e.g. the repo's
+    ``variablesNeeded`` failing closed on a missing DT token) means it never
+    provisioned, so the session must be reported failed (red banner + log)
+    rather than a broken "ready" shell.
+    """
+    return exit_code == 0
+
+
 async def execute_daemon(
     job: dict,
     redis_pool=None,
@@ -438,6 +451,7 @@ async def execute_daemon(
 
     sections = []
     rc = 0
+    failed_step = ""
     livelog_key = f"job:livelog:{job_id}" if redis_pool is not None else None
 
     try:
@@ -536,27 +550,37 @@ async def execute_daemon(
             sections.append(step_out)
             if proc.returncode != 0:
                 rc = proc.returncode
-                msg = f"\n=== {label} failed (rc={rc}) — daemon environment may be incomplete ===\n"
+                failed_step = label
+                msg = f"\n=== {label} failed (rc={rc}) — environment did not provision ===\n"
                 sections.append(msg)
                 if livelog_key:
                     await redis_pool.append(livelog_key, msg)
+                break
 
-        ready_msg = (
-            "\n=== Daemon ready — environment is up ===\n"
-            "=== Connect via the Shell button. Terminate when done. ===\n"
-        )
-        sections.append(ready_msg)
-        if livelog_key:
-            await redis_pool.append(livelog_key, ready_msg)
-            await redis_pool.expire(livelog_key, 86400)
+        # Only a clean setup brings the environment up. On failure do NOT emit the
+        # readiness marker (session-status keys on it) and do NOT block on docker
+        # wait — return immediately so the session is reported failed.
+        if daemon_provisioned(rc):
+            ready_msg = (
+                "\n=== Daemon ready — environment is up ===\n"
+                "=== Connect via the Shell button. Terminate when done. ===\n"
+            )
+            sections.append(ready_msg)
+            if livelog_key:
+                await redis_pool.append(livelog_key, ready_msg)
+                await redis_pool.expire(livelog_key, 86400)
 
-        log.info("Daemon %s ready — waiting for termination", job_id)
-        wait_proc = await asyncio.create_subprocess_exec(
-            "docker", "wait", sb_name,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await wait_proc.wait()
+            log.info("Daemon %s ready — waiting for termination", job_id)
+            wait_proc = await asyncio.create_subprocess_exec(
+                "docker", "wait", sb_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await wait_proc.wait()
+        else:
+            log.warning(
+                "Daemon %s setup failed at %s (rc=%s) — not marking ready",
+                job_id, failed_step, rc)
 
     except Exception as e:
         sections.append(f"\n=== daemon error: {e} ===\n")
@@ -593,9 +617,10 @@ async def execute_daemon(
         "ref": ref,
         "exit_code": rc,
         "duration_seconds": duration,
-        "passed": True,
+        "passed": daemon_provisioned(rc),
         "timed_out": False,
-        "failed_step": "",
+        "failed_step": failed_step,
+        "error": "" if daemon_provisioned(rc) else f"{failed_step or 'setup'} failed (rc={rc}) — environment did not provision",
         "log_file": str(log_file),
     }
 
