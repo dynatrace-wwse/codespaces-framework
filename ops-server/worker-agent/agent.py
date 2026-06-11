@@ -94,6 +94,17 @@ def _triple_of(job: dict, default_arch: str) -> str:
     return f"{job['repo']}:{_branch_of(job)}:{job.get('arch', default_arch)}"
 
 
+def daemon_failed(job: dict, result: dict) -> bool:
+    """Whether a daemon job's setup (postCreate/postStart) failed to provision.
+
+    A daemon whose setup exited non-zero never came up, so the Arena session
+    must be reported failed (red banner + retained log) instead of a silent
+    "completed". Integration tests keep their own completed-with-passed-flag
+    semantics, so this is daemon-scoped.
+    """
+    return job.get("type") == "daemon" and bool((result or {}).get("exit_code", 0))
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -655,7 +666,12 @@ class WorkerAgent:
                 else:
                     result = await execute_integration_test(job, redis_pool=self.pool, slot=slot)
                 job["result"] = result
-                job["status"] = "completed"
+                if daemon_failed(job, result):
+                    # Setup exited non-zero — the environment never provisioned.
+                    job["status"] = "failed"
+                    healthy = False
+                else:
+                    job["status"] = "completed"
             except Exception as e:
                 log.error("Job %s failed: %s", job_id, e)
                 job["result"] = {"error": str(e)}
@@ -682,6 +698,17 @@ class WorkerAgent:
                 await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
                 await self.pool.ltrim("jobs:completed", -500, -1)
+                # Terminal record that OUTLIVES job:running so the Arena
+                # session-status endpoint can report failed/terminated/completed
+                # (drives the red banner + retained log). Mirrors workers/manager.py;
+                # without it a finished AMD daemon resolved to a bare "expired".
+                final_rec = {
+                    "status":      job.get("status", "completed"),
+                    "finished_at": job["finished_at"],
+                    "error":       str((job.get("result") or {}).get("error", ""))[:500],
+                }
+                await self.pool.hset(f"job:final:{job_id}", mapping=final_rec)
+                await self.pool.expire(f"job:final:{job_id}", 7 * 24 * 3600)
                 await self.pool.delete(running_key)
                 if lock_key:
                     await self.pool.delete(lock_key)
