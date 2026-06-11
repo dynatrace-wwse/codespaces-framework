@@ -26,6 +26,7 @@ catch-all, same as /api/arena/*):
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -73,6 +74,10 @@ def classify_tenant(tenant_url: str | None) -> tuple[str, str]:
     for suffix, cls in DOMAIN_SUFFIXES.items():
         if host.endswith(suffix):
             tenant_id = host[: -len(suffix)].split(".")[0]
+            # Sprint/dev env URLs carry a cluster suffix, e.g. 'ydi9582h-1' — strip it
+            # so the id matches the tenant_map key ('ydi9582h'). Otherwise the lookup
+            # misses and the tenant falls back to the domain default profile.
+            tenant_id = re.sub(r"-\d+$", "", tenant_id)
             if tenant_id:
                 return tenant_id, cls
     raise HTTPException(403, "Content is only served to Dynatrace tenants (prod/sprint/dev).")
