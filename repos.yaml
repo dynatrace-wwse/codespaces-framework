@@ -182,16 +182,6 @@ repos:
     duration: "2h"
 
   # ── Demos ──
-  - name: demo-agentic-ai-with-nvidia
-    repo: dynatrace-wwse/demo-agentic-ai-with-nvidia
-    status: active
-    maintainer: "@shinojosa"
-    description: "Hands-on demo showcasing agentic AI workflows powered by NVIDIA with full Dynatrace observability. Trace AI agents end-to-end, monitor model performance, and detect issues in real-time."
-    tags: [gen-ai]
-    title: "Agentic AI with NVIDIA"
-    primary_tag: gen-ai
-    duration: "1.5h"
-
   - name: demo-mcp-unguard
     repo: dynatrace-wwse/demo-mcp-unguard
     status: active

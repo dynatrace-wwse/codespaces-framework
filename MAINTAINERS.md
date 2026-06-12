@@ -8,7 +8,6 @@ Repository maintainers identified from git commit history.
 | bizobs-journey-simulator | @shinojosa, @lawrobar90 |
 | bug-busters | @shinojosa, @joshDynatrace (Joshua Hendrick), Diego Quispe |
 | codespaces-tracker | @shinojosa |
-| demo-agentic-ai-with-nvidia | @shinojosa |
 | demo-astroshop-problems | @shinojosa |
 | demo-astroshop-runtime-optimization | @shinojosa |
 | demo-mcp-unguard | @shinojosa |

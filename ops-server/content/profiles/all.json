@@ -108,13 +108,6 @@
       "branch": "main"
     },
     {
-      "key": "agentic-ai-nvidia",
-      "category": "hands-on",
-      "categoryLabel": "Hands-On Trainings",
-      "repo": "dynatrace-wwse/demo-agentic-ai-with-nvidia",
-      "branch": "main"
-    },
-    {
       "key": "mcp-unguard",
       "category": "hands-on",
       "categoryLabel": "Hands-On Trainings",
