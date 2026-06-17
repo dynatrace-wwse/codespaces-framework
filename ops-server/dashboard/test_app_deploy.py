@@ -131,32 +131,73 @@ def test_deploy_with_status_skips_when_up_to_date():
     saved_ver = dep._app_version
     saved_inst = dep._get_installed
     saved_run = dep._run_deploy
+    saved_sync = dep._sync_repo
     ran = {"called": False}
     async def fake_installed(t, u): return "1.2.3"
     async def fake_run(t, u): ran["called"] = True; return 0, ""
+    async def fake_sync(): return True, "master@abc"
     dep._app_version = lambda: "1.2.3"
     dep._get_installed = fake_installed
     dep._run_deploy = fake_run
+    dep._sync_repo = fake_sync
     try:
         res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
         assert res == {"status": "up-to-date", "to": "1.2.3"}
         assert ran["called"] is False
     finally:
-        dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
+        dep._app_version = saved_ver; dep._get_installed = saved_inst
+        dep._run_deploy = saved_run; dep._sync_repo = saved_sync
 
 
 def test_deploy_with_status_upgrades_when_older():
-    saved_ver = dep._app_version; saved_inst = dep._get_installed; saved_run = dep._run_deploy
+    saved_ver = dep._app_version; saved_inst = dep._get_installed
+    saved_run = dep._run_deploy; saved_sync = dep._sync_repo
     async def fake_installed(t, u): return "1.0.0"
     async def fake_run(t, u): return 0, "ok"
+    async def fake_sync(): return True, "master@abc"
     dep._app_version = lambda: "1.2.0"
     dep._get_installed = fake_installed
     dep._run_deploy = fake_run
+    dep._sync_repo = fake_sync
     try:
         res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
         assert res == {"status": "upgraded", "from": "1.0.0", "to": "1.2.0"}
     finally:
-        dep._app_version = saved_ver; dep._get_installed = saved_inst; dep._run_deploy = saved_run
+        dep._app_version = saved_ver; dep._get_installed = saved_inst
+        dep._run_deploy = saved_run; dep._sync_repo = saved_sync
+
+
+def test_sync_repo_skips_when_not_a_git_checkout():
+    # No .git → best-effort no-op, no subprocess, deploy still proceeds on the caller side.
+    saved = dep.APP_REPO_DIR
+    dep.APP_REPO_DIR = "/nonexistent/app/repo"
+    try:
+        ok, msg = asyncio.run(dep._sync_repo())
+    finally:
+        dep.APP_REPO_DIR = saved
+    assert ok is False and "not a git checkout" in msg
+
+
+def test_deploy_with_status_syncs_repo_before_building():
+    # _sync_repo must run BEFORE the build so _app_version()/dt-app see freshly pulled code.
+    saved_ver = dep._app_version; saved_inst = dep._get_installed
+    saved_run = dep._run_deploy; saved_sync = dep._sync_repo
+    order = []
+    async def fake_installed(t, u): return "1.0.0"
+    async def fake_run(t, u): order.append("deploy"); return 0, "ok"
+    async def fake_sync(): order.append("sync"); return True, "master@abc"
+    dep._app_version = lambda: "1.2.0"
+    dep._get_installed = fake_installed
+    dep._run_deploy = fake_run
+    dep._sync_repo = fake_sync
+    try:
+        res = asyncio.run(dep._deploy_with_status("tok", "https://x.apps.dynatrace.com"))
+        assert res["status"] == "upgraded"
+        assert order and order[0] == "sync", f"sync must precede deploy, got {order}"
+        assert "deploy" in order
+    finally:
+        dep._app_version = saved_ver; dep._get_installed = saved_inst
+        dep._run_deploy = saved_run; dep._sync_repo = saved_sync
 
 
 def test_is_coe():

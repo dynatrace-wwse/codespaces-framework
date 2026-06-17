@@ -67,6 +67,10 @@ REQUIRED_SCOPES = {
 # Local checkout of the app repo (has node_modules/dt-app) used to build + deploy.
 APP_REPO_DIR = os.environ.get("APP_REPO_DIR", "/home/ops/enablement-framework/dynatrace-app-enablements")
 DEPLOY_TIMEOUT = int(os.environ.get("DEPLOY_TIMEOUT", "600"))
+# Branch the deploy checkout is fast-forwarded to before every build, so a `git push`
+# is enough to ship — no manual rsync to the ops checkout. See _sync_repo().
+APP_DEPLOY_BRANCH = os.environ.get("APP_DEPLOY_BRANCH", "master")
+REPO_SYNC_TIMEOUT = int(os.environ.get("REPO_SYNC_TIMEOUT", "90"))
 
 # COE tenant — the one tenant in the COE account. Orbital holds its client credentials, so a
 # deploy to COE needs NO pasted token (auto). Every other tenant requires a token.
@@ -159,6 +163,46 @@ def _app_version() -> str:
         return "?"
 
 
+async def _sync_repo() -> tuple[bool, str]:
+    """Fast-forward the deploy checkout to origin/<APP_DEPLOY_BRANCH> before building.
+
+    This makes `git push` the only step needed to ship the app — no manual rsync into the
+    ops checkout. Best-effort: on any failure we log and let the deploy proceed with whatever
+    is currently checked out (returns (False, reason)).
+
+    `git reset --hard` only rewrites tracked files, so the checkout's untracked/ignored
+    node_modules, .env and .dt-app are preserved. Dependency changes (package-lock.json) still
+    need a manual `npm ci` in the checkout — surfaced via the returned message.
+    """
+    if not (Path(APP_REPO_DIR) / ".git").is_dir():
+        return False, "not a git checkout"
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0",
+           "HOME": os.environ.get("HOME", "/home/ops")}
+
+    async def _git(*args: str) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", APP_REPO_DIR, *args, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=REPO_SYNC_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return 124, "timed out"
+        return proc.returncode or 0, out.decode(errors="replace").strip()
+
+    rc, msg = await _git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
+    if rc != 0:
+        return False, f"fetch failed: {msg[-300:]}"
+    # Note whether dependencies changed so the operator knows to `npm ci` if a build fails.
+    _, lock_diff = await _git("diff", "--name-only", f"HEAD..origin/{APP_DEPLOY_BRANCH}", "--", "package-lock.json")
+    rc, msg = await _git("reset", "--hard", f"origin/{APP_DEPLOY_BRANCH}")
+    if rc != 0:
+        return False, f"reset failed: {msg[-300:]}"
+    _, head = await _git("rev-parse", "--short", "HEAD")
+    suffix = " (package-lock changed — run `npm ci` if build fails)" if lock_diff else ""
+    return True, f"{APP_DEPLOY_BRANCH}@{head}{suffix}"
+
+
 async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     """Shell `dt-app deploy` with the delegated token as DT_APP_PLATFORM_TOKEN (dt-app builds,
     signs and POSTs the archive to the registry — correct by construction). Token is passed via
@@ -199,6 +243,13 @@ async def _get_installed(token: str, tenant_url: str) -> str | None:
 async def _deploy_with_status(token: str, tenant_url: str) -> dict:
     """Idempotent deploy: check what's installed; skip if already current, else install/upgrade.
     Returns {status: up-to-date|installed|upgraded|error, from, to, output}."""
+    # Pull the latest pushed code into the deploy checkout first, so `_app_version()` and the
+    # build below reflect origin/<branch>. Best-effort — a sync failure never blocks deploy.
+    synced, sync_msg = await _sync_repo()
+    if synced:
+        log.info("deploy repo synced: %s", sync_msg)
+    else:
+        log.warning("deploy repo sync skipped/failed (deploying current checkout): %s", sync_msg)
     installed = await _get_installed(token, tenant_url)
     ours = _app_version()
     if installed and installed == ours:
