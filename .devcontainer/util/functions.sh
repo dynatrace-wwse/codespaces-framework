@@ -59,14 +59,14 @@ printWarn() {
   if [ "$2" = "false" ]; then
     return 0
   fi
-  echo -e "${YELLOW}[$LOGNAME| ${YELLOW}WARN${YELLOW} |$(timestamp) ${LILA}| ${RESET}$1${LILA}  |"
+  echo -e "${GREEN}[$LOGNAME| ${YELLOW}WARN${CYAN} |$(timestamp) ${LILA}| ${RESET}$1${LILA}  |"
 }
 
 printError() {
   if [ "$2" = "false" ]; then
     return 0
   fi
-  echo -e "${GREEN}[$LOGNAME| ${RED}ERROR${GREEN} |$(timestamp) ${LILA}| ${RESET}$1${LILA}  |"
+  echo -e "${GREEN}[$LOGNAME| ${RED}ERROR${CYAN} |$(timestamp) ${LILA}| ${RESET}$1${LILA}  |"
 }
 
 detectRunEnvironment(){
