@@ -2455,6 +2455,9 @@ ${otel_paths}
     http:
       paths:
 ${otel_paths}
+  - http:
+      paths:
+${otel_paths}
 OTELINGRESSEOF
 
   # Register in app registry (same 7-field layout as registerApp).
