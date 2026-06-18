@@ -93,7 +93,7 @@ token is involved.
  Orbital (RELAY, no compute):  holds the user's token
    • PUT /user/codespaces/secrets/DT_*        (per-tenant isolation)
    • POST /repos/{org}/{repo}/codespaces      (as the user → user-owned)
-   • gh cs ssh --server-port  → PTY bridge    (terminal relay)
+   • web_url → Codespace web terminal         (image has no sshd; not an SSH-PTY relay)
    • gh codespace logs                        (log relay)
    • ports visibility 80:public               (app URL relay)
    │
