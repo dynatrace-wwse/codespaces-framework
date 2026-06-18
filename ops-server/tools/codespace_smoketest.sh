@@ -68,8 +68,10 @@ echo "==> (1) Setting user Codespaces secrets scoped to $REPO"
 for pair in "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_OPERATOR_TOKEN=$DT_OPERATOR_TOKEN" "DT_INGEST_TOKEN=$DT_INGEST_TOKEN"; do
   name="${pair%%=*}"
   value="${pair#*=}"
-  echo "    gh secret set $name --user --app codespaces --repos $REPO --body ***"
-  printf '%s' "$value" | gh secret set "$name" --user --app codespaces --repos "$REPO" --body -
+  echo "    gh secret set $name --user --app codespaces --repos $REPO (value via stdin)"
+  # NOTE: do NOT use `--body -` — gh treats it as the literal value "-", not stdin.
+  # Omit --body so gh reads the secret value from stdin.
+  printf '%s' "$value" | gh secret set "$name" --user --app codespaces --repos "$REPO"
 done
 
 # ── (2) create the codespace, capture NAME ───────────────────────────────────
