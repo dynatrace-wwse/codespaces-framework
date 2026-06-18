@@ -223,10 +223,11 @@ is *who pressed start* (the app, via the user's GitHub identity) and *who relays
     The app mints the DT tokens and runs a **GitHub OAuth service** (`codespace` scope). With the
     **user's** token, Orbital sets the user's Codespaces secrets, calls
     `POST /repos/{owner}/{repo}/codespaces` **as the user** (so the Codespace is owned + billed to
-    them). The terminal is the Codespace's **built-in web terminal** (`web_url`) — the framework image
-    has no `sshd`, so there is no SSH-PTY relay; Orbital still relays `gh codespace logs` (logs) and
-    `ports visibility 80:public` (app URL). A shared bot PAT cannot do the create — it has no
-    on-behalf-of, even for a public repo — which is why the design is per-user.
+    them). The terminal defaults to the Codespace's **built-in web terminal** (`web_url`); an in-app
+    PTY relay (`gh cs ssh` → Orbital PTY bridge) and `gh codespace logs` also work **once the
+    `ghcr.io/devcontainers/features/sshd:1` feature is added** to the repo (the stock framework image
+    ships no sshd — proven 2026-06-18). `ports visibility 80:public` relays the app URL. A shared bot
+    PAT cannot do the create — it has no on-behalf-of, even for a public repo — so the design is per-user.
     DT creds must be **user-scope** Codespaces secrets (repo/org secrets break per-tenant isolation).
     Full design: `dynatrace-app-enablements/docs/CODESPACES_DIRECT_LAUNCH_ANALYSIS.md`.
 
