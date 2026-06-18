@@ -23,23 +23,57 @@ import re
 import subprocess
 import sys
 
-try:
-    import yaml  # type: ignore
-except Exception:
-    # The lab container's python3 is externally-managed (PEP 668), so a plain
-    # `pip install` is blocked. The container is ephemeral — install with the
-    # escape hatch; fall back to --user if needed.
-    for extra in (["--break-system-packages"], ["--user", "--break-system-packages"]):
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", *extra, "pyyaml"], check=False)
-        try:
-            import yaml  # type: ignore
-            break
-        except Exception:
-            continue
-    else:
-        import yaml  # type: ignore  # last attempt — surface the real error if still missing
+# Dependency-free: the lab container's python3 is externally-managed (PEP 668)
+# and ships no pyyaml, so we parse the (simple, authored) annotation blocks with
+# a minimal parser instead of importing yaml. Only the shapes these blocks use are
+# supported: top-level `key: scalar`, `key:`+`- list`, and one nested map (expect).
 
 BLOCK_RE = re.compile(r"<!--\s*(LAB_QUESTION|STEP_SETUP|LAB_SOLUTION)\s*(.*?)-->", re.S)
+
+
+def _unquote(s):
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] == '"':
+        return s[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    if len(s) >= 2 and s[0] == s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    return s
+
+
+def parse_block(body):
+    """Minimal YAML-subset parser for STEP_SETUP / LAB_SOLUTION / LAB_QUESTION blocks."""
+    lines = body.split("\n")
+    out = {}
+    i, n = 0, len(lines)
+    while i < n:
+        raw = lines[i]; i += 1
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^(\s*)([A-Za-z_][\w-]*):\s?(.*)$", raw)
+        if not m or len(m.group(1)) > 0:   # only handle top-level keys here
+            continue
+        key, val = m.group(2), m.group(3).strip()
+        if val in ("|", ">", "|-", ">-"):   # block scalar (e.g. reveal) — consume + ignore
+            while i < n and (lines[i].strip() == "" or lines[i].startswith((" ", "\t"))):
+                i += 1
+        elif val == "":                     # list or nested map
+            children = []
+            while i < n and (lines[i].strip() == "" or lines[i].startswith((" ", "\t"))):
+                children.append(lines[i]); i += 1
+            items = [c for c in children if c.strip().startswith("- ")]
+            if items:
+                out[key] = [_unquote(c.strip()[2:]) for c in items]
+            else:
+                sub = {}
+                for c in children:
+                    mm = re.match(r"^\s+([A-Za-z_][\w-]*):\s?(.*)$", c)
+                    if mm:
+                        sub[mm.group(1)] = _unquote(mm.group(2))
+                if sub:
+                    out[key] = sub
+        else:                               # inline scalar (handles `: ` inside quotes)
+            out[key] = _unquote(val)
+    return out
 
 
 def _md_files(docs_dir):
@@ -55,7 +89,7 @@ def extract(docs_dir):
             text = fh.read()
         for kind, body in BLOCK_RE.findall(text):
             try:
-                doc = yaml.safe_load(body)
+                doc = parse_block(body)
             except Exception:
                 continue
             if not isinstance(doc, dict):
