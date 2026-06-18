@@ -55,7 +55,7 @@ app.include_router(content_router)
 from dashboard.app_deploy import router as deploy_router  # noqa: E402
 app.include_router(deploy_router)
 
-_DEPLOY_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Deploy app to a tenant</title>
+_DEPLOY_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Tenant Registration</title>
 <style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}
 header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
 main{max-width:680px;margin:0 auto;padding:24px}
@@ -73,7 +73,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .bar > i{display:block;height:100%;width:30%;background:#6c6cff;border-radius:3px;animation:slide 1.4s ease-in-out infinite}
 @keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
 </style></head><body>
-<header>Deploy the Enablement App to a Dynatrace tenant</header>
+<header>Tenant Registration — install the Enablement App on a Dynatrace tenant</header>
 <main>
 <p class=hint>Install / upgrade the app into a Dynatrace tenant with a platform token. The token is
 used once and never stored. We log user + tenant + action, never the token.</p>
@@ -301,7 +301,7 @@ button.sec{background:#30363d} button.danger{background:#8b2c2c} .hint{opacity:.
 .msg{margin-left:10px;font-size:13px} pre{white-space:pre-wrap;background:#0d1117;padding:8px;border-radius:6px}
 </style></head><body>
 <header>Content Delivery — profiles · tenants · preview
-  <a href="/deploy">deploy app →</a></header>
+  <a href="/deploy">tenant registration →</a></header>
 <main>
 <p class=hint>Profiles = named sets of training repos. The delivery table maps each domain
 (prod/sprint/dev) to a default profile, and lets you override any tenant. Resolution:
@@ -3597,6 +3597,47 @@ async def api_arena_user_session(userId: str, trainingId: str, tenant: str = "")
         if cursor == 0:
             break
     raise HTTPException(status_code=404, detail="No active session found")
+
+
+@app.get("/api/arena/active-sessions")
+async def api_arena_active_sessions(userId: str, tenant: str = ""):
+    """Every running session for a user+tenant, ACROSS all trainings.
+
+    Server-side resource guard: only one live environment per user+tenant is
+    allowed. The app calls this before launching so a second training can't be
+    provisioned while ANY session is still running here — authoritative even when
+    the learner switches browser/device (localStorage can't see those). Mirrors
+    user-session but drops the training filter and returns a list.
+    """
+    sessions = []
+    cursor = 0
+    while True:
+        cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=100)
+        for key in keys:
+            meta = await pool.hgetall(key)
+            if not meta or meta.get("terminating"):
+                continue
+            tenant_match = (not tenant) or tenant in (
+                meta.get("dt_tenant_url", ""), meta.get("arena_tenant", ""))
+            if meta.get("arena_user") == userId and tenant_match:
+                job_id = meta.get("job_id", key.split(":")[-1])
+                livelog = await pool.get(f"job:livelog:{job_id}")
+                if livelog and "Daemon ready" in livelog:
+                    status = "ready"
+                elif meta.get("worker_id") in ("queued", ""):
+                    status = "queued"
+                else:
+                    status = "provisioning"
+                sessions.append({
+                    "jobId":      job_id,
+                    "status":     status,
+                    "trainingId": meta.get("training_id", ""),
+                    "userId":     meta.get("arena_user", ""),
+                    "expiresAt":  meta.get("expires_at", ""),
+                })
+        if cursor == 0:
+            break
+    return {"sessions": sessions, "count": len(sessions)}
 
 
 @app.post("/api/arena/sessions/{job_id}/shell-token")
