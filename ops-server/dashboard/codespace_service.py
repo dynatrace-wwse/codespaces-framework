@@ -152,7 +152,7 @@ class DTEnv(BaseModel):
 class ProvisionBody(BaseModel):
     dtUser: str
     repo: str
-    machine: str
+    machine: str | None = None  # omit → GitHub uses the repo's devcontainer default machine
     ref: str | None = None
     dtEnv: DTEnv
 
@@ -205,8 +205,11 @@ async def provision(body: ProvisionBody):
         )
 
     # b. Create the Codespace as the user via REST so we get JSON incl. name + web_url.
-    create_args = ["api", "-X", "POST", f"repos/{body.repo}/codespaces",
-                   "-f", f"machine={body.machine}"]
+    #    Machine is optional: omit it so GitHub picks the repo's devcontainer default
+    #    (the smallest type satisfying hostRequirements) — the repo runs as designed.
+    create_args = ["api", "-X", "POST", f"repos/{body.repo}/codespaces"]
+    if body.machine:
+        create_args += ["-f", f"machine={body.machine}"]
     if body.ref:
         create_args += ["-f", f"ref={body.ref}"]
     out = await _gh(body.dtUser, *create_args)
@@ -230,7 +233,7 @@ async def provision(body: ProvisionBody):
         "dtUser": body.dtUser,
         "repo": body.repo,
         "ref": body.ref or "",
-        "machine": body.machine,
+        "machine": body.machine or "default",
         "status": "provisioning",
         "created": now.isoformat(),
         "started_at": now.isoformat(),
