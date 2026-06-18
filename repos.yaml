@@ -5,7 +5,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @saikkoj"
     description: "Introduction to Kubernetes fundamentals with Dynatrace. Learn core concepts — pods, deployments, services — and observe a live cluster with full-stack monitoring."
-    tags: [kubernetes]
+    tags: [kubernetes, dynatrace-app]
     title: "Kubernetes 101"
     primary_tag: kubernetes
     duration: "1.5h"
@@ -68,7 +68,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @popecruzdt, @agardnerIT"
     description: "Introduction to log ingestion and analytics. Learn how to ingest, parse, and analyse logs at scale using OpenPipeline and Dynatrace DQL."
-    tags: [logs, kubernetes]
+    tags: [logs, kubernetes, dynatrace-app]
     title: "Log Ingestion 101"
     primary_tag: logs
     arch: amd64
@@ -89,7 +89,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @joshDynatrace, @ericyyuu, @popecruzdt"
     description: "Diagnose production issues in real-world scenarios using Dynatrace Live Debugger — no redeploys, no restarts. Step through running code with full observability context."
-    tags: [live-debugger, devops]
+    tags: [live-debugger, devops, dynatrace-app]
     title: "Live Debugger & Bug Hunting"
     primary_tag: live-debugger
     duration: "2h"
