@@ -93,10 +93,10 @@ token is involved.
  Orbital (RELAY, no compute):  holds the user's token
    • PUT /user/codespaces/secrets/DT_*        (per-tenant isolation)
    • POST /repos/{org}/{repo}/codespaces      (as the user → user-owned)
-   • web_url → Codespace web terminal         (default; always works)
-   • gh cs ssh --server-port → PTY bridge     (in-app terminal; needs sshd devcontainer feature)
-   • gh codespace logs                        (log relay; also needs the sshd feature)
+   • gh cs ssh -c {name} → PTY bridge         (in-app terminal; sshd installed on demand by functions.sh)
+   • gh codespace logs                        (log relay; same SSH channel)
    • ports visibility 80:public               (app URL relay)
+   • gh api -X DELETE user/codespaces/{name}  (terminate from the app)
    │
    ▼
  User-owned Codespace: framework devcontainer → k3d + DT Operator + apps
