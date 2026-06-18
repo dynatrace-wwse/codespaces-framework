@@ -96,11 +96,19 @@ def _tenant_meta(dt_environment: str) -> tuple[str, str]:
 
 
 async def delete_codespace(dtUser: str, name: str) -> None:
-    """Delete a learner's Codespace and clear its running record. Shared by the
-    /api/codespace terminate route and the dashboard's generic terminate path."""
-    await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")
+    """Delete a learner's Codespace, clear its running record, and DESTROY the learner's
+    stored GitHub credential — the token is kept (encrypted, short-lived) only to spin +
+    proxy the Codespace; once it's gone, so is the credential. Shared by the
+    /api/codespace terminate route and the dashboard's generic terminate path.
+
+    Audit log records user + repo + machine only — NEVER the credential."""
+    meta = await _pool().hgetall(f"job:running:{name}")
+    repo, machine = meta.get("repo", ""), meta.get("machine", "")
+    await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")  # needs the token
     await _pool().delete(f"job:running:{name}")
-    log.info("Codespace deleted name=%s dtUser=%s", name, dtUser)
+    await _pool().delete(f"gh:token:{dtUser}")  # destroy the credential now the Codespace is gone
+    log.info("Codespace deleted name=%s user=%s repo=%s machine=%s (credential destroyed)",
+             name, dtUser, repo, machine)
 
 
 async def _gh(dtUser: str, *args: str, input: str | None = None) -> str:
@@ -236,7 +244,9 @@ async def provision(body: ProvisionBody):
     await _pool().expire(f"job:running:{name}", CODESPACE_JOB_TTL)
 
     ws_url = f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{name}/shell"
-    log.info("Codespace provisioned name=%s repo=%s dtUser=%s stage=%s", name, body.repo, body.dtUser, stage)
+    # Audit: user + repo + machine + tenant/stage — NEVER the credential or DT tokens.
+    log.info("Codespace provisioned name=%s user=%s repo=%s machine=%s tenant=%s stage=%s",
+             name, body.dtUser, body.repo, body.machine, tenant_id, stage)
     # d.
     return {"jobId": name, "status": "provisioning", "webUrl": web_url, "wsUrl": ws_url}
 
