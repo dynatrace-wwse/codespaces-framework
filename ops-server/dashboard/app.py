@@ -55,6 +55,15 @@ app.include_router(content_router)
 from dashboard.app_deploy import router as deploy_router  # noqa: E402
 app.include_router(deploy_router)
 
+# Per-user GitHub OAuth broker + user-owned Codespace launch/relay (Codespaces
+# launch toggle). Compute runs in the learner's own GitHub account; Orbital holds
+# only a short-lived per-user token and relays terminal/logs/app-URL. Additive —
+# unused unless the app's provisioning-mode is set to "codespace".
+from dashboard.github_oauth import router as github_oauth_router  # noqa: E402
+app.include_router(github_oauth_router)
+from dashboard.codespace_service import router as codespace_router  # noqa: E402
+app.include_router(codespace_router)
+
 _DEPLOY_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Tenant Registration</title>
 <style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}
 header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
@@ -1169,6 +1178,8 @@ async def api_builds_running():
                 "type": meta.get("type", "integration-test"),
                 "arena_user": meta.get("arena_user"),
                 "arena_tenant": meta.get("arena_tenant"),
+                "provider": meta.get("provider", "sysbox"),
+                "stage": meta.get("stage"),
             })
         elif key_type == "string":
             parts = key.split(":", 3)
@@ -1260,6 +1271,18 @@ async def api_terminate_job(job_id: str, request: Request):
             log.info("Revoking %d DT token(s) for session %s", len(token_ids), job_id)
         except Exception as exc:
             log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+
+    # Codespace jobs have no Sysbox worker to signal — delete the Codespace directly
+    # (as the learner, via their stored GitHub token) instead of publishing ops:terminate.
+    if meta.get("provider") == "codespace":
+        from dashboard.codespace_service import delete_codespace
+        try:
+            await delete_codespace(meta.get("dtUser", ""), job_id)
+        except Exception as exc:
+            log.warning("Codespace delete failed for %s: %s", job_id, exc)
+            raise HTTPException(502, f"Could not delete codespace {job_id}: {exc}")
+        log.info("Codespace %s terminated by %s", job_id, requested_by)
+        return {"status": "terminated", "job_id": job_id, "requested_by": requested_by}
 
     await pool.publish("ops:terminate", job_id)
     log.info("Termination requested for %s by %s", job_id, requested_by)
@@ -2455,6 +2478,20 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
     repo_name = repo.split("/")[-1] if "/" in repo else repo or "workspace"
     workspace = f"/workspaces/{repo_name}"
 
+    # Codespace jobs: shell in via `gh codespace ssh` as the learner (their stored
+    # token), not docker-exec into a Sysbox container. Same xterm front-end + token flow.
+    if meta.get("provider") == "codespace":
+        from dashboard.github_oauth import get_user_token
+        user_token = await get_user_token(pool, meta.get("dtUser", ""))
+        gh_env = {"GH_TOKEN": user_token} if user_token else {}
+        # No `--`: gh opens the learner's default login shell (zsh) with a TTY, so the
+        # framework profile (KUBECONFIG, prompt, workspace cwd) is sourced — a native shell.
+        cmd = ["gh", "codespace", "ssh", "-c", job_id]
+        log.info("Codespace shell open: job=%s rows=%s cols=%s", job_id, rows, cols)
+        await _pty_bridge(ws, cmd, rows=rows, cols=cols, env=gh_env)
+        log.info("Codespace shell closed: job=%s", job_id)
+        return
+
     # sb_name is stored in the running hash by the warm-pool agent (slot-based jobs).
     # Fall back to the legacy naming for non-slotted jobs.
     sb_name = meta.get("sb_name") or f"sb-{job_id[-32:]}"
@@ -2485,7 +2522,8 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
     log.info("Shell closed: job=%s", job_id)
 
 
-async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int = 220):
+async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int = 220,
+                      env: dict | None = None):
     """Create a PTY subprocess and bridge its I/O to the WebSocket.
 
     Uses loop.add_reader for non-blocking PTY output so the reader task is
@@ -2505,7 +2543,7 @@ async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int =
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-            env={**os.environ, "TERM": "xterm-256color"},
+            env={**os.environ, "TERM": "xterm-256color", **(env or {})},
         )
         os.close(slave_fd)  # parent doesn't need the slave end
     except Exception as exc:

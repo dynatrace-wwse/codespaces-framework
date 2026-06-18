@@ -70,12 +70,17 @@ printError() {
 }
 
 detectRunEnvironment(){
-  # Returns "orbital", "codespaces", or "local" based on available signals.
+  # Returns "orbital_codespaces", "orbital", "codespaces", or "local" based on signals.
+  # orbital_codespaces: a GitHub Codespace orchestrated by Orbital (CODESPACES=true AND
+  #                     ORBITAL_ENVIRONMENT=true) — surfaced so monitoring can see that a
+  #                     training ran in Codespaces-mode under Orbital. Tested FIRST.
   # orbital:   ORBITAL_ENVIRONMENT=true is set by the Orbital worker manager
   #            or K3D_CLUSTER_NAME starts with "master-" (worker port-override pattern)
   # codespaces: CODESPACE_NAME is set by GitHub Codespaces
   # local:     fallback
-  if [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]] || [[ "${K3D_CLUSTER_NAME:-}" == master-* ]]; then
+  if [[ "${CODESPACES:-}" == "true" ]] && [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]]; then
+    echo "orbital_codespaces"
+  elif [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]] || [[ "${K3D_CLUSTER_NAME:-}" == master-* ]]; then
     echo "orbital"
   elif [[ -n "${CODESPACE_NAME:-}" ]]; then
     echo "codespaces"
@@ -396,6 +401,38 @@ setUpTerminal(){
 
   # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
+
+  # Orbital-orchestrated Codespaces need an SSH server so the Enablement App can
+  # relay a terminal in via `gh codespace ssh`. The stock image ships none.
+  # Only this mode gets sshd — plain codespaces, local, dev-container and Sysbox/orbital
+  # are left untouched.
+  if [ "$INSTANTIATION_TYPE" = "orbital_codespaces" ]; then
+    installCodespaceSSH
+  fi
+}
+
+installCodespaceSSH() {
+  # Idempotently install and prepare openssh-server for Orbital-orchestrated Codespaces.
+  # Detect presence via the binary path (NOT `command -v sshd`) so a half-installed
+  # PATH entry never makes us skip host-key generation.
+  printInfoSection "Installing SSH server for Orbital Codespaces relay"
+  if [ -x /usr/sbin/sshd ]; then
+    printInfo "openssh-server already present at /usr/sbin/sshd — skipping install"
+  else
+    printInfo "openssh-server not found — installing via apt-get"
+    sudo apt-get update -qq \
+      && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server \
+      || printWarn "Failed to install openssh-server"
+  fi
+
+  if [ -x /usr/sbin/sshd ]; then
+    printInfo "Generating SSH host keys and preparing /run/sshd"
+    sudo ssh-keygen -A || printWarn "ssh-keygen -A reported an issue"
+    sudo mkdir -p /run/sshd || printWarn "Could not create /run/sshd"
+    printInfo "SSH server ready for gh codespace ssh relay"
+  else
+    printWarn "sshd not available after install — Orbital terminal relay will not work"
+  fi
 }
 
 

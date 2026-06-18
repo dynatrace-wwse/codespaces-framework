@@ -1435,6 +1435,8 @@ async function loadRunningDetail() {
                         <span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span>
                         ${r.arena_user ? `<br><span style="font-size:0.7rem;color:#4ec9b0" title="Arena session">👤 ${escapeHtml(r.arena_user)}</span>` : ''}
                         ${r.arena_tenant ? `<br><span style="font-size:0.7rem;color:var(--text-2)" title="Tenant">${escapeHtml(r.arena_tenant.replace(/\.apps\.dynatrace\.com$/, ''))}</span>` : ''}
+                        ${r.stage ? `<span style="font-size:0.62rem;margin-left:4px;padding:0 4px;border-radius:3px;background:${r.stage === 'production' ? '#5a1e1e' : '#3a3a1e'};color:${r.stage === 'production' ? '#ff9a9a' : '#e0d77d'}" title="Tenant stage">${escapeHtml(r.stage)}</span>` : ''}
+                        ${r.provider === 'codespace' ? `<br><span style="font-size:0.7rem;color:#a78bfa" title="Runs in the learner's own GitHub Codespace, proxied by Orbital">☁ codespace</span>` : ''}
                     </td>
                     <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
                     <td>${formatDuration(elapsed)}</td>
