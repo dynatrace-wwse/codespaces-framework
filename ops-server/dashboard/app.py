@@ -2404,8 +2404,8 @@ async def api_trigger_build(request: Request):
     requested_by = role["user"]
 
     job_type = body.get("type", "integration-test")
-    if job_type not in ("integration-test", "daemon"):
-        raise HTTPException(400, "type must be integration-test or daemon")
+    if job_type not in ("integration-test", "daemon", "app-layer-test"):
+        raise HTTPException(400, "type must be integration-test, daemon, or app-layer-test")
 
     arches = ["arm64", "amd64"] if arch == "both" else [arch]
     timestamp = datetime.now(timezone.utc).isoformat()

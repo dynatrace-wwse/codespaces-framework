@@ -427,7 +427,7 @@ class WorkerManager:
             lock_key = None
             triple = None
             arch = job.get("arch", "arm64")
-            if job.get("type") == "integration-test":
+            if job.get("type") in ("integration-test", "app-layer-test"):
                 triple = _triple_of(job)
                 lock_key = f"running:lock:{triple}"
                 acquired = await self.pool.set(
@@ -459,7 +459,7 @@ class WorkerManager:
                     "ref": _branch_of(job),
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "worker_id": "master",
-                    "type": "integration-test",
+                    "type": job["type"],
                 })
                 await self.pool.expire(running_key, LOCK_TTL_SECONDS)
             elif job.get("type") == "daemon":
@@ -581,9 +581,9 @@ class WorkerManager:
                             )
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished job: %s → %s", job_id, job["status"])
-                # Telemetry: integration-test results emit test.result with the
-                # full schema. Best-effort — never block on tracker outage.
-                if job.get("type") == "integration-test":
+                # Telemetry: integration-test + app-layer-test results emit test.result
+                # with the full schema. Best-effort — never block on tracker outage.
+                if job.get("type") in ("integration-test", "app-layer-test"):
                     try:
                         result = job.get("result", {}) or {}
                         repo_name = job["repo"].split("/")[-1]
@@ -659,6 +659,11 @@ class WorkerManager:
             return await self._run_sync_command(job)
 
         elif job_type == "integration-test":
+            return await self._run_integration_test(job)
+
+        elif job_type == "app-layer-test":
+            # Same Sysbox provisioning as integration-test; final step is the
+            # app-layer driver (shell-verification + LAB_SOLUTION via the exec path).
             return await self._run_integration_test(job)
 
         elif job_type == "daemon":
@@ -926,6 +931,14 @@ class WorkerManager:
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
                              dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
 
+        # app-layer-test rides this same provisioning path; it only swaps the final
+        # step (the app-layer driver instead of integration.sh). Copy the driver
+        # into the workspace so it is mounted into the dt container.
+        is_app_layer = job.get("type") == "app-layer-test"
+        if is_app_layer:
+            driver_src = Path(__file__).resolve().parent.parent / "tools" / "app_layer_driver.py"
+            shutil.copy(driver_src, repo_dir / ".app_layer_driver.py")
+
         # Sysbox-isolated nested containers (see executor.py for the same
         # architecture): outer Sysbox container runs docker:25-dind; inner
         # dockerd hosts the dt-enablement container which spins up its own
@@ -1038,8 +1051,13 @@ class WorkerManager:
             steps = [
                 ("postCreateCommand", "./.devcontainer/post-create.sh"),
                 ("postStartCommand",  "./.devcontainer/post-start.sh"),
-                ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
             ]
+            if is_app_layer:
+                # Drive the app-layer path: STEP_SETUP + LAB_SOLUTION + shell-verification
+                # commands from docs, exactly as the Enablement App would via the exec API.
+                steps.append(("appLayerTest", "python3 .app_layer_driver.py docs"))
+            else:
+                steps.append(("integrationTest", "zsh .devcontainer/test/integration.sh"))
             livelog_key = f"job:livelog:{job_id}"
             await self.pool.set(livelog_key, "", ex=3600)
 
@@ -1108,7 +1126,7 @@ class WorkerManager:
         shutil.rmtree(work_dir, ignore_errors=True)
 
         return {
-            "test": "integration",
+            "test": "app-layer" if is_app_layer else "integration",
             "arch": "arm64",
             "ref": ref,
             "exit_code": rc,
