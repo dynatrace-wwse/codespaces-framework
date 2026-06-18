@@ -207,6 +207,28 @@ Key points:
 `getAppURL()` and `registerApp()` use to build the wildcard subdomain URL instead of
 the sslip.io or Codespaces URL.
 
+### 5. 🧑‍🚀 Codespaces launched from the Enablement App (planned)
+
+The [Enablement App](enablement-app.md) lets a learner launch a training from inside their
+Dynatrace tenant. Today that always provisions an **Orbital** Sysbox job. A planned admin toggle lets
+the operator switch the launch backend to a **GitHub Codespace running in the learner's own GitHub
+account** — the learner picks a machine, GitHub spins it up and bills it, and **Orbital is repurposed
+as a relay** that forwards the terminal, logs, and app URL back into the app player.
+
+This is still the **Codespaces** instantiation type at runtime (`INSTANTIATION_TYPE=github-codespaces`)
+— the framework, repo, and `post-create.sh` are identical to opening a Codespace by hand. What is new
+is *who pressed start* (the app, via the user's GitHub identity) and *who relays the session* (Orbital).
+
+!!! info "How it works (per-user OAuth, not a shared token)"
+    The app mints the DT tokens and runs a **GitHub OAuth service** (`codespace` scope). With the
+    **user's** token, Orbital sets the user's Codespaces secrets, calls
+    `POST /repos/{owner}/{repo}/codespaces` **as the user** (so the Codespace is owned + billed to
+    them), then relays the session: `gh cs ssh --server-port` → PTY bridge (terminal),
+    `gh codespace logs` (logs), and `ports visibility 80:public` (app URL). A shared bot PAT cannot do
+    the create — it has no on-behalf-of, even for a public repo — which is why the design is per-user.
+    DT creds must be **user-scope** Codespaces secrets (repo/org secrets break per-tenant isolation).
+    Full design: `dynatrace-app-enablements/docs/CODESPACES_DIRECT_LAUNCH_ANALYSIS.md`.
+
 !!! info "DNS & TLS requirements"
     The wildcard subdomain requires:
 
@@ -235,6 +257,8 @@ Secrets and environment variables are handled differently depending on the insta
 | ☁️ Codespaces             | Auto-injected as environment variables from GitHub Codespaces secrets                   | GitHub repository > Codespaces secrets         | No manual setup; secrets available at container start                                 |
 | 🖥️ VS Code Dev Containers | Passed as environment variables via `runArgs` and `.env` file                          | `.devcontainer/devcontainer.json`, `.devcontainer/runlocal/.env`      | Edit/add `.devcontainer/runlocal/.env` for local secrets; `runArgs` must include `--env-file`                    |
 | 🐳 Local Container        | Loaded from `.devcontainer/runlocal/.env` file and passed to Docker at runtime by `makefile.sh`                | `.devcontainer/runlocal/.env`, `makefile.sh`   | Run `make start` in `.devcontainer`; secrets loaded at container start                |
+| 🛰️ Orbital                | Written just-in-time per job as `.devcontainer/.env` by the worker (`executor.py`); minted, tenant-scoped, fail-closed for foreign tenants | Orbital ops-server (no learner action)         | See [Orbital](ops-platform.md); CoE creds never leak cross-tenant                     |
+| 🧑‍🚀 App-launched Codespace | The learner's **user-scope** GitHub Codespaces secrets (set once, or via per-user OAuth) — repo/org secrets break per-tenant isolation | `https://github.com/settings/codespaces` or app OAuth | See [Enablement App](enablement-app.md); create API takes no env, so secrets are pre-set |
 
 
 

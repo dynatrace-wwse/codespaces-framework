@@ -55,6 +55,15 @@ app.include_router(content_router)
 from dashboard.app_deploy import router as deploy_router  # noqa: E402
 app.include_router(deploy_router)
 
+# Per-user GitHub OAuth broker + user-owned Codespace launch/relay (Codespaces
+# launch toggle). Compute runs in the learner's own GitHub account; Orbital holds
+# only a short-lived per-user token and relays terminal/logs/app-URL. Additive —
+# unused unless the app's provisioning-mode is set to "codespace".
+from dashboard.github_oauth import router as github_oauth_router  # noqa: E402
+app.include_router(github_oauth_router)
+from dashboard.codespace_service import router as codespace_router  # noqa: E402
+app.include_router(codespace_router)
+
 _DEPLOY_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Tenant Registration</title>
 <style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0}
 header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
