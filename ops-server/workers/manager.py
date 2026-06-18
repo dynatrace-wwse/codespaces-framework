@@ -938,6 +938,31 @@ class WorkerManager:
         if is_app_layer:
             driver_src = Path(__file__).resolve().parent.parent / "tools" / "app_layer_driver.py"
             shutil.copy(driver_src, repo_dir / ".app_layer_driver.py")
+            # LAB_SOLUTION `solve_bug*` does `git checkout solution/bugN`; the shallow
+            # single-branch clone lacks them. Fetch any solution/* branches + create
+            # local branches so the checkout resolves. No-op for repos without them.
+            try:
+                fetch = await asyncio.create_subprocess_exec(
+                    "git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin",
+                    "+refs/heads/solution/*:refs/remotes/origin/solution/*",
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(fetch.wait(), timeout=120)
+                lsr = await asyncio.create_subprocess_exec(
+                    "git", "-C", str(repo_dir), "for-each-ref",
+                    "--format=%(refname:short)", "refs/remotes/origin/solution",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                )
+                out, _ = await lsr.communicate()
+                for rb in out.decode().split():
+                    local = rb.split("origin/", 1)[-1]  # e.g. solution/bug1
+                    br = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(repo_dir), "branch", "-f", local, rb,
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await br.wait()
+            except Exception as e:
+                log.warning("app-layer-test: solution/* branch fetch failed: %s", e)
 
         # Sysbox-isolated nested containers (see executor.py for the same
         # architecture): outer Sysbox container runs docker:25-dind; inner

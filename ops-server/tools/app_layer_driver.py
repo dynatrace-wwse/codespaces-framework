@@ -110,10 +110,18 @@ def extract(docs_dir):
     return setups, solutions, checks
 
 
+# Sourcing the framework loads my_functions.sh (solve_bug*, is_bug*, addTask, …).
+# This is what the app's exec(interactive=true) does — bash login alone does NOT
+# read .zshrc, so STEP_SETUP/LAB_SOLUTION commands need an explicit source.
+_SOURCE = "source .devcontainer/util/source_framework.sh >/dev/null 2>&1 && "
+
+
 def run(cmd, login):
-    """Run a command; login=True -> `bash -lc` (sources .zshrc/my_functions)."""
-    flag = "-lc" if login else "-c"
-    p = subprocess.run(["bash", flag, cmd], capture_output=True, text=True)
+    """Run a command. login=True -> source the framework first (interactive=true
+    equivalent: my_functions available). login=False -> plain non-interactive
+    (the real shell-verification path; commands that need functions source themselves)."""
+    full = (_SOURCE + cmd) if login else cmd
+    p = subprocess.run(["bash", "-c", full], capture_output=True, text=True)
     return p.stdout, p.stderr, p.returncode
 
 
