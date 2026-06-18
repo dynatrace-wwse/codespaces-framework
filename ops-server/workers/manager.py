@@ -427,7 +427,7 @@ class WorkerManager:
             lock_key = None
             triple = None
             arch = job.get("arch", "arm64")
-            if job.get("type") == "integration-test":
+            if job.get("type") in ("integration-test", "app-layer-test"):
                 triple = _triple_of(job)
                 lock_key = f"running:lock:{triple}"
                 acquired = await self.pool.set(
@@ -459,7 +459,7 @@ class WorkerManager:
                     "ref": _branch_of(job),
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "worker_id": "master",
-                    "type": "integration-test",
+                    "type": job["type"],
                 })
                 await self.pool.expire(running_key, LOCK_TTL_SECONDS)
             elif job.get("type") == "daemon":
@@ -581,9 +581,9 @@ class WorkerManager:
                             )
                 self.active_jobs.pop(job_id, None)
                 log.info("Finished job: %s → %s", job_id, job["status"])
-                # Telemetry: integration-test results emit test.result with the
-                # full schema. Best-effort — never block on tracker outage.
-                if job.get("type") == "integration-test":
+                # Telemetry: integration-test + app-layer-test results emit test.result
+                # with the full schema. Best-effort — never block on tracker outage.
+                if job.get("type") in ("integration-test", "app-layer-test"):
                     try:
                         result = job.get("result", {}) or {}
                         repo_name = job["repo"].split("/")[-1]
@@ -659,6 +659,11 @@ class WorkerManager:
             return await self._run_sync_command(job)
 
         elif job_type == "integration-test":
+            return await self._run_integration_test(job)
+
+        elif job_type == "app-layer-test":
+            # Same Sysbox provisioning as integration-test; final step is the
+            # app-layer driver (shell-verification + LAB_SOLUTION via the exec path).
             return await self._run_integration_test(job)
 
         elif job_type == "daemon":
@@ -926,6 +931,14 @@ class WorkerManager:
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
                              dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
 
+        # app-layer-test rides this same provisioning path; it only swaps the final
+        # step (the app-layer driver instead of integration.sh). Copy the driver
+        # into the workspace so it is mounted into the dt container.
+        is_app_layer = job.get("type") == "app-layer-test"
+        if is_app_layer:
+            driver_src = Path(__file__).resolve().parent.parent / "tools" / "app_layer_driver.py"
+            shutil.copy(driver_src, repo_dir / ".app_layer_driver.py")
+
         # Sysbox-isolated nested containers (see executor.py for the same
         # architecture): outer Sysbox container runs docker:25-dind; inner
         # dockerd hosts the dt-enablement container which spins up its own
@@ -1038,8 +1051,13 @@ class WorkerManager:
             steps = [
                 ("postCreateCommand", "./.devcontainer/post-create.sh"),
                 ("postStartCommand",  "./.devcontainer/post-start.sh"),
-                ("integrationTest",   "zsh .devcontainer/test/integration.sh"),
             ]
+            if is_app_layer:
+                # Drive the app-layer path: STEP_SETUP + LAB_SOLUTION + shell-verification
+                # commands from docs, exactly as the Enablement App would via the exec API.
+                steps.append(("appLayerTest", "python3 .app_layer_driver.py docs"))
+            else:
+                steps.append(("integrationTest", "zsh .devcontainer/test/integration.sh"))
             livelog_key = f"job:livelog:{job_id}"
             await self.pool.set(livelog_key, "", ex=3600)
 
@@ -1108,7 +1126,7 @@ class WorkerManager:
         shutil.rmtree(work_dir, ignore_errors=True)
 
         return {
-            "test": "integration",
+            "test": "app-layer" if is_app_layer else "integration",
             "arch": "arm64",
             "ref": ref,
             "exit_code": rc,
@@ -2060,18 +2078,61 @@ class WorkerManager:
         repo = job["repo"]
 
         if agent_type == "fix-issue":
+            repo_name = repo.split("/")[-1]
+            issue_no  = job["issue_number"]
+            title     = job.get("title", "")
+            body      = job.get("body", "")
+            instructions = job.get("instructions", "")
+            instr_section = (
+                f"\nReporter / operator instructions (highest priority — follow these):\n{instructions}\n"
+                if instructions else ""
+            )
             return (
-                f"You are the enablement ops agent. A bug was reported in {repo}.\n\n"
-                f"Issue #{job['issue_number']}: {job['title']}\n\n"
-                f"{job.get('body', '')}\n\n"
-                "Instructions:\n"
-                "1. Investigate the issue — read the relevant code, check recent changes\n"
-                "2. Query Dynatrace via MCP if the issue relates to observability or monitoring\n"
-                "3. Implement a fix\n"
-                "4. Run tests: make test (if available)\n"
-                "5. Create a new branch, commit, and create a PR referencing the issue\n"
-                "6. Use: gh pr create --title 'Fix: <summary>' "
-                f"--body 'Fixes #{job['issue_number']}'\n"
+                f"You are the Autonomous Enablement Ops agent triaging a GitHub issue in {repo}.\n\n"
+                f"Issue #{issue_no}: {title}\n\n"
+                f"{body}\n"
+                f"{instr_section}\n"
+                f"Your job is to TRIAGE FIRST, then act. Do NOT assume the issue is a real code bug.\n"
+                f"Many issues are false alarms (transient failures, already-fixed problems, or\n"
+                f"misreported state). Acting on a false alarm by opening a code PR is WRONG.\n\n"
+                f"STEP 1 — REPRODUCE / VERIFY THE CLAIM\n"
+                f"  Establish the current ground truth before changing anything.\n"
+                f"  - Read the relevant code / config / workflow in this repo (already cloned in your cwd).\n"
+                f"  - If the claim is about a live URL, GitHub Page, deployment, or endpoint, CHECK IT\n"
+                f"    DIRECTLY before trusting the issue text. For a GitHub Pages claim:\n"
+                f"      gh api repos/{repo}/pages              # is Pages enabled? what is the live url + status?\n"
+                f"      gh run list --repo {repo} --workflow pages-build-deployment --limit 5\n"
+                f"      curl -sS -o /dev/null -w '%{{http_code}}' <the published url>   # 200 == live\n"
+                f"  - Query Dynatrace via MCP only if the claim is about observability/monitoring.\n\n"
+                f"STEP 2 — CLASSIFY\n"
+                f"  Decide exactly one verdict:\n"
+                f"    (A) NOT A BUG — the reported problem does not reproduce / the thing already works\n"
+                f"        (e.g. the Page IS published, the failure was transient, or it was fixed already).\n"
+                f"    (B) REAL BUG  — you reproduced a genuine defect in this repo that needs a code change.\n\n"
+                f"STEP 3A — IF VERDICT IS (A) NOT A BUG  ->  COMMENT AND CLOSE. DO NOT open a PR. DO NOT edit code.\n"
+                f"  1. Post a comment stating what you checked and the evidence it works\n"
+                f"     (include the command output / HTTP status / live URL you verified):\n"
+                f"       gh issue comment {issue_no} --repo {repo} --body \"<your findings + evidence>\"\n"
+                f"  2. Close the issue as not-planned (it was not an actionable defect):\n"
+                f"       gh issue close {issue_no} --repo {repo} --reason 'not planned' \\\n"
+                f"         --comment 'Verified working — see analysis above. Closing.'\n"
+                f"  Then STOP. Do not create branches, commits, or PRs.\n\n"
+                f"STEP 3B — IF VERDICT IS (B) REAL BUG  ->  FIX AND OPEN A PR.\n"
+                f"  1. Be surgical — change only what is needed.\n"
+                f"  2. Run tests if available: make test\n"
+                f"  3. Branch, commit, push:\n"
+                f"       git checkout -b agent/fix-issue-{issue_no}\n"
+                f"       git commit -am 'fix: resolve issue #{issue_no}'\n"
+                f"       git push origin agent/fix-issue-{issue_no}\n"
+                f"  4. Open a PR that auto-closes the issue on merge:\n"
+                f"       gh pr create --repo {repo} \\\n"
+                f"         --title 'Fix: <one-line summary>' \\\n"
+                f"         --body 'Fixes #{issue_no}'\n"
+                f"  Do NOT manually close the issue — the merged PR closes it via 'Fixes #'.\n\n"
+                f"STEP 4 — SUMMARY (end your response with this block)\n"
+                f"  - Verdict: NOT A BUG | REAL BUG\n"
+                f"  - Evidence: (what you checked, key command output)\n"
+                f"  - Action: commented+closed | PR opened (URL)\n"
             )
 
         elif agent_type == "fix-ci":
