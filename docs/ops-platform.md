@@ -679,5 +679,5 @@ sudo systemctl restart ops-worker ops-dashboard
 
 <div class="grid cards" markdown>
 - [← Monitoring](monitoring.md)
-- [What's next? →](whats-next.md)
+- [Enablement App →](enablement-app.md)
 </div>

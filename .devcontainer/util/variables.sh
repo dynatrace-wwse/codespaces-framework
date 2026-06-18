@@ -57,7 +57,12 @@ if [ -z "$GITHUB_REPOSITORY" ]; then
 fi
 
 # Calculating instantiation type
-if [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]]; then
+# Order matters: the combined (Codespace + Orbital) case must be tested BEFORE the
+# plain orbital and plain github-codespaces cases so it isn't mislabeled as either.
+if [[ $CODESPACES == true ]] && [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]]; then
+  # GitHub Codespace orchestrated by Orbital (ORBITAL_ENVIRONMENT set as a Codespace secret)
+  INSTANTIATION_TYPE="orbital_codespaces"
+elif [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]]; then
   INSTANTIATION_TYPE="orbital"
 elif [[ $CODESPACES == true ]]; then
   INSTANTIATION_TYPE="github-codespaces"
