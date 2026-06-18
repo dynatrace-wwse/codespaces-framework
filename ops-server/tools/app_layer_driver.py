@@ -26,8 +26,18 @@ import sys
 try:
     import yaml  # type: ignore
 except Exception:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=False)
-    import yaml  # type: ignore
+    # The lab container's python3 is externally-managed (PEP 668), so a plain
+    # `pip install` is blocked. The container is ephemeral — install with the
+    # escape hatch; fall back to --user if needed.
+    for extra in (["--break-system-packages"], ["--user", "--break-system-packages"]):
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", *extra, "pyyaml"], check=False)
+        try:
+            import yaml  # type: ignore
+            break
+        except Exception:
+            continue
+    else:
+        import yaml  # type: ignore  # last attempt — surface the real error if still missing
 
 BLOCK_RE = re.compile(r"<!--\s*(LAB_QUESTION|STEP_SETUP|LAB_SOLUTION)\s*(.*?)-->", re.S)
 
