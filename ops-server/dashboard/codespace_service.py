@@ -75,6 +75,34 @@ def _redact(text: str, *secrets: str) -> str:
     return out
 
 
+def _tenant_meta(dt_environment: str) -> tuple[str, str]:
+    """Derive (tenant_id, stage) from a DT environment URL so the Orbital Running
+    tab can show which tenant + whether it's production or development.
+      https://geu80787.apps.dynatrace.com              -> ("geu80787", "production")
+      https://abc.sprint.apps.dynatracelabs.com        -> ("abc", "sprint")
+      https://abc.dev.apps.dynatracelabs.com           -> ("abc", "development")
+    """
+    host = (dt_environment or "").split("://", 1)[-1].split("/", 1)[0]
+    tenant_id = host.split(".", 1)[0] if host else ""
+    if "sprint.apps.dynatracelabs.com" in host:
+        stage = "sprint"
+    elif "dynatracelabs.com" in host:           # dev/hardening labs tenants
+        stage = "development"
+    elif "apps.dynatrace.com" in host:
+        stage = "production"
+    else:
+        stage = "unknown"
+    return tenant_id, stage
+
+
+async def delete_codespace(dtUser: str, name: str) -> None:
+    """Delete a learner's Codespace and clear its running record. Shared by the
+    /api/codespace terminate route and the dashboard's generic terminate path."""
+    await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")
+    await _pool().delete(f"job:running:{name}")
+    log.info("Codespace deleted name=%s dtUser=%s", name, dtUser)
+
+
 async def _gh(dtUser: str, *args: str, input: str | None = None) -> str:
     """Run the `gh` CLI as the learner. Sets GH_TOKEN to their stored token; if none,
     falls back to ambient `gh` auth (local testing). Returns stdout; raises HTTPException
@@ -154,6 +182,10 @@ async def provision(body: ProvisionBody):
         "DT_ENVIRONMENT": body.dtEnv.DT_ENVIRONMENT,
         "DT_OPERATOR_TOKEN": body.dtEnv.DT_OPERATOR_TOKEN,
         "DT_INGEST_TOKEN": body.dtEnv.DT_INGEST_TOKEN,
+        # Signals to the framework (variables.sh) that this Codespace is orchestrated
+        # by Orbital → INSTANTIATION_TYPE=orbital_codespaces → setUpTerminal installs
+        # the SSH server so the in-app terminal relay can attach.
+        "ORBITAL_ENVIRONMENT": "true",
     }
     for name, value in secrets_map.items():
         if not value:
@@ -179,25 +211,34 @@ async def provision(body: ProvisionBody):
     if not name:
         raise HTTPException(502, "GitHub did not return a codespace name.")
 
-    # c. Record the running job (mirrors the Arena daemon job hash shape).
+    # c. Record the running job (mirrors the Arena daemon job hash shape so the
+    #    dashboard Running tab, shell, and terminate plumbing all see it).
     now = datetime.now(timezone.utc)
+    tenant_id, stage = _tenant_meta(body.dtEnv.DT_ENVIRONMENT)
     redis_meta = {
         "job_id": name,
         "provider": "codespace",
+        "type": "codespace",
         "dtUser": body.dtUser,
         "repo": body.repo,
         "ref": body.ref or "",
         "machine": body.machine,
         "status": "provisioning",
         "created": now.isoformat(),
+        "started_at": now.isoformat(),
+        "worker_id": "github-codespaces",
+        "arena_user": body.dtUser,
+        "arena_tenant": tenant_id,
+        "stage": stage,
         "web_url": web_url or "",
     }
     await _pool().hset(f"job:running:{name}", mapping=redis_meta)
     await _pool().expire(f"job:running:{name}", CODESPACE_JOB_TTL)
 
-    log.info("Codespace provisioned name=%s repo=%s dtUser=%s", name, body.repo, body.dtUser)
+    ws_url = f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{name}/shell"
+    log.info("Codespace provisioned name=%s repo=%s dtUser=%s stage=%s", name, body.repo, body.dtUser, stage)
     # d.
-    return {"jobId": name, "status": "provisioning", "webUrl": web_url}
+    return {"jobId": name, "status": "provisioning", "webUrl": web_url, "wsUrl": ws_url}
 
 
 @router.get("/api/codespace/sessions/{name}")
@@ -221,9 +262,7 @@ async def session_status(name: str, dtUser: str = ""):
 @router.post("/api/codespace/sessions/{name}/terminate")
 async def terminate(name: str, dtUser: str = ""):
     """Delete the learner's Codespace and clear the running record."""
-    await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")
-    await _pool().delete(f"job:running:{name}")
-    log.info("Codespace terminated name=%s dtUser=%s", name, dtUser)
+    await delete_codespace(dtUser, name)
     return {"status": "terminated"}
 
 
