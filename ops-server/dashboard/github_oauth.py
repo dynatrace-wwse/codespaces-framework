@@ -52,8 +52,10 @@ from webhook.config import REDIS_URL
 log = logging.getLogger("ops-dashboard.github-oauth")
 
 GH_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+GH_DEVICE_CODE_URL = "https://github.com/login/device/code"
 GH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GH_API = "https://api.github.com"
+GH_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 DEFAULT_ORBITAL_URL = "https://autonomous-enablements.whydevslovedynatrace.com"
 DEFAULT_TOKEN_TTL = 28800  # 8h
 STATE_TTL = 600  # signed state is only valid for 10 minutes
@@ -292,6 +294,59 @@ async def github_disconnect(dtUser: str):
         except Exception as exc:
             log.warning("gh grant revoke failed for %s: %s", dtUser, exc)
     return {"disconnected": True, "revoked": revoked}
+
+
+# ── Device Flow (browser login, no client secret / callback / nginx needed) ──
+
+@router.post("/auth/github/device/start")
+async def github_device_start(dtUser: str):
+    """Begin GitHub Device Flow. Returns a `user_code` + `verification_uri` the learner
+    enters in their own browser (logging in with their GitHub credentials), plus the
+    `device_code` to poll with. Needs only GITHUB_OAUTH_CLIENT_ID — no client secret,
+    no callback URL, no nginx route."""
+    if not dtUser:
+        raise HTTPException(400, "dtUser is required.")
+    client_id = _client_id()
+    if not client_id:
+        raise HTTPException(503, "GitHub OAuth not configured (set GITHUB_OAUTH_CLIENT_ID).")
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(GH_DEVICE_CODE_URL, headers={"Accept": "application/json"},
+                         data={"client_id": client_id, "scope": "codespace"})
+    if r.status_code != 200:
+        raise HTTPException(502, f"GitHub device/code failed (HTTP {r.status_code}).")
+    d = r.json()
+    return {"user_code": d.get("user_code"), "verification_uri": d.get("verification_uri"),
+            "device_code": d.get("device_code"), "interval": d.get("interval", 5),
+            "expires_in": d.get("expires_in")}
+
+
+@router.post("/auth/github/device/poll")
+async def github_device_poll(dtUser: str, device_code: str):
+    """Poll for the device-flow token. On success, store it ENCRYPTED at gh:token:{dtUser}
+    (short-lived; destroyed when the Codespace is deleted). Never logs the token."""
+    if not dtUser or not device_code:
+        raise HTTPException(400, "dtUser and device_code are required.")
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(GH_TOKEN_URL, headers={"Accept": "application/json"},
+                         data={"client_id": _client_id(), "device_code": device_code,
+                               "grant_type": GH_DEVICE_GRANT})
+    d = r.json()
+    token = d.get("access_token")
+    if not token:
+        # authorization_pending / slow_down / expired_token / access_denied
+        return {"connected": False, "status": d.get("error", "authorization_pending")}
+    await set_user_token(_pool(), dtUser, token)
+    login = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            u = await c.get(f"{GH_API}/user", headers={
+                "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+            if u.status_code == 200:
+                login = u.json().get("login")
+    except Exception:
+        pass
+    log.info("GitHub connected via device flow dtUser=%s login=%s", dtUser, login)
+    return {"connected": True, "login": login}
 
 
 def _close_page(msg: str, ok: bool) -> str:
