@@ -1066,7 +1066,8 @@ variablesNeeded() {
   #
   # - VAR_NAME:true  → required, error if missing
   # - VAR_NAME:false → optional, warning if missing
-  # - DT_*TOKEN vars are validated for Dynatrace token format (dt0c01.* or dt0s01.*)
+  # - DT_*TOKEN vars are validated for Dynatrace token format (dt0c01.*/dt0s01.* classic,
+  #   dt0s16.* platform/gen3, dt0g02.* ActiveGate/gen3)
   # - DT_ENVIRONMENT is validated and parsed (derives DT_TENANT, DT_OTEL_ENDPOINT)
   #
   # Returns 0 if all required vars pass, 1 if any required var is missing/invalid.
@@ -1106,11 +1107,12 @@ variablesNeeded() {
 
     # Validate Dynatrace tokens (DT_*TOKEN pattern)
     if [[ "$var_name" == DT_*TOKEN ]]; then
-      if [[ "$var_value" == dt0c01.* || "$var_value" == dt0s01.* ]] && [ ${#var_value} -gt 60 ]; then
+      if [[ "$var_value" == dt0c01.* || "$var_value" == dt0s01.* || "$var_value" == dt0s16.* || "$var_value" == dt0g02.* ]] && [ ${#var_value} -gt 60 ]; then
+        # dt0c01/dt0s01 = classic API tokens; dt0s16 = platform token (gen3); dt0g02 = ActiveGate token (gen3).
         # Never echo the token value (or any prefix of it) — avoid leaking secrets to the console.
         printInfo "$var_name: valid Dynatrace token format"
       else
-        printError "$var_name: invalid token format. Expected dt0c01.* or dt0s01.* with min 60 chars (length: ${#var_value})"
+        printError "$var_name: invalid token format. Expected dt0c01.*/dt0s01.*/dt0s16.*/dt0g02.* with min 60 chars (length: ${#var_value})"
         if [ "$required" = "true" ]; then
           has_errors=1
         fi
@@ -1188,8 +1190,8 @@ verifyParseSecret(){
     fi
   fi
 
-  # Check if it's a token
-  if [[ "$secret" == dt0c01.* || "$secret" == dt0s01.* ]] && [ ${#secret} -gt 60 ]; then
+  # Check if it's a token (dt0c01/dt0s01 classic; dt0s16 platform; dt0g02 ActiveGate)
+  if [[ "$secret" == dt0c01.* || "$secret" == dt0s01.* || "$secret" == dt0s16.* || "$secret" == dt0g02.* ]] && [ ${#secret} -gt 60 ]; then
     printInfo "Valid Dynatrace Token format" $print_log
     if [ "${print_log}" = "false" ]; then
       echo "$secret"

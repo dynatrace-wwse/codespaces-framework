@@ -208,6 +208,28 @@ source_functions() {
   [[ "$output" == *"valid Dynatrace token format"* ]]
 }
 
+# Token bodies are built at runtime (prefix + filler) so no literal token-shaped string
+# lives in the file — avoids tripping secret-scanning push protection on the fake samples.
+@test "variablesNeeded: validates DT token format (valid dt0s16 platform token)" {
+  source_functions
+  local body; body="$(printf 'Y%.0s' $(seq 1 66))"
+  export DT_OPERATOR_TOKEN="dt0s16.SAMPLE8X.${body}"
+
+  run variablesNeeded DT_OPERATOR_TOKEN:true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"valid Dynatrace token format"* ]]
+}
+
+@test "variablesNeeded: validates DT token format (valid dt0g02 ActiveGate token)" {
+  source_functions
+  local body; body="$(printf 'Y%.0s' $(seq 1 66))"
+  export DT_ACTIVEGATE_TOKEN="dt0g02.SAMPLE8X.${body}"
+
+  run variablesNeeded DT_ACTIVEGATE_TOKEN:true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"valid Dynatrace token format"* ]]
+}
+
 @test "variablesNeeded: rejects invalid token format" {
   source_functions
   export DT_OPERATOR_TOKEN="invalid-token-format"
