@@ -254,3 +254,87 @@ if __name__ == "__main__":
         t()
         print(f"  PASS {t.__name__}")
     print(f"\n{len(tests)}/{len(tests)} deploy tests passed")
+
+
+# ── _ensure_remote_grail (auto-enable cross-tenant forwarding) ──────────────────
+
+def _grail_client(captured, existing_items):
+    import httpx
+
+    class _Resp:
+        def __init__(self, code, payload=None):
+            self.status_code = code
+            self._payload = payload or {}
+            self.text = ""
+        def json(self): return self._payload
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None, params=None):
+            captured["get_params"] = params
+            return _Resp(200, {"items": existing_items})
+        async def post(self, url, headers=None, json=None):
+            captured["post"] = json
+            return _Resp(200)
+        async def put(self, url, headers=None, json=None):
+            captured["put"] = json
+            captured["put_url"] = url
+            return _Resp(200)
+
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = _Client
+    return orig
+
+
+def test_ensure_remote_grail_skips_coe_tenant(monkeypatch=None):
+    msg = asyncio.run(dep._ensure_remote_grail("tok", "https://wwse.apps.dynatrace.com"))
+    assert "central tenant" in msg
+    msg2 = asyncio.run(dep._ensure_remote_grail("tok", "https://geu80787.apps.dynatrace.com"))
+    assert "central tenant" in msg2
+
+
+def test_ensure_remote_grail_skips_without_token():
+    orig = dep._coe_remote_grail_token
+    dep._coe_remote_grail_token = lambda: None
+    try:
+        msg = asyncio.run(dep._ensure_remote_grail("tok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        dep._coe_remote_grail_token = orig
+    assert "not configured" in msg
+
+
+def test_ensure_remote_grail_creates_setting_with_coe_token():
+    import httpx
+    captured = {}
+    orig_tok = dep._coe_remote_grail_token
+    dep._coe_remote_grail_token = lambda: "COE-SECRET"
+    orig_client = _grail_client(captured, existing_items=[])  # no existing object → create
+    try:
+        msg = asyncio.run(dep._ensure_remote_grail("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._coe_remote_grail_token = orig_tok
+    assert msg == "enabled → wwse"
+    body = captured["post"][0]
+    assert body["schemaId"] == "app:my.dynatrace.enablements:remote-grail"
+    assert body["value"]["enabled"] is True
+    assert body["value"]["tenantUrl"] == "https://wwse.apps.dynatrace.com"
+    assert body["value"]["apiToken"] == "COE-SECRET"
+
+
+def test_ensure_remote_grail_updates_existing_setting():
+    import httpx
+    captured = {}
+    orig_tok = dep._coe_remote_grail_token
+    dep._coe_remote_grail_token = lambda: "COE-SECRET"
+    orig_client = _grail_client(captured, existing_items=[{"objectId": "obj-1"}])
+    try:
+        msg = asyncio.run(dep._ensure_remote_grail("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._coe_remote_grail_token = orig_tok
+    assert msg == "updated → wwse"
+    assert captured["put_url"].endswith("/obj-1")
+    assert captured["put"]["value"]["apiToken"] == "COE-SECRET"
