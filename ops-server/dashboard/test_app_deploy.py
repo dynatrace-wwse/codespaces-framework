@@ -338,3 +338,13 @@ def test_ensure_remote_grail_updates_existing_setting():
     assert msg == "updated → wwse"
     assert captured["put_url"].endswith("/obj-1")
     assert captured["put"]["value"]["apiToken"] == "COE-SECRET"
+
+
+def test_scope_warnings_flags_missing_settings_scope():
+    w = dep._scope_warnings("skipped (token lacks settings:objects:read/write)",
+                            "skipped (token lacks settings:objects:read/write)")
+    assert len(w) == 2
+    assert any("remote-grail NOT configured" in x for x in w)
+    # clean results → no warnings
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse") == []
+    assert dep._scope_warnings("", "skipped (central tenant — stores locally)") == []

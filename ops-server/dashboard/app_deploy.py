@@ -52,7 +52,12 @@ DEPLOY_REDIRECT_URI = os.environ.get(
 )
 DEPLOY_SCOPES = os.environ.get(
     "DEPLOY_SCOPES",
-    "app-engine:apps:install app-engine:apps:run app-engine:apps:delete app-settings:objects:write",
+    # apps:* to install/run/delete; app-settings + CLASSIC settings:objects:* so the
+    # post-install steps can write the outbound-allowlist and remote-grail settings via
+    # the classic settings API. Without classic settings:objects:write those steps 403
+    # and silently skip (cross-tenant forwarding wouldn't get configured).
+    "app-engine:apps:install app-engine:apps:run app-engine:apps:delete "
+    "app-settings:objects:write settings:objects:read settings:objects:write",
 )
 APP_ID = "my.dynatrace.enablements"
 DEFAULT_SSO = "https://sso.dynatrace.com"
@@ -145,6 +150,23 @@ def _client_for(domain: str) -> tuple[str, str]:
 def _missing_scopes(action: str, granted: str | None) -> list[str]:
     """Required IAM scopes for the action minus what the user's token actually granted."""
     return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
+
+
+def _scope_warnings(allowlist: str, remote_grail: str) -> list[str]:
+    """Surface post-install steps that were SKIPPED because the deploy token lacked
+    settings:objects:write. The deploy itself still succeeds (those steps are best-effort),
+    but the operator must know cross-tenant forwarding wasn't configured — otherwise it
+    fails silently. Returned in the deploy response + audit so it's visible, not buried."""
+    warnings: list[str] = []
+    if "token lacks settings" in (remote_grail or ""):
+        warnings.append(
+            "remote-grail NOT configured: the deploy token is missing settings:objects:write, "
+            "so cross-tenant forwarding to wwse was not enabled. Re-deploy with a token that has "
+            "settings:objects:read+write, or set the remote-grail setting by hand.")
+    if "token lacks settings" in (allowlist or ""):
+        warnings.append(
+            "outbound allowlist NOT updated: the deploy token is missing settings:objects:write.")
+    return warnings
 
 
 def _app_url(tenant_url: str) -> str:
@@ -623,12 +645,13 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
+    warnings = _scope_warnings(allowlist, remote_grail)
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
-                 allowlist=allowlist, remote_grail=remote_grail)
+                 allowlist=allowlist, remote_grail=remote_grail, warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
-            "remote_grail": remote_grail}
+            "remote_grail": remote_grail, "warnings": warnings}
 
 
 @router.get("/api/deploy/audit")
