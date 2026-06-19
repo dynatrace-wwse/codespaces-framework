@@ -2244,6 +2244,28 @@ def _infer_started_at(job: dict, result: dict) -> str:
     return finished or ""
 
 
+def _merge_agent_history(completed_raw: list, agent_raw: list) -> list:
+    """Append archived agent-job records that aren't already in jobs:completed
+    (dedupe by job_id). Pure — unit-tested. Bad JSON entries are passed through
+    untouched (the caller's loop skips them)."""
+    if not agent_raw:
+        return completed_raw
+    seen: set = set()
+    for r in completed_raw:
+        try:
+            seen.add(json.loads(r).get("job_id"))
+        except Exception:
+            pass
+    out = list(completed_raw)
+    for r in agent_raw:
+        try:
+            if json.loads(r).get("job_id") not in seen:
+                out.append(r)
+        except Exception:
+            pass
+    return out
+
+
 @app.get("/api/builds/history")
 async def api_builds_history(
     repo: str | None = None,
@@ -2260,6 +2282,10 @@ async def api_builds_history(
     ``repo`` is a substring match (case-insensitive) so the search bar works.
     """
     completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    # Merge the dedicated agent-job archive (agent jobs are rare and otherwise roll off
+    # the 500-cap jobs:completed list, leaving Agentic History empty). Dedupe by job_id.
+    agent_raw = await pool.lrange("agent:jobs:completed", -300, -1)
+    completed_raw = _merge_agent_history(completed_raw, agent_raw)
     rows = []
     distinct_repos: set[str] = set()
     distinct_branches: set[str] = set()
