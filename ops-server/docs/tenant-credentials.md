@@ -37,6 +37,13 @@ token with `storage:events:write` + `storage:bizevents:read` + `storage:buckets:
 The app then **self-mints** training tokens with its own installed identity — classic
 API-token creation still works on these tenants.
 
+> ⚠️ **`environment-api:api-tokens:write` is now DEPRECATED** (shown as deprecated in the
+> OAuth-client scope picker). That is the scope the app's self-mint relies on. So the gen2
+> path above is on borrowed time — as classic token creation is retired tenant-by-tenant
+> (sprint already, prod following), **the Account Management platform-token path becomes
+> the direction for ALL generations**, not just gen3. Treat the gen2 self-mint as legacy;
+> prioritise the Account Management mint (below) as the long-term mechanism.
+
 ### Gen3 / migrated tenants (sprint: `*.sprint.apps.dynatracelabs.com`, e.g. ydi9582h; rolling out to prod)
 Classic API-token **creation is disabled** here (Settings API returns 400 "only available
 in Account Management" — see `dynatrace-app-enablements/docs/sprint-mint-platform-tokens-spike.md`).
