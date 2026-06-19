@@ -25,7 +25,7 @@ from typing import Optional
 
 import httpx
 
-from .token_specs import TokenSpec
+from .token_specs import TokenSpec, to_platform_scopes
 
 log = logging.getLogger("ops-provisioning")
 
@@ -278,10 +278,19 @@ class PlatformTokenProvisioner:
         env: dict[str, str] = {}
         token_ids: list[str] = []
         errors: list[str] = []
+        needs_ag = False
         async with httpx.AsyncClient(timeout=20) as client:
             for spec in specs:
+                # Classic apiToken scopes are meaningless to the platform-token API — translate
+                # to platform scopes. activeGateTokenManagement.* has no platform equivalent →
+                # flags an ActiveGate-token pre-mint instead.
+                platform_scopes, spec_needs_ag = to_platform_scopes(spec.scopes)
+                needs_ag = needs_ag or spec_needs_ag
+                if not platform_scopes:
+                    log.info("Spec '%s' has no platform scopes after translation — skipping platform token", spec.name_suffix)
+                    continue
                 name = f"{prefix}-{spec.name_suffix}"[:100]
-                payload = {"name": name, "scope": spec.scopes, "resource": resource,
+                payload = {"name": name, "scope": platform_scopes, "resource": resource,
                            "tags": ["enablement", repo_short], "expirationDate": expires_iso}
                 try:
                     r = await client.post(self._tokens_url, headers=headers, json=payload)
@@ -289,9 +298,22 @@ class PlatformTokenProvisioner:
                     data = r.json()
                     env[spec.env_var] = data["token"]
                     token_ids.append(data.get("tokenId") or data.get("id"))
-                    log.info("Created platform token '%s' (id=%s)", name, token_ids[-1])
+                    log.info("Created platform token '%s' (id=%s, scopes=%s)", name, token_ids[-1], platform_scopes)
                 except httpx.HTTPStatusError as exc:
                     errors.append(f"platform token '{name}': HTTP {exc.response.status_code} — {exc.response.text[:200]}")
+        # An operator spec that needed activeGateTokenManagement → pre-mint an ActiveGate token
+        # (dt0g02), exposed as DT_ACTIVEGATE_TOKEN, since the platform operator token can't carry
+        # that scope. The training wires it into DynaKube (operator no longer self-mints it).
+        if needs_ag and not errors:
+            try:
+                ag = await self.create_activegate_token(f"{prefix}-activegate"[:100], expires_in_hours)
+                if ag.get("token"):
+                    env["DT_ACTIVEGATE_TOKEN"] = ag["token"]
+                    if ag.get("id"):
+                        token_ids.append(ag["id"])
+                    log.info("Pre-minted ActiveGate token (id=%s)", ag.get("id"))
+            except Exception as exc:
+                errors.append(f"ActiveGate token: {exc}")
         if errors:
             if token_ids:
                 await self.revoke_tokens(token_ids)
@@ -307,6 +329,10 @@ class PlatformTokenProvisioner:
         async with httpx.AsyncClient(timeout=15) as client:
             for tid in token_ids:
                 if not tid:
+                    continue
+                if tid.startswith("dt0g02"):
+                    # ActiveGate token — not deletable via the account platform-tokens API
+                    # (different resource); it expires on its short TTL. Skip.
                     continue
                 try:
                     r = await client.delete(f"{self._tokens_url}/{tid}", headers=headers)

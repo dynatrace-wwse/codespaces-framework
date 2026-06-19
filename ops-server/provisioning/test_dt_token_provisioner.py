@@ -274,3 +274,50 @@ def test_platform_create_activegate_token():
     assert captured["sso"]["scope"] == "environment-api:activegate-tokens:write"
     assert captured["sso"]["resource"] == "urn:dtenvironment:ydi9582h"
     assert any(c[1].endswith("/platform/classic/environment-api/v2/activeGateTokens") for c in calls)
+
+
+def test_platform_create_tokens_translates_scopes_and_premints_ag():
+    """gen3 create_tokens: classic operator/ingest scopes → platform scopes; operator's
+    activeGateTokenManagement → a pre-minted ActiveGate token (DT_ACTIVEGATE_TOKEN)."""
+    from provisioning.token_specs import DEFAULT_SPECS
+    sent = []
+    def h(method, url, **kw):
+        if method == "POST" and url.endswith("/sso/oauth2/token"):
+            return _Resp(200, {"access_token": "B", "expires_in": 3600})
+        if method == "POST" and url.endswith("/platform-tokens"):
+            body = kw.get("json"); sent.append(body)
+            n = len(sent)
+            return _Resp(200, {"tokenId": f"dt0s16.P{n}", "token": f"dt0s16.P{n}.V{n}"})
+        if method == "POST" and url.endswith("/activeGateTokens"):
+            sent.append(kw.get("json"))
+            return _Resp(200, {"id": "dt0g02.AG", "token": "dt0g02.AG.SECRET"})
+        return _Resp(404)
+    restore, calls = _install_fake(h)
+    try:
+        res = asyncio.run(_pt().create_tokens("dynatrace-wwse/enablement-kubernetes-101",
+                                              "devlove@dynatracelabs.com", DEFAULT_SPECS))
+    finally:
+        restore()
+    # operator + ingest platform tokens minted with TRANSLATED (platform) scopes — no classic dotted scope leaks
+    pt_bodies = [b for b in sent if "scope" in b]
+    all_scopes = [s for b in pt_bodies for s in b["scope"]]
+    assert all(":" in s for s in all_scopes), all_scopes
+    assert "storage:metrics:write" in all_scopes and "storage:entities:read" in all_scopes
+    assert "activeGateTokenManagement.write" not in all_scopes and "metrics.ingest" not in all_scopes
+    # operator triggered an ActiveGate-token pre-mint, exposed as DT_ACTIVEGATE_TOKEN
+    assert res.env["DT_ACTIVEGATE_TOKEN"].startswith("dt0g02.")
+    assert res.env["DT_OPERATOR_TOKEN"].startswith("dt0s16.")
+    assert res.env["DT_INGEST_TOKEN"].startswith("dt0s16.")
+    assert any(c[1].endswith("/activeGateTokens") for c in calls)
+    # AG token id present but revoke skips it (dt0g02 not deletable via platform-tokens API)
+    assert "dt0g02.AG" in res.token_ids
+
+
+def test_platform_revoke_skips_activegate_ids():
+    restore, calls = _install_fake(_pt_handler())
+    try:
+        asyncio.run(_pt().revoke_tokens(["dt0s16.A", "dt0g02.AG", "dt0s16.B"]))
+    finally:
+        restore()
+    dels = [c for c in calls if c[0] == "DELETE"]
+    assert len(dels) == 2 and all("dt0g02" not in c[1] for c in dels)
