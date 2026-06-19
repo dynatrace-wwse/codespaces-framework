@@ -648,6 +648,7 @@
             <nav class="content-subnav">
                 <button class="content-tab active" data-content-view="profiles">Profiles</button>
                 <button class="content-tab" data-content-view="tenants">Tenants &amp; delivery</button>
+                <button class="content-tab" data-content-view="trainings">Trainings</button>
             </nav>
 
             <!-- Profiles sub-view -->
@@ -695,6 +696,30 @@
                         <button class="btn btn-small" id="cs-save-delivery" data-action>Save delivery table</button>
                         <span id="cs-dmsg" class="content-msg"></span>
                     </div>
+                </div>
+            </div>
+
+            <!-- Trainings sub-view — manage the training-source repo catalog -->
+            <div id="content-view-trainings" class="content-subview" hidden>
+                <p class="content-hint">Training sources Orbital delivers — WWSE Hands-On / Learning Bytes / SE Onboarding repos, and <strong>private repos</strong> for customer workshops. Adding a repo validates it on GitHub (with Orbital's token) before it's managed; reference it from a profile in the Profiles tab.</p>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">Add a training source</h3>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                        <input type="text" id="cs-src-url" placeholder="https://github.com/owner/repo (public or private)" style="flex:1;min-width:320px">
+                        <select id="cs-src-cat" title="Training type / library">
+                            <option value="hands-on">Hands-On Trainings</option>
+                            <option value="learning-byte">Learning Bytes</option>
+                            <option value="onboarding">SE Onboarding</option>
+                            <option value="custom">Custom / workshop</option>
+                        </select>
+                        <button class="btn btn-small btn-secondary" id="cs-src-validate" data-action>Validate</button>
+                        <button class="btn btn-small" id="cs-src-add" data-action>Add</button>
+                    </div>
+                    <span id="cs-src-msg" class="content-msg"></span>
+                </div>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">Managed training sources</h3>
+                    <table id="cs-sources"><thead><tr><th>Repo</th><th>Type</th><th>Delivery</th><th></th></tr></thead><tbody></tbody></table>
                 </div>
             </div>
         </section>

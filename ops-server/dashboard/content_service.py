@@ -60,6 +60,10 @@ DOMAIN_SUFFIXES = _load_domain_suffixes()
 
 PROFILES_DIR = Path(__file__).parent.parent / "content" / "profiles"
 TENANT_MAP_FILE = Path(__file__).parent.parent / "content" / "tenant_map.json"
+# Managed training-source catalog: repos Orbital delivers (incl. private ones added for
+# customer workshops). Distinct from profiles — this is the master list you add/validate/
+# remove in the Trainings tab; profiles reference these repos.
+SOURCES_FILE = Path(__file__).parent.parent / "content" / "sources.json"
 
 router = APIRouter(prefix="/api/content", tags=["content"])
 
@@ -122,7 +126,7 @@ def _load_profile(profile_id: str) -> dict:
 
 
 def _allowed_repos() -> set[str]:
-    """owner/repo allowlist = every repo referenced by any profile."""
+    """owner/repo allowlist = every repo referenced by any profile + every managed source."""
     repos: set[str] = set()
     if PROFILES_DIR.is_dir():
         for f in PROFILES_DIR.glob("*.json"):
@@ -132,7 +136,80 @@ def _allowed_repos() -> set[str]:
                         repos.add(src["repo"].lower())
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("Bad profile %s: %s", f.name, exc)
+    for s in _load_sources():
+        if s.get("repo"):
+            repos.add(s["repo"].lower())
     return repos
+
+
+# ── Managed training-source catalog ─────────────────────────────────────────────
+
+def _parse_repo(url_or_full: str) -> str | None:
+    """Normalize a GitHub repo reference to "owner/repo". Accepts a full URL
+    (https://github.com/owner/repo[.git][/...]) or a bare "owner/repo"."""
+    s = (url_or_full or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"^https?://(www\.)?github\.com/", "", s)
+    s = re.sub(r"\.git$", "", s).strip("/")
+    parts = s.split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    owner, repo = parts[0], parts[1]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", owner) or not re.fullmatch(r"[A-Za-z0-9._-]+", repo):
+        return None
+    return f"{owner}/{repo}"
+
+
+def _load_sources() -> list[dict]:
+    if SOURCES_FILE.is_file():
+        try:
+            return json.loads(SOURCES_FILE.read_text()).get("sources", [])
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Bad sources.json: %s", exc)
+    return []
+
+
+def _save_sources(sources: list[dict]) -> None:
+    SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SOURCES_FILE.write_text(json.dumps({"sources": sources}, indent=2) + "\n")
+
+
+async def _gh_get(path: str):
+    headers = {"Accept": "application/vnd.github+json"}
+    if GH_TOKEN:
+        headers["Authorization"] = f"Bearer {GH_TOKEN}"
+    async with httpx.AsyncClient(timeout=12) as client:
+        return await client.get(f"{GH_API}{path}", headers=headers)
+
+
+async def _validate_repo(repo_full: str, branch: str = "main") -> dict:
+    """Probe GitHub: repo reachable (with Orbital's token, so private repos count) and it
+    looks like a training repo (mkdocs.yml/.yaml = self-paced, .devcontainer = hands-on).
+    Returns {valid, reason, delivery, hasMkdocs, hasDevcontainer, defaultBranch}."""
+    owner, _, repo = repo_full.partition("/")
+    try:
+        r = await _gh_get(f"/repos/{owner}/{repo}")
+        if r.status_code == 404:
+            return {"valid": False, "reason": "Repository not found (or Orbital's token can't see it)."}
+        if r.status_code == 403:
+            return {"valid": False, "reason": "Access denied — Orbital's GitHub token lacks access to this repo."}
+        if r.status_code != 200:
+            return {"valid": False, "reason": f"GitHub returned HTTP {r.status_code}."}
+        default_branch = r.json().get("default_branch", "main")
+        use_branch = branch or default_branch
+        tree = await _gh_get(f"/repos/{owner}/{repo}/git/trees/{use_branch}?recursive=0")
+        paths = [e.get("path", "") for e in (tree.json().get("tree", []) if tree.status_code == 200 else [])]
+        has_mkdocs = any(p in ("mkdocs.yml", "mkdocs.yaml") for p in paths)
+        has_devc = any(p == ".devcontainer" or p.startswith(".devcontainer") for p in paths)
+        if not has_mkdocs and not has_devc:
+            return {"valid": False, "reason": "Not a training repo — no mkdocs.yml or .devcontainer found.",
+                    "defaultBranch": default_branch}
+        return {"valid": True, "reason": "Validated.", "defaultBranch": default_branch,
+                "hasMkdocs": has_mkdocs, "hasDevcontainer": has_devc,
+                "delivery": "hands-on" if has_devc else "self-paced"}
+    except Exception as exc:
+        return {"valid": False, "reason": f"Validation error: {exc}"}
 
 
 async def _latest_sha(owner: str, repo: str, branch: str) -> str | None:
@@ -333,6 +410,69 @@ async def put_tenant_map(body: dict, x_auth_user: str | None = Header(default=No
     TENANT_MAP_FILE.write_text(json.dumps(clean, indent=2) + "\n")
     log.info("Tenant map saved by %s (%d tenant override(s))", x_auth_user, len(clean["tenants"]))
     return {"ok": True, "tenants": len(clean["tenants"])}
+
+
+@router.get("/admin/sources")
+async def list_sources(x_auth_user: str | None = Header(default=None)):
+    """List the managed training sources (the Trainings tab)."""
+    _require_writer(x_auth_user)
+    return {"sources": _load_sources()}
+
+
+@router.post("/admin/validate-repo")
+async def validate_repo(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Validate a repo URL without adding it (so the UI can show ✓/✗ before Add)."""
+    _require_writer(x_auth_user)
+    repo_full = _parse_repo(body.get("repo", ""))
+    if not repo_full:
+        raise HTTPException(400, "Provide a GitHub repo URL or owner/repo.")
+    result = await _validate_repo(repo_full, body.get("branch", "main"))
+    return {"repo": repo_full, **result}
+
+
+@router.post("/admin/sources")
+async def add_source(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Validate a repo and add it to the managed catalog. Stored only if validation passes,
+    so an invalid/unreachable repo never enters delivery."""
+    _require_writer(x_auth_user)
+    repo_full = _parse_repo(body.get("repo", ""))
+    if not repo_full:
+        raise HTTPException(400, "Provide a GitHub repo URL or owner/repo.")
+    branch = (body.get("branch") or "main").strip()
+    result = await _validate_repo(repo_full, branch)
+    if not result.get("valid"):
+        raise HTTPException(400, result.get("reason", "Repository did not validate."))
+    sources = _load_sources()
+    if any(s.get("repo", "").lower() == repo_full.lower() for s in sources):
+        raise HTTPException(409, f"{repo_full} is already managed.")
+    category = (body.get("category") or "hands-on").strip()
+    entry = {
+        "repo": repo_full,
+        "branch": branch or result.get("defaultBranch", "main"),
+        "category": category,
+        "categoryLabel": (body.get("categoryLabel") or "").strip() or category.replace("-", " ").title(),
+        "delivery": result.get("delivery", "self-paced"),
+        "private": bool(body.get("private", False)),
+        "addedBy": x_auth_user or "",
+    }
+    sources.append(entry)
+    _save_sources(sources)
+    log.info("Added managed source %s (%s) by %s", repo_full, entry["delivery"], x_auth_user)
+    return {"ok": True, "source": entry}
+
+
+@router.delete("/admin/sources/{owner}/{repo}")
+async def remove_source(owner: str, repo: str, x_auth_user: str | None = Header(default=None)):
+    """Remove a repo from the managed catalog. Does not touch profiles that reference it."""
+    _require_writer(x_auth_user)
+    repo_full = f"{owner}/{repo}".lower()
+    sources = _load_sources()
+    kept = [s for s in sources if s.get("repo", "").lower() != repo_full]
+    if len(kept) == len(sources):
+        raise HTTPException(404, f"{owner}/{repo} is not a managed source.")
+    _save_sources(kept)
+    log.info("Removed managed source %s/%s by %s", owner, repo, x_auth_user)
+    return {"ok": True, "removed": f"{owner}/{repo}"}
 
 
 @router.post("/admin/register-tenant")

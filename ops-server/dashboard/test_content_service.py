@@ -172,3 +172,89 @@ if __name__ == "__main__":
         t()
         print(f"  PASS {t.__name__}")
     print(f"\n{len(tests)}/{len(tests)} content-service tests passed")
+
+
+# ── Managed training sources (Trainings tab) ────────────────────────────────────
+
+class _GhResp:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._p = payload or {}
+    def json(self): return self._p
+
+
+def test_parse_repo():
+    assert cs._parse_repo("https://github.com/dynatrace-wwse/enablement-kubernetes-101") == "dynatrace-wwse/enablement-kubernetes-101"
+    assert cs._parse_repo("dynatrace-wwse/enablement-kubernetes-101.git") == "dynatrace-wwse/enablement-kubernetes-101"
+    assert cs._parse_repo("https://github.com/owner/repo/tree/main") == "owner/repo"
+    assert cs._parse_repo("not a repo") is None
+    assert cs._parse_repo("") is None
+
+
+def test_validate_repo_detects_training(monkeypatch=None):
+    async def fake_gh(path):
+        if path.endswith("/repos/o/r"): return _GhResp(200, {"default_branch": "main"})
+        if "/git/trees/" in path: return _GhResp(200, {"tree": [{"path": ".devcontainer/devcontainer.json"}, {"path": "mkdocs.yml"}]})
+        return _GhResp(404)
+    orig = cs._gh_get; cs._gh_get = fake_gh
+    try:
+        r = asyncio.run(cs._validate_repo("o/r", "main"))
+    finally:
+        cs._gh_get = orig
+    assert r["valid"] is True
+    assert r["delivery"] == "hands-on"  # has .devcontainer
+
+
+def test_validate_repo_rejects_non_training_and_missing(monkeypatch=None):
+    async def gh_plain(path):
+        if path.endswith("/repos/o/r"): return _GhResp(200, {"default_branch": "main"})
+        if "/git/trees/" in path: return _GhResp(200, {"tree": [{"path": "README.md"}]})
+        return _GhResp(404)
+    orig = cs._gh_get
+    cs._gh_get = gh_plain
+    try:
+        r = asyncio.run(cs._validate_repo("o/r"))
+        assert r["valid"] is False and "no mkdocs" in r["reason"].lower()
+        cs._gh_get = lambda path: _coro(_GhResp(404))
+        r2 = asyncio.run(cs._validate_repo("o/missing"))
+        assert r2["valid"] is False and "not found" in r2["reason"].lower()
+    finally:
+        cs._gh_get = orig
+
+
+async def _coro(v): return v
+
+
+def test_add_and_remove_source(monkeypatch=None):
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        cs.SOURCES_FILE = Path(d) / "content" / "sources.json"
+        async def fake_gh(path):
+            if path.endswith("/repos/dynatrace-wwse/enablement-dql-301"): return _GhResp(200, {"default_branch": "main"})
+            if "/git/trees/" in path: return _GhResp(200, {"tree": [{"path": "mkdocs.yml"}]})
+            return _GhResp(404)
+        orig = cs._gh_get; cs._gh_get = fake_gh
+        try:
+            res = asyncio.run(cs.add_source({"repo": "https://github.com/dynatrace-wwse/enablement-dql-301", "category": "hands-on"}, x_auth_user="alice"))
+            assert res["ok"] and res["source"]["repo"] == "dynatrace-wwse/enablement-dql-301"
+            assert res["source"]["delivery"] == "self-paced"  # mkdocs only
+            listed = asyncio.run(cs.list_sources(x_auth_user="alice"))
+            assert len(listed["sources"]) == 1
+            # the new repo is now in the proxy allowlist
+            assert "dynatrace-wwse/enablement-dql-301" in cs._allowed_repos()
+            # duplicate add → 409
+            _expect_http(409, cs.add_source, {"repo": "dynatrace-wwse/enablement-dql-301"}, x_auth_user="alice")
+            # remove
+            rm = asyncio.run(cs.remove_source("dynatrace-wwse", "enablement-dql-301", x_auth_user="alice"))
+            assert rm["ok"]
+            assert asyncio.run(cs.list_sources(x_auth_user="alice"))["sources"] == []
+            _expect_http(404, cs.remove_source, "dynatrace-wwse", "nope", x_auth_user="alice")
+        finally:
+            cs._gh_get = orig
+
+
+def test_add_source_rejects_invalid_repo(monkeypatch=None):
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d)); cs.SOURCES_FILE = Path(d) / "content" / "sources.json"
+        _expect_http(400, cs.add_source, {"repo": "garbage"}, x_auth_user="alice")
+    _expect_http(401, cs.list_sources, None)
