@@ -1256,7 +1256,17 @@ async def api_terminate_job(job_id: str, request: Request):
     meta = await pool.hgetall(f"job:running:{job_id}")
     # Only Orbital-minted tokens carry a stored auth cred here. App-minted tokens
     # (multi-tenancy) are revoked by the app itself — Orbital holds no tenant cred.
-    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+    if meta.get("mint_kind") == "platform" and meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
+        # Orbital-minted platform tokens (gen3) — revoke via the account OAuth client (from env).
+        try:
+            token_ids = json.loads(meta["dt_token_ids"])
+            prov = _gen3_platform_provisioner(meta["dt_tenant_url"])
+            if prov:
+                asyncio.create_task(prov.revoke_tokens(token_ids))
+                log.info("Revoking %d platform token(s) for session %s", len(token_ids), job_id)
+        except Exception as exc:
+            log.warning("Could not initiate platform-token revocation for %s: %s", job_id, exc)
+    elif (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
             and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
         from provisioning import DTTokenProvisioner
         try:
@@ -3445,6 +3455,29 @@ class ArenaProvisionRequest(BaseModel):
     dtTokenIds: list[str] = []   # ids the app will revoke (Orbital does not)
 
 
+def _gen3_platform_provisioner(tenant_url: str):
+    """Build a PlatformTokenProvisioner for a tenant whose classic apiToken creation is
+    disabled (gen3 — sprint/dev, and prod as it migrates). Reads the per-account account
+    OAuth client from env: MINT_{CLIENT_ID,CLIENT_SECRET,RESOURCE,SSO,API_HOST}_<DOMAIN>.
+    Returns None when the tenant isn't gen3 or no creds are configured for its account."""
+    try:
+        tenant_id, domain = classify_tenant(tenant_url)
+    except Exception:
+        return None
+    sfx = domain.upper()  # SPRINT / DEV / PROD
+    cid = os.environ.get(f"MINT_CLIENT_ID_{sfx}")
+    csec = os.environ.get(f"MINT_CLIENT_SECRET_{sfx}")
+    res = os.environ.get(f"MINT_RESOURCE_{sfx}", "")
+    sso = os.environ.get(f"MINT_SSO_{sfx}")
+    api = os.environ.get(f"MINT_API_HOST_{sfx}")
+    if not (cid and csec and res and sso and api):
+        return None
+    from provisioning import PlatformTokenProvisioner
+    return PlatformTokenProvisioner(
+        tenant_url=tenant_url, env_id=tenant_id, account_uuid=res.split(":")[-1],
+        sso_token_url=sso, account_api_host=api, oauth_client_id=cid, oauth_client_secret=csec)
+
+
 @app.post("/api/arena/provision")
 async def api_arena_provision(body: ArenaProvisionRequest):
     """Provision a training environment — queues a real daemon job on the amd64 worker.
@@ -3474,6 +3507,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     dt_env: dict[str, str] = {}
     provisioned_token_ids: list[str] = []
     token_provisioned = False
+    mint_kind = ""  # "platform" when Orbital minted via the Account Management API (gen3)
 
     tenant_url = body.tenantUrl.rstrip("/") if body.tenantUrl else ""
     if body.dtEnv:
@@ -3484,6 +3518,22 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         token_provisioned = True
         if not tenant_url:
             tenant_url = (dt_env.get("DT_ENVIRONMENT") or "").rstrip("/")
+    elif tenant_url and (_gen3 := _gen3_platform_provisioner(tenant_url)) is not None:
+        # gen3 tenant (classic apiToken creation disabled, e.g. sprint): Orbital mints
+        # platform tokens via the account OAuth client. Orbital owns revocation (mint_kind).
+        try:
+            specs = await load_token_specs(repo_nwo, ref=training["branch"])
+            result = await _gen3.create_tokens(repo=repo_nwo, user_id=body.userId,
+                                               specs=specs, expires_in_hours=session_hours)
+            dt_env = result.env
+            provisioned_token_ids = result.token_ids
+            token_provisioned = True
+            mint_kind = "platform"
+        except Exception as exc:
+            import logging as _log
+            _log.getLogger("ops-dashboard").warning(
+                "Platform-token provisioning failed for %s / %s: %s — falling back to worker creds",
+                repo_nwo, body.userId, exc)
     elif tenant_url and (body.apiToken or (body.oauthClientId and body.oauthClientSecret)):
         try:
             provisioner = DTTokenProvisioner(
@@ -3551,6 +3601,10 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         redis_meta["dt_token_ids"] = json.dumps(provisioned_token_ids)
     if tenant_url:
         redis_meta["dt_tenant_url"] = tenant_url
+    if mint_kind:
+        # Orbital minted platform tokens (gen3) → terminate revokes via the same account
+        # OAuth client (no per-job creds stored; rebuilt from env on revoke).
+        redis_meta["mint_kind"] = mint_kind
     # Store auth so terminate can revoke tokens. Token has apiTokens.read+write only.
     if token_provisioned:
         if body.apiToken:
@@ -4237,7 +4291,15 @@ async def api_arena_terminate(job_id: str):
     meta = await pool.hgetall(f"job:running:{job_id}")
     # Only Orbital-minted tokens carry a stored auth cred here. App-minted tokens
     # (multi-tenancy) are revoked by the app itself — Orbital holds no tenant cred.
-    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+    if meta.get("mint_kind") == "platform" and meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
+        try:
+            token_ids = json.loads(meta["dt_token_ids"])
+            prov = _gen3_platform_provisioner(meta["dt_tenant_url"])
+            if prov:
+                asyncio.create_task(prov.revoke_tokens(token_ids))
+        except Exception as exc:
+            log.warning("Could not initiate platform-token revocation for %s: %s", job_id, exc)
+    elif (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
             and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
         from provisioning import DTTokenProvisioner
         try:
