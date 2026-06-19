@@ -661,6 +661,22 @@ async def deploy_audit(limit: int = 50, x_auth_user: str | None = Header(default
     return {"audit": [json.loads(r) for r in rows]}
 
 
+@router.get("/api/deploy/mint-clients")
+async def mint_clients(x_auth_user: str | None = Header(default=None)):
+    """Read-only: the account OAuth clients configured for gen3 platform-token minting,
+    per domain. Returns the client_id + account URN only — NEVER the secret — so an admin
+    can see which client is in use and rotate it in myaccount if needed."""
+    _require_writer(x_auth_user)
+    out = []
+    for dom in ("SPRINT", "DEV", "PROD"):
+        cid = os.environ.get(f"MINT_CLIENT_ID_{dom}")
+        if cid:
+            out.append({"domain": dom.lower(), "clientId": cid,
+                        "account": os.environ.get(f"MINT_RESOURCE_{dom}", ""),
+                        "sso": os.environ.get(f"MINT_SSO_{dom}", "")})
+    return {"mintClients": out}
+
+
 def _page(msg: str, ok: bool) -> str:
     color = "#2da44e" if ok else "#f85149"
     return (f"<!doctype html><html><head><meta charset=utf-8><title>Deploy</title></head>"

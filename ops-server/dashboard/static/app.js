@@ -3304,4 +3304,23 @@ async function loadRegisterAudit() {
 function loadRegister() {
     wireRegister();
     loadRegisterAudit();
+    loadMintClients();
+}
+
+async function loadMintClients() {
+    const el = document.getElementById('reg-mint-clients');
+    if (!el) return;
+    try {
+        const r = await fetch('/api/deploy/mint-clients', { credentials: 'same-origin' });
+        if (!r.ok) { el.innerHTML = ''; return; }
+        const j = await r.json();
+        const rows = j.mintClients || [];
+        el.innerHTML = rows.length
+            ? '<h3 style="margin:24px 0 8px">Token-mint OAuth clients (gen3, read-only)</h3>'
+              + '<p class="content-hint" style="margin:0 0 6px">Account OAuth clients used to mint platform tokens for trainings on gen3 tenants. Rotate in myaccount.dynatrace.com; the secret is never shown.</p>'
+              + '<table><thead><tr><th>Domain</th><th>Client ID</th><th>Account</th></tr></thead><tbody>'
+              + rows.map(c => `<tr><td>${escapeHtml(c.domain)}</td><td><code>${escapeHtml(c.clientId)}</code></td><td><code style="font-size:0.72rem">${escapeHtml(c.account)}</code></td></tr>`).join('')
+              + '</tbody></table>'
+            : '';
+    } catch { el.innerHTML = ''; }
 }
