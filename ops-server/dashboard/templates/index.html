@@ -733,8 +733,11 @@
                     <li><code>app-engine:apps:install</code> — install / upgrade the app</li>
                     <li><code>app-engine:apps:run</code> — run the app's functions</li>
                     <li><code>app-engine:apps:delete</code> — only needed for Undeploy</li>
-                    <li><code>settings:objects:read</code> + <code>settings:objects:write</code> — auto-allow the app to reach Orbital + GitHub (required on sprint/dev, which enforce an outbound allowlist)</li>
+                    <li><code>settings:objects:read</code> + <code>settings:objects:write</code> — set the remote-grail config + outbound allowlist (forward analytics to the central tenant; required on sprint/dev)</li>
+                    <li><code>api-tokens:tokens:read</code> + <code>api-tokens:tokens:write</code> — grant the app its self-mint scope so hands-on labs can mint operator/ingest tokens <em>(gen2 <code>.apps.dynatrace.com</code> only)</em></li>
+                    <li><code>document:documents:read</code> — optional, content verification</li>
                 </ul>
+                <p class="content-hint" style="margin:6px 0 0">Sprint/dev (<code>.sprint|dev.apps.dynatracelabs.com</code>): classic token creation is disabled — minting also needs an <strong>account-level OAuth client</strong> (token management). See <code>ops-server/docs/tenant-credentials.md</code>.</p>
             </div>
             <div class="content-card">
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
