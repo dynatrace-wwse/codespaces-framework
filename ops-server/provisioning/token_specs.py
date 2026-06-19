@@ -61,6 +61,58 @@ DEFAULT_SPECS: list[TokenSpec] = [
 ]
 
 
+# ── gen3 scope translation ──────────────────────────────────────────────────────
+# On tenants where classic apiToken creation is disabled, training tokens are minted as
+# platform tokens (dt0s16). Classic apiToken scopes have no meaning there — map each to its
+# platform-scope equivalent. A value of None = no platform equivalent: the capability is
+# either not needed for applicationMonitoring (DataExport/InstallerDownload) or is covered by
+# a pre-minted ActiveGate token (activeGateTokenManagement.*). Verified mintable live on
+# sprint 2026-06-19 (see docs/gen3-token-research.md in the app repo).
+_CLASSIC_TO_PLATFORM: dict[str, Optional[str]] = {
+    "entities.read":        "storage:entities:read",
+    "settings.read":        "settings:objects:read",
+    "settings.write":       "settings:objects:write",
+    "ReadConfig":           "settings:objects:read",
+    "WriteConfig":          "settings:objects:write",
+    "metrics.read":         "storage:metrics:read",
+    "metrics.ingest":       "storage:metrics:write",
+    "logs.read":            "storage:logs:read",
+    "logs.ingest":          "storage:logs:write",
+    "events.ingest":        "storage:events:write",
+    # No platform-token equivalent → dropped (covered elsewhere / not needed for apponly):
+    "activeGateTokenManagement.write":  None,   # → triggers ActiveGate-token pre-mint
+    "activeGateTokenManagement.create": None,   # → triggers ActiveGate-token pre-mint
+    "DataExport":           None,
+    "InstallerDownload":    None,
+    "openTelemetryTrace.ingest": None,          # platform OTel-ingest scope TBD (storage:spans:write invalid)
+}
+# Classic scopes meaning "this token must manage ActiveGate tokens" → on gen3 we pre-mint an
+# ActiveGate token instead (the platform operator token can't carry it).
+_AG_TRIGGER_SCOPES = {"activeGateTokenManagement.write", "activeGateTokenManagement.create"}
+
+
+def to_platform_scopes(scopes: list[str]) -> tuple[list[str], bool]:
+    """Translate classic apiToken scopes → platform-token scopes for gen3 minting.
+
+    Returns (platform_scopes, needs_activegate_token). Scopes already in platform form
+    (contain ':') pass through unchanged. Unknown classic scopes are dropped (logged)."""
+    out: list[str] = []
+    needs_ag = False
+    for s in scopes:
+        if s in _AG_TRIGGER_SCOPES:
+            needs_ag = True
+        if ":" in s:                      # already a platform scope
+            out.append(s)
+            continue
+        if s in _CLASSIC_TO_PLATFORM:
+            mapped = _CLASSIC_TO_PLATFORM[s]
+            if mapped:
+                out.append(mapped)
+        else:
+            log.warning("No gen3 platform-scope mapping for classic scope %r — dropped", s)
+    return sorted(set(out)), needs_ag
+
+
 def _parse_yaml(content: str) -> list[TokenSpec]:
     data = yaml.safe_load(content)
     specs = []
