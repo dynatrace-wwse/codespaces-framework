@@ -3491,7 +3491,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "arch":          "amd64",
         "ref":           training["branch"],
         "timestamp":     now.isoformat(),
-        "trigger":       "arena",
+        "trigger":       "enablement-app",
         "nightly_run_id": f"enablement-{body.trainingId}",
         "requested_by":  body.userId,
     }

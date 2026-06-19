@@ -676,7 +676,10 @@ function applyWrapPref() {
     const wrap = getWrapPref();
     pre.classList.toggle('nowrap', !wrap);
     const btn = document.getElementById('livelog-wrap-toggle');
-    if (btn) btn.textContent = wrap ? '↩ Wrap' : '→ NoWrap';
+    // Label shows the ACTION the click performs (not the current state): when wrapping,
+    // the button offers "NoWrap"; when not wrapping, it offers "Wrap". (Previously these
+    // were swapped — the button showed the current state, which read backwards to users.)
+    if (btn) btn.textContent = wrap ? '→ NoWrap' : '↩ Wrap';
 }
 
 function openLiveLog(jobId, title, isAgent = false) {
@@ -1360,7 +1363,7 @@ async function loadHistory() {
                 <td>${dur}</td>
                 <td><span class="${statusCls}">${statusLabel}</span></td>
                 <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(r.type))}</td>
-                <td>${escapeHtml(r.trigger || '')}</td>
+                <td>${escapeHtml(formatTrigger(r.trigger))}</td>
                 <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
                 <td>${logLink}</td>
                 <td>${rerunBtn}</td>
@@ -2146,6 +2149,14 @@ function escapeHtml(s) {
     return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({
         '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'
     }[c]));
+}
+
+function formatTrigger(trigger) {
+    // "arena" was the old name for the enablement-app provisioner; the Arena product
+    // was renamed to the Enablement App. Map both the legacy value (old Redis jobs) and
+    // the new value to a single friendly label so the History "Trigger" column is consistent.
+    if (trigger === 'arena' || trigger === 'enablement-app') return 'Enablement App';
+    return trigger || '';
 }
 
 function formatJobType(type) {
