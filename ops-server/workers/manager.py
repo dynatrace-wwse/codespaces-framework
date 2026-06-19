@@ -34,6 +34,10 @@ from telemetry.reporter import (
 # 2h: longer than any expected build. If a worker crashes mid-job, the lock
 # auto-expires and the next enqueue for the same triple proceeds.
 LOCK_TTL_SECONDS = 7200
+# Claude-Code agent job types — archived to a dedicated list so Agentic History
+# isn't crowded out of the 500-cap jobs:completed list by integration/framework runs.
+AGENT_JOB_TYPES = {"fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab",
+                   "validate-after-push", "deploy-ghpages"}
 
 # App proxy port pool — master Sysbox containers publish one port in this range
 # so the dashboard can reverse-proxy to k3d LB apps without SSH tunnelling.
@@ -546,8 +550,15 @@ class WorkerManager:
                     self._terminated_jobs.discard(job_id)
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
                 await self._publish_log(job)
-                await self.pool.rpush("jobs:completed", json.dumps(job))
+                _rec = json.dumps(job)
+                await self.pool.rpush("jobs:completed", _rec)
                 await self.pool.ltrim("jobs:completed", -500, -1)
+                # Agent jobs are rare but get crowded out of the 500-cap jobs:completed
+                # list by integration/framework runs — so Agentic History looked empty.
+                # Keep a dedicated list (cap 300) so it survives.
+                if job.get("type") in AGENT_JOB_TYPES:
+                    await self.pool.rpush("agent:jobs:completed", _rec)
+                    await self.pool.ltrim("agent:jobs:completed", -300, -1)
                 # Terminal-status record that OUTLIVES job:running (deleted below),
                 # so session-status can report a failed creation and point the
                 # student at the retained log (job:log:{id}) instead of a bare
