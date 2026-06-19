@@ -1572,7 +1572,11 @@ class WorkerManager:
         shutil.rmtree(work_dir, ignore_errors=True)
 
         await self._save_framework_suite_result(suite, job_id, rc, duration, arch, "".join(sections))
-        return {"suite": suite, "exit_code": rc, "passed": rc == 0, "duration_seconds": duration, "arch": arch, "timed_out": timed_out}
+        # Return log_file so _publish_log persists job:log:{id} (read by /api/jobs/{id}/log).
+        # Without this the master (arm64) framework suites streamed to job:livelog during the
+        # run but left job:log empty → the dashboard showed "Initializing isolation container…"
+        # forever for green nightly runs. The amd64 path returns log_file via executor.py.
+        return {"suite": suite, "exit_code": rc, "passed": rc == 0, "duration_seconds": duration, "arch": arch, "timed_out": timed_out, "log_file": str(log_file)}
 
     async def _save_framework_suite_result(self, suite: str, job_id: str, rc: int, duration: int, arch: str, log_text: str):
         """Store last result for a framework suite in Redis."""
