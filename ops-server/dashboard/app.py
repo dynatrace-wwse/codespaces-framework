@@ -3512,6 +3512,11 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "type":         "daemon",
         "arena_user":   body.userId,
         "arena_tenant": body.tenantId or tenant_url,
+        # Stage badge shown next to the tenant id in History (production / sprint / dev),
+        # derived from the tenant domain (*.apps.dynatrace.com=production,
+        # *.sprint.apps.dynatracelabs.com=sprint, *.dev…=dev).
+        "stage":        {"prod": "production", "sprint": "sprint", "dev": "dev"}.get(
+            classify_tenant(tenant_url or body.tenantId or "")[1], "production"),
         "training_id":  body.trainingId,
         "expires_at":   expires_at,
         "token_provisioned": "1" if token_provisioned else "0",

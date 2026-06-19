@@ -3106,9 +3106,24 @@ function csRenderDelivery() {
     document.getElementById('cs-newtp').innerHTML = csProfileOpts(csState.profiles[0] && csState.profiles[0].profileId);
 }
 
+// Derive the deployment stage from a tenant id/URL: *.apps.dynatrace.com = production,
+// *.sprint.apps.dynatracelabs.com = sprint, *.dev.apps.dynatracelabs.com = dev. A bare
+// id with no domain hint defaults to production (the common case).
+function stageOf(idOrUrl) {
+    const s = String(idOrUrl || '');
+    if (/\.sprint\./.test(s)) return 'sprint';
+    if (/\.dev\./.test(s)) return 'dev';
+    return 'production';
+}
+function stageBadge(stage) {
+    const bg = stage === 'production' ? '#5a1e1e' : stage === 'sprint' ? '#3a3a1e' : '#1e3a3a';
+    const fg = stage === 'production' ? '#ff9a9a' : stage === 'sprint' ? '#e0d77d' : '#7dd6e0';
+    return `<span style="font-size:0.62rem;margin-left:6px;padding:0 5px;border-radius:3px;background:${bg};color:${fg}" title="Deployment stage">${escapeHtml(stage)}</span>`;
+}
+
 function csTenantRow(tid, pid) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td><code>${escapeHtml(tid)}</code></td><td><select>${csProfileOpts(pid)}</select></td><td><button class="btn btn-small btn-secondary" type="button">remove</button></td>`;
+    tr.innerHTML = `<td><code>${escapeHtml(tid)}</code>${stageBadge(stageOf(tid))}</td><td><select>${csProfileOpts(pid)}</select></td><td><button class="btn btn-small btn-secondary" type="button">remove</button></td>`;
     tr.dataset.tid = tid;
     tr.querySelector('button').addEventListener('click', () => tr.remove());
     return tr;
