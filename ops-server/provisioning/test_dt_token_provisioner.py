@@ -183,3 +183,70 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ── PlatformTokenProvisioner (gen3 / Account Management) ────────────────────────
+
+def _pt():
+    from .dt_token_provisioner import PlatformTokenProvisioner
+    return PlatformTokenProvisioner(
+        tenant_url="https://ydi9582h.sprint.apps.dynatracelabs.com", env_id="ydi9582h",
+        account_uuid="ceae4b9d", sso_token_url="https://sso-sprint.dynatracelabs.com/sso/oauth2/token",
+        account_api_host="https://api-hardening.internal.dynatracelabs.com",
+        oauth_client_id="dt0s02.X", oauth_client_secret="dt0s02.X.SEC")
+
+
+def test_platform_token_requires_all_config():
+    from .dt_token_provisioner import PlatformTokenProvisioner
+    try:
+        PlatformTokenProvisioner("https://t", "", "", "", "", "", "")
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError")
+
+
+def _pt_handler():
+    n = {"i": 0}
+    def h(method, url, **kw):
+        if method == "POST" and url.endswith("/sso/oauth2/token"):
+            return _Resp(200, {"access_token": "BEARER", "expires_in": 3600})
+        if method == "POST" and url.endswith("/platform-tokens"):
+            n["i"] += 1
+            return _Resp(200, {"name": "x", "tokenId": f"dt0s16.ID{n['i']}", "token": f"dt0s16.ID{n['i']}.VAL{n['i']}"})
+        if method == "DELETE":
+            return _Resp(200)
+        return _Resp(404, text="unexpected")
+    return h
+
+
+def test_platform_token_create_uses_account_api_and_env_resource():
+    restore, calls = _install_fake(_pt_handler())
+    try:
+        res = asyncio.run(_pt().create_tokens("dynatrace-wwse/enablement-kubernetes-101", "devlove@dynatracelabs.com", SPECS))
+    finally:
+        restore()
+    # tokens minted into env vars
+    assert res.env["DT_OPERATOR_TOKEN"].startswith("dt0s16.")
+    assert res.env["DT_INGEST_TOKEN"].startswith("dt0s16.")
+    assert len(res.token_ids) == 2
+    # create POSTs hit the account platform-tokens endpoint with the env URN as resource
+    creates = [c for c in calls if c[0] == "POST" and c[1].endswith("/platform-tokens")]
+    assert creates and all("/iam/v1/accounts/ceae4b9d/platform-tokens" in c[1] for c in creates)
+    body = creates[0][2]["json"]
+    assert body["resource"] == ["urn:dtenvironment:ydi9582h"]
+    assert "expirationDate" in body and isinstance(body["scope"], list)
+    # bearer fetched with platform-token scope + account resource
+    tok = [c for c in calls if c[1].endswith("/sso/oauth2/token")][0][2]["data"]
+    assert "platform-token:tokens:write" in tok["scope"]
+    assert tok["resource"] == "urn:dtaccount:ceae4b9d"
+
+
+def test_platform_token_revoke_deletes_each():
+    restore, calls = _install_fake(_pt_handler())
+    try:
+        asyncio.run(_pt().revoke_tokens(["dt0s16.A", "dt0s16.B", ""]))
+    finally:
+        restore()
+    dels = [c for c in calls if c[0] == "DELETE"]
+    assert len(dels) == 2  # empty id skipped
+    assert all("/platform-tokens/dt0s16." in c[1] for c in dels)

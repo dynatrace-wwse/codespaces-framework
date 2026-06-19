@@ -175,3 +175,113 @@ class DTTokenProvisioner:
                         log.warning("Unexpected status revoking token %s: %d", tid, r.status_code)
                 except Exception as exc:
                     log.warning("Could not revoke token %s: %s", tid, exc)
+
+
+# ── Account Management platform-token provisioner (gen3 / migrated tenants) ──────
+#
+# On tenants where classic apiToken creation is disabled (sprint, and prod as it
+# migrates: POST /platform/classic/environment-api/v2/apiTokens → 400 "only available
+# in Account Management"), training tokens must be minted as PLATFORM tokens (dt0s16)
+# via the Account Management API, using an ACCOUNT-level OAuth client.
+#
+# Verified live on sprint (ydi9582h / account ceae4b9d…) 2026-06-19:
+#   bearer:  POST {sso}/sso/oauth2/token  client_credentials
+#            scope="platform-token:tokens:write platform-token:tokens:manage"
+#            resource="urn:dtaccount:{uuid}"
+#   create:  POST {accountApi}/iam/v1/accounts/{uuid}/platform-tokens
+#            {name, scope:[...], resource:["urn:dtenvironment:{envId}"], tags:[...],
+#             expirationDate}  → {tokenId, token}      (userUuid NOT required for the client)
+#   revoke:  DELETE {accountApi}/iam/v1/accounts/{uuid}/platform-tokens/{tokenId}
+
+_PT_SCOPE = "platform-token:tokens:write platform-token:tokens:manage"
+
+
+class PlatformTokenProvisioner:
+    """Mint/revoke training tokens as Account Management platform tokens (gen3 path).
+
+    `env_id` is the tenant subdomain (e.g. 'ydi9582h'); the token is scoped to
+    `urn:dtenvironment:{env_id}`. Mirrors DTTokenProvisioner's ProvisionedTokens output
+    so the rest of the provisioning flow is unchanged.
+    """
+
+    def __init__(self, tenant_url: str, env_id: str, account_uuid: str,
+                 sso_token_url: str, account_api_host: str,
+                 oauth_client_id: str, oauth_client_secret: str):
+        self.tenant_url = tenant_url.rstrip("/")
+        self.env_id = env_id
+        self.account_uuid = account_uuid
+        self.sso_token_url = sso_token_url
+        self.account_api_host = account_api_host.rstrip("/")
+        self._cid = oauth_client_id
+        self._csec = oauth_client_secret
+        if not (env_id and account_uuid and sso_token_url and account_api_host and oauth_client_id and oauth_client_secret):
+            raise ValueError("PlatformTokenProvisioner requires env_id, account_uuid, sso_token_url, account_api_host, oauth_client_id, oauth_client_secret")
+
+    @property
+    def _tokens_url(self) -> str:
+        return f"{self.account_api_host}/iam/v1/accounts/{self.account_uuid}/platform-tokens"
+
+    async def _bearer(self) -> str:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(self.sso_token_url, data={
+                "grant_type": "client_credentials",
+                "client_id": self._cid,
+                "client_secret": self._csec,
+                "scope": _PT_SCOPE,
+                "resource": f"urn:dtaccount:{self.account_uuid}",
+            })
+            r.raise_for_status()
+            return r.json()["access_token"]
+
+    async def create_tokens(self, repo: str, user_id: str, specs: list[TokenSpec],
+                            expires_in_hours: int = 4) -> ProvisionedTokens:
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+        expires_iso = expires_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        repo_short = repo.split("/")[-1][:20].replace("_", "-")
+        user_short = user_id.split("@")[0][:10].replace("_", "-").replace(".", "-")
+        prefix = f"enbl-{repo_short}-{user_short}"
+        resource = [f"urn:dtenvironment:{self.env_id}"]
+
+        bearer = await self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
+        env: dict[str, str] = {}
+        token_ids: list[str] = []
+        errors: list[str] = []
+        async with httpx.AsyncClient(timeout=20) as client:
+            for spec in specs:
+                name = f"{prefix}-{spec.name_suffix}"[:100]
+                payload = {"name": name, "scope": spec.scopes, "resource": resource,
+                           "tags": ["enablement", repo_short], "expirationDate": expires_iso}
+                try:
+                    r = await client.post(self._tokens_url, headers=headers, json=payload)
+                    r.raise_for_status()
+                    data = r.json()
+                    env[spec.env_var] = data["token"]
+                    token_ids.append(data.get("tokenId") or data.get("id"))
+                    log.info("Created platform token '%s' (id=%s)", name, token_ids[-1])
+                except httpx.HTTPStatusError as exc:
+                    errors.append(f"platform token '{name}': HTTP {exc.response.status_code} — {exc.response.text[:200]}")
+        if errors:
+            if token_ids:
+                await self.revoke_tokens(token_ids)
+            raise RuntimeError("Platform-token provisioning failed:\n" + "\n".join(errors))
+        env["DT_ENVIRONMENT"] = self.tenant_url
+        return ProvisionedTokens(env=env, token_ids=token_ids, expires_at=expires_iso, tenant_url=self.tenant_url)
+
+    async def revoke_tokens(self, token_ids: list[str]):
+        if not token_ids:
+            return
+        bearer = await self._bearer()
+        headers = {"Authorization": f"Bearer {bearer}"}
+        async with httpx.AsyncClient(timeout=15) as client:
+            for tid in token_ids:
+                if not tid:
+                    continue
+                try:
+                    r = await client.delete(f"{self._tokens_url}/{tid}", headers=headers)
+                    if r.status_code in (200, 204, 404):
+                        log.info("Revoked platform token %s (status=%d)", tid, r.status_code)
+                    else:
+                        log.warning("Unexpected status revoking platform token %s: %d", tid, r.status_code)
+                except Exception as exc:
+                    log.warning("Could not revoke platform token %s: %s", tid, exc)
