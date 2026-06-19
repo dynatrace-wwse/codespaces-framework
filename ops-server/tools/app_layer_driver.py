@@ -23,13 +23,57 @@ import re
 import subprocess
 import sys
 
-try:
-    import yaml  # type: ignore
-except Exception:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "pyyaml"], check=False)
-    import yaml  # type: ignore
+# Dependency-free: the lab container's python3 is externally-managed (PEP 668)
+# and ships no pyyaml, so we parse the (simple, authored) annotation blocks with
+# a minimal parser instead of importing yaml. Only the shapes these blocks use are
+# supported: top-level `key: scalar`, `key:`+`- list`, and one nested map (expect).
 
 BLOCK_RE = re.compile(r"<!--\s*(LAB_QUESTION|STEP_SETUP|LAB_SOLUTION)\s*(.*?)-->", re.S)
+
+
+def _unquote(s):
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] == '"':
+        return s[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+    if len(s) >= 2 and s[0] == s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    return s
+
+
+def parse_block(body):
+    """Minimal YAML-subset parser for STEP_SETUP / LAB_SOLUTION / LAB_QUESTION blocks."""
+    lines = body.split("\n")
+    out = {}
+    i, n = 0, len(lines)
+    while i < n:
+        raw = lines[i]; i += 1
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^(\s*)([A-Za-z_][\w-]*):\s?(.*)$", raw)
+        if not m or len(m.group(1)) > 0:   # only handle top-level keys here
+            continue
+        key, val = m.group(2), m.group(3).strip()
+        if val in ("|", ">", "|-", ">-"):   # block scalar (e.g. reveal) — consume + ignore
+            while i < n and (lines[i].strip() == "" or lines[i].startswith((" ", "\t"))):
+                i += 1
+        elif val == "":                     # list or nested map
+            children = []
+            while i < n and (lines[i].strip() == "" or lines[i].startswith((" ", "\t"))):
+                children.append(lines[i]); i += 1
+            items = [c for c in children if c.strip().startswith("- ")]
+            if items:
+                out[key] = [_unquote(c.strip()[2:]) for c in items]
+            else:
+                sub = {}
+                for c in children:
+                    mm = re.match(r"^\s+([A-Za-z_][\w-]*):\s?(.*)$", c)
+                    if mm:
+                        sub[mm.group(1)] = _unquote(mm.group(2))
+                if sub:
+                    out[key] = sub
+        else:                               # inline scalar (handles `: ` inside quotes)
+            out[key] = _unquote(val)
+    return out
 
 
 def _md_files(docs_dir):
@@ -45,7 +89,7 @@ def extract(docs_dir):
             text = fh.read()
         for kind, body in BLOCK_RE.findall(text):
             try:
-                doc = yaml.safe_load(body)
+                doc = parse_block(body)
             except Exception:
                 continue
             if not isinstance(doc, dict):
@@ -66,10 +110,18 @@ def extract(docs_dir):
     return setups, solutions, checks
 
 
+# Sourcing the framework loads my_functions.sh (solve_bug*, is_bug*, addTask, …).
+# This is what the app's exec(interactive=true) does — bash login alone does NOT
+# read .zshrc, so STEP_SETUP/LAB_SOLUTION commands need an explicit source.
+_SOURCE = "source .devcontainer/util/source_framework.sh >/dev/null 2>&1 && "
+
+
 def run(cmd, login):
-    """Run a command; login=True -> `bash -lc` (sources .zshrc/my_functions)."""
-    flag = "-lc" if login else "-c"
-    p = subprocess.run(["bash", flag, cmd], capture_output=True, text=True)
+    """Run a command. login=True -> source the framework first (interactive=true
+    equivalent: my_functions available). login=False -> plain non-interactive
+    (the real shell-verification path; commands that need functions source themselves)."""
+    full = (_SOURCE + cmd) if login else cmd
+    p = subprocess.run(["bash", "-c", full], capture_output=True, text=True)
     return p.stdout, p.stderr, p.returncode
 
 
