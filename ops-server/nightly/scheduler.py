@@ -38,6 +38,7 @@ def load_testable_repos() -> list[dict]:
             "repo": r["repo"],
             "duration": r.get("duration", "1h"),
             "arch": r.get("arch", "both"),  # arm64 | amd64 | both
+            "tags": r.get("tags", []),
         })
 
     return repos
@@ -70,6 +71,7 @@ def build_schedule(repos: list[dict], stagger_minutes: int = 5) -> list[dict]:
             "name": repo["name"],
             "duration": repo["duration"],
             "arch": repo.get("arch", "both"),
+            "tags": repo.get("tags", []),
             "offset_minutes": i * stagger_minutes,
             "order": i + 1,
         })
@@ -142,6 +144,22 @@ async def run_nightly(
             }
             await pool.rpush(f"queue:test:{a}", json.dumps(job))
             log.info("Queued: %s → queue:test:%s (order %d)", entry["name"], a, entry["order"])
+
+        # App-optimized labs (tagged `dynatrace-app`) also get an app-layer-test:
+        # provision + drive the docs' STEP_SETUP / LAB_SOLUTION / shell-verification
+        # through the same exec path the Enablement App uses. Master (arm64) only.
+        if "dynatrace-app" in (entry.get("tags") or []):
+            al_job = {
+                "type": "app-layer-test",
+                "repo": entry["repo"],
+                "arch": "arm64",
+                "queue": "test",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "nightly_run_id": run_id,
+                "order": entry["order"],
+            }
+            await pool.rpush("queue:test:arm64", json.dumps(al_job))
+            log.info("Queued: %s → app-layer-test on queue:test:arm64 (order %d)", entry["name"], entry["order"])
 
     log.info("All %d repos queued for nightly run %s", len(schedule), run_id)
 

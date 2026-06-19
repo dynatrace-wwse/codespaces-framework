@@ -150,10 +150,27 @@ def main():
     docs_dir = sys.argv[1]
     setups, solutions, checks = extract(docs_dir)
 
+    def run_checks(phase):
+        """Run every shell-verification once; return {index: passed_bool}."""
+        res = {}
+        for idx, (fname, label, cmd, expect) in enumerate(checks):
+            stdout, stderr, rc = run(cmd, login=False)  # non-interactive — the real app path
+            ok = evaluate(stdout, rc, expect)
+            res[idx] = ok
+            out1 = (stdout or stderr or "").strip().replace("\n", " ")[:80]
+            print(f"  [{phase}] {'PASS' if ok else 'fail'}  [{fname}] {label} -> exit={rc} expect={expect.get('operator')} {expect.get('value','')}")
+        return res
+
     print(f"== STEP_SETUP ({len(setups)}) ==")
     for fname, c in setups:
         _, _, rc = run(c, login=True)
         print(f"  [setup {fname}] exit={rc}: {c}")
+
+    # BASELINE: with the bugs still present, "reproduce" checks (e.g. is_bug_there)
+    # pass here, "solved" checks fail here. We OR the two phases so a reproduce->fix
+    # lab passes every gate in the phase where it is meant to hold.
+    print(f"== shell-verification — baseline ({len(checks)}) ==")
+    baseline = run_checks("base") if checks else {}
 
     print(f"== LAB_SOLUTION ({len(solutions)}) ==")
     solve_fail = 0
@@ -167,16 +184,17 @@ def main():
             solve_fail += 0 if ok else 1
             print(f"  [verify {fname}] {'OK' if ok else 'FAIL'} exit={rc}: {v}")
 
-    print(f"== shell-verification ({len(checks)}) ==")
+    # POST-SOLVE: "solved" checks now pass.
+    print(f"== shell-verification — post-solve ({len(checks)}) ==")
+    post = run_checks("post") if checks else {}
+
+    print(f"== shell-verification verdict ({len(checks)}) ==")
     passed = 0
-    for fname, label, cmd, expect in checks:
-        stdout, stderr, rc = run(cmd, login=False)  # non-interactive — the real app path
-        ok = evaluate(stdout, rc, expect)
+    for idx, (fname, label, cmd, expect) in enumerate(checks):
+        ok = baseline.get(idx, False) or post.get(idx, False)
         passed += 1 if ok else 0
-        out1 = (stdout or stderr or "").strip().replace("\n", " ")[:80]
-        print(f"  {'PASS' if ok else 'FAIL'}  [{fname}] {label}")
-        print(f"        $ {cmd}")
-        print(f"        -> exit={rc} out={out1!r} expect={expect.get('operator')} {expect.get('value','')}")
+        where = "baseline" if baseline.get(idx) and not post.get(idx) else ("post-solve" if post.get(idx) else "neither")
+        print(f"  {'PASS' if ok else 'FAIL'}  [{fname}] {label}  (held: {where})")
 
     total = len(checks)
     print(f"\nRESULT: {passed}/{total} shell-verification checks passed; {solve_fail} solution-verify failures")
