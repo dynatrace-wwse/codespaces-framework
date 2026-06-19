@@ -157,8 +157,15 @@ def main():
             stdout, stderr, rc = run(cmd, login=False)  # non-interactive — the real app path
             ok = evaluate(stdout, rc, expect)
             res[idx] = ok
-            out1 = (stdout or stderr or "").strip().replace("\n", " ")[:80]
             print(f"  [{phase}] {'PASS' if ok else 'fail'}  [{fname}] {label} -> exit={rc} expect={expect.get('operator')} {expect.get('value','')}")
+            if not ok:
+                # Surface WHY (the check function's own printInfo/printWarn) — the
+                # driver otherwise swallows it, leaving failures undiagnosable.
+                tail = (stdout or "").strip().splitlines()[-12:]
+                for ln in tail:
+                    print(f"        | {ln}")
+                if stderr.strip():
+                    print(f"        | stderr: {stderr.strip().splitlines()[-3:]}")
         return res
 
     print(f"== STEP_SETUP ({len(setups)}) ==")
@@ -179,10 +186,13 @@ def main():
             _, _, rc = run(c, login=True)
             print(f"  [solve {fname}] exit={rc}: {c}")
         for v in ver:
-            _, _, rc = run(v, login=True)
+            vstdout, vstderr, rc = run(v, login=True)
             ok = rc == 0
             solve_fail += 0 if ok else 1
             print(f"  [verify {fname}] {'OK' if ok else 'FAIL'} exit={rc}: {v}")
+            if not ok:
+                for ln in (vstdout or "").strip().splitlines()[-12:]:
+                    print(f"        | {ln}")
 
     # POST-SOLVE: "solved" checks now pass.
     print(f"== shell-verification — post-solve ({len(checks)}) ==")
