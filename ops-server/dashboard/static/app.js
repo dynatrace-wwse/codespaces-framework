@@ -3050,12 +3050,18 @@ function wireContent() {
     document.querySelectorAll('.content-tab').forEach(t => t.addEventListener('click', () => {
         document.querySelectorAll('.content-tab').forEach(x => x.classList.toggle('active', x === t));
         document.querySelectorAll('.content-subview').forEach(v => { v.hidden = (v.id !== 'content-view-' + t.dataset.contentView); });
+        if (t.dataset.contentView === 'trainings') csLoadSources();
     }));
     document.getElementById('cs-save-profile').addEventListener('click', csSaveProfile);
     document.getElementById('cs-clear-profile').addEventListener('click', () => csEditProfile(null));
     document.getElementById('cs-resolve').addEventListener('click', csResolve);
     document.getElementById('cs-add-tenant').addEventListener('click', csAddTenant);
     document.getElementById('cs-save-delivery').addEventListener('click', csSaveDelivery);
+    document.getElementById('cs-src-validate').addEventListener('click', () => csSource('validate'));
+    document.getElementById('cs-src-add').addEventListener('click', () => csSource('add'));
+    document.querySelector('#cs-sources tbody').addEventListener('click', (e) => {
+        const rm = e.target.closest('[data-cs-srcdel]'); if (rm) csRemoveSource(rm.dataset.csSrcdel);
+    });
     document.getElementById('content-profiles').addEventListener('click', (e) => {
         const ed = e.target.closest('[data-cs-edit]'); if (ed) { csEditProfile(ed.dataset.csEdit); return; }
         const dl = e.target.closest('[data-cs-del]'); if (dl) { csDeleteProfile(dl.dataset.csDel); }
@@ -3171,6 +3177,55 @@ async function csResolve() {
     document.getElementById('cs-pmsg').textContent = '';
     document.getElementById('cs-presult').innerHTML = `<div style="margin-top:10px">tenant <strong>${escapeHtml(j.tenant)}</strong> · domain <strong>${escapeHtml(j.domain)}</strong> · profile <strong>${escapeHtml(j.profileId)}</strong> · ${j.sources.length} repo(s)</div>
         <table style="margin-top:8px"><thead><tr><th>repo</th><th>category</th><th>sha</th></tr></thead><tbody>${j.sources.map(s => `<tr><td>${escapeHtml(s.repo)}</td><td>${escapeHtml(s.category || '')}</td><td><code>${escapeHtml((s.version || '?').slice(0, 8))}</code></td></tr>`).join('')}</tbody></table>`;
+}
+
+// ── Trainings tab: managed training-source catalog ──────────────────────────────
+const CS_CAT_LABEL = { 'hands-on': 'Hands-On', 'learning-byte': 'Learning Bytes', 'onboarding': 'SE Onboarding', 'custom': 'Custom' };
+
+async function csLoadSources() {
+    const tb = document.querySelector('#cs-sources tbody');
+    tb.innerHTML = '<tr><td colspan="4" class="loading">Loading…</td></tr>';
+    try {
+        const r = await fetch('/api/content/admin/sources', { credentials: 'same-origin' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) { tb.innerHTML = `<tr><td colspan="4" class="content-hint">${escapeHtml(j.detail || 'Sign in as an org member.')}</td></tr>`; return; }
+        const rows = j.sources || [];
+        tb.innerHTML = rows.length ? rows.map(s => `<tr>
+            <td><code>${escapeHtml(s.repo)}</code>${s.private ? ' <span style="font-size:0.62rem;color:#e0d77d" title="Private repo">🔒</span>' : ''}</td>
+            <td>${escapeHtml(CS_CAT_LABEL[s.category] || s.category || '')}</td>
+            <td><span style="font-size:0.72rem;color:var(--text-2)">${escapeHtml(s.delivery || '')}</span></td>
+            <td><button class="btn btn-small btn-secondary" type="button" data-cs-srcdel="${escapeHtml(s.repo)}">remove</button></td>
+        </tr>`).join('') : '<tr><td colspan="4" class="content-hint">No managed training sources yet — add one above.</td></tr>';
+    } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="content-hint">Error: ${escapeHtml(String(e))}</td></tr>`; }
+}
+
+async function csSource(action) {
+    const url = document.getElementById('cs-src-url').value.trim();
+    const category = document.getElementById('cs-src-cat').value;
+    const msg = document.getElementById('cs-src-msg');
+    if (!url) { msg.textContent = 'Enter a GitHub repo URL.'; return; }
+    msg.textContent = action === 'validate' ? 'Validating…' : 'Adding…';
+    const ep = action === 'validate' ? '/api/content/admin/validate-repo' : '/api/content/admin/sources';
+    try {
+        const r = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin', body: JSON.stringify({ repo: url, category }) });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) { msg.textContent = '✗ ' + (j.detail || 'error'); return; }
+        if (action === 'validate') {
+            msg.textContent = j.valid ? `✓ valid (${j.delivery})` : `✗ ${j.reason}`;
+        } else {
+            msg.textContent = `✓ added ${j.source.repo} (${j.source.delivery})`;
+            document.getElementById('cs-src-url').value = '';
+            csLoadSources();
+        }
+    } catch (e) { msg.textContent = '✗ ' + String(e); }
+}
+
+async function csRemoveSource(repo) {
+    if (!confirm(`Remove ${repo} from managed sources?`)) return;
+    const r = await fetch('/api/content/admin/sources/' + repo, { method: 'DELETE', credentials: 'same-origin' });
+    if (r.ok) csLoadSources();
+    else { const j = await r.json().catch(() => ({})); document.getElementById('cs-src-msg').textContent = '✗ ' + (j.detail || 'remove failed'); }
 }
 
 async function loadContent() {
