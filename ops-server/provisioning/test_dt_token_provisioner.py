@@ -250,3 +250,27 @@ def test_platform_token_revoke_deletes_each():
     dels = [c for c in calls if c[0] == "DELETE"]
     assert len(dels) == 2  # empty id skipped
     assert all("/platform-tokens/dt0s16." in c[1] for c in dels)
+
+
+def test_platform_create_activegate_token():
+    import httpx
+    captured = {}
+    def h(method, url, **kw):
+        if method == "POST" and url.endswith("/sso/oauth2/token"):
+            captured["sso"] = kw.get("data")
+            return _Resp(200, {"access_token": "AGBEARER", "expires_in": 3600})
+        if method == "POST" and url.endswith("/activeGateTokens"):
+            captured["create"] = kw.get("json")
+            return _Resp(200, {"id": "dt0g02.ABC", "token": "dt0g02.ABC.SECRET"})
+        return _Resp(404)
+    restore, calls = _install_fake(h)
+    try:
+        out = asyncio.run(_pt().create_activegate_token("enbl-k8s-ag"))
+    finally:
+        restore()
+    assert out["id"] == "dt0g02.ABC" and out["token"].startswith("dt0g02.")
+    # AG-token endpoint hit with ENVIRONMENT type; bearer scoped to the ENVIRONMENT resource
+    assert captured["create"]["activeGateType"] == "ENVIRONMENT"
+    assert captured["sso"]["scope"] == "environment-api:activegate-tokens:write"
+    assert captured["sso"]["resource"] == "urn:dtenvironment:ydi9582h"
+    assert any(c[1].endswith("/platform/classic/environment-api/v2/activeGateTokens") for c in calls)

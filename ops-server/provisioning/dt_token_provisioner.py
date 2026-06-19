@@ -233,6 +233,37 @@ class PlatformTokenProvisioner:
             r.raise_for_status()
             return r.json()["access_token"]
 
+    async def _env_bearer(self, scope: str) -> str:
+        """Bearer scoped to the ENVIRONMENT (urn:dtenvironment) — for tenant-level APIs
+        such as ActiveGate-token creation (vs the account-scoped _bearer for platform tokens)."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(self.sso_token_url, data={
+                "grant_type": "client_credentials", "client_id": self._cid,
+                "client_secret": self._csec, "scope": scope,
+                "resource": f"urn:dtenvironment:{self.env_id}"})
+            r.raise_for_status()
+            return r.json()["access_token"]
+
+    async def create_activegate_token(self, name: str, expires_in_hours: int = 4) -> dict:
+        """Create an ENVIRONMENT ActiveGate token (dt0g02) on the tenant — for DynaKube's
+        ActiveGate. The classic apiTokens endpoint is disabled on gen3, but the
+        ActiveGate-token endpoint still works with an OAuth bearer holding
+        `environment-api:activegate-tokens:write`. Returns {id, token}. Verified live on
+        sprint 2026-06-19. This is what unblocks DynaKube provisioning on gen3 (the operator
+        no longer needs to self-mint an AG token — Orbital pre-creates it)."""
+        expires_iso = (datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        bearer = await self._env_bearer("environment-api:activegate-tokens:write")
+        url = f"{self.tenant_url}/platform/classic/environment-api/v2/activeGateTokens"
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(url, headers={"Authorization": f"Bearer {bearer}",
+                                                "Content-Type": "application/json"},
+                                  json={"name": name[:100], "activeGateType": "ENVIRONMENT",
+                                        "expirationDate": expires_iso})
+            r.raise_for_status()
+            d = r.json()
+            log.info("Created ActiveGate token '%s' (id=%s)", name, d.get("id"))
+            return {"id": d.get("id"), "token": d.get("token")}
+
     async def create_tokens(self, repo: str, user_id: str, specs: list[TokenSpec],
                             expires_in_hours: int = 4) -> ProvisionedTokens:
         expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
