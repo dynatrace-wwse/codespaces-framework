@@ -3,6 +3,30 @@
 One place that answers: **Platform token or OAuth client? Tenant- or account-level?
 Which scopes?** — for every operation Orbital performs on a target tenant.
 
+## RECOMMENDATION (decision): one account-level OAuth client, one implementation
+
+Ask for **a single account-level OAuth client** (per account) — not platform tokens — and
+use it for everything. One client can be granted **both**:
+- **Environment** permissions on the target tenant(s): `app-engine:apps:install`,
+  `app-engine:apps:run`, `app-engine:apps:delete`, `settings:objects:read`,
+  `settings:objects:write`, `document:documents:read`.
+- **Account** permission: token management (for minting training tokens via the Account
+  Management API).
+
+At call time Orbital does `client_credentials` against `sso.dynatrace.com` with the right
+`resource`: the **tenant/environment** for deploy + settings, the **account
+(`urn:dtaccount:…`)** for minting. Orbital already has this machinery (COE auto-deploy).
+
+**Why one client, one implementation:** the app's self-mint scope
+`environment-api:api-tokens:write` is **deprecated**, and classic token creation is being
+retired tenant-by-tenant. If we use **Account Management minting for every generation**, the
+gen2/gen3 split disappears — one mint path for all tenants. Platform tokens would force
+**two** implementations (gen2 in-tenant self-mint vs gen3 account mint). So: **OAuth client +
+Account Management mint = one implementation that works everywhere.** The per-generation
+platform-token notes below are the fallback/legacy reference.
+
+---
+
 ## Two distinct credentials (don't conflate them)
 
 | Credential | Who holds it | Purpose |
