@@ -37,6 +37,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from webhook.config import REDIS_URL
 from dashboard.content_service import classify_tenant, register_tenant
+from dashboard.github_oauth import _decrypt  # Fernet (GH_OAUTH_ENC_KEY) — reused for the COE token
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -301,11 +302,21 @@ async def _mint_coe_token(action: str) -> str | None:
 
 
 OUTBOUND_SCHEMA = "builtin:dt-javascript-runtime.allowed-outbound-connections"
-# Hosts the app's functions must reach for content delivery + manual GitHub imports.
+# The central (COE) tenant that non-COE installs forward training telemetry to.
+# wwse.apps.dynatrace.com is a vanity alias for geu80787.apps.dynatrace.com.
+COE_TENANT_URL = "https://wwse.apps.dynatrace.com"
+COE_TENANT_HOST = "wwse.apps.dynatrace.com"
+# Tenants that ARE the central tenant — never forward to themselves (store locally).
+COE_TENANT_IDS = {"wwse", "geu80787"}
+REMOTE_GRAIL_SCHEMA = "app:my.dynatrace.enablements:remote-grail"
+REMOTE_GRAIL_SCHEMA_VERSION = "1.1"
+# Hosts the app's functions must reach for content delivery + manual GitHub imports
+# + forwarding training bizevents to the central tenant.
 OUTBOUND_HOSTS = [
     "autonomous-enablements.whydevslovedynatrace.com",
     "raw.githubusercontent.com",
     "api.github.com",
+    COE_TENANT_HOST,
 ]
 
 
@@ -357,6 +368,68 @@ async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
     except Exception as exc:
         log.warning("outbound allowlist for %s: %s", tenant_url, exc)
         return f"allowlist error: {exc}"
+
+
+def _coe_remote_grail_token() -> str | None:
+    """Decrypt the COE remote-grail token stored encrypted at rest.
+
+    The plaintext token is NEVER stored or logged. It is held only as a Fernet
+    ciphertext in env `REMOTE_GRAIL_COE_TOKEN_ENC` (encrypted with GH_OAUTH_ENC_KEY)
+    and decrypted in-memory here, then written into the target tenant's remote-grail
+    setting (where the platform stores it as a `secret`-typed property). The token is
+    scoped read+ingest only (storage:events:write, storage:bizevents:read,
+    storage:buckets:read). Returns None when not configured."""
+    enc = os.environ.get("REMOTE_GRAIL_COE_TOKEN_ENC", "")
+    if not enc:
+        return None
+    try:
+        return _decrypt(enc)
+    except Exception as exc:
+        log.warning("remote-grail: could not decrypt COE token: %s", exc)
+        return None
+
+
+async def _ensure_remote_grail(token: str, tenant_url: str) -> str:
+    """For a NON-COE tenant, set the app's `remote-grail` setting so its training
+    bizevents forward to (and are read back from) the central COE tenant. The COE
+    token is injected from encrypted storage — never logged, never returned.
+
+    Skips the central tenant itself (it stores locally). Best-effort; needs
+    settings:objects:read+write on the deploy token. Idempotent: updates the existing
+    object in place. See docs/remote-grail-setup-and-automation.md."""
+    tenant_id, _ = classify_tenant(tenant_url)
+    if tenant_id in COE_TENANT_IDS:
+        return "skipped (central tenant — stores locally)"
+    coe_token = _coe_remote_grail_token()
+    if not coe_token:
+        return "skipped (REMOTE_GRAIL_COE_TOKEN_ENC not configured)"
+    base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
+    h = {"Authorization": f"Bearer {token}"}
+    value = {"enabled": True, "tenantUrl": COE_TENANT_URL, "apiToken": coe_token}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(base, headers=h, params={
+                "schemaIds": REMOTE_GRAIL_SCHEMA, "scopes": "environment", "fields": "objectId"})
+            if r.status_code == 403:
+                return "skipped (token lacks settings:objects:read/write)"
+            if r.status_code != 200:
+                return f"skipped (settings read HTTP {r.status_code})"
+            items = r.json().get("items", [])
+            if items:
+                oid = items[0]["objectId"]
+                pr = await c.put(f"{base}/{oid}", headers={**h, "Content-Type": "application/json"},
+                                 json={"value": value})
+                ok = pr.status_code in (200, 201, 204)
+                return "updated → wwse" if ok else f"update failed (HTTP {pr.status_code})"
+            cr = await c.post(base, headers={**h, "Content-Type": "application/json"}, json=[{
+                "schemaId": REMOTE_GRAIL_SCHEMA, "schemaVersion": REMOTE_GRAIL_SCHEMA_VERSION,
+                "scope": "environment", "value": value,
+            }])
+            ok = cr.status_code in (200, 201)
+            return "enabled → wwse" if ok else f"create failed (HTTP {cr.status_code}: {cr.text[:120]})"
+    except Exception as exc:
+        log.warning("remote-grail for %s: %s", tenant_url, exc)
+        return f"remote-grail error: {exc}"
 
 
 async def _register_in_content_service(user: str, tenant_url: str) -> dict | None:
@@ -475,6 +548,10 @@ async def deploy_callback(request: Request):
 
     # deploy — idempotent: skip if up-to-date, else install/upgrade
     res = await _deploy_with_status(token, tenant_url)
+    remote_grail = ""
+    if res["status"] != "error":
+        await _ensure_outbound_allowlist(token, tenant_url)
+        remote_grail = await _ensure_remote_grail(token, tenant_url)  # auto-enable cross-tenant forwarding
     del token  # discard the credential before doing anything else
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
@@ -485,7 +562,8 @@ async def deploy_callback(request: Request):
     reg = await _register_in_content_service(user, tenant_url)
     profile = (reg or {}).get("profile")
     await _audit(user, tenant_id, "deploy", res["status"],
-                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile)
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile,
+                 remote_grail=remote_grail)
     if res["status"] == "up-to-date":
         head = f"App already up-to-date on <b>{tenant_id}</b> (v{res.get('to')}) — nothing to do."
     elif res["status"] == "upgraded":
@@ -534,8 +612,10 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
 
     res = await _deploy_with_status(token, tenant)
     allowlist = ""
+    remote_grail = ""
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant)  # use token before discarding
+        remote_grail = await _ensure_remote_grail(token, tenant)     # auto-enable cross-tenant forwarding
     del token
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"))
@@ -544,9 +624,11 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
-                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile, allowlist=allowlist)
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
+                 allowlist=allowlist, remote_grail=remote_grail)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
-            "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist}
+            "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
+            "remote_grail": remote_grail}
 
 
 @router.get("/api/deploy/audit")
