@@ -1736,8 +1736,12 @@ async def api_sync_run(request: Request):
 
 @app.get("/api/sync/history")
 async def api_sync_history(limit: int = 50):
-    """Past sync command runs from jobs:completed."""
+    """Past sync command runs. Sync jobs are rare and roll off the 500-cap jobs:completed
+    list, so merge the dedicated sync:jobs:completed archive (cap 200; dedupe by job_id) —
+    same pattern as Agentic History. Otherwise 'recent runs' looks empty."""
     completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    sync_raw = await pool.lrange("sync:jobs:completed", -200, -1)
+    completed_raw = _merge_agent_history(completed_raw, sync_raw)
     rows = []
     for raw in reversed(completed_raw):
         try:
