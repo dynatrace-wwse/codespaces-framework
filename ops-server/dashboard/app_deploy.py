@@ -603,8 +603,13 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     """Override path for ANY tenant (customer / prospect / free trial / cross-account): the
     caller supplies a platform token created IN the target tenant (scopes apps:install/run/
     delete). That credential carries the target account's authority, so no SSO/account binding
-    is needed. The token is used once and discarded — never logged or persisted. Writer-gated."""
-    user = _require_writer(x_auth_user)
+    is needed. The token is used once and discarded — never logged or persisted.
+
+    NOT org-member-gated: the platform token IS the authority to deploy on the target tenant,
+    so a signed-out user holding a valid token may deploy/register (nginx routes this one path
+    with opportunistic auth — see ops-server.conf `location = /api/deploy/token`). We audit the
+    GitHub identity when nginx forwards one (signed-in org member), else "anonymous"."""
+    user = x_auth_user or "anonymous"
     action = body.get("action", "deploy")
     if action not in ("deploy", "undeploy"):
         raise HTTPException(400, "action must be deploy or undeploy.")
