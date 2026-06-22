@@ -3111,13 +3111,24 @@ function csRenderDelivery() {
     document.getElementById('cs-newtp').innerHTML = csProfileOpts(csState.profiles[0] && csState.profiles[0].profileId);
 }
 
+// Known fleet tenants keyed by bare id → stage. A bare id (e.g. "ydi9582h") carries no
+// domain hint, so the suffix regex below can't classify it; this map keeps those correct.
+// (ydi9582h is SPRINT, not production.)
+const KNOWN_TENANT_STAGE = {
+    geu80787: 'production',   // COE
+    sro97894: 'production',   // SRO
+    ydi9582h: 'sprint',       // sprint env
+};
 // Derive the deployment stage from a tenant id/URL: *.apps.dynatrace.com = production,
-// *.sprint.apps.dynatracelabs.com = sprint, *.dev.apps.dynatracelabs.com = dev. A bare
-// id with no domain hint defaults to production (the common case).
+// *.sprint.apps.dynatracelabs.com = sprint, *.dev.apps.dynatracelabs.com = dev. A full URL
+// is classified by suffix; a bare id is looked up in KNOWN_TENANT_STAGE, else defaults to
+// production (the common case for prod tenants, which use bare ids).
 function stageOf(idOrUrl) {
     const s = String(idOrUrl || '');
     if (/\.sprint\./.test(s)) return 'sprint';
     if (/\.dev\./.test(s)) return 'dev';
+    const id = s.replace(/^https?:\/\//, '').split('.')[0].split('/')[0];
+    if (KNOWN_TENANT_STAGE[id]) return KNOWN_TENANT_STAGE[id];
     return 'production';
 }
 function stageBadge(stage) {
@@ -3296,8 +3307,8 @@ async function loadRegisterAudit() {
         const audit = data.audit || [];
         const b = document.querySelector('#reg-audit tbody');
         b.innerHTML = audit.length
-            ? audit.map(a => `<tr><td>${escapeHtml((a.ts || '').replace('T', ' ').slice(0, 19))}</td><td>${escapeHtml(a.user || '')}</td><td>${escapeHtml(a.tenant || '')}</td><td>${escapeHtml(a.action || '')}</td><td>${escapeHtml(a.result || '')}</td><td>${escapeHtml(a.to || a.version || '')}</td><td>${escapeHtml(a.via || '')}</td></tr>`).join('')
-            : '<tr><td colspan="7" class="content-hint">none yet</td></tr>';
+            ? audit.map(a => `<tr><td>${escapeHtml((a.ts || '').replace('T', ' ').slice(0, 19))}</td><td>${escapeHtml(a.user || '')}</td><td>${escapeHtml(a.tenant || '')}</td><td>${a.tenant ? stageBadge(stageOf(a.tenant)) : '<span class="content-hint">—</span>'}</td><td>${escapeHtml(a.action || '')}</td><td>${escapeHtml(a.result || '')}</td><td>${escapeHtml(a.to || a.version || '')}</td><td>${escapeHtml(a.via || '')}</td></tr>`).join('')
+            : '<tr><td colspan="8" class="content-hint">none yet</td></tr>';
     } catch (e) { /* ignore */ }
 }
 
