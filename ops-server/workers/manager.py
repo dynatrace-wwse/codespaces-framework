@@ -38,6 +38,9 @@ LOCK_TTL_SECONDS = 7200
 # isn't crowded out of the 500-cap jobs:completed list by integration/framework runs.
 AGENT_JOB_TYPES = {"fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab",
                    "validate-after-push", "deploy-ghpages"}
+# Sync-command jobs are likewise rare and roll off the 500-cap jobs:completed list,
+# leaving the Synchronizer "recent runs" empty — keep a dedicated list (cap 200).
+SYNC_JOB_TYPES = {"sync-command"}
 
 # App proxy port pool — master Sysbox containers publish one port in this range
 # so the dashboard can reverse-proxy to k3d LB apps without SSH tunnelling.
@@ -559,6 +562,10 @@ class WorkerManager:
                 if job.get("type") in AGENT_JOB_TYPES:
                     await self.pool.rpush("agent:jobs:completed", _rec)
                     await self.pool.ltrim("agent:jobs:completed", -300, -1)
+                # Same fix for sync-command jobs → Synchronizer "recent runs".
+                if job.get("type") in SYNC_JOB_TYPES:
+                    await self.pool.rpush("sync:jobs:completed", _rec)
+                    await self.pool.ltrim("sync:jobs:completed", -200, -1)
                 # Terminal-status record that OUTLIVES job:running (deleted below),
                 # so session-status can report a failed creation and point the
                 # student at the retained log (job:log:{id}) instead of a bare
