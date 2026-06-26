@@ -365,7 +365,7 @@ function onFleetActionChange() {
 async function triggerFleetBuild() {
     if (!isWriter()) {
         if (!authState.signedIn) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
         } else {
             alert('Only org members can trigger fleet builds.');
         }
@@ -396,7 +396,7 @@ async function triggerFleetBuild() {
                 body: JSON.stringify({ branch }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -420,7 +420,7 @@ async function triggerFleetBuild() {
                 body: JSON.stringify({ branch, arch }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -516,7 +516,7 @@ function onRowActionChange(safeRepo) {
 
 async function triggerBuildFromRow(repo, safeRepo, btn) {
     if (!authState.signedIn) {
-        window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
         return;
     }
     if (!isWriter()) {
@@ -537,7 +537,7 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
                 body: JSON.stringify({ repo, ref: branch }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -561,7 +561,7 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
                 body: JSON.stringify({ repo, arch, ref: branch, type: action, requested_by: 'dashboard' }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -2023,7 +2023,7 @@ async function submitFixWithAI() {
         });
 
         if (res.status === 401) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
             return;
         }
         if (res.status === 403) {
@@ -2114,7 +2114,7 @@ document.addEventListener('click', async e => {
     if (!spec) return;
     if (!authState.signedIn) {
         if (confirm('Sign in to run sync commands?')) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
         }
         return;
     }
