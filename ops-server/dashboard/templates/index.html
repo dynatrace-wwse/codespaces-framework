@@ -745,8 +745,11 @@
                     <input type="password" id="reg-token" placeholder="platform token (dt0s16.…)" style="width:300px">
                 </div>
                 <div style="display:flex;align-items:center;gap:10px">
-                    <button class="btn btn-small" id="reg-deploy" data-action>Deploy / Upgrade</button>
-                    <button class="btn btn-small btn-secondary" id="reg-undeploy" data-action>Undeploy</button>
+                    <!-- No data-action: token-deploy is authorized by the platform token itself,
+                         not GitHub org membership. Must stay clickable for guests/anonymous users
+                         (backend /api/deploy/token + nginx allow signed-out token deploys). -->
+                    <button class="btn btn-small" id="reg-deploy">Deploy / Upgrade</button>
+                    <button class="btn btn-small btn-secondary" id="reg-undeploy">Undeploy</button>
                     <span id="reg-msg" class="content-msg"></span>
                 </div>
                 <div id="reg-spin" class="reg-spin"><div class="reg-spinner"></div><span>Working… building &amp; deploying the app. This can take a minute or two — <strong>please don't refresh or close this page.</strong></span></div>
