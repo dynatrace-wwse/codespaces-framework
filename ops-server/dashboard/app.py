@@ -563,7 +563,12 @@ async def api_auth_role(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Fleet overview dashboard."""
-    return templates.TemplateResponse(request, "index.html")
+    # no-cache: the HTML carries no version hint, so without this browsers may
+    # heuristically cache it and keep serving a stale page (e.g. after a deploy
+    # fix). The doc is tiny; always revalidate so users get current markup +
+    # the current ?v= asset references.
+    return templates.TemplateResponse(request, "index.html",
+                                      headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 # ── API Routes ───────────────────────────────────────────────────────────────
