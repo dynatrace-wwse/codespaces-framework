@@ -107,11 +107,11 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => activateTab(tab.dataset.view));
 });
 
-// Restore tab from URL hash on load
-(function () {
-    const hash = location.hash.replace('#', '');
-    if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
-})();
+// NOTE: tab restore from the URL hash happens in the init IIFE at the bottom of
+// this file — NOT here at parse time. Running activateTab() this early reaches
+// state declared later (e.g. `let regWired`) while it is still in the temporal
+// dead zone, which throws and aborts the rest of top-level init (loadAuthState
+// never runs → header stuck on "checking…", sign-in button never appears).
 
 // ── Health Check ────────────────────────────────────────────────────────────
 
@@ -2993,6 +2993,20 @@ function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
     loadNightly();
     loadNightlyRuns();
 })();
+
+// Restore the active tab from the URL hash. Deferred with setTimeout(0) so it runs
+// AFTER this entire script has finished executing — tab handlers read module state
+// declared lower in the file (e.g. `let regWired` in the Register section, `const
+// csState` in Content). Calling activateTab() during top-level/init execution hits
+// those bindings in their temporal dead zone, throwing ReferenceError and (before
+// this fix) aborting init so loadAuthState() never ran (header stuck on "checking…",
+// no sign-in button). The macrotask guarantees every declaration is initialized.
+setTimeout(() => {
+    try {
+        const hash = location.hash.replace('#', '');
+        if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
+    } catch (e) { console.error('tab restore failed', e); }
+}, 0);
 
 // Auto-refresh
 setInterval(() => { checkHealth(); loadWorkers(); }, 30000);

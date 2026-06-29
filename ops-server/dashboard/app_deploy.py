@@ -687,4 +687,4 @@ def _page(msg: str, ok: bool) -> str:
     return (f"<!doctype html><html><head><meta charset=utf-8><title>Deploy</title></head>"
             f"<body style='font-family:system-ui;background:#0d1117;color:#e6edf3;padding:40px'>"
             f"<h2 style='color:{color}'>{'✓' if ok else '✗'} App deploy</h2><p>{msg}</p>"
-            f"<p><a style='color:#9d9dff' href='/deploy'>← back</a></p></body></html>")
+            f"<p><a style='color:#9d9dff' href='/#register'>← back</a></p></body></html>")

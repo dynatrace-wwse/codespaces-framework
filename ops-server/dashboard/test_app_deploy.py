@@ -282,6 +282,36 @@ def test_register_buttons_have_no_guest_gate():
             f"#{bid} must not have data-action — it re-enables the guest gate that blocks token deploys"
 
 
+def test_hash_restore_runs_after_init_not_at_parse_time():
+    """Race regression: restoring the active tab from the URL hash must happen inside the init
+    IIFE (after every top-level declaration), NOT in a bare IIFE at parse time. The early form
+    ran activateTab() -> loadRegister() -> wireRegister(), which touched `let regWired` while it
+    was still in the temporal dead zone; the throw aborted the rest of init so loadAuthState()
+    never ran — header stuck on "checking…" and the sign-in button never appeared on a fresh
+    deep-link load (e.g. /#register)."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    js = open(os.path.join(here, "static", "app.js"), encoding="utf-8").read()
+    # The old parse-time form must be gone.
+    assert "// Restore tab from URL hash on load" not in js, \
+        "parse-time hash-restore IIFE reintroduced — it aborts init via a TDZ on regWired"
+    # The restore must be deferred (setTimeout) so it runs after the whole script — and
+    # therefore after every `let`/`const` (regWired, csState, …) — has initialized.
+    import re
+    m = re.search(r"setTimeout\(\(\)\s*=>\s*\{[^}]*location\.hash\.replace\('#', ''\)",
+                  js, re.DOTALL)
+    assert m, "hash restore must be deferred via setTimeout so tab handlers don't hit a TDZ"
+
+
+def test_standalone_deploy_page_removed():
+    """The legacy /deploy standalone page is gone; /#register is the only deploy UI."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    app_py = open(os.path.join(here, "app.py"), encoding="utf-8").read()
+    assert "_DEPLOY_PAGE" not in app_py, "_DEPLOY_PAGE constant should be removed"
+    assert '@app.get("/deploy"' not in app_py, "/deploy route should be removed"
+
+
 def test_deploy_missing_repo_returns_127():
     saved = dep.APP_REPO_DIR
     dep.APP_REPO_DIR = "/nonexistent/app/repo"
