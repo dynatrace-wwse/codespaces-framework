@@ -222,8 +222,30 @@ def test_coe_auto_without_creds_503():
         dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_TENANT_URL = saved
 
 
+def test_is_sro():
+    saved = dep.SRO_TENANT_URL
+    dep.SRO_TENANT_URL = "https://sro97894.apps.dynatrace.com"
+    try:
+        assert dep._is_sro("https://sro97894.apps.dynatrace.com")
+        assert dep._is_sro("https://sro97894.apps.dynatrace.com/ui/apps")
+        assert not dep._is_sro("https://other.apps.dynatrace.com")
+    finally:
+        dep.SRO_TENANT_URL = saved
+
+
+def test_sro_auto_without_creds_503():
+    saved = (dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_PLATFORM_TOKEN, dep.SRO_TENANT_URL)
+    dep.SRO_CLIENT_ID = ""; dep.SRO_CLIENT_SECRET = ""; dep.SRO_PLATFORM_TOKEN = ""
+    dep.SRO_TENANT_URL = "https://sro97894.apps.dynatrace.com"
+    try:
+        # SRO tenant, no token, no creds/platform-token configured → 503
+        _expect_http(503, dep.deploy_with_token({"tenant": "https://sro97894.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+    finally:
+        dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_PLATFORM_TOKEN, dep.SRO_TENANT_URL = saved
+
+
 def test_non_coe_without_token_400():
-    # any non-COE Dynatrace tenant without a token → 400 (token required)
+    # any tenant that is neither COE nor SRO, without a token → 400 (token required)
     _expect_http(400, dep.deploy_with_token({"tenant": "https://other.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
 
 
@@ -263,6 +285,37 @@ def test_token_deploy_allows_anonymous():
          dep._register_in_content_service, dep._audit) = saved
     assert res["ok"] is True and res["status"] == "up-to-date"
     assert audited.get("user") == "anonymous", f"signed-out deploy must audit anonymous, got {audited}"
+
+
+def test_sro_auto_deploys_with_platform_token():
+    """SRO no-token deploy: with SRO_PLATFORM_TOKEN set and no OAuth client, deploy_with_token
+    must proceed (not 400/503) using the stored token and audit via='sro-auto'."""
+    saved = (dep._deploy_with_status, dep._ensure_outbound_allowlist, dep._ensure_remote_grail,
+             dep._register_in_content_service, dep._audit,
+             dep.SRO_PLATFORM_TOKEN, dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_TENANT_URL)
+    audited = {}
+    async def fake_deploy(t, u): return {"status": "installed", "to": "9.9.9"}
+    async def fake_allow(t, u): return ""
+    async def fake_grail(t, u): return ""
+    async def fake_register(u, t): return {"profile": None}
+    async def fake_audit(user, tenant, action, result, **extra): audited.update(result=result, via=extra.get("via"))
+    dep._deploy_with_status = fake_deploy
+    dep._ensure_outbound_allowlist = fake_allow
+    dep._ensure_remote_grail = fake_grail
+    dep._register_in_content_service = fake_register
+    dep._audit = fake_audit
+    dep.SRO_CLIENT_ID = ""; dep.SRO_CLIENT_SECRET = ""          # no OAuth client → no mint
+    dep.SRO_PLATFORM_TOKEN = "dt0s16.STORED-SRO-TOKEN"          # stored platform token used
+    dep.SRO_TENANT_URL = "https://sro97894.apps.dynatrace.com"
+    try:
+        res = asyncio.run(dep.deploy_with_token(
+            {"tenant": "https://sro97894.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+    finally:
+        (dep._deploy_with_status, dep._ensure_outbound_allowlist, dep._ensure_remote_grail,
+         dep._register_in_content_service, dep._audit,
+         dep.SRO_PLATFORM_TOKEN, dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_TENANT_URL) = saved
+    assert res["ok"] is True and res["status"] == "installed"
+    assert audited.get("via") == "sro-auto", f"SRO auto-deploy must audit via=sro-auto, got {audited}"
 
 
 def test_register_buttons_have_no_guest_gate():
