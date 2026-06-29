@@ -228,14 +228,88 @@ def test_non_coe_without_token_400():
 
 
 def test_token_deploy_guards():
-    # no auth → 401
-    _expect_http(401, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t"}, x_auth_user=None))
     # bad action → 400
     _expect_http(400, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": "t", "action": "nuke"}, x_auth_user="a"))
     # non-Dynatrace tenant → 403
     _expect_http(403, dep.deploy_with_token({"tenant": "https://evil.example.com", "token": "t"}, x_auth_user="a"))
     # Dynatrace tenant but no token → 400
     _expect_http(400, dep.deploy_with_token({"tenant": "https://x.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+
+
+def test_token_deploy_allows_anonymous():
+    """Regression: a signed-out user holding a valid platform token MUST be able to deploy.
+    The token carries the target tenant's own authority, so no GitHub identity is required —
+    deploy_with_token must NOT raise 401 when x_auth_user is None, and must audit "anonymous".
+    (Mirrors nginx `location = /api/deploy/token` opportunistic-auth + the frontend buttons
+    having no `data-action` guest-gate.) Guards against re-introducing the org-member gate."""
+    saved = (dep._deploy_with_status, dep._ensure_outbound_allowlist, dep._ensure_remote_grail,
+             dep._register_in_content_service, dep._audit)
+    audited = {}
+    async def fake_deploy(t, u): return {"status": "up-to-date", "to": "1.2.3"}
+    async def fake_allow(t, u): return ""
+    async def fake_grail(t, u): return ""
+    async def fake_register(u, t): return {"profile": None}
+    async def fake_audit(user, tenant, action, result, **extra): audited.update(user=user, result=result)
+    dep._deploy_with_status = fake_deploy
+    dep._ensure_outbound_allowlist = fake_allow
+    dep._ensure_remote_grail = fake_grail
+    dep._register_in_content_service = fake_register
+    dep._audit = fake_audit
+    try:
+        res = asyncio.run(dep.deploy_with_token(
+            {"tenant": "https://x.apps.dynatrace.com", "token": "valid-tok"}, x_auth_user=None))
+    finally:
+        (dep._deploy_with_status, dep._ensure_outbound_allowlist, dep._ensure_remote_grail,
+         dep._register_in_content_service, dep._audit) = saved
+    assert res["ok"] is True and res["status"] == "up-to-date"
+    assert audited.get("user") == "anonymous", f"signed-out deploy must audit anonymous, got {audited}"
+
+
+def test_register_buttons_have_no_guest_gate():
+    """Root-cause regression: the Register-Tenant deploy/undeploy buttons must NOT carry the
+    `data-action` attribute. CSS `body.role-guest [data-action]` sets pointer-events:none, which
+    made the buttons silently unclickable for guests/anonymous users ("nothing happens"). Token
+    deploy is authorized by the platform token, not GitHub org membership, so these buttons must
+    stay clickable for everyone. If this fails, signed-out token deploys are broken in the UI."""
+    import os
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    html = open(os.path.join(here, "templates", "index.html"), encoding="utf-8").read()
+    for bid in ("reg-deploy", "reg-undeploy"):
+        m = re.search(r"<button[^>]*\bid=\"" + bid + r"\"[^>]*>", html)
+        assert m, f"button #{bid} not found in index.html"
+        assert "data-action" not in m.group(0), \
+            f"#{bid} must not have data-action — it re-enables the guest gate that blocks token deploys"
+
+
+def test_hash_restore_runs_after_init_not_at_parse_time():
+    """Race regression: restoring the active tab from the URL hash must happen inside the init
+    IIFE (after every top-level declaration), NOT in a bare IIFE at parse time. The early form
+    ran activateTab() -> loadRegister() -> wireRegister(), which touched `let regWired` while it
+    was still in the temporal dead zone; the throw aborted the rest of init so loadAuthState()
+    never ran — header stuck on "checking…" and the sign-in button never appeared on a fresh
+    deep-link load (e.g. /#register)."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    js = open(os.path.join(here, "static", "app.js"), encoding="utf-8").read()
+    # The old parse-time form must be gone.
+    assert "// Restore tab from URL hash on load" not in js, \
+        "parse-time hash-restore IIFE reintroduced — it aborts init via a TDZ on regWired"
+    # The restore must be deferred (setTimeout) so it runs after the whole script — and
+    # therefore after every `let`/`const` (regWired, csState, …) — has initialized.
+    import re
+    m = re.search(r"setTimeout\(\(\)\s*=>\s*\{[^}]*location\.hash\.replace\('#', ''\)",
+                  js, re.DOTALL)
+    assert m, "hash restore must be deferred via setTimeout so tab handlers don't hit a TDZ"
+
+
+def test_standalone_deploy_page_removed():
+    """The legacy /deploy standalone page is gone; /#register is the only deploy UI."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    app_py = open(os.path.join(here, "app.py"), encoding="utf-8").read()
+    assert "_DEPLOY_PAGE" not in app_py, "_DEPLOY_PAGE constant should be removed"
+    assert '@app.get("/deploy"' not in app_py, "/deploy route should be removed"
 
 
 def test_deploy_missing_repo_returns_127():

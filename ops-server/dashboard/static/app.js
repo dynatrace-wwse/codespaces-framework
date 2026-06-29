@@ -107,11 +107,11 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => activateTab(tab.dataset.view));
 });
 
-// Restore tab from URL hash on load
-(function () {
-    const hash = location.hash.replace('#', '');
-    if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
-})();
+// NOTE: tab restore from the URL hash happens in the init IIFE at the bottom of
+// this file — NOT here at parse time. Running activateTab() this early reaches
+// state declared later (e.g. `let regWired`) while it is still in the temporal
+// dead zone, which throws and aborts the rest of top-level init (loadAuthState
+// never runs → header stuck on "checking…", sign-in button never appears).
 
 // ── Health Check ────────────────────────────────────────────────────────────
 
@@ -365,7 +365,7 @@ function onFleetActionChange() {
 async function triggerFleetBuild() {
     if (!isWriter()) {
         if (!authState.signedIn) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
         } else {
             alert('Only org members can trigger fleet builds.');
         }
@@ -396,7 +396,7 @@ async function triggerFleetBuild() {
                 body: JSON.stringify({ branch }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -420,7 +420,7 @@ async function triggerFleetBuild() {
                 body: JSON.stringify({ branch, arch }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -516,7 +516,7 @@ function onRowActionChange(safeRepo) {
 
 async function triggerBuildFromRow(repo, safeRepo, btn) {
     if (!authState.signedIn) {
-        window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+        window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
         return;
     }
     if (!isWriter()) {
@@ -537,7 +537,7 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
                 body: JSON.stringify({ repo, ref: branch }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -561,7 +561,7 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
                 body: JSON.stringify({ repo, arch, ref: branch, type: action, requested_by: 'dashboard' }),
             });
             if (res.status === 401) {
-                window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+                window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
             if (!res.ok) {
@@ -2023,7 +2023,7 @@ async function submitFixWithAI() {
         });
 
         if (res.status === 401) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
             return;
         }
         if (res.status === 403) {
@@ -2114,7 +2114,7 @@ document.addEventListener('click', async e => {
     if (!spec) return;
     if (!authState.signedIn) {
         if (confirm('Sign in to run sync commands?')) {
-            window.location.href = '/oauth2/sign_in?rd=' + encodeURIComponent(window.location.pathname);
+            window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
         }
         return;
     }
@@ -2993,6 +2993,20 @@ function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
     loadNightly();
     loadNightlyRuns();
 })();
+
+// Restore the active tab from the URL hash. Deferred with setTimeout(0) so it runs
+// AFTER this entire script has finished executing — tab handlers read module state
+// declared lower in the file (e.g. `let regWired` in the Register section, `const
+// csState` in Content). Calling activateTab() during top-level/init execution hits
+// those bindings in their temporal dead zone, throwing ReferenceError and (before
+// this fix) aborting init so loadAuthState() never ran (header stuck on "checking…",
+// no sign-in button). The macrotask guarantees every declaration is initialized.
+setTimeout(() => {
+    try {
+        const hash = location.hash.replace('#', '');
+        if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
+    } catch (e) { console.error('tab restore failed', e); }
+}, 0);
 
 // Auto-refresh
 setInterval(() => { checkHealth(); loadWorkers(); }, 30000);
