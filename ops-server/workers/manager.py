@@ -34,6 +34,38 @@ from telemetry.reporter import (
 # 2h: longer than any expected build. If a worker crashes mid-job, the lock
 # auto-expires and the next enqueue for the same triple proceeds.
 LOCK_TTL_SECONDS = 7200
+# How often the durable terminate reconciler sweeps job:running for jobs flagged
+# terminating=1 that the fire-and-forget ops:terminate pub/sub never reached
+# (worker restart, dropped message). Containers are disposable, so this
+# guarantees a terminated session always converges to a clean state.
+RECONCILE_INTERVAL = 15
+
+
+def _terminate_candidate_names(job_id, redis_sb_name=None):
+    """Ordered, de-duplicated Sysbox container names to try when killing a job.
+
+    Master jobs are named ``sb-{job_id}``; a persisted ``sb_name`` field (if
+    any) is tried first.
+    """
+    names = []
+    for n in (redis_sb_name, f"sb-{job_id[-32:]}"):
+        if n and n not in names:
+            names.append(n)
+    return names
+
+
+def _docker_rm_removed(returncode, stderr_text):
+    """Whether ``docker rm -f`` actually removed a container.
+
+    ``docker rm -f`` exits 0 even when the container does NOT exist (it prints
+    ``No such container`` to stderr), so a 0 exit alone is not proof the kill
+    hit anything. Treat a 'No such container' message as a miss.
+    """
+    if returncode != 0:
+        return False
+    return "No such container" not in (stderr_text or "")
+
+
 # Claude-Code agent job types — archived to a dedicated list so Agentic History
 # isn't crowded out of the 500-cap jobs:completed list by integration/framework runs.
 AGENT_JOB_TYPES = {"fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab",
@@ -134,23 +166,57 @@ class WorkerManager:
             # Legacy queue for backwards compatibility
             self._consume_queue("test", self.test_semaphore),
             self._terminate_listener(),
+            self._terminate_reconciler(),
             self._master_heartbeat_loop(),
         )
 
+    def _credentials_ok(self, path: Path) -> bool:
+        """True if the OAuth credential at ``path`` is usable: token unexpired,
+        or expired-but-refreshable (non-empty refreshToken so ``claude`` can
+        self-renew in place). An expired token with a blank refreshToken is the
+        dead state that produced ``401 Invalid authentication credentials``."""
+        try:
+            d = json.loads(path.read_text())
+            o = d.get("claudeAiOauth", d)
+            exp = int(o.get("expiresAt", 0))           # epoch ms
+            has_refresh = bool(o.get("refreshToken"))
+            now_ms = int(time.time() * 1000)
+            return exp > now_ms or has_refresh
+        except Exception:
+            return False
+
     def _sync_claude_credentials(self):
-        """Copy ubuntu's Claude.ai OAuth credentials to ops user on startup."""
+        """Best-effort seed of ops' Claude.ai OAuth credentials.
+
+        The agent subprocess runs as ``HOME=/home/ops`` and authenticates with
+        the token in ``/home/ops/.claude/.credentials.json``. ``claude`` refreshes
+        that token *in place* on each run via its refreshToken — that, not this
+        copy, is the durable mechanism that keeps ops authed.
+
+        This is only a recovery seed for a fresh/broken box: it copies ubuntu's
+        copy in ONLY when ops' own credential is missing or dead (expired AND no
+        refreshToken). It never clobbers a working ops token — so a token ops has
+        self-refreshed is preserved. Note the service runs as ``ops`` which often
+        cannot read ubuntu's home (mode 600); in that case this is a quiet no-op
+        and ops must be seeded out of band (``sudo cp`` once). The 401 bug was a
+        dead ops token (blank refreshToken) that this guard now detects."""
         import shutil
         src = Path("/home/ubuntu/.claude/.credentials.json")
         dst = Path("/home/ops/.claude/.credentials.json")
+        if self._credentials_ok(dst):
+            return  # ops can self-refresh from here — leave it alone.
         try:
-            if src.exists():
-                shutil.copy2(src, dst)
-                dst.chmod(0o600)
-                log.info("Synced Claude credentials from ubuntu to ops")
-            else:
-                log.warning("Claude credentials source not found: %s", src)
+            if not src.exists() or not os.access(src, os.R_OK):
+                log.warning(
+                    "ops Claude credentials are dead and ubuntu's copy is "
+                    "unreadable (%s); re-seed manually: sudo cp %s %s", src, src, dst
+                )
+                return
+            shutil.copy2(src, dst)
+            dst.chmod(0o600)
+            log.info("Seeded ops Claude credentials from ubuntu (ops token was dead)")
         except Exception as e:
-            log.warning("Could not sync Claude credentials: %s", e)
+            log.warning("Could not seed Claude credentials: %s", e)
 
     async def _register_master(self):
         """Write the master worker record so it shows up in the Workers tab.
@@ -294,28 +360,83 @@ class WorkerManager:
             log.info("Termination request received for %s — killing container", job_id)
             await self._kill_job_container(job_id)
 
-    async def _kill_job_container(self, job_id: str):
-        """Mark a job as terminated and force-remove its Sysbox container.
+    async def _kill_job_container(self, job_id: str, rec: dict | None = None) -> bool:
+        """Mark a job terminated and force-remove its Sysbox container.
 
         The job's running asyncio task hits its ``finally`` block once the
         subprocess chain unwinds; that block consults ``_terminated_jobs``
-        and sets status='terminated'.
+        and sets status='terminated'. Removal is *verified* against stderr
+        because ``docker rm -f`` exits 0 on a missing name, which previously
+        made a wrong/stale-name kill look successful while the job kept running.
+
+        Returns True if a container was actually removed.
         """
         self._terminated_jobs.add(job_id)
-        sb_name = f"sb-{job_id[-32:]}"
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", sb_name,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-            )
-            _, err = await proc.communicate()
-            if proc.returncode != 0:
-                log.warning(
-                    "docker rm -f %s rc=%s: %s",
-                    sb_name, proc.returncode, err.decode(errors="replace")[:200],
+        if rec is None:
+            try:
+                rec = await self.pool.hgetall(f"job:running:{job_id}")
+            except Exception:
+                rec = {}
+        names = _terminate_candidate_names(job_id, (rec or {}).get("sb_name"))
+        for sb_name in names:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-f", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
                 )
+                _, err = await proc.communicate()
+                err_text = err.decode(errors="replace")
+                if _docker_rm_removed(proc.returncode, err_text):
+                    log.info("Terminated %s: removed container %s", job_id, sb_name)
+                    return True
+                if proc.returncode != 0 and "No such container" not in err_text:
+                    log.warning("docker rm -f %s rc=%s: %s",
+                                sb_name, proc.returncode, err_text[:200])
+            except Exception as e:
+                log.warning("Failed to kill %s (%s): %s", job_id, sb_name, e)
+        log.warning("Terminate %s: no live container among %s (already gone?)", job_id, names)
+        return False
+
+    async def _terminate_reconciler(self):
+        """Durable safety net for terminations the pub/sub path missed.
+
+        ``ops:terminate`` is fire-and-forget: a worker restart or dropped
+        message leaves a daemon container running forever. This loop scans
+        ``job:running:*`` owned by the master for ``terminating=1`` and
+        force-kills + cleans orphans the live listener can't reach.
+        """
+        while not self._shutdown:
+            try:
+                async for key in self.pool.scan_iter(match="job:running:*"):
+                    try:
+                        rec = await self.pool.hgetall(key)
+                    except Exception:
+                        continue
+                    if rec.get("worker_id") != "master" or rec.get("terminating") != "1":
+                        continue
+                    job_id = key.split("job:running:", 1)[1]
+                    if job_id in self.active_jobs:
+                        continue  # live task — listener + finally handle it
+                    await self._kill_job_container(job_id, rec=rec)
+                    await self._force_clean_orphan(job_id)
+            except Exception as e:
+                log.warning("Terminate reconciler error: %s", e)
+            await asyncio.sleep(RECONCILE_INTERVAL)
+
+    async def _force_clean_orphan(self, job_id: str):
+        """Clear Redis state for a terminated job with no live task to do it."""
+        try:
+            await self.pool.hset(f"job:final:{job_id}", mapping={
+                "status": "terminated",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": "",
+            })
+            await self.pool.expire(f"job:final:{job_id}", 7 * 24 * 3600)
+            await self.pool.delete(f"job:running:{job_id}")
+            self._terminated_jobs.discard(job_id)
+            log.info("Reconciler: cleaned orphaned terminated job %s", job_id)
         except Exception as e:
-            log.warning("Failed to kill %s: %s", sb_name, e)
+            log.warning("Could not clean orphaned job %s: %s", job_id, e)
 
     async def _handle_shutdown(self, sig):
         """Graceful shutdown: kill active job containers, then exit."""
@@ -882,6 +1003,11 @@ class WorkerManager:
 
         log.info("Running Claude agent: %s in %s", agent_type, repo_dir)
         start_time = time.time()
+
+        # Guard against a dead ops OAuth token before spawning. claude normally
+        # self-refreshes its token in place; this only re-seeds if ops' credential
+        # is missing/expired-with-no-refreshToken (the 401 state). Cheap; per job.
+        self._sync_claude_credentials()
 
         # Strip ANTHROPIC_API_KEY so claude falls back to the ops user's OAuth
         # credentials in /home/ops/.claude/ — the API key in ops .env is exhausted.

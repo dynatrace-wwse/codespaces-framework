@@ -61,6 +61,40 @@ from .scheduler import WeightedScheduler, classify
 
 LOCK_TTL_SECONDS = 7200
 
+# How often the durable terminate reconciler sweeps job:running for jobs flagged
+# terminating=1 that the fire-and-forget ops:terminate pub/sub never reached
+# (worker restart, dropped message, stale code). Containers are disposable, so
+# this guarantees a terminated session always converges to a clean state.
+RECONCILE_INTERVAL = 15
+
+
+def _terminate_candidate_names(job_id, slot_sb_name=None, redis_sb_name=None):
+    """Ordered, de-duplicated Sysbox container names to try when killing a job.
+
+    A slot-pooled daemon's real container is ``sb-slot-{worker}-{i}`` — taken
+    from the in-memory slot or the persisted ``sb_name`` field — NOT
+    ``sb-{job_id}``. The legacy ``sb-{job_id}`` name is kept only as a
+    last-resort fallback for jobs that predate slot pooling.
+    """
+    names = []
+    for n in (slot_sb_name, redis_sb_name, f"sb-{job_id[-32:]}"):
+        if n and n not in names:
+            names.append(n)
+    return names
+
+
+def _docker_rm_removed(returncode, stderr_text):
+    """Whether ``docker rm -f`` actually removed a container.
+
+    ``docker rm -f`` exits 0 even when the container does NOT exist (it prints
+    ``No such container`` to stderr), so a 0 exit alone is not proof the kill
+    hit anything — the silent no-op that let terminated daemons leak. Treat a
+    'No such container' message as a miss regardless of exit code.
+    """
+    if returncode != 0:
+        return False
+    return "No such container" not in (stderr_text or "")
+
 
 def _b36(n: int) -> str:
     """Encode a non-negative int in base36 (0-9a-z)."""
@@ -379,6 +413,7 @@ class WorkerAgent:
             self._consume_queue(),
             self._heartbeat_loop(),
             self._terminate_listener(),
+            self._terminate_reconciler(),
         )
 
     async def _terminate_listener(self):
@@ -398,29 +433,111 @@ class WorkerAgent:
             log.info("Termination request received for %s — killing container", job_id)
             await self._kill_job_container(job_id)
 
-    async def _kill_job_container(self, job_id: str):
-        """Mark a job as terminated and force-remove its Sysbox container.
+    async def _kill_job_container(self, job_id: str, rec: dict | None = None) -> bool:
+        """Mark a job terminated and force-remove its Sysbox container.
 
         For slotted jobs, killing the outer Sysbox makes the executor's
         ``docker wait`` return, triggering the finally block. The pool's
         release() will re-initialize the slot since the container is gone.
+
+        The real container name is resolved from the in-memory slot, then the
+        persisted ``sb_name`` field, then the legacy ``sb-{job_id}`` fallback —
+        each tried in turn. Removal is *verified* against stderr because
+        ``docker rm -f`` exits 0 on a missing name, which previously made a
+        wrong-name kill look successful while the daemon kept running.
+
+        Returns True if a container was actually removed.
         """
         self._terminated_jobs.add(job_id)
         slot = self._job_slots.get(job_id)
-        sb_name = slot.sb_name if slot else f"sb-{job_id[-32:]}"
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-fv", sb_name,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-            )
-            _, err = await proc.communicate()
-            if proc.returncode != 0:
-                log.warning(
-                    "docker rm -f %s rc=%s: %s",
-                    sb_name, proc.returncode, err.decode(errors="replace")[:200],
+        if rec is None:
+            try:
+                rec = await self.pool.hgetall(f"job:running:{job_id}")
+            except Exception:
+                rec = {}
+        names = _terminate_candidate_names(
+            job_id,
+            slot.sb_name if slot else None,
+            (rec or {}).get("sb_name"),
+        )
+        for sb_name in names:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "rm", "-fv", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
                 )
+                _, err = await proc.communicate()
+                err_text = err.decode(errors="replace")
+                if _docker_rm_removed(proc.returncode, err_text):
+                    log.info("Terminated %s: removed container %s", job_id, sb_name)
+                    return True
+                if proc.returncode != 0 and "No such container" not in err_text:
+                    log.warning("docker rm -fv %s rc=%s: %s",
+                                sb_name, proc.returncode, err_text[:200])
+            except Exception as e:
+                log.warning("Failed to kill %s (%s): %s", job_id, sb_name, e)
+        log.warning("Terminate %s: no live container among %s (already gone?)", job_id, names)
+        return False
+
+    async def _terminate_reconciler(self):
+        """Durable safety net for terminations the pub/sub path missed.
+
+        ``ops:terminate`` is fire-and-forget: a worker that was restarting,
+        briefly disconnected from Redis, or running stale code never sees the
+        message and its daemon container leaks forever. This loop scans
+        ``job:running:*`` owned by this worker for ``terminating=1`` and
+        force-kills + cleans them. Live jobs are still handled by the listener;
+        this catches the orphans (no in-memory task) and any missed message.
+        """
+        while self._running:
+            try:
+                async for key in self.pool.scan_iter(match="job:running:*"):
+                    try:
+                        rec = await self.pool.hgetall(key)
+                    except Exception:
+                        continue
+                    if rec.get("worker_id") != WORKER_ID or rec.get("terminating") != "1":
+                        continue
+                    job_id = key.split("job:running:", 1)[1]
+                    if job_id in self.active_jobs:
+                        # Live task: only re-kill while it still holds its slot.
+                        # Once its finally block pops _job_slots and re-inits the
+                        # slot, skip — re-killing could hit a reused slot. The
+                        # finally also clears Redis, so no orphan cleanup needed.
+                        if self._job_slots.get(job_id) is not None:
+                            await self._kill_job_container(job_id, rec=rec)
+                        continue
+                    # Orphan (no live task — only happens after a worker restart).
+                    # Slot names (sb-slot-{worker}-{i}) are STABLE across restarts
+                    # and the pool's init() already force-removed every old slot
+                    # container on startup, so the orphan's container is already
+                    # gone. We must NOT docker-rm by the record's (now stale)
+                    # sb_name — it would kill a freshly re-warmed slot that init()
+                    # recreated under the same name. Redis cleanup only.
+                    await self._force_clean_orphan(job_id)
+            except Exception as e:
+                log.warning("Terminate reconciler error: %s", e)
+            await asyncio.sleep(RECONCILE_INTERVAL)
+
+    async def _force_clean_orphan(self, job_id: str):
+        """Clear Redis state for a terminated job that has no live task to do it.
+
+        Writes a terminal ``job:final`` record (so the Arena session-status
+        endpoint reports 'terminated') and deletes ``job:running`` so the
+        dashboard stops listing the dead session.
+        """
+        try:
+            await self.pool.hset(f"job:final:{job_id}", mapping={
+                "status": "terminated",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": "",
+            })
+            await self.pool.expire(f"job:final:{job_id}", 7 * 24 * 3600)
+            await self.pool.delete(f"job:running:{job_id}")
+            self._terminated_jobs.discard(job_id)
+            log.info("Reconciler: cleaned orphaned terminated job %s", job_id)
         except Exception as e:
-            log.warning("Failed to kill %s: %s", sb_name, e)
+            log.warning("Could not clean orphaned job %s: %s", job_id, e)
 
     async def _handle_shutdown(self, sig):
         """Graceful shutdown: kill active job containers, shut down pool, then exit."""
