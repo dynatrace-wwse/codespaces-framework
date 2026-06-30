@@ -198,6 +198,38 @@ def _app_version() -> str:
         return "?"
 
 
+async def _latest_repo_version() -> tuple[str, str]:
+    """Version Orbital WOULD deploy = app.config.json on origin/<branch>, without mutating the
+    working tree. `git fetch` then read the file from the remote ref via `git show`. Falls back
+    to the checked-out version (`_app_version()`) on any git error. Returns (version, source)."""
+    if not (Path(APP_REPO_DIR) / ".git").is_dir():
+        return _app_version(), "local"
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "HOME": os.environ.get("HOME", "/home/ops")}
+
+    async def _git(*args: str) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", APP_REPO_DIR, *args, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=REPO_SYNC_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return 124, "timed out"
+        return proc.returncode or 0, out.decode(errors="replace").strip()
+
+    rc, _ = await _git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
+    if rc != 0:
+        return _app_version(), "local"
+    rc, out = await _git("show", f"origin/{APP_DEPLOY_BRANCH}:app.config.json")
+    if rc != 0:
+        return _app_version(), "local"
+    try:
+        cfg = json.loads(out)
+        return (cfg.get("app", {}).get("version") or cfg.get("version") or "?"), f"origin/{APP_DEPLOY_BRANCH}"
+    except Exception:
+        return _app_version(), "local"
+
+
 async def _sync_repo() -> tuple[bool, str]:
     """Fast-forward the deploy checkout to origin/<APP_DEPLOY_BRANCH> before building.
 
@@ -634,6 +666,15 @@ async def deploy_callback(request: Request):
         f"{head}<br><br>Open: <a href='{app_url}'>{app_url}</a><br>"
         + (f"Content profile: <b>{profile}</b> — open the app and Refresh to load it."
            if profile else "Tenant registered for content delivery."), ok=True))
+
+
+@router.get("/api/deploy/latest-version")
+async def latest_version():
+    """The app version Orbital would deploy (origin/<branch> app.config.json). Tokenless — just a
+    version string, no tenant credential involved. The app's Admin "Check for updates" compares
+    this against its own baked-in installed version (no platform token needed for the check)."""
+    version, source = await _latest_repo_version()
+    return {"version": version, "branch": APP_DEPLOY_BRANCH, "source": source}
 
 
 @router.post("/api/deploy/token")
