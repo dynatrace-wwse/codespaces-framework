@@ -1208,6 +1208,11 @@ async def api_terminate_job(job_id: str, request: Request):
         log.info("Codespace %s terminated by %s", job_id, requested_by)
         return {"status": "terminated", "job_id": job_id, "requested_by": requested_by}
 
+    # Flag terminating=1 BEFORE publishing so the worker's durable reconciler
+    # force-kills the job even if this fire-and-forget pub/sub message is missed
+    # (worker restart / dropped connection). Without the flag a missed message
+    # leaks the daemon container forever.
+    await pool.hset(f"job:running:{job_id}", "terminating", "1")
     await pool.publish("ops:terminate", job_id)
     log.info("Termination requested for %s by %s", job_id, requested_by)
     return {"status": "termination_requested", "job_id": job_id, "requested_by": requested_by}
@@ -3734,7 +3739,14 @@ html,body{{margin:0;padding:0;background:#000;width:100%;height:100vh;overflow:h
   term.loadAddon(fit);
   term.open(document.getElementById('t'));
   await document.fonts.load('13px "MesloLGS NF"').catch(()=>{{}});
-  fit.fit();
+  // Fit robustly: a single fit() before layout/fonts settle leaves the bottom
+  // prompt row clipped. Re-fit on rAF, after a short delay, and on load so the
+  // last (command-input) row is always fully visible.
+  const doFit=()=>{{try{{fit.fit();}}catch(e){{}}}};
+  doFit();
+  requestAnimationFrame(doFit);
+  setTimeout(doFit,150);
+  window.addEventListener('load',doFit);
   term.write('\\x1b[36m◈  Connecting to isolation container…\\x1b[0m\\r\\n');
   let token='';
   try{{
@@ -3744,13 +3756,13 @@ html,body{{margin:0;padding:0;background:#000;width:100%;height:100vh;overflow:h
   }}catch(err){{term.write('\\r\\n\\x1b[31mError: '+err+'\\x1b[0m\\r\\n');return;}}
   const ws=new WebSocket('wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/'+jobId+'/shell?token='+encodeURIComponent(token)+'&rows='+term.rows+'&cols='+term.cols);
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{{term.write('\\x1b[32m◈  Tunnel established — spawning shell\\x1b[0m\\r\\n\\r\\n');ws.send(JSON.stringify({{type:'resize',rows:term.rows,cols:term.cols}}));}};
+  ws.onopen=()=>{{doFit();term.write('\\x1b[32m◈  Tunnel established — spawning shell\\x1b[0m\\r\\n\\r\\n');ws.send(JSON.stringify({{type:'resize',rows:term.rows,cols:term.cols}}));}};
   ws.onmessage=e=>{{term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data);}};
   ws.onclose=()=>term.write('\\r\\n\\x1b[90m[connection closed]\\x1b[0m\\r\\n');
   ws.onerror=()=>term.write('\\r\\n\\x1b[31m[WebSocket error]\\x1b[0m\\r\\n');
   term.onData(d=>{{if(ws.readyState===WebSocket.OPEN)ws.send(new TextEncoder().encode(d));}});
   term.onResize(({{rows,cols}})=>{{if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({{type:'resize',rows,cols}}));}});
-  window.addEventListener('resize',()=>fit.fit());
+  window.addEventListener('resize',doFit);
 }})();
 </script>
 </body>
