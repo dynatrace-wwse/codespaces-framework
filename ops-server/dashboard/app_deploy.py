@@ -533,13 +533,11 @@ async def _register_in_content_service(user: str, tenant_url: str) -> dict | Non
         return None
 
 
-@router.get("/api/deploy/start")
-async def deploy_start(tenant: str, action: str = "deploy", x_auth_user: str | None = Header(default=None)):
-    """Begin the SSO flow for a tenant. Validates the Dynatrace domain, then 302s to the
-    Dynatrace authorize endpoint (PKCE). nginx gates this to org members (X-Auth-User)."""
-    user = _require_writer(x_auth_user)
-    if action not in ("deploy", "undeploy"):
-        raise HTTPException(400, "action must be deploy or undeploy.")
+async def _begin_sso_flow(tenant: str, action: str, user: str) -> RedirectResponse:
+    """Build the Dynatrace SSO authorize redirect (Auth-Code + PKCE) for a tenant deploy and
+    stash the flow in Redis. Shared by the dashboard operator path (/api/deploy/start,
+    writer-gated) and the in-app trigger (/api/deploy/app-start, public — for a general tenant
+    the authority is the user's OWN Dynatrace SSO login)."""
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     client_id, _ = _client_for(domain)
     if not client_id:
@@ -565,6 +563,79 @@ async def deploy_start(tenant: str, action: str = "deploy", x_auth_user: str | N
     })
     await _audit(user, tenant_id, action, "auth-started", domain=domain)
     return RedirectResponse(authorize, status_code=302)
+
+
+@router.get("/api/deploy/start")
+async def deploy_start(tenant: str, action: str = "deploy", x_auth_user: str | None = Header(default=None)):
+    """Begin the SSO flow for a tenant (dashboard operator path). nginx gates this to org
+    members (X-Auth-User)."""
+    user = _require_writer(x_auth_user)
+    if action not in ("deploy", "undeploy"):
+        raise HTTPException(400, "action must be deploy or undeploy.")
+    return await _begin_sso_flow(tenant, action, user)
+
+
+async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str, token: str) -> HTMLResponse:
+    """Run the install/upgrade (or uninstall) with a valid bearer and return the result page.
+    Shared by the SSO callback and the in-app COE/SRO auto-deploy path. The caller owns the
+    token's lifetime and must `del` it after this returns (it is never logged here)."""
+    app_url = _app_url(tenant_url)
+    if action == "undeploy":
+        ok, msg = await _run_undeploy(token, tenant_url)
+        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error", detail=msg)
+        return HTMLResponse(_page(
+            f"App <b>{APP_ID}</b> undeployed from <b>{tenant_id}</b>." if ok
+            else f"Undeploy failed for <b>{tenant_id}</b>: {msg}", ok=ok),
+            status_code=200 if ok else 502)
+
+    # deploy — idempotent: skip if up-to-date, else install/upgrade
+    res = await _deploy_with_status(token, tenant_url)
+    remote_grail = ""
+    if res["status"] != "error":
+        await _ensure_outbound_allowlist(token, tenant_url)
+        remote_grail = await _ensure_remote_grail(token, tenant_url)  # auto-enable cross-tenant forwarding
+    if res["status"] == "error":
+        await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
+        return HTMLResponse(_page(
+            f"Deploy to <b>{tenant_id}</b> failed (exit {res.get('rc')}).<br><br>"
+            f"<pre style='white-space:pre-wrap;color:#f0c674'>{res.get('output','')}</pre>", ok=False), status_code=502)
+
+    reg = await _register_in_content_service(user, tenant_url)
+    profile = (reg or {}).get("profile")
+    await _audit(user, tenant_id, "deploy", res["status"],
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile,
+                 remote_grail=remote_grail)
+    if res["status"] == "up-to-date":
+        head = f"App already up-to-date on <b>{tenant_id}</b> (v{res.get('to')}) — nothing to do."
+    elif res["status"] == "upgraded":
+        head = f"App upgraded on <b>{tenant_id}</b>: v{res.get('from')} → v{res.get('to')}."
+    else:
+        head = f"App installed on <b>{tenant_id}</b> (v{res.get('to')})."
+    return HTMLResponse(_page(
+        f"{head}<br><br>Open: <a href='{app_url}'>{app_url}</a><br>"
+        + (f"Content profile: <b>{profile}</b> — open the app and Refresh to load it."
+           if profile else "Tenant registered for content delivery."), ok=True))
+
+
+@router.get("/api/deploy/app-start", response_class=HTMLResponse)
+async def deploy_app_start(tenant: str, action: str = "deploy"):
+    """In-app trigger for the Admin "Update now" button (opened in a popup). PUBLIC, no GitHub
+    gate. For the COE/SRO tenants Orbital holds credentials → deploy directly (no SSO). For any
+    other tenant, fall back to SSO-delegated deploy — the authority is the user's OWN Dynatrace
+    SSO login (Auth-Code + PKCE), and the resulting token is used once and discarded."""
+    if action not in ("deploy", "undeploy"):
+        raise HTTPException(400, "action must be deploy or undeploy.")
+    tenant_id, _ = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    if _is_coe(tenant) or _is_sro(tenant):
+        auto = "COE" if _is_coe(tenant) else "SRO"
+        token = (await _mint_coe_token(action)) if auto == "COE" else (await _mint_sro_token(action) or SRO_PLATFORM_TOKEN)
+        if not token:
+            return HTMLResponse(_page(f"{auto} auto-deploy not configured.", ok=False), status_code=503)
+        try:
+            return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token)
+        finally:
+            del token
+    return await _begin_sso_flow(tenant, action, f"app:{tenant_id}")
 
 
 @router.get("/auth/dt-callback", response_class=HTMLResponse)
@@ -627,45 +698,10 @@ async def deploy_callback(request: Request):
             f"Ask a tenant administrator to grant them, then try again.", ok=False), status_code=403)
 
     tenant_url = flow["tenant"]
-    app_url = _app_url(tenant_url)
-
-    if action == "undeploy":
-        ok, msg = await _run_undeploy(token, tenant_url)
-        del token  # discard the credential
-        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error", detail=msg)
-        return HTMLResponse(_page(
-            f"App <b>{APP_ID}</b> undeployed from <b>{tenant_id}</b>." if ok
-            else f"Undeploy failed for <b>{tenant_id}</b>: {msg}", ok=ok),
-            status_code=200 if ok else 502)
-
-    # deploy — idempotent: skip if up-to-date, else install/upgrade
-    res = await _deploy_with_status(token, tenant_url)
-    remote_grail = ""
-    if res["status"] != "error":
-        await _ensure_outbound_allowlist(token, tenant_url)
-        remote_grail = await _ensure_remote_grail(token, tenant_url)  # auto-enable cross-tenant forwarding
-    del token  # discard the credential before doing anything else
-    if res["status"] == "error":
-        await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
-        return HTMLResponse(_page(
-            f"Deploy to <b>{tenant_id}</b> failed (exit {res.get('rc')}).<br><br>"
-            f"<pre style='white-space:pre-wrap;color:#f0c674'>{res.get('output','')}</pre>", ok=False), status_code=502)
-
-    reg = await _register_in_content_service(user, tenant_url)
-    profile = (reg or {}).get("profile")
-    await _audit(user, tenant_id, "deploy", res["status"],
-                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile,
-                 remote_grail=remote_grail)
-    if res["status"] == "up-to-date":
-        head = f"App already up-to-date on <b>{tenant_id}</b> (v{res.get('to')}) — nothing to do."
-    elif res["status"] == "upgraded":
-        head = f"App upgraded on <b>{tenant_id}</b>: v{res.get('from')} → v{res.get('to')}."
-    else:
-        head = f"App installed on <b>{tenant_id}</b> (v{res.get('to')})."
-    return HTMLResponse(_page(
-        f"{head}<br><br>Open: <a href='{app_url}'>{app_url}</a><br>"
-        + (f"Content profile: <b>{profile}</b> — open the app and Refresh to load it."
-           if profile else "Tenant registered for content delivery."), ok=True))
+    try:
+        return await _finish_deploy(user, tenant_id, tenant_url, action, token)
+    finally:
+        del token  # discard the delegated credential on every path
 
 
 @router.get("/api/deploy/latest-version")
