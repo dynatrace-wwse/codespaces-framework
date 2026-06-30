@@ -37,7 +37,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from webhook.config import REDIS_URL
 from dashboard.content_service import classify_tenant, register_tenant
-from dashboard.github_oauth import _decrypt  # Fernet (GH_OAUTH_ENC_KEY) — reused for the COE token
+from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KEY) — COE token + stashed deploy token
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -535,9 +535,10 @@ async def _register_in_content_service(user: str, tenant_url: str) -> dict | Non
 
 async def _begin_sso_flow(tenant: str, action: str, user: str) -> RedirectResponse:
     """Build the Dynatrace SSO authorize redirect (Auth-Code + PKCE) for a tenant deploy and
-    stash the flow in Redis. Shared by the dashboard operator path (/api/deploy/start,
-    writer-gated) and the in-app trigger (/api/deploy/app-start, public — for a general tenant
-    the authority is the user's OWN Dynatrace SSO login)."""
+    stash the flow in Redis. Used by the dashboard operator path (/api/deploy/start, writer-gated).
+    NOTE: the in-app "Update now" path does NOT use SSO — Dynatrace OAuth clients are account-
+    scoped, so they can't deploy a foreign tenant; the app uses a pasted platform token instead
+    (see /api/deploy/stash + /api/deploy/app-start)."""
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     client_id, _ = _client_for(domain)
     if not client_id:
@@ -617,15 +618,44 @@ async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str
            if profile else "Tenant registered for content delivery."), ok=True))
 
 
+# Required scopes for a deploy platform token created in the target tenant. Surfaced to the
+# admin so the token they paste actually works (install/run/delete + settings for the
+# post-install allowlist + cross-tenant forwarding steps).
+DEPLOY_TOKEN_SCOPES = ("app-engine:apps:install", "app-engine:apps:run", "app-engine:apps:delete",
+                       "settings:objects:read", "settings:objects:write")
+
+
+@router.post("/api/deploy/stash")
+async def deploy_stash(body: dict):
+    """Step 1 of the in-app "Update now" for a self-managed tenant: the app POSTs the platform
+    token the admin pasted; we encrypt it (Fernet, GH_OAUTH_ENC_KEY) and hold it under a random
+    nonce for 5 minutes, returning the nonce. The popup then calls /api/deploy/app-start?nonce=…
+    so the token is NEVER put in a URL / access log. PUBLIC, opaque blob keyed by the nonce."""
+    tenant = (body.get("tenant") or "").strip()
+    token = (body.get("token") or "").strip()
+    classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    if not token:
+        raise HTTPException(400, "token is required.")
+    nonce = secrets.token_urlsafe(24)
+    await _pool().setex(f"deploy:pending:{nonce}", 300, _encrypt(json.dumps({"tenant": tenant, "token": token})))
+    del token
+    return {"nonce": nonce}
+
+
 @router.get("/api/deploy/app-start", response_class=HTMLResponse)
-async def deploy_app_start(tenant: str, action: str = "deploy"):
+async def deploy_app_start(tenant: str, action: str = "deploy", nonce: str = ""):
     """In-app trigger for the Admin "Update now" button (opened in a popup). PUBLIC, no GitHub
-    gate. For the COE/SRO tenants Orbital holds credentials → deploy directly (no SSO). For any
-    other tenant, fall back to SSO-delegated deploy — the authority is the user's OWN Dynatrace
-    SSO login (Auth-Code + PKCE), and the resulting token is used once and discarded."""
+    gate, no OAuth client (Dynatrace OAuth clients are account-scoped → can't deploy a foreign
+    tenant). Credential paths, in order:
+      1. COE/SRO — Orbital holds these tenants' creds → deploy directly, no token needed.
+      2. nonce — the admin pasted a platform token in the app; we deploy with the stashed,
+         encrypted token (created in the target tenant, so it carries that account's authority),
+         then discard it.
+      3. neither — show how to update: the required token scopes + the Orbital register link."""
     if action not in ("deploy", "undeploy"):
         raise HTTPException(400, "action must be deploy or undeploy.")
     tenant_id, _ = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+
     if _is_coe(tenant) or _is_sro(tenant):
         auto = "COE" if _is_coe(tenant) else "SRO"
         token = (await _mint_coe_token(action)) if auto == "COE" else (await _mint_sro_token(action) or SRO_PLATFORM_TOKEN)
@@ -635,7 +665,32 @@ async def deploy_app_start(tenant: str, action: str = "deploy"):
             return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token)
         finally:
             del token
-    return await _begin_sso_flow(tenant, action, f"app:{tenant_id}")
+
+    if nonce:
+        raw = await _pool().get(f"deploy:pending:{nonce}")
+        if not raw:
+            return HTMLResponse(_page("Update session expired — go back to the app and try again.", ok=False), status_code=400)
+        await _pool().delete(f"deploy:pending:{nonce}")  # one-time use
+        try:
+            stashed = json.loads(_decrypt(raw))
+        except Exception:
+            return HTMLResponse(_page("Could not read the update session.", ok=False), status_code=400)
+        # Bind the stashed token to the tenant it was pasted for.
+        if stashed.get("tenant") != tenant:
+            return HTMLResponse(_page("Tenant mismatch for this update session.", ok=False), status_code=400)
+        token = stashed.get("token", "")
+        try:
+            return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token)
+        finally:
+            del token
+
+    scopes = ", ".join(DEPLOY_TOKEN_SCOPES)
+    return HTMLResponse(_page(
+        f"To update the app on <b>{tenant_id}</b>, paste a Dynatrace <b>platform token</b> created "
+        f"in this tenant into the app’s <b>Update now</b> field, then click it again.<br><br>"
+        f"The token needs scopes: <b>{scopes}</b>.<br><br>"
+        f"Alternatively, an enablement admin can deploy it for you from "
+        f"<a href='/deploy'>Autonomous Enablement (Orbital)</a>.", ok=False), status_code=200)
 
 
 @router.get("/auth/dt-callback", response_class=HTMLResponse)
