@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Updating the Enablement App — creating the deploy token</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         max-width: 760px; margin: 2.5rem auto; padding: 0 1.2rem; color: #1a1a1a; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { color: #e6e6e6; background: #16181d; } a { color: #7aa2ff; } code { background:#2a2d35; } th { background:#2a2d35; } }
+  h1 { font-size: 1.7rem; } h2 { font-size: 1.2rem; margin-top: 2rem; }
+  code { background: #f1f2f4; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.92em; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #c9ccd1; padding: 0.5rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: #f1f2f4; }
+  .note { border-left: 3px solid #7aa2ff; padding: 0.4rem 0.9rem; margin: 1rem 0; opacity: 0.92; }
+  ol li, ul li { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+<h1>Updating the Enablement App — creating the deploy token</h1>
+
+<p>When a newer version of the <strong>Dynatrace Enablements</strong> app is available, the
+<strong>Administration &rarr; App version</strong> page shows an <strong>Update now</strong> button.</p>
+
+<ul>
+  <li>If your tenant is <strong>managed by the enablement team</strong> (the central enablement
+  Dynatrace account), leave the token field blank and click <strong>Update now</strong> — the update
+  is applied for you, no token needed.</li>
+  <li>If this is <strong>your own Dynatrace tenant</strong>, you provide a one-time
+  <strong>platform token</strong> so the update can install the new app version into your
+  environment. This page explains how to create it.</li>
+</ul>
+
+<p>The token is used <strong>once</strong> to install the update and is then discarded. It is never
+stored in the app.</p>
+
+<h2>1. Create a platform token in your tenant</h2>
+<ol>
+  <li>In your Dynatrace environment, open <strong>Platform tokens</strong> (search for
+  &ldquo;Platform tokens&rdquo; in the menu, or go to <strong>Settings &rarr; Platform tokens</strong> /
+  <strong>Account Management &rarr; Identity &amp; access management &rarr; Platform tokens</strong>).</li>
+  <li>Choose <strong>Generate new token</strong>.</li>
+  <li>Name it, for example <code>enablement-app-update</code>.</li>
+  <li>Optionally set a short expiration (a day is plenty — it is only used once).</li>
+  <li>Add these <strong>permissions (scopes)</strong>:</li>
+</ol>
+
+<table>
+  <thead><tr><th>Scope</th><th>Why it is needed</th></tr></thead>
+  <tbody>
+    <tr><td><code>app-engine:apps:install</code></td><td>install the new app version</td></tr>
+    <tr><td><code>app-engine:apps:run</code></td><td>activate the installed version</td></tr>
+    <tr><td><code>app-engine:apps:delete</code></td><td>replace the previous version</td></tr>
+    <tr><td><code>settings:objects:read</code></td><td>read the environment settings the install checks</td></tr>
+    <tr><td><code>settings:objects:write</code></td><td>apply the app&rsquo;s post-install settings (e.g. network allow-list)</td></tr>
+  </tbody>
+</table>
+
+<ol start="6">
+  <li><strong>Generate</strong> the token and copy it. It looks like <code>dt0s16.XXXXXXXX&hellip;</code>
+  You can only copy it once.</li>
+</ol>
+
+<div class="note">You need permission to create tokens and to install apps in your tenant. If the
+button later reports a missing permission, your token is missing one of the scopes above — recreate
+it with all five.</div>
+
+<h2>2. Paste it into the app</h2>
+<ol>
+  <li>In the Enablement app, go to <strong>Administration &rarr; App version</strong>.</li>
+  <li>Click <strong>Check for updates</strong>. If a newer version exists you will see
+  <strong>Update available</strong>.</li>
+  <li>Paste the token into <strong>Platform token (only for your own tenant)</strong>.</li>
+  <li>Click <strong>Update now</strong>. A new browser tab opens and runs the install
+  (about 1&ndash;2 minutes).</li>
+  <li>When it reports <strong>App upgraded</strong>, return to the app and <strong>reload the
+  page</strong> to load the new version.</li>
+</ol>
+
+<h2>3. Clean up (optional)</h2>
+<p>The token is discarded by the updater after a single use. If you set no expiration, you can delete
+it afterwards from the same <strong>Platform tokens</strong> page.</p>
+
+<h2>What happens to the token (security)</h2>
+<ul>
+  <li>It is sent over HTTPS to <strong>Autonomous Enablement by Dynatrace</strong> (Orbital), held
+  <strong>encrypted</strong> for at most a few minutes, used once to install the update, and then
+  <strong>deleted</strong>.</li>
+  <li>It is <strong>never</strong> written to the app, to logs, or to a URL.</li>
+  <li>It only authorises actions in <strong>your</strong> tenant — the token you create carries your
+  own account&rsquo;s permissions, nothing more.</li>
+</ul>
+
+<p>If you would rather not handle a token, ask the enablement team to deploy the update for you from
+Autonomous Enablement (Orbital) — the <strong>Register / deploy via Orbital</strong> link next to the
+button.</p>
+</body>
+</html>
