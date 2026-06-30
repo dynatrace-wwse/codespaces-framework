@@ -690,7 +690,7 @@ async def deploy_app_start(tenant: str, action: str = "deploy", nonce: str = "")
         f"in this tenant into the app’s <b>Update now</b> field, then click it again.<br><br>"
         f"The token needs scopes: <b>{scopes}</b>.<br><br>"
         f"Alternatively, an enablement admin can deploy it for you from "
-        f"<a href='/deploy'>Autonomous Enablement (Orbital)</a>.", ok=False), status_code=200)
+        f"<a href='/#register'>Autonomous Enablement (Orbital)</a>.", ok=False), status_code=200)
 
 
 @router.get("/auth/dt-callback", response_class=HTMLResponse)
