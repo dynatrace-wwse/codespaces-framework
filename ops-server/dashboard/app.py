@@ -3532,7 +3532,9 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
     job_id = f"enablement-{_uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
-    session_hours = 4
+    # Cap Orbital-hosted training sessions at 2h so no daemon runs unbounded; the
+    # expiry reaper force-kills it at expires_at. Overridable via env.
+    session_hours = int(os.environ.get("ORBITAL_SESSION_HOURS", "2"))
     expires_at = (now.replace(microsecond=0) + timedelta(hours=session_hours)).isoformat()
 
     # --- Token provisioning ---
