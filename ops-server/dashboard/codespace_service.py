@@ -222,6 +222,26 @@ async def provision(body: ProvisionBody):
     if not name:
         raise HTTPException(502, "GitHub did not return a codespace name.")
 
+    # Capture the ACTUAL machine GitHub assigned. When body.machine is omitted the
+    # create response carries the chosen machine (name + human size), so the size is
+    # visible in the dashboard UI + logs instead of "default"/None.
+    m = cs.get("machine") or {}
+    machine_name = m.get("name") or body.machine or "default"
+
+    def _gib(n):
+        try:
+            return f"{int(n) / (1024 ** 3):.0f}GB"
+        except (TypeError, ValueError):
+            return "?"
+
+    machine_display = (m.get("display_name") or machine_name)
+    if m.get("cpus"):
+        machine_display += f" • {m['cpus']} vCPU"
+    if m.get("memory_in_bytes"):
+        machine_display += f" • {_gib(m['memory_in_bytes'])} RAM"
+    if m.get("storage_in_bytes"):
+        machine_display += f" • {_gib(m['storage_in_bytes'])} disk"
+
     # c. Record the running job (mirrors the Arena daemon job hash shape so the
     #    dashboard Running tab, shell, and terminate plumbing all see it).
     now = datetime.now(timezone.utc)
@@ -233,7 +253,8 @@ async def provision(body: ProvisionBody):
         "dtUser": body.dtUser,
         "repo": body.repo,
         "ref": body.ref or "",
-        "machine": body.machine or "default",
+        "machine": machine_name,
+        "machine_display": machine_display,
         "status": "provisioning",
         "created": now.isoformat(),
         "started_at": now.isoformat(),
@@ -246,10 +267,27 @@ async def provision(body: ProvisionBody):
     await _pool().hset(f"job:running:{name}", mapping=redis_meta)
     await _pool().expire(f"job:running:{name}", CODESPACE_JOB_TTL)
 
+    # Seed the Log tab (the /api/jobs/{id}/log endpoint reads job:log:{name}); without
+    # this a Codespace session's Log tab is empty/404. Records creation metadata incl.
+    # the machine size and tenant. Live devcontainer build logs are appended by the
+    # session-status poller.
+    creation_log = (
+        f"[{now.isoformat()}] Codespace created\n"
+        f"  name:    {name}\n"
+        f"  repo:    {body.repo}@{body.ref or 'default'}\n"
+        f"  machine: {machine_display}\n"
+        f"  tenant:  {tenant_id} ({stage})\n"
+        f"  web:     {web_url or '(pending)'}\n"
+        f"  user:    {body.dtUser}\n"
+        "Provisioning the devcontainer (Kubernetes + demo apps). This can take a "
+        "few minutes; the shell and app become available once the environment is ready.\n"
+    )
+    await _pool().setex(f"job:log:{name}", CODESPACE_JOB_TTL, creation_log)
+
     ws_url = f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{name}/shell"
     # Audit: user + repo + machine + tenant/stage — NEVER the credential or DT tokens.
     log.info("Codespace provisioned name=%s user=%s repo=%s machine=%s tenant=%s stage=%s",
-             name, body.dtUser, body.repo, body.machine, tenant_id, stage)
+             name, body.dtUser, body.repo, machine_display, tenant_id, stage)
     # d.
     return {"jobId": name, "status": "provisioning", "webUrl": web_url, "wsUrl": ws_url}
 

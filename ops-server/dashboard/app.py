@@ -1205,6 +1205,25 @@ async def api_terminate_job(job_id: str, request: Request):
         except Exception as exc:
             log.warning("Codespace delete failed for %s: %s", job_id, exc)
             raise HTTPException(502, f"Could not delete codespace {job_id}: {exc}")
+        # Record the session in history (machine size, tenant, creation-log pointer)
+        # before the running hash is gone, so the History tab shows Codespace sessions.
+        try:
+            hist = {
+                "job_id": job_id, "type": "codespace", "provider": "codespace",
+                "repo": meta.get("repo", ""), "ref": meta.get("ref", ""),
+                "status": "terminated", "machine": meta.get("machine", ""),
+                "machine_display": meta.get("machine_display", ""),
+                "tenant": meta.get("arena_tenant", ""), "stage": meta.get("stage", ""),
+                "arena_user": meta.get("arena_user", ""), "web_url": meta.get("web_url", ""),
+                "started_at": meta.get("started_at", ""),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "requested_by": requested_by,
+            }
+            await pool.rpush("jobs:completed", json.dumps(hist))
+            await pool.ltrim("jobs:completed", -500, -1)
+        except Exception as exc:
+            log.warning("Could not write codespace history for %s: %s", job_id, exc)
+        await pool.delete(f"job:running:{job_id}")
         log.info("Codespace %s terminated by %s", job_id, requested_by)
         return {"status": "terminated", "job_id": job_id, "requested_by": requested_by}
 
@@ -2443,9 +2462,20 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
         from dashboard.github_oauth import get_user_token
         user_token = await get_user_token(pool, meta.get("dtUser", ""))
         gh_env = {"GH_TOKEN": user_token} if user_token else {}
-        # No `--`: gh opens the learner's default login shell (zsh) with a TTY, so the
-        # framework profile (KUBECONFIG, prompt, workspace cwd) is sourced — a native shell.
-        cmd = ["gh", "codespace", "ssh", "-c", job_id]
+        # `gh codespace ssh` lands in the Codespace BASE (user "vscode"), but the
+        # hands-on happens inside the nested Dynatrace enablement container (image
+        # shinojosa/dt-enablement) where kubectl, the k3d cluster and the lab tools
+        # live. That container is started without a fixed --name, so select it by
+        # image and docker-exec into its zsh. `-- -t <cmd>` forces ssh to allocate a
+        # PTY so `docker exec -it` gets a real TTY (verified: /dev/pts + zsh present).
+        inner_shell = (
+            "CID=$(docker ps --format '{{.ID}} {{.Image}}' | "
+            "awk '/dt-enablement/{print $1; exit}'); "
+            "if [ -n \"$CID\" ]; then exec docker exec -it \"$CID\" zsh; "
+            "else echo 'dt-enablement container not found; opening base shell'; "
+            "exec \"$SHELL\" -l; fi"
+        )
+        cmd = ["gh", "codespace", "ssh", "-c", job_id, "--", "-t", inner_shell]
         log.info("Codespace shell open: job=%s rows=%s cols=%s", job_id, rows, cols)
         await _pty_bridge(ws, cmd, rows=rows, cols=cols, env=gh_env)
         log.info("Codespace shell closed: job=%s", job_id)

@@ -167,6 +167,7 @@ class WorkerManager:
             self._consume_queue("test", self.test_semaphore),
             self._terminate_listener(),
             self._terminate_reconciler(),
+            self._expiry_reaper(),
             self._master_heartbeat_loop(),
         )
 
@@ -422,6 +423,73 @@ class WorkerManager:
             except Exception as e:
                 log.warning("Terminate reconciler error: %s", e)
             await asyncio.sleep(RECONCILE_INTERVAL)
+
+    async def _expiry_reaper(self):
+        """Reap sessions whose ``expires_at`` has passed.
+
+        The terminate reconciler only acts on jobs explicitly flagged
+        ``terminating=1``; a session that simply outlives its ``expires_at`` and
+        was never terminated sits in ``job:running`` forever (observed: a daemon
+        stale for ~16h with the worker already idle). This sweep flags any expired
+        job for termination — the owning worker's reconciler then force-kills
+        Sysbox containers. Codespace jobs have no worker reconciler, so they are
+        cleaned here directly (GitHub owns the Codespace lifecycle; we only clear
+        our stale record and write history).
+        """
+        while not self._shutdown:
+            try:
+                now = datetime.now(timezone.utc)
+                async for key in self.pool.scan_iter(match="job:running:*"):
+                    try:
+                        rec = await self.pool.hgetall(key)
+                    except Exception:
+                        continue
+                    exp = rec.get("expires_at")
+                    if not exp or rec.get("terminating") == "1":
+                        continue
+                    try:
+                        exp_dt = datetime.fromisoformat(exp)
+                    except ValueError:
+                        continue
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    if exp_dt > now:
+                        continue
+                    job_id = key.split("job:running:", 1)[1]
+                    log.info("Expiry reaper: %s expired at %s — reaping", job_id, exp)
+                    # Flag for the owning worker's reconciler to force-kill Sysbox.
+                    await self.pool.hset(key, "terminating", "1")
+                    if rec.get("provider") == "codespace":
+                        await self._write_codespace_history(job_id, rec, "expired")
+                        await self.pool.delete(key)
+            except Exception as e:
+                log.warning("Expiry reaper error: %s", e)
+            await asyncio.sleep(RECONCILE_INTERVAL)
+
+    async def _write_codespace_history(self, job_id: str, rec: dict, status: str):
+        """Append a Codespace session to jobs:completed so the History tab shows it
+        (with machine size, tenant, and a pointer to the retained creation log)."""
+        try:
+            record = {
+                "job_id":       job_id,
+                "type":         "codespace",
+                "provider":     "codespace",
+                "repo":         rec.get("repo", ""),
+                "ref":          rec.get("ref", ""),
+                "status":       status,
+                "machine":      rec.get("machine", ""),
+                "machine_display": rec.get("machine_display", ""),
+                "tenant":       rec.get("arena_tenant", ""),
+                "stage":        rec.get("stage", ""),
+                "arena_user":   rec.get("arena_user", ""),
+                "web_url":      rec.get("web_url", ""),
+                "started_at":   rec.get("started_at", ""),
+                "finished_at":  datetime.now(timezone.utc).isoformat(),
+            }
+            await self.pool.rpush("jobs:completed", json.dumps(record))
+            await self.pool.ltrim("jobs:completed", -500, -1)
+        except Exception as e:
+            log.warning("Could not write codespace history for %s: %s", job_id, e)
 
     async def _force_clean_orphan(self, job_id: str):
         """Clear Redis state for a terminated job with no live task to do it."""
