@@ -112,6 +112,42 @@ async def delete_codespace(dtUser: str, name: str) -> None:
              name, dtUser, repo, machine)
 
 
+async def reap_codespace_if_idle(dtUser: str, name: str, max_idle_min: int | None = None) -> str | None:
+    """Throw away a Codespace that GitHub has stopped, or that has been idle past
+    ``max_idle_min``. Returns the reason ('shutdown'/'archived'/'idle') if it deleted
+    the Codespace, else None. Used by the expiry reaper — training sessions should not
+    leave a stopped/abandoned Codespace lingering on the learner's account."""
+    if not dtUser or not name:
+        return None
+    max_idle_min = max_idle_min or CODESPACE_IDLE_TIMEOUT_MIN
+    try:
+        cs = json.loads(await _gh(dtUser, "api", f"user/codespaces/{name}"))
+    except Exception:
+        return None  # transient / token gone — leave it for the next sweep
+    state = (cs.get("state") or "").lower()
+    reason = None
+    if state in ("shutdown", "archived"):
+        reason = state
+    else:
+        last_used = cs.get("last_used_at")
+        if last_used:
+            try:
+                lu = datetime.fromisoformat(last_used.replace("Z", "+00:00"))
+                if (datetime.now(timezone.utc) - lu).total_seconds() > max_idle_min * 60:
+                    reason = "idle"
+            except ValueError:
+                pass
+    if reason:
+        try:
+            await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")
+            await _pool().delete(f"gh:token:{dtUser}")  # credential dies with the Codespace
+            log.info("Reaped Codespace name=%s user=%s reason=%s", name, dtUser, reason)
+        except Exception as exc:
+            log.warning("Idle-reap delete failed for %s: %s", name, exc)
+            return None
+    return reason
+
+
 async def _gh(dtUser: str, *args: str, input: str | None = None) -> str:
     """Run the `gh` CLI as the learner. Sets GH_TOKEN to their stored token; if none,
     falls back to ambient `gh` auth (local testing). Returns stdout; raises HTTPException
@@ -238,13 +274,18 @@ async def provision(body: ProvisionBody):
         except (TypeError, ValueError):
             return "?"
 
-    machine_display = (m.get("display_name") or machine_name)
-    if m.get("cpus"):
-        machine_display += f" • {m['cpus']} vCPU"
-    if m.get("memory_in_bytes"):
-        machine_display += f" • {_gib(m['memory_in_bytes'])} RAM"
-    if m.get("storage_in_bytes"):
-        machine_display += f" • {_gib(m['storage_in_bytes'])} disk"
+    # GitHub's display_name is already a clean size string ("2 cores, 8 GB RAM,
+    # 32 GB storage"); only synthesize one from the raw specs if it's missing.
+    if m.get("display_name"):
+        machine_display = m["display_name"]
+    else:
+        machine_display = machine_name
+        if m.get("cpus"):
+            machine_display += f" • {m['cpus']} vCPU"
+        if m.get("memory_in_bytes"):
+            machine_display += f" • {_gib(m['memory_in_bytes'])} RAM"
+        if m.get("storage_in_bytes"):
+            machine_display += f" • {_gib(m['storage_in_bytes'])} disk"
 
     # c. Record the running job (mirrors the Arena daemon job hash shape so the
     #    dashboard Running tab, shell, and terminate plumbing all see it).

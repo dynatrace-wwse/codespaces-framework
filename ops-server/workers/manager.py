@@ -444,8 +444,31 @@ class WorkerManager:
                         rec = await self.pool.hgetall(key)
                     except Exception:
                         continue
+                    if rec.get("terminating") == "1":
+                        continue
+                    job_id = key.split("job:running:", 1)[1]
+                    provider = rec.get("provider")
+                    # Codespace idle/stopped reaping — independent of the expires_at TTL
+                    # (GitHub stops an idle Codespace; we throw it away). Throttled to one
+                    # GitHub check per codespace per minute.
+                    if provider == "codespace":
+                        throttle = f"cs:idlecheck:{job_id}"
+                        if not await self.pool.exists(throttle):
+                            await self.pool.set(throttle, "1", ex=60)
+                            reason = None
+                            try:
+                                from dashboard.codespace_service import reap_codespace_if_idle
+                                reason = await reap_codespace_if_idle(rec.get("dtUser", ""), job_id)
+                            except Exception as e:
+                                log.warning("Codespace idle-reap error %s: %s", job_id, e)
+                            if reason:
+                                log.info("Expiry reaper: codespace %s reaped (%s)", job_id, reason)
+                                await self._write_codespace_history(job_id, rec, reason)
+                                await self.pool.delete(key)
+                                continue
+                    # expires_at TTL flag (all providers)
                     exp = rec.get("expires_at")
-                    if not exp or rec.get("terminating") == "1":
+                    if not exp:
                         continue
                     try:
                         exp_dt = datetime.fromisoformat(exp)
@@ -455,11 +478,10 @@ class WorkerManager:
                         exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                     if exp_dt > now:
                         continue
-                    job_id = key.split("job:running:", 1)[1]
                     log.info("Expiry reaper: %s expired at %s — reaping", job_id, exp)
                     # Flag for the owning worker's reconciler to force-kill Sysbox.
                     await self.pool.hset(key, "terminating", "1")
-                    if rec.get("provider") == "codespace":
+                    if provider == "codespace":
                         await self._write_codespace_history(job_id, rec, "expired")
                         await self.pool.delete(key)
             except Exception as e:
