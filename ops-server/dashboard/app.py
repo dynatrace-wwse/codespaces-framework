@@ -2636,6 +2636,67 @@ async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int =
             pass
 
 
+async def _read_codespace_app_registry(job_id: str, meta: dict) -> list[dict]:
+    """Read the framework app-registry from a Codespace and attach each app's
+    public GitHub-forwarded-port URL.
+
+    The registry is written by the framework's registerApp() into the nested
+    dt-enablement container (selected by image, like the shell bridge). Each app's
+    forwarded port is set public so the learner can open it, and `url` points at
+    `https://{codespace}-{port}.app.github.dev`.
+    """
+    from dashboard.github_oauth import get_user_token
+    token = await get_user_token(pool, meta.get("dtUser", ""))
+    if not token:
+        return []
+    env = {**os.environ, "GH_TOKEN": token}
+    registry_path = "/home/vscode/.cache/dt-framework/app-registry"
+    inner = (
+        "CID=$(docker ps --format '{{.ID}} {{.Image}}' | "
+        "awk '/dt-enablement/{print $1; exit}'); "
+        f"docker exec \"$CID\" cat {registry_path} 2>/dev/null"
+    )
+    cmd = ["gh", "codespace", "ssh", "-c", job_id, "--", "-t", inner]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25)
+    except Exception:
+        return []
+
+    apps = []
+    seen_ports = set()
+    for line in stdout.decode(errors="replace").strip().splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 5:
+            continue
+        port = parts[3].strip()
+        url = f"https://{job_id}-{port}.app.github.dev" if port else ""
+        apps.append({
+            "name": parts[0], "namespace": parts[1], "service": parts[2],
+            "port": port, "ingress_host": parts[4],
+            "orbital_subdomain": "", "url": url, "provider": "codespace",
+        })
+        if port and port not in seen_ports:
+            seen_ports.add(port)
+    # Make each app's forwarded port public so the URL is reachable (best-effort).
+    for port in seen_ports:
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "gh", "codespace", "ports", "visibility", f"{port}:public",
+                "-c", job_id, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL, env=env,
+            )
+            await asyncio.wait_for(p.communicate(), timeout=15)
+        except Exception:
+            pass
+    return apps
+
+
 async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
     """Read the .app-registry file from inside the running job's dt container.
 
@@ -2649,6 +2710,14 @@ async def _read_app_registry(job_id: str, meta: dict) -> list[dict]:
             return json.loads(cached)
         except Exception:
             pass
+
+    # Codespace sessions run on GitHub, not a Sysbox container: read the same
+    # app-registry via `gh codespace ssh` + docker-exec into the dt-enablement
+    # container, and expose each app through its GitHub-forwarded-port URL.
+    if meta.get("provider") == "codespace":
+        apps = await _read_codespace_app_registry(job_id, meta)
+        await pool.set(cache_key, json.dumps(apps), ex=60)
+        return apps
 
     worker_id = meta.get("worker_id", "")
     sb_name = meta.get("sb_name") or f"sb-{job_id[-32:]}"
@@ -2940,6 +3009,16 @@ async def proxy_job_app(job_id: str, app_name: str, request: Request, path: str 
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
         raise HTTPException(status_code=404, detail="job not running")
+
+    # Codespace apps aren't proxied through Orbital (the port lives in the learner's
+    # Codespace on GitHub) — redirect to the public GitHub-forwarded-port URL.
+    if meta.get("provider") == "codespace":
+        from fastapi.responses import RedirectResponse
+        cs_apps = await _read_app_registry(job_id, meta)
+        target = next((a.get("url") for a in cs_apps if a["name"] == app_name and a.get("url")), None)
+        if target:
+            return RedirectResponse(target)
+        raise HTTPException(status_code=404, detail=f"app '{app_name}' not exposed in this Codespace yet")
 
     app_proxy_port = meta.get("app_proxy_port")
     if not app_proxy_port:

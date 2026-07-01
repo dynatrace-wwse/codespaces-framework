@@ -35,6 +35,7 @@ from dashboard.github_oauth import get_user_token
 log = logging.getLogger("ops-dashboard.codespace")
 
 CODESPACE_JOB_TTL = int(os.environ.get("CODESPACE_JOB_TTL", "14400"))  # 4h, lazy-overridable
+CODESPACE_IDLE_TIMEOUT_MIN = int(os.environ.get("CODESPACE_IDLE_TIMEOUT_MIN", "60"))  # stop after 60m idle
 GH_TIMEOUT = int(os.environ.get("CODESPACE_GH_TIMEOUT", "120"))
 
 router = APIRouter(tags=["codespace"])
@@ -212,6 +213,9 @@ async def provision(body: ProvisionBody):
         create_args += ["-f", f"machine={body.machine}"]
     if body.ref:
         create_args += ["-f", f"ref={body.ref}"]
+    # Stop the Codespace after 60 min idle (training sessions shouldn't burn the
+    # learner's compute while abandoned); the expiry reaper then throws it away.
+    create_args += ["-F", f"idle_timeout_minutes={CODESPACE_IDLE_TIMEOUT_MIN}"]
     out = await _gh(body.dtUser, *create_args)
     try:
         cs = json.loads(out)
