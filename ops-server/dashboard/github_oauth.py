@@ -326,6 +326,22 @@ async def github_device_poll(dtUser: str, device_code: str):
     (short-lived; destroyed when the Codespace is deleted). Never logs the token."""
     if not dtUser or not device_code:
         raise HTTPException(400, "dtUser and device_code are required.")
+    # GitHub's device flow REQUIRES honoring the poll `interval` and backing off
+    # further whenever GitHub answers `slow_down`; polling faster gets the token
+    # request rate-limited so the token is never delivered even after the learner
+    # authorizes. The DT app polls this endpoint on a fixed ~5s cadence and from
+    # several function instances at once, so Orbital must be the single gatekeeper:
+    # forward to GitHub at most once per interval (reserved BEFORE the call so
+    # concurrent instances don't all hit GitHub together), and grow the interval on
+    # slow_down. State is per device_code in Redis (gh:poll:{device_code}).
+    pool = _pool()
+    throttle_key = f"gh:poll:{device_code}"
+    state = await pool.hgetall(throttle_key)
+    interval = int(state.get("interval") or 5) if state else 5
+    if state and time.time() < float(state.get("next_ts") or 0):
+        return {"connected": False, "status": "authorization_pending"}
+    await pool.hset(throttle_key, mapping={"next_ts": time.time() + interval, "interval": interval})
+    await pool.expire(throttle_key, 1000)
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(GH_TOKEN_URL, headers={"Accept": "application/json"},
                          data={"client_id": _client_id(), "device_code": device_code,
@@ -334,7 +350,14 @@ async def github_device_poll(dtUser: str, device_code: str):
     token = d.get("access_token")
     if not token:
         # authorization_pending / slow_down / expired_token / access_denied
-        return {"connected": False, "status": d.get("error", "authorization_pending")}
+        err = d.get("error", "authorization_pending")
+        if err == "slow_down":
+            interval = int(d.get("interval") or (interval + 5))
+            await pool.hset(throttle_key, mapping={"next_ts": time.time() + interval, "interval": interval})
+            await pool.expire(throttle_key, 1000)
+        # slow_down is a transient backoff, not a user-facing state — keep the UI waiting
+        return {"connected": False, "status": "authorization_pending" if err == "slow_down" else err}
+    await pool.delete(throttle_key)
     await set_user_token(_pool(), dtUser, token)
     login = None
     try:
