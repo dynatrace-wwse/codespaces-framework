@@ -143,7 +143,11 @@ if [[ ! -d "${REPO_DIR}" ]]; then
         'ops-server/worker-agent/**' \
         'ops-server/requirements.txt' \
         'ops-server/systemd/**' \
-        'ops-server/ops-docker-cleanup.sh'
+        'ops-server/ops-docker-cleanup.sh' \
+        'ops-server/tools/**'
+    # tools/ holds app_layer_driver.py, which the worker-agent copies into the repo
+    # when running an app-layer-test (amd64/AstroShop labs run here) — without it the
+    # driver copy fails and the job silently falls back to integration.sh.
 fi
 # Convenience symlink: /home/ops/worker-agent → …/ops-server/worker-agent
 ln -sfn "${REPO_DIR}/ops-server/worker-agent" "${AGENT_SYMLINK}"
