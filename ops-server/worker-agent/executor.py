@@ -142,8 +142,44 @@ async def execute_integration_test(
     await _make_world_writable(repo_dir)
     _write_env_file(repo_dir / ".devcontainer" / ".env")
 
+    # app-layer-test rides this same provisioning path as integration-test; it only
+    # swaps the final step (the app-layer driver instead of integration.sh). Mirrors
+    # workers/manager.py _run_integration_test so master (arm64) and this AMD worker
+    # verify a lab's LAB_SOLUTION steps identically — AstroShop/amd64 labs that refuse
+    # to deploy on ARM are routed here (queue:test:amd64) instead of the arm64 master.
+    is_app_layer = job.get("type") == "app-layer-test"
+    if is_app_layer:
+        driver_src = Path(__file__).resolve().parent.parent / "tools" / "app_layer_driver.py"
+        shutil.copy(driver_src, repo_dir / ".app_layer_driver.py")
+        # LAB_SOLUTION `solve_bug*` does `git checkout solution/bugN`; the shallow
+        # single-branch clone lacks them. Fetch any solution/* branches + create
+        # local branches so the checkout resolves. No-op for repos without them.
+        try:
+            fetch = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin",
+                "+refs/heads/solution/*:refs/remotes/origin/solution/*",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(fetch.wait(), timeout=120)
+            lsr = await asyncio.create_subprocess_exec(
+                "git", "-C", str(repo_dir), "for-each-ref",
+                "--format=%(refname:short)", "refs/remotes/origin/solution",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await lsr.communicate()
+            for rb in out.decode().split():
+                local = rb.split("origin/", 1)[-1]  # e.g. solution/bug1
+                br = await asyncio.create_subprocess_exec(
+                    "git", "-C", str(repo_dir), "branch", "-f", local, rb,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await br.wait()
+        except Exception as e:
+            log.warning("app-layer-test: solution/* branch fetch failed: %s", e)
+
     start_time = time.time()
-    log.info("Running integration test for %s (arch=%s, ref=%s)", repo_name, WORKER_ARCH, ref)
+    log.info("Running %s for %s (arch=%s, ref=%s)",
+             "app-layer test" if is_app_layer else "integration test", repo_name, WORKER_ARCH, ref)
 
     workspace = f"/workspaces/{repo_name}"
     env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -255,8 +291,13 @@ async def execute_integration_test(
         await _wait_for_inner_dt_ready(sb_name, inner_name)
 
         await _setup_log("Environment ready — starting test steps")
-        custom_script = job.get("test_script") or "zsh .devcontainer/test/integration.sh"
-        test_label = f"frameworkTest:{job['suite']}" if job.get("suite") else "integrationTest"
+        if is_app_layer:
+            # Drive the app-layer path: STEP_SETUP + LAB_SOLUTION + shell-verification
+            # commands from docs, exactly as the Enablement App would via the exec API.
+            test_label, custom_script = "appLayerTest", "python3 .app_layer_driver.py docs"
+        else:
+            custom_script = job.get("test_script") or "zsh .devcontainer/test/integration.sh"
+            test_label = f"frameworkTest:{job['suite']}" if job.get("suite") else "integrationTest"
         steps = [
             ("postCreateCommand", "./.devcontainer/post-create.sh"),
             ("postStartCommand",  "./.devcontainer/post-start.sh"),
@@ -366,7 +407,7 @@ async def execute_integration_test(
         await redis_pool.ltrim("framework:runs", 0, 99)
 
     return {
-        "test": "integration",
+        "test": "app-layer" if is_app_layer else "integration",
         "arch": WORKER_ARCH,
         "ref": ref,
         "exit_code": rc,
