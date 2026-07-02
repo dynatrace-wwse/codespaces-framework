@@ -67,20 +67,33 @@ fi
 # Tier 3: Neither cache exists → git clone into host cache, then copy to container cache
 echo "⬇️  Pulling framework v${FRAMEWORK_VERSION}..."
 if ! (
+  # A partial cache (failed earlier pull, no .complete) would make git clone
+  # fail with "directory exists" forever — clear it first.
+  rm -rf "${HOST_CACHE}" && \
   mkdir -p "$(dirname "${HOST_CACHE}")" && \
   git clone --depth 1 --filter=blob:none --sparse \
     -b "${FRAMEWORK_VERSION}" \
     https://github.com/dynatrace-wwse/codespaces-framework.git \
     "${HOST_CACHE}" 2>/dev/null && \
   cd "${HOST_CACHE}" && \
-  git sparse-checkout set \
-    .devcontainer/util \
-    .devcontainer/p10k \
-    .devcontainer/test \
-    .devcontainer/apps \
-    .devcontainer/Makefile \
-    .devcontainer/makefile.sh \
-    .devcontainer/runlocal && \
+  # --no-cone (git ≥2.35): the list has FILE patterns (Makefile, makefile.sh);
+  # cone mode on git ≥2.37 hard-errors on non-directories. Fall back for old git.
+  { git sparse-checkout set --no-cone \
+      .devcontainer/util \
+      .devcontainer/p10k \
+      .devcontainer/test \
+      .devcontainer/apps \
+      .devcontainer/Makefile \
+      .devcontainer/makefile.sh \
+      .devcontainer/runlocal 2>/dev/null || \
+    git sparse-checkout set \
+      .devcontainer/util \
+      .devcontainer/p10k \
+      .devcontainer/test \
+      .devcontainer/apps \
+      .devcontainer/Makefile \
+      .devcontainer/makefile.sh \
+      .devcontainer/runlocal; } && \
   touch "${HOST_CACHE}/.complete"
 ); then
   echo "❌ Failed to pull framework v${FRAMEWORK_VERSION} — check network and retry"
