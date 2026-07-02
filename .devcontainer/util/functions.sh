@@ -1379,8 +1379,10 @@ dynatraceDeployOperator() {
     --version "$operator_version" \
     --create-namespace --namespace dynatrace --atomic
 
-  # Create the secret for Dynakube to use
-  kubectl -n dynatrace create secret generic "$RepositoryName" \
+  # Create the secret for Dynakube to use. Name must be lowercase (k8s RFC-1123)
+  # and match the lowercased Dynakube name derived in generateDynakube.
+  local dk_secret_name="$(echo "$RepositoryName" | tr '[:upper:]' '[:lower:]')"
+  kubectl -n dynatrace create secret generic "$dk_secret_name" \
     --from-literal="apiToken=$DT_OPERATOR_TOKEN" \
     --from-literal="dataIngestToken=$DT_INGEST_TOKEN" \
     2>/dev/null || true
@@ -1474,7 +1476,10 @@ generateDynakube() {
 
   local mode="${mode_override:-${DK_MODE:-cloudnative}}"
   local api_version="${DK_DYNAKUBE_API_VERSION:-v1beta6}"
-  local cluster_name="${RepositoryName:-$(hostname)}"
+  # Kubernetes resource names must be lowercase RFC-1123. Repo names can be
+  # mixed-case (e.g. Enablement-DTWiz-101), which the DynaKube validating webhook
+  # rejects — silently breaking OneAgent injection. Lowercase for the Dynakube name.
+  local cluster_name="$(echo "${RepositoryName:-$(hostname)}" | tr '[:upper:]' '[:lower:]')"
   local api_url="${DT_TENANT}/api"
 
   local gen_dir="$REPO_PATH/.devcontainer/yaml/gen"
