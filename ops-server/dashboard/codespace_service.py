@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import redis.asyncio as redis
 from fastapi import APIRouter, HTTPException
@@ -291,6 +291,16 @@ async def provision(body: ProvisionBody):
     #    dashboard Running tab, shell, and terminate plumbing all see it).
     now = datetime.now(timezone.utc)
     tenant_id, stage = _tenant_meta(body.dtEnv.DT_ENVIRONMENT)
+    # The Running tab reads `branch` and `arch` — resolve the actual branch the
+    # Codespace checked out (explicit ref → git_status.ref → repo default) and
+    # record the machine architecture (GitHub Codespaces machines are all x86_64).
+    branch = (
+        body.ref
+        or (cs.get("git_status") or {}).get("ref")
+        or (cs.get("repository") or {}).get("default_branch")
+        or ""
+    )
+    expires_at = (now.replace(microsecond=0) + timedelta(seconds=CODESPACE_JOB_TTL)).isoformat()
     redis_meta = {
         "job_id": name,
         "provider": "codespace",
@@ -298,11 +308,14 @@ async def provision(body: ProvisionBody):
         "dtUser": body.dtUser,
         "repo": body.repo,
         "ref": body.ref or "",
+        "branch": branch,
+        "arch": "x86_64",
         "machine": machine_name,
         "machine_display": machine_display,
         "status": "provisioning",
         "created": now.isoformat(),
         "started_at": now.isoformat(),
+        "expires_at": expires_at,
         "worker_id": "github-codespaces",
         "arena_user": body.dtUser,
         "arena_tenant": tenant_id,
@@ -337,6 +350,53 @@ async def provision(body: ProvisionBody):
     return {"jobId": name, "status": "provisioning", "webUrl": web_url, "wsUrl": ws_url}
 
 
+async def _append_creation_log(dtUser: str, name: str) -> None:
+    """Append the Codespace's devcontainer creation log (post-create output) to
+    job:log:{name} so both the Orbital Log tab and the app's Logs tab show what
+    actually happened while the repo was provisioning. Fetched once, when the
+    Codespace first reaches ready — guarded by a flag on the running hash."""
+    key = f"job:running:{name}"
+    if await _pool().hget(key, "creation_log_fetched"):
+        return
+    # Mark first (best-effort at-most-once; a failed fetch clears the flag below
+    # so the next status poll retries).
+    await _pool().hset(key, "creation_log_fetched", "1")
+    token = await get_user_token(_pool(), dtUser) if dtUser else None
+    env = {**os.environ}
+    if token:
+        env["GH_TOKEN"] = token
+        env.pop("GITHUB_TOKEN", None)
+    # GitHub persists the devcontainer build/post-create output here.
+    creation_path = "/workspaces/.codespaces/.persistedshare/creation.log"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "codespace", "ssh", "-c", name, "--",
+            f"cat {creation_path} 2>/dev/null || true",
+            env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        text = out_b.decode(errors="replace").strip()
+    except Exception as exc:
+        await _pool().hdel(key, "creation_log_fetched")
+        log.warning("Could not fetch creation log for %s: %s", name, exc)
+        return
+    if not text:
+        await _pool().hdel(key, "creation_log_fetched")
+        return
+    log_key = f"job:log:{name}"
+    existing = await _pool().get(log_key) or ""
+    ttl = await _pool().ttl(log_key)
+    combined = (
+        existing
+        + "\n───────────── devcontainer creation log ─────────────\n"
+        + _redact(text, token or "")
+        + "\n"
+    )
+    await _pool().set(log_key, combined, ex=ttl if ttl and ttl > 0 else CODESPACE_JOB_TTL)
+    log.info("Creation log appended for codespace %s (%d bytes)", name, len(text))
+
+
 @router.get("/api/codespace/sessions/{name}")
 async def session_status(name: str, dtUser: str = ""):
     """Map the Codespace's GitHub state to our lifecycle status and refresh the running
@@ -350,9 +410,17 @@ async def session_status(name: str, dtUser: str = ""):
     status = _STATE_MAP.get(gh_state, "provisioning")
     web_url = cs.get("web_url")
     key = f"job:running:{name}"
+    expires_at = ""
     if await _pool().exists(key):
         await _pool().hset(key, mapping={"status": status, "gh_state": gh_state})
-    return {"jobId": name, "status": status, "ghState": gh_state, "webUrl": web_url}
+        expires_at = await _pool().hget(key, "expires_at") or ""
+    if status == "ready":
+        # Pull the devcontainer creation log into job:log (once) so the Log tabs
+        # show the repo's post-create output. Fire-and-forget — status polling
+        # must stay fast.
+        asyncio.ensure_future(_append_creation_log(dtUser, name))
+    return {"jobId": name, "status": status, "ghState": gh_state, "webUrl": web_url,
+            "expiresAt": expires_at}
 
 
 @router.post("/api/codespace/sessions/{name}/terminate")

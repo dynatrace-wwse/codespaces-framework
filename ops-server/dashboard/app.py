@@ -2468,10 +2468,16 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
         # live. That container is started without a fixed --name, so select it by
         # image and docker-exec into its zsh. `-- -t <cmd>` forces ssh to allocate a
         # PTY so `docker exec -it` gets a real TTY (verified: /dev/pts + zsh present).
+        # -w {workspace} is required: without it the shell starts at "/", so
+        # source_framework.sh derives REPO_PATH="/" and the framework errors with
+        # "//.devcontainer/util/.count: no such file or directory".
         inner_shell = (
             "CID=$(docker ps --format '{{.ID}} {{.Image}}' | "
             "awk '/dt-enablement/{print $1; exit}'); "
-            "if [ -n \"$CID\" ]; then exec docker exec -it \"$CID\" zsh; "
+            f"WS='{workspace}'; "
+            "if [ -n \"$CID\" ]; then "
+            "docker exec \"$CID\" test -d \"$WS\" 2>/dev/null || WS=/workspaces; "
+            "exec docker exec -it -e TERM=xterm-256color -w \"$WS\" \"$CID\" zsh; "
             "else echo 'dt-enablement container not found; opening base shell'; "
             "exec \"$SHELL\" -l; fi"
         )
@@ -2666,7 +2672,6 @@ async def _read_codespace_app_registry(job_id: str, meta: dict) -> list[dict]:
         return []
 
     apps = []
-    seen_ports = set()
     for line in stdout.decode(errors="replace").strip().splitlines():
         line = line.strip()
         if not line or "|" not in line:
@@ -2674,20 +2679,22 @@ async def _read_codespace_app_registry(job_id: str, meta: dict) -> list[dict]:
         parts = line.split("|")
         if len(parts) < 5:
             continue
+        # parts[3] is the app's SERVICE port (e.g. todoapp 8080) — inside the
+        # cluster only. In a Codespace every app is reached through the nginx
+        # ingress catch-all on forwarded port 80 (see framework getAppURL), so
+        # the public URL is always https://{codespace}-80.app.github.dev.
         port = parts[3].strip()
-        url = f"https://{job_id}-{port}.app.github.dev" if port else ""
         apps.append({
             "name": parts[0], "namespace": parts[1], "service": parts[2],
             "port": port, "ingress_host": parts[4],
-            "orbital_subdomain": "", "url": url, "provider": "codespace",
+            "orbital_subdomain": "", "provider": "codespace",
+            "url": f"https://{job_id}-80.app.github.dev",
         })
-        if port and port not in seen_ports:
-            seen_ports.add(port)
-    # Make each app's forwarded port public so the URL is reachable (best-effort).
-    for port in seen_ports:
+    # Make the ingress port public so the URL is reachable (best-effort).
+    if apps:
         try:
             p = await asyncio.create_subprocess_exec(
-                "gh", "codespace", "ports", "visibility", f"{port}:public",
+                "gh", "codespace", "ports", "visibility", "80:public",
                 "-c", job_id, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL, env=env,
             )
@@ -4258,17 +4265,40 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
     # interactive=True: zsh -i loads .zshrc so my_functions.sh functions are available
     zsh_flag = "-ic" if body.interactive else "-c"
-    cmd_args = ["docker", "exec", container,
-                "docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
-                "zsh", zsh_flag, body.command]
 
-    worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id != "master" else {}
-    ssh_host = worker_rec.get("ssh_host", "")
-    if ssh_host:
-        full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-                    ssh_host, _shlex.join(cmd_args)]
+    # Codespace sessions have no Sysbox container — exec through the learner's
+    # Codespace (`gh codespace ssh`) into the nested dt-enablement container,
+    # selected by image like the shell bridge. Same audit-log flow below.
+    if meta.get("provider") == "codespace":
+        from dashboard.github_oauth import get_user_token
+        token = await get_user_token(pool, meta.get("dtUser", ""))
+        if not token:
+            raise HTTPException(status_code=502, detail="GitHub credential for this Codespace is gone")
+        cs_env = {**os.environ, "GH_TOKEN": token}
+        cs_env.pop("GITHUB_TOKEN", None)
+        inner = (
+            "CID=$(docker ps --format '{{.ID}} {{.Image}}' | "
+            "awk '/dt-enablement/{print $1; exit}'); "
+            f"WS='/workspaces/{repo_name}'; "
+            "if [ -z \"$CID\" ]; then echo 'dt-enablement container not found' >&2; exit 1; fi; "
+            "docker exec \"$CID\" test -d \"$WS\" 2>/dev/null || WS=/workspaces; "
+            f"docker exec -w \"$WS\" \"$CID\" zsh {zsh_flag} {_shlex.quote(body.command)}"
+        )
+        full_cmd = ["gh", "codespace", "ssh", "-c", job_id, "--", inner]
+        exec_env = cs_env
     else:
-        full_cmd = cmd_args
+        cmd_args = ["docker", "exec", container,
+                    "docker", "exec", "-w", f"/workspaces/{repo_name}", "dt",
+                    "zsh", zsh_flag, body.command]
+
+        worker_rec = await pool.hgetall(f"worker:{worker_id}") if worker_id != "master" else {}
+        ssh_host = worker_rec.get("ssh_host", "")
+        if ssh_host:
+            full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                        ssh_host, _shlex.join(cmd_args)]
+        else:
+            full_cmd = cmd_args
+        exec_env = None
 
     ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     try:
@@ -4276,6 +4306,7 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
             *full_cmd,
             stdout=_asyncio.subprocess.PIPE,
             stderr=_asyncio.subprocess.PIPE,
+            env=exec_env,
         )
         stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
         result = {
