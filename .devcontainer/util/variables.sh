@@ -51,8 +51,10 @@ if [ -e "$ENV_FILE" ]; then
 fi
 
 # Calculating GH Repository
+# -C "$REPO_PATH" + stderr suppressed: a shell opened outside the repo dir must
+# not spam "fatal: not a git repository" on every terminal open.
 if [ -z "$GITHUB_REPOSITORY" ]; then
-  GITHUB_REPOSITORY=$(git remote get-url origin)
+  GITHUB_REPOSITORY=$(git -C "${REPO_PATH:-.}" remote get-url origin 2>/dev/null)
   export GITHUB_REPOSITORY=$GITHUB_REPOSITORY
 fi
 
@@ -78,10 +80,14 @@ export INSTANTIATION_TYPE=$INSTANTIATION_TYPE
 if [ -e "$COUNT_FILE" ]; then
   # file exists
   source $COUNT_FILE
-else
+elif [ -d "$(dirname "$COUNT_FILE")" ]; then
   # create .env file and add variables
   echo -e "DURATION=0\nERROR_COUNT=0" > $COUNT_FILE
   source $COUNT_FILE
+else
+  # REPO_PATH invalid (shell opened outside the repo) — defaults, no "//..." error
+  DURATION=0
+  ERROR_COUNT=0
 fi
 
 # Calculating architecture

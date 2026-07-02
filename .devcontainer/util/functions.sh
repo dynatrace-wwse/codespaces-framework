@@ -3091,4 +3091,7 @@ freeUpSpace(){
 }
 
 # Custom functions for each repo can be added in my_functions.sh
-source $REPO_PATH/.devcontainer/util/my_functions.sh
+# Guarded: repos without one (or a shell opened outside the repo) must not error.
+if [ -f "$REPO_PATH/.devcontainer/util/my_functions.sh" ]; then
+  source "$REPO_PATH/.devcontainer/util/my_functions.sh"
+fi

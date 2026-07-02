@@ -15,7 +15,21 @@
 # Framework version pin — sync push-update updates this line
 FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-1.5.0}"
 
-REPO_PATH="$(pwd)"
+# Derive REPO_PATH from this script's own location (repo/.devcontainer/util/…),
+# NOT from $(pwd): shells opened outside the repo dir (docker exec lands in "/")
+# would otherwise set REPO_PATH="/" and every $REPO_PATH/... path becomes "//...".
+_sf_self=""
+if [ -n "${BASH_SOURCE:-}" ]; then
+  _sf_self="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  _sf_self="${(%):-%x}"
+fi
+if [ -n "$_sf_self" ] && [ -f "$_sf_self" ]; then
+  REPO_PATH="$(cd "$(dirname "$_sf_self")/../.." && pwd)"
+else
+  REPO_PATH="$(pwd)"
+fi
+unset _sf_self
 RepositoryName="$(basename "$REPO_PATH")"
 
 # ── DEV MODE: local files exist → source directly, no cache ──

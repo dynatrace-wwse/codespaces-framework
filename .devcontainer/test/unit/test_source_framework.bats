@@ -92,6 +92,29 @@ create_partial_cache() {
   [[ "$output" == *"REPO_PATH=$FAKE_REPO"* ]]
 }
 
+@test "cwd-independent: REPO_PATH derives from the script location, not \$(pwd)" {
+  # A shell opened outside the repo (docker exec lands in "/") must still
+  # resolve REPO_PATH to the repo, not to the current directory.
+  create_fake_cache
+
+  cd /
+  run bash -c "source '$FAKE_REPO/.devcontainer/util/source_framework.sh' && echo \"REPO_PATH=\$REPO_PATH\""
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REPO_PATH=$FAKE_REPO"* ]]
+}
+
+@test "cwd-independent: zsh sourcing outside the repo also derives REPO_PATH" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  create_fake_cache
+
+  cd /
+  run zsh -c "source '$FAKE_REPO/.devcontainer/util/source_framework.sh' && echo \"REPO_PATH=\$REPO_PATH\""
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REPO_PATH=$FAKE_REPO"* ]]
+}
+
 @test "cache hit: exports FRAMEWORK_APPS_PATH correctly" {
   create_fake_cache
 
