@@ -3492,6 +3492,9 @@ class ArenaProvisionRequest(BaseModel):
     # the lifecycle and revokes via its own identity on terminate.
     dtEnv: dict[str, str] = {}   # env_var -> token value (DT_OPERATOR_TOKEN, ...)
     dtTokenIds: list[str] = []   # ids the app will revoke (Orbital does not)
+    # Branch to check the training repo out from (the app passes the branch its
+    # lab content was imported from). Empty → the catalog's branch (main).
+    ref: str = ""
 
 
 def _gen3_platform_provisioner(tenant_url: str):
@@ -3544,6 +3547,14 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     session_hours = int(os.environ.get("ORBITAL_SESSION_HOURS", "2"))
     expires_at = (now.replace(microsecond=0) + timedelta(hours=session_hours)).isoformat()
 
+    # Environment follows the content: a lab imported from a branch runs its
+    # session from that branch (test-before-merge). Reject refs that could
+    # smuggle flags/paths into the git checkout.
+    session_ref = (body.ref or "").strip()
+    if session_ref and (session_ref.startswith("-") or ".." in session_ref):
+        raise HTTPException(status_code=400, detail=f"Invalid ref '{session_ref}'")
+    session_ref = session_ref or training["branch"]
+
     # --- Token provisioning ---
     dt_env: dict[str, str] = {}
     provisioned_token_ids: list[str] = []
@@ -3563,7 +3574,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         # gen3 tenant (classic apiToken creation disabled, e.g. sprint): Orbital mints
         # platform tokens via the account OAuth client. Orbital owns revocation (mint_kind).
         try:
-            specs = await load_token_specs(repo_nwo, ref=training["branch"])
+            specs = await load_token_specs(repo_nwo, ref=session_ref)
             result = await _gen3.create_tokens(repo=repo_nwo, user_id=body.userId,
                                                specs=specs, expires_in_hours=session_hours)
             dt_env = result.env
@@ -3583,7 +3594,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
                 oauth_client_id=body.oauthClientId,
                 oauth_client_secret=body.oauthClientSecret,
             )
-            specs = await load_token_specs(repo_nwo, ref=training["branch"])
+            specs = await load_token_specs(repo_nwo, ref=session_ref)
             result = await provisioner.create_tokens(
                 repo=repo_nwo,
                 user_id=body.userId,
@@ -3606,7 +3617,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "type":          "daemon",
         "repo":          repo_nwo,
         "arch":          "amd64",
-        "ref":           training["branch"],
+        "ref":           session_ref,
         "timestamp":     now.isoformat(),
         "trigger":       "enablement-app",
         "nightly_run_id": f"enablement-{body.trainingId}",
@@ -3622,7 +3633,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     redis_meta = {
         "job_id":       job_id,
         "repo":         repo_nwo,
-        "branch":       training["branch"],
+        "branch":       session_ref,
         "arch":         "amd64",
         "started_at":   now.isoformat(),
         "worker_id":    "queued",
@@ -4235,6 +4246,51 @@ class ArenaExecRequest(BaseModel):
     # When True, run inside an interactive zsh (-i) so .zshrc / my_functions.sh are sourced.
     # Use for STEP_SETUP commands that call shell functions. Default False (faster, no profile).
     interactive: bool = False
+    # Per-call timeout (seconds), clamped to [10, 900]. Solution runs
+    # (deployApplicationMonitoring & co.) legitimately outlive the old fixed
+    # 120 s cap — the app passes a higher value for those.
+    timeoutSeconds: int = 120
+
+
+@app.post("/api/arena/sessions/{job_id}/exec-start")
+async def api_arena_session_exec_start(job_id: str, body: ArenaExecRequest):
+    """Start a command in the background and return an execId immediately.
+
+    For long-running commands (solution runs: operator deploy, ActiveGate
+    rollout) that outlive the Dynatrace app-function's ~120 s cap: the app
+    starts the exec here and polls /exec-status/{execId} until done. The
+    result is kept in Redis for 1 h.
+    """
+    import uuid as _uuid
+
+    meta = await pool.hgetall(f"job:running:{job_id}")
+    if not meta:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if meta.get("status") == "provisioning" or meta.get("worker_id") == "stub":
+        raise HTTPException(status_code=409, detail="Session not ready yet")
+
+    exec_id = _uuid.uuid4().hex[:12]
+    key = f"exec:result:{job_id}:{exec_id}"
+    await pool.set(key, json.dumps({"done": False}), ex=3600)
+
+    async def _run():
+        try:
+            result = await _arena_exec_run(job_id, meta, body)
+        except Exception as exc:  # pragma: no cover — defensive
+            result = {"stdout": "", "stderr": str(exc), "exitCode": -1}
+        await pool.set(key, json.dumps({"done": True, **result}), ex=3600)
+
+    asyncio.ensure_future(_run())
+    return {"execId": exec_id, "done": False}
+
+
+@app.get("/api/arena/sessions/{job_id}/exec-status/{exec_id}")
+async def api_arena_session_exec_status(job_id: str, exec_id: str):
+    """Poll a background exec started via /exec-start. Returns {done, stdout, stderr, exitCode}."""
+    raw = await pool.get(f"exec:result:{job_id}:{exec_id}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="Unknown or expired execId")
+    return json.loads(raw)
 
 
 @app.post("/api/arena/sessions/{job_id}/exec")
@@ -4249,14 +4305,19 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
     Returns: { stdout, stderr, exitCode }
     """
-    import asyncio as _asyncio
-    import shlex as _shlex
-
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     if meta.get("status") == "provisioning" or meta.get("worker_id") == "stub":
         raise HTTPException(status_code=409, detail="Session not ready yet")
+
+    return await _arena_exec_run(job_id, meta, body)
+
+
+async def _arena_exec_run(job_id: str, meta: dict, body: ArenaExecRequest) -> dict:
+    """Build the exec chain (Sysbox or Codespace), run it, audit-log the result."""
+    import asyncio as _asyncio
+    import shlex as _shlex
 
     worker_id = meta.get("worker_id", "")
     repo = meta.get("repo", "")
@@ -4301,6 +4362,7 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
         exec_env = None
 
     ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    timeout_s = max(10, min(int(body.timeoutSeconds or 120), 900))
     try:
         proc = await _asyncio.create_subprocess_exec(
             *full_cmd,
@@ -4308,14 +4370,20 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
             stderr=_asyncio.subprocess.PIPE,
             env=exec_env,
         )
-        stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout_b, stderr_b = await _asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         result = {
             "stdout": stdout_b.decode("utf-8", errors="replace"),
             "stderr": stderr_b.decode("utf-8", errors="replace"),
             "exitCode": proc.returncode,
         }
     except _asyncio.TimeoutError:
-        result = {"stdout": "", "stderr": "Command timed out after 120 seconds", "exitCode": -1}
+        # Don't leak the subprocess — without kill() a timed-out ssh/docker exec
+        # keeps running server-side while the UI already reported failure.
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        result = {"stdout": "", "stderr": f"Command timed out after {timeout_s} seconds", "exitCode": -1}
     except Exception as exc:
         result = {"stdout": "", "stderr": str(exc), "exitCode": -1}
 
