@@ -144,21 +144,31 @@ def _allowed_repos() -> set[str]:
 
 # ── Managed training-source catalog ─────────────────────────────────────────────
 
-def _parse_repo(url_or_full: str) -> str | None:
-    """Normalize a GitHub repo reference to "owner/repo". Accepts a full URL
-    (https://github.com/owner/repo[.git][/...]) or a bare "owner/repo"."""
+def _parse_repo_ref(url_or_full: str) -> tuple[str | None, str | None]:
+    """Normalize a GitHub repo reference to ("owner/repo", branch|None). Accepts a
+    full URL (https://github.com/owner/repo[.git][/tree/branch[/...]]) or a bare
+    "owner/repo". A /tree/{branch} suffix yields the branch so trainings can be
+    loaded straight from a branch URL (test-before-merge)."""
     s = (url_or_full or "").strip()
     if not s:
-        return None
+        return None, None
     s = re.sub(r"^https?://(www\.)?github\.com/", "", s)
     s = re.sub(r"\.git$", "", s).strip("/")
     parts = s.split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
-        return None
+        return None, None
     owner, repo = parts[0], parts[1]
     if not re.fullmatch(r"[A-Za-z0-9._-]+", owner) or not re.fullmatch(r"[A-Za-z0-9._-]+", repo):
-        return None
-    return f"{owner}/{repo}"
+        return None, None
+    branch = None
+    if len(parts) > 3 and parts[2] == "tree":
+        branch = "/".join(parts[3:]) or None
+    return f"{owner}/{repo}", branch
+
+
+def _parse_repo(url_or_full: str) -> str | None:
+    """Normalize a GitHub repo reference to "owner/repo" (see _parse_repo_ref)."""
+    return _parse_repo_ref(url_or_full)[0]
 
 
 def _load_sources() -> list[dict]:
@@ -228,11 +238,20 @@ async def _latest_sha(owner: str, repo: str, branch: str) -> str | None:
 
 
 async def _build_sources(profile: dict) -> list[dict]:
-    """Expand a profile's sources with each repo's latest commit sha."""
+    """Expand a profile's sources with each repo's latest commit sha.
+
+    Branch resolution: the managed catalog (Trainings tab) is authoritative — a
+    branch switch there takes effect for every profile on the next manifest,
+    without re-saving profiles. Profiles keep their own branch as fallback for
+    repos not in the catalog."""
+    managed_branch = {
+        s.get("repo", "").lower(): s.get("branch")
+        for s in _load_sources() if s.get("repo") and s.get("branch")
+    }
     sources = []
     for src in profile.get("sources", []):
         repo_full = src.get("repo", "")
-        branch = src.get("branch", "main")
+        branch = managed_branch.get(repo_full.lower()) or src.get("branch", "main")
         owner, _, repo = repo_full.partition("/")
         sha = await _latest_sha(owner, repo, branch) if owner and repo else None
         sources.append({
@@ -282,7 +301,9 @@ async def proxy_raw(
         raise HTTPException(403, "Repository not in any profile.")
     if ".." in path or path.startswith("/"):
         raise HTTPException(400, "Invalid path.")
-    if ".." in ref or "/" in ref:
+    # Slashes are legal in refs (branch names like feat/my-lab); only traversal
+    # and absolute/empty refs are rejected.
+    if not ref or ".." in ref or ref.startswith("/"):
         raise HTTPException(400, "Invalid ref.")
 
     url = f"{RAW_BASE}/{owner}/{repo}/{ref}/{path}"
@@ -423,11 +444,12 @@ async def list_sources(x_auth_user: str | None = Header(default=None)):
 async def validate_repo(body: dict, x_auth_user: str | None = Header(default=None)):
     """Validate a repo URL without adding it (so the UI can show ✓/✗ before Add)."""
     _require_writer(x_auth_user)
-    repo_full = _parse_repo(body.get("repo", ""))
+    repo_full, url_branch = _parse_repo_ref(body.get("repo", ""))
     if not repo_full:
         raise HTTPException(400, "Provide a GitHub repo URL or owner/repo.")
-    result = await _validate_repo(repo_full, body.get("branch", "main"))
-    return {"repo": repo_full, **result}
+    branch = (body.get("branch") or "").strip() or url_branch or "main"
+    result = await _validate_repo(repo_full, branch)
+    return {"repo": repo_full, "branch": branch, **result}
 
 
 @router.post("/admin/sources")
@@ -435,15 +457,24 @@ async def add_source(body: dict, x_auth_user: str | None = Header(default=None))
     """Validate a repo and add it to the managed catalog. Stored only if validation passes,
     so an invalid/unreachable repo never enters delivery."""
     _require_writer(x_auth_user)
-    repo_full = _parse_repo(body.get("repo", ""))
+    repo_full, url_branch = _parse_repo_ref(body.get("repo", ""))
     if not repo_full:
         raise HTTPException(400, "Provide a GitHub repo URL or owner/repo.")
-    branch = (body.get("branch") or "main").strip()
+    # Branch precedence: explicit field → /tree/{branch} in the pasted URL → main.
+    branch = (body.get("branch") or "").strip() or url_branch or "main"
     result = await _validate_repo(repo_full, branch)
     if not result.get("valid"):
         raise HTTPException(400, result.get("reason", "Repository did not validate."))
     sources = _load_sources()
-    if any(s.get("repo", "").lower() == repo_full.lower() for s in sources):
+    existing = next((s for s in sources if s.get("repo", "").lower() == repo_full.lower()), None)
+    if existing:
+        # Re-adding a managed repo with a different branch switches its branch —
+        # this is how a training is flipped to a test branch and back to main.
+        if (existing.get("branch") or "main") != branch:
+            existing["branch"] = branch
+            _save_sources(sources)
+            log.info("Switched managed source %s to branch %s by %s", repo_full, branch, x_auth_user)
+            return {"ok": True, "source": existing, "branchSwitched": True}
         raise HTTPException(409, f"{repo_full} is already managed.")
     category = (body.get("category") or "hands-on").strip()
     entry = {

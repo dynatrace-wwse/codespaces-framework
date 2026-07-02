@@ -709,7 +709,8 @@
                 <div class="content-card">
                     <h3 style="margin:0 0 10px">Add a training source</h3>
                     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-                        <input type="text" id="cs-src-url" placeholder="https://github.com/owner/repo (public or private)" style="flex:1;min-width:320px">
+                        <input type="text" id="cs-src-url" placeholder="https://github.com/owner/repo (or …/tree/branch)" style="flex:1;min-width:320px">
+                        <input type="text" id="cs-src-branch" placeholder="branch (default: main)" title="Deliver this repo from a branch — test training changes before merging to main. Re-adding a managed repo with a different branch switches it." style="width:170px">
                         <select id="cs-src-cat" title="Training type / library">
                             <option value="hands-on">Hands-On Trainings</option>
                             <option value="learning-byte">Learning Bytes</option>
@@ -723,7 +724,7 @@
                 </div>
                 <div class="content-card">
                     <h3 style="margin:0 0 10px">Managed training sources</h3>
-                    <table id="cs-sources"><thead><tr><th>Repo</th><th>Type</th><th>Delivery</th><th></th></tr></thead><tbody></tbody></table>
+                    <table id="cs-sources"><thead><tr><th>Repo</th><th>Branch</th><th>Type</th><th>Delivery</th><th></th></tr></thead><tbody></tbody></table>
                 </div>
             </div>
         </section>

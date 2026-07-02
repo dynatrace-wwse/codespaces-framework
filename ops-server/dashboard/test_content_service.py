@@ -166,14 +166,6 @@ def test_tenant_map_put_requires_writer():
         _expect_http(401, cs.put_tenant_map, {"defaults": {}, "tenants": {}}, x_auth_user=None)
 
 
-if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
-    for t in tests:
-        t()
-        print(f"  PASS {t.__name__}")
-    print(f"\n{len(tests)}/{len(tests)} content-service tests passed")
-
-
 # ── Managed training sources (Trainings tab) ────────────────────────────────────
 
 class _GhResp:
@@ -258,3 +250,79 @@ def test_add_source_rejects_invalid_repo(monkeypatch=None):
         _setup(Path(d)); cs.SOURCES_FILE = Path(d) / "content" / "sources.json"
         _expect_http(400, cs.add_source, {"repo": "garbage"}, x_auth_user="alice")
     _expect_http(401, cs.list_sources, None)
+
+
+def test_parse_repo_ref_branch_extraction():
+    assert cs._parse_repo_ref("https://github.com/o/r/tree/feat/my-lab") == ("o/r", "feat/my-lab")
+    assert cs._parse_repo_ref("https://github.com/o/r/tree/main") == ("o/r", "main")
+    assert cs._parse_repo_ref("https://github.com/o/r") == ("o/r", None)
+    assert cs._parse_repo_ref("o/r") == ("o/r", None)
+
+
+def test_proxy_accepts_slash_branch_ref():
+    # feat/x is a legal branch name — must NOT 400; traversal/absolute still rejected.
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        t = "https://geu80787.apps.dynatrace.com"
+        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes", "docs/x.md", ref="/abs", tenant=t)
+        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes", "docs/x.md", ref="", tenant=t)
+        _expect_http(400, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes", "docs/x.md", ref="feat/../../x", tenant=t)
+        # slash branch passes validation and reaches the upstream fetch (mock it to 404)
+        class _R:
+            status_code = 404
+            content = b""
+            headers = {}
+        class _C:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **k): return _R()
+        orig = cs.httpx.AsyncClient
+        cs.httpx.AsyncClient = _C
+        try:
+            _expect_http(404, cs.proxy_raw, "dynatrace-wwse", "enablement-learning-bytes", "docs/x.md",
+                         ref="feat/my-lab", tenant=t)
+        finally:
+            cs.httpx.AsyncClient = orig
+
+
+def test_add_source_switches_branch_and_manifest_prefers_catalog():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d)); cs.SOURCES_FILE = Path(d) / "content" / "sources.json"
+        async def fake_gh(path):
+            if path.endswith("/repos/dynatrace-wwse/enablement-learning-bytes"):
+                return _GhResp(200, {"default_branch": "main"})
+            if "/git/trees/" in path:
+                return _GhResp(200, {"tree": [{"path": "mkdocs.yml"}]})
+            return _GhResp(404)
+        orig_gh = cs._gh_get; cs._gh_get = fake_gh
+        async def fake_sha(owner, repo, branch):
+            return f"sha-{branch}"
+        orig_sha = cs._latest_sha; cs._latest_sha = fake_sha
+        try:
+            r1 = asyncio.run(cs.add_source(
+                {"repo": "dynatrace-wwse/enablement-learning-bytes", "category": "learning-byte"},
+                x_auth_user="alice"))
+            assert r1["ok"] and r1["source"]["branch"] == "main"
+            # re-add with a branch → switches, no 409
+            r2 = asyncio.run(cs.add_source(
+                {"repo": "https://github.com/dynatrace-wwse/enablement-learning-bytes/tree/feat/test-lab",
+                 "category": "learning-byte"},
+                x_auth_user="alice"))
+            assert r2.get("branchSwitched") and r2["source"]["branch"] == "feat/test-lab"
+            # manifest for a profile that references this repo @ main now delivers the catalog branch
+            built = asyncio.run(cs._build_sources(cs._load_profile("all")))
+            src = next(s for s in built if s["repo"] == "dynatrace-wwse/enablement-learning-bytes")
+            assert src["branch"] == "feat/test-lab"
+            assert src["version"] == "sha-feat/test-lab"
+        finally:
+            cs._gh_get = orig_gh
+            cs._latest_sha = orig_sha
+
+
+if __name__ == "__main__":
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    for t in tests:
+        t()
+        print(f"  PASS {t.__name__}")
+    print(f"\n{len(tests)}/{len(tests)} content-service tests passed")

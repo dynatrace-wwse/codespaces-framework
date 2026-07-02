@@ -3209,23 +3209,25 @@ const CS_CAT_LABEL = { 'hands-on': 'Hands-On', 'learning-byte': 'Learning Bytes'
 
 async function csLoadSources() {
     const tb = document.querySelector('#cs-sources tbody');
-    tb.innerHTML = '<tr><td colspan="4" class="loading">Loading…</td></tr>';
+    tb.innerHTML = '<tr><td colspan="5" class="loading">Loading…</td></tr>';
     try {
         const r = await fetch('/api/content/admin/sources', { credentials: 'same-origin' });
         const j = await r.json().catch(() => ({}));
-        if (!r.ok) { tb.innerHTML = `<tr><td colspan="4" class="content-hint">${escapeHtml(j.detail || 'Sign in as an org member.')}</td></tr>`; return; }
+        if (!r.ok) { tb.innerHTML = `<tr><td colspan="5" class="content-hint">${escapeHtml(j.detail || 'Sign in as an org member.')}</td></tr>`; return; }
         const rows = j.sources || [];
         tb.innerHTML = rows.length ? rows.map(s => `<tr>
             <td><code>${escapeHtml(s.repo)}</code>${s.private ? ' <span style="font-size:0.62rem;color:#e0d77d" title="Private repo">🔒</span>' : ''}</td>
+            <td>${(s.branch && s.branch !== 'main') ? `<code style="color:#e0d77d" title="Delivered from a non-main branch">${escapeHtml(s.branch)}</code>` : `<span style="font-size:0.72rem;color:var(--text-2)">${escapeHtml(s.branch || 'main')}</span>`}</td>
             <td>${escapeHtml(CS_CAT_LABEL[s.category] || s.category || '')}</td>
             <td><span style="font-size:0.72rem;color:var(--text-2)">${escapeHtml(s.delivery || '')}</span></td>
             <td><button class="btn btn-small btn-secondary" type="button" data-cs-srcdel="${escapeHtml(s.repo)}">remove</button></td>
-        </tr>`).join('') : '<tr><td colspan="4" class="content-hint">No managed training sources yet — add one above.</td></tr>';
-    } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="content-hint">Error: ${escapeHtml(String(e))}</td></tr>`; }
+        </tr>`).join('') : '<tr><td colspan="5" class="content-hint">No managed training sources yet — add one above.</td></tr>';
+    } catch (e) { tb.innerHTML = `<tr><td colspan="5" class="content-hint">Error: ${escapeHtml(String(e))}</td></tr>`; }
 }
 
 async function csSource(action) {
     const url = document.getElementById('cs-src-url').value.trim();
+    const branch = (document.getElementById('cs-src-branch')?.value || '').trim();
     const category = document.getElementById('cs-src-cat').value;
     const msg = document.getElementById('cs-src-msg');
     if (!url) { msg.textContent = 'Enter a GitHub repo URL.'; return; }
@@ -3233,14 +3235,17 @@ async function csSource(action) {
     const ep = action === 'validate' ? '/api/content/admin/validate-repo' : '/api/content/admin/sources';
     try {
         const r = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin', body: JSON.stringify({ repo: url, category }) });
+            credentials: 'same-origin', body: JSON.stringify({ repo: url, category, branch }) });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) { msg.textContent = '✗ ' + (j.detail || 'error'); return; }
         if (action === 'validate') {
-            msg.textContent = j.valid ? `✓ valid (${j.delivery})` : `✗ ${j.reason}`;
+            msg.textContent = j.valid ? `✓ valid (${j.delivery}${j.branch && j.branch !== 'main' ? ` @ ${j.branch}` : ''})` : `✗ ${j.reason}`;
         } else {
-            msg.textContent = `✓ added ${j.source.repo} (${j.source.delivery})`;
+            msg.textContent = j.branchSwitched
+                ? `✓ ${j.source.repo} switched to branch ${j.source.branch}`
+                : `✓ added ${j.source.repo} (${j.source.delivery}${j.source.branch && j.source.branch !== 'main' ? ` @ ${j.source.branch}` : ''})`;
             document.getElementById('cs-src-url').value = '';
+            const bEl = document.getElementById('cs-src-branch'); if (bEl) bEl.value = '';
             csLoadSources();
         }
     } catch (e) { msg.textContent = '✗ ' + String(e); }
