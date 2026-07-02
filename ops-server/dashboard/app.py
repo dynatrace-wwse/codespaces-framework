@@ -3247,6 +3247,13 @@ _ARENA_REPOS = {
         "estimatedTime": 45,
         "tags": ["logs", "log-ingest", "opentelemetry"],
     },
+    "enablement-dtwiz-101": {
+        "id": "dtwiz-101",
+        "type": "lab",
+        "difficulty": "beginner",
+        "estimatedTime": 60,
+        "tags": ["kubernetes", "operator", "problems", "dtwiz"],
+    },
     "enablement-live-debugger-bug-hunting": {
         "id": "live-debugger",
         "type": "lab",

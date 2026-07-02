@@ -10,6 +10,16 @@ repos:
     primary_tag: kubernetes
     duration: "1.5h"
 
+  - name: enablement-dtwiz-101
+    repo: dynatrace-wwse/enablement-dtwiz-101
+    status: active
+    maintainer: "@shinojosa"
+    description: "DTWiz 101 — install Kubernetes, deploy the Dynatrace Operator, break things on purpose and troubleshoot them with Dynatrace. Generated with the Open Enablement CLI, hardened by hand."
+    tags: [kubernetes, dynatrace-app]
+    title: "DTWiz 101"
+    primary_tag: kubernetes
+    duration: "1h"
+
   - name: enablement-kubernetes-opentelemetry
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry
     status: active
