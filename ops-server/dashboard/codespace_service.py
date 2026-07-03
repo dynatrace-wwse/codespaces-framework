@@ -36,6 +36,9 @@ log = logging.getLogger("ops-dashboard.codespace")
 
 CODESPACE_JOB_TTL = int(os.environ.get("CODESPACE_JOB_TTL", "14400"))  # 4h, lazy-overridable
 CODESPACE_IDLE_TIMEOUT_MIN = int(os.environ.get("CODESPACE_IDLE_TIMEOUT_MIN", "60"))  # stop after 60m idle
+# Max seconds to keep reporting "provisioning" after GitHub says Available while
+# waiting for sshd (installed by post-create) to answer. Fail open after that.
+SSH_READY_MAX_HOLD = int(os.environ.get("SSH_READY_MAX_HOLD", "600"))
 GH_TIMEOUT = int(os.environ.get("CODESPACE_GH_TIMEOUT", "120"))
 
 router = APIRouter(tags=["codespace"])
@@ -381,6 +384,11 @@ async def _append_creation_log(dtUser: str, name: str) -> None:
         await _pool().hdel(key, "creation_log_fetched")
         log.warning("Could not fetch creation log for %s: %s", name, exc)
         return
+    if proc.returncode == 0:
+        # One SSH round-trip succeeded → sshd (installed by setUpTerminal during
+        # post-create) is up. session_status holds "provisioning" until this flag
+        # is set so the app never offers a terminal that cannot connect yet.
+        await _pool().hset(key, "ssh_ready", "1")
     if not text:
         await _pool().hdel(key, "creation_log_fetched")
         return
@@ -411,14 +419,30 @@ async def session_status(name: str, dtUser: str = ""):
     web_url = cs.get("web_url")
     key = f"job:running:{name}"
     expires_at = ""
-    if await _pool().exists(key):
-        await _pool().hset(key, mapping={"status": status, "gh_state": gh_state})
-        expires_at = await _pool().hget(key, "expires_at") or ""
+    tracked = await _pool().exists(key)
     if status == "ready":
         # Pull the devcontainer creation log into job:log (once) so the Log tabs
         # show the repo's post-create output. Fire-and-forget — status polling
         # must stay fast.
         asyncio.ensure_future(_append_creation_log(dtUser, name))
+        # A Codespace reports Available minutes before post-create's setUpTerminal
+        # has installed sshd. Hold "provisioning" until one SSH round-trip (the
+        # creation-log fetch above) has succeeded, so the app never offers a
+        # terminal that `gh codespace ssh` cannot reach yet. Bounded: if sshd
+        # never comes up (repo without the framework's installCodespaceSSH),
+        # surface ready after SSH_READY_MAX_HOLD anyway — a failing terminal
+        # beats a session stuck in provisioning forever.
+        if tracked and not await _pool().hget(key, "ssh_ready"):
+            first_seen = await _pool().hget(key, "ready_first_seen")
+            now_ts = int(time.time())
+            if not first_seen:
+                await _pool().hset(key, "ready_first_seen", str(now_ts))
+                first_seen = str(now_ts)
+            if now_ts - int(first_seen) < SSH_READY_MAX_HOLD:
+                status = "provisioning"
+    if tracked:
+        await _pool().hset(key, mapping={"status": status, "gh_state": gh_state})
+        expires_at = await _pool().hget(key, "expires_at") or ""
     return {"jobId": name, "status": status, "ghState": gh_state, "webUrl": web_url,
             "expiresAt": expires_at}
 

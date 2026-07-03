@@ -58,6 +58,23 @@ if [ -z "$GITHUB_REPOSITORY" ]; then
   export GITHUB_REPOSITORY=$GITHUB_REPOSITORY
 fi
 
+# GitHub Codespaces only injects user secrets (DT_*, ORBITAL_ENVIRONMENT) into
+# LOGIN shells and the VS Code server — non-login shells (docker exec, zsh -c,
+# the Orbital exec relay) and occasionally even post-create miss them. The
+# canonical secrets file always has them: fill in ONLY the missing ones so an
+# explicitly-set env var is never overridden.
+CODESPACES_SECRETS_FILE="/workspaces/.codespaces/shared/.env-secrets"
+if [[ $CODESPACES == true ]] && [ -r "$CODESPACES_SECRETS_FILE" ]; then
+  # File format is KEY=<base64(value)> — decode on the way in.
+  while IFS='=' read -r _cs_key _cs_val; do
+    case "$_cs_key" in ''|\#*) continue;; esac
+    if [ -z "$(printenv "$_cs_key" 2>/dev/null)" ]; then
+      export "$_cs_key=$(printf '%s' "$_cs_val" | base64 -d 2>/dev/null)"
+    fi
+  done < "$CODESPACES_SECRETS_FILE"
+  unset _cs_key _cs_val
+fi
+
 # Calculating instantiation type
 # Order matters: the combined (Codespace + Orbital) case must be tested BEFORE the
 # plain orbital and plain github-codespaces cases so it isn't mislabeled as either.

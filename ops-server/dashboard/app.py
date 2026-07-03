@@ -4344,13 +4344,25 @@ async def _arena_exec_run(job_id: str, meta: dict, body: ArenaExecRequest) -> di
             raise HTTPException(status_code=502, detail="GitHub credential for this Codespace is gone")
         cs_env = {**os.environ, "GH_TOKEN": token}
         cs_env.pop("GITHUB_TOKEN", None)
+        # docker-exec sessions do NOT get the Codespace's secret env (GitHub only
+        # injects DT_ENVIRONMENT & co. into login shells) — load the canonical
+        # secrets file (KEY=<base64(value)> lines) first so lab commands
+        # referencing $DT_* work. Never overrides an already-set variable.
+        secrets_src = (
+            "if [ -r /workspaces/.codespaces/shared/.env-secrets ]; then "
+            "while IFS='=' read -r k v; do "
+            'case "$k" in ""|\\#*) continue;; esac; '
+            '[ -n "$(printenv "$k" 2>/dev/null)" ] && continue; '
+            'export "$k=$(printf %s "$v" | base64 -d 2>/dev/null)"; '
+            "done < /workspaces/.codespaces/shared/.env-secrets; fi; "
+        )
         inner = (
             "CID=$(docker ps --format '{{.ID}} {{.Image}}' | "
             "awk '/dt-enablement/{print $1; exit}'); "
             f"WS='/workspaces/{repo_name}'; "
             "if [ -z \"$CID\" ]; then echo 'dt-enablement container not found' >&2; exit 1; fi; "
             "docker exec \"$CID\" test -d \"$WS\" 2>/dev/null || WS=/workspaces; "
-            f"docker exec -w \"$WS\" \"$CID\" zsh {zsh_flag} {_shlex.quote(body.command)}"
+            f"docker exec -w \"$WS\" \"$CID\" zsh {zsh_flag} {_shlex.quote(secrets_src + body.command)}"
         )
         full_cmd = ["gh", "codespace", "ssh", "-c", job_id, "--", inner]
         exec_env = cs_env

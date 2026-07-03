@@ -373,13 +373,18 @@ setUpTerminal(){
   # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
 
-  # Orbital-orchestrated Codespaces need an SSH server so the Enablement App can
-  # relay a terminal in via `gh codespace ssh`. The stock image ships none.
-  # Only this mode gets sshd — plain codespaces, local, dev-container and Sysbox/orbital
-  # are left untouched.
-  if [ "$INSTANTIATION_TYPE" = "orbital_codespaces" ]; then
-    installCodespaceSSH
-  fi
+  # Codespaces need an SSH server so `gh codespace ssh` works — and the Orbital
+  # relay (Enablement App terminal/exec) depends on it. The stock image ships
+  # none. Install it for EVERY Codespace, not just orbital_codespaces: the
+  # ORBITAL_ENVIRONMENT secret occasionally fails to surface in the post-create
+  # environment (GitHub secret-injection flake), which used to silently skip
+  # sshd and permanently break the in-app terminal. Local, dev-container and
+  # Sysbox/orbital instantiations are left untouched.
+  case "$INSTANTIATION_TYPE" in
+    orbital_codespaces|github-codespaces)
+      installCodespaceSSH
+      ;;
+  esac
 }
 
 installCodespaceSSH() {
