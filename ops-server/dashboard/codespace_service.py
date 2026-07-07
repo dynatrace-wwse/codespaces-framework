@@ -369,11 +369,16 @@ async def _append_creation_log(dtUser: str, name: str) -> None:
     if token:
         env["GH_TOKEN"] = token
         env.pop("GITHUB_TOKEN", None)
-    # GitHub persists the devcontainer build/post-create output here.
+    # GitHub persists the devcontainer build/post-create output here. Also probe
+    # for RECOVERY-REASON-FILE: when the devcontainer's PID-1 exits abruptly,
+    # GitHub silently swaps in an Alpine "recovery container" — sshd answers but
+    # the training environment is gone. Detect it and mark the session broken.
     creation_path = "/workspaces/.codespaces/.persistedshare/creation.log"
+    recovery_path = "/workspaces/.codespaces/.persistedshare/RECOVERY-REASON-FILE"
     try:
         proc = await asyncio.create_subprocess_exec(
             "gh", "codespace", "ssh", "-c", name, "--",
+            f"test -f {recovery_path} && echo __ORBITAL_RECOVERY__; "
             f"cat {creation_path} 2>/dev/null || true",
             env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -384,6 +389,10 @@ async def _append_creation_log(dtUser: str, name: str) -> None:
         await _pool().hdel(key, "creation_log_fetched")
         log.warning("Could not fetch creation log for %s: %s", name, exc)
         return
+    if text.startswith("__ORBITAL_RECOVERY__"):
+        text = text[len("__ORBITAL_RECOVERY__"):].lstrip("\n")
+        await _pool().hset(key, "recovery", "1")
+        log.warning("Codespace %s is in GitHub RECOVERY MODE (devcontainer exited) — marking broken", name)
     if proc.returncode == 0:
         # One SSH round-trip succeeded → sshd (installed by setUpTerminal during
         # post-create) is up. session_status holds "provisioning" until this flag
@@ -420,6 +429,15 @@ async def session_status(name: str, dtUser: str = ""):
     key = f"job:running:{name}"
     expires_at = ""
     tracked = await _pool().exists(key)
+    # Devcontainer died → GitHub recovery container (detected by the creation-log
+    # fetch). The training env is gone for good — surface a hard error so the app
+    # shows the failed state and the learner relaunches (fresh VM ≈ healthy).
+    if tracked and await _pool().hget(key, "recovery"):
+        await _pool().hset(key, mapping={"status": "error", "gh_state": gh_state})
+        return {"jobId": name, "status": "error", "ghState": gh_state, "webUrl": web_url,
+                "expiresAt": await _pool().hget(key, "expires_at") or "",
+                "error": "The environment's container failed to start (GitHub recovery mode). "
+                         "Terminate and launch the training again."}
     if status == "ready":
         # Pull the devcontainer creation log into job:log (once) so the Log tabs
         # show the repo's post-create output. Fire-and-forget — status polling

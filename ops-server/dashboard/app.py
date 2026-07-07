@@ -2460,8 +2460,44 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
     # token), not docker-exec into a Sysbox container. Same xterm front-end + token flow.
     if meta.get("provider") == "codespace":
         from dashboard.github_oauth import get_user_token
+        from dashboard.codespace_service import SSH_READY_MAX_HOLD, _append_creation_log
         user_token = await get_user_token(pool, meta.get("dtUser", ""))
         gh_env = {"GH_TOKEN": user_token} if user_token else {}
+
+        # sshd is installed by the repo's post-create (setUpTerminal), minutes after
+        # GitHub reports Available. If the learner opens the terminal before that,
+        # `gh codespace ssh` fails with "failed to start SSH server" and the popup
+        # dies. Wait for the ssh_ready flag (set by the creation-log fetch, which is
+        # itself one SSH round-trip) instead — keep the learner informed meanwhile.
+        if not await pool.hget(f"job:running:{job_id}", "ssh_ready"):
+            await ws.send_bytes(
+                b"\r\n\x1b[33m\xe2\x8f\xb3 The environment is still starting \xe2\x80\x94 "
+                b"waiting for its SSH server (this can take a few minutes)...\x1b[0m\r\n"
+            )
+            deadline = asyncio.get_event_loop().time() + SSH_READY_MAX_HOLD
+            while not await pool.hget(f"job:running:{job_id}", "ssh_ready"):
+                if await pool.hget(f"job:running:{job_id}", "recovery"):
+                    break
+                if asyncio.get_event_loop().time() > deadline:
+                    await ws.send_bytes(
+                        b"\r\n\x1b[31mThe environment did not come up in time \xe2\x80\x94 its container "
+                        b"likely failed to start (GitHub-side).\r\nPlease Terminate this session and "
+                        b"launch the training again \xe2\x80\x94 a fresh environment normally works.\x1b[0m\r\n")
+                    return
+                # The fetch is one gh-ssh round-trip; on success it sets ssh_ready.
+                asyncio.ensure_future(_append_creation_log(meta.get("dtUser", ""), job_id))
+                await asyncio.sleep(10)
+                await ws.send_bytes(b"\x1b[90m.\x1b[0m")
+            else:
+                await ws.send_bytes(b"\r\n\x1b[32mEnvironment ready \xe2\x80\x94 connecting...\x1b[0m\r\n")
+            # Devcontainer died → GitHub swapped in an Alpine recovery container; a
+            # shell there has none of the training tools. Tell the learner instead.
+            if await pool.hget(f"job:running:{job_id}", "recovery"):
+                await ws.send_bytes(
+                    b"\r\n\x1b[31mThe environment's container failed to start \xe2\x80\x94 GitHub put the "
+                    b"Codespace in recovery mode.\r\nPlease Terminate this session and launch the "
+                    b"training again \xe2\x80\x94 a fresh environment normally works.\x1b[0m\r\n")
+                return
         # `gh codespace ssh` lands in the Codespace BASE (user "vscode"), but the
         # hands-on happens inside the nested Dynatrace enablement container (image
         # shinojosa/dt-enablement) where kubectl, the k3d cluster and the lab tools
