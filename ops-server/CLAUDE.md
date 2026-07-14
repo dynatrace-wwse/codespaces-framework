@@ -319,3 +319,37 @@ Rules:
 - IF graphify-out/wiki/index.md EXISTS, navigate it instead of reading raw files
 - For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+## Fleet autoscaler
+
+EC2 spot-worker scaling for the AMD worker pool. Logic in `dashboard/fleet.py`
+(aws CLI v2 at `/usr/local/bin/aws` via subprocess — **boto3 is not installed**,
+region `eu-west-2`); endpoints in `dashboard/app.py`; pure-logic tests in
+`dashboard/test_fleet.py` (`python3 -m pytest dashboard/test_fleet.py` or
+`/home/ops/ops-venv/bin/python -m dashboard.test_fleet`).
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /api/fleet` | none | EC2 instances (tag `project=autonomous-enablements` or Name prefix) joined with registered `worker:{id}` hashes (match: `private_ip` == worker `host`) |
+| `POST /api/fleet/scale-up` | writer | `{count, instanceType?}` — launches spot workers from golden AMI `ami-0ed76cf85fa7d2967`; subnet/SGs/key resolved live from worker-1 (`i-02b773319c758fe40`); **hard cap 4 per call** |
+| `POST /api/fleet/scale-down` | writer | `{instanceIds, force?}` — marks matched workers `draining=1`, 409s if a matched worker has `active_jobs > 0` (unless `force`), then terminates. Refuses any id not tagged `orbital-role=worker` / `Name=orbital-worker-spot` |
+| `POST /api/fleet/worker/{id}/start` `/stop` | writer | start/stop pet workers (`autonomous-enablements-worker*`, e.g. stopped worker-3 `i-03689a1374d39cb6a`) |
+
+Spot user-data (built by `_build_user_data()`): IMDSv2-derived unique
+`WORKER_ID=worker-x86_64-spot-<iid tail>` sed-set in `/home/ops/.env`,
+`MASTER_REDIS_URL` host forced to `172.31.36.172`, then
+`systemctl restart ops-worker-agent`.
+
+**Credentials expire:** the service user's `~/.aws/credentials` holds federated
+STS creds. On `ExpiredToken` / `AuthFailure` / missing creds every endpoint
+returns 502 with `"AWS credentials expired or missing — refresh
+~/.aws/credentials"` — refresh the file and retry; nothing to restart.
+
+Deploy:
+```bash
+sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/dashboard/app.py \
+        /home/ops/enablement-framework/codespaces-framework/ops-server/dashboard/app.py
+sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/dashboard/fleet.py \
+        /home/ops/enablement-framework/codespaces-framework/ops-server/dashboard/fleet.py
+sudo systemctl restart ops-dashboard
+```

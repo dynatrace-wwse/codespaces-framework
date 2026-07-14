@@ -65,6 +65,9 @@ app.include_router(github_oauth_router)
 from dashboard.codespace_service import router as codespace_router  # noqa: E402
 app.include_router(codespace_router)
 
+# EC2 spot-worker fleet scaling (aws CLI, no boto3) — see dashboard/fleet.py.
+from dashboard import fleet  # noqa: E402
+
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Content Profiles</title><style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
@@ -4780,6 +4783,172 @@ async def api_health():
         }, headers=_cors)
     except Exception as e:
         return _JSONResponse(content={"status": "unhealthy", "error": str(e)}, headers=_cors)
+
+
+# ── Fleet autoscaler (EC2 spot workers) ──────────────────────────────────────
+# AWS access via the aws CLI in dashboard/fleet.py — safety rules (4-instance
+# cap, terminate-only-spot-workers, creds-expiry classification) live there
+# as pure functions with tests in dashboard/test_fleet.py.
+
+async def _fleet_workers() -> list[dict]:
+    """Registered worker:{id} hashes (same scan as /api/workers)."""
+    workers = []
+    async for key in pool.scan_iter("worker:*"):
+        # Skip port-pool lists (worker:<id>:app_ports_free) — Redis lists,
+        # not hashes; hgetall would raise WRONGTYPE.
+        if key.endswith(":app_ports_free"):
+            continue
+        try:
+            data = await pool.hgetall(key)
+        except Exception:
+            continue
+        if data:
+            data["worker_id"] = key.replace("worker:", "")
+            workers.append(data)
+    return workers
+
+
+@app.get("/api/fleet")
+async def api_fleet():
+    """EC2 fleet instances joined with registered worker agents.
+
+    Returns ``{instances, workers}``. Each instance carries ``worker_id`` /
+    ``agent_online`` when a registered worker's ``host`` matches the
+    instance's private IP, so the UI can see which boxes have a live agent.
+    """
+    try:
+        instances = await fleet.list_fleet()
+    except fleet.FleetError as e:
+        raise HTTPException(502, str(e))
+
+    workers = await _fleet_workers()
+    by_ip = {w.get("host"): w for w in workers if w.get("host")}
+    for inst in instances:
+        w = by_ip.get(inst.get("private_ip"))
+        inst["worker_id"] = w["worker_id"] if w else None
+        inst["agent_online"] = bool(w)
+    return {"instances": instances, "workers": workers}
+
+
+@app.post("/api/fleet/scale-up")
+async def api_fleet_scale_up(request: Request):
+    """Launch spot workers from the golden AMI.
+
+    Body: ``{count: int, instanceType?: str}`` — hard cap of 4 per call.
+    """
+    role = await _require_writer(request)
+    body = await request.json()
+    try:
+        count = int(body.get("count") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "count must be an integer")
+    instance_type = (body.get("instanceType")
+                     or fleet.DEFAULT_INSTANCE_TYPE).strip()
+
+    try:
+        launched = await fleet.scale_up(count, instance_type)
+    except ValueError as e:          # bad count / over the safety cap
+        raise HTTPException(400, str(e))
+    except fleet.FleetError as e:    # AWS failure (incl. expired creds)
+        raise HTTPException(502, str(e))
+
+    log.info("fleet scale-up by %s: %d × %s → %s",
+             role["user"], count, instance_type,
+             [i["instance_id"] for i in launched])
+    return {
+        "status": "launched",
+        "count": count,
+        "instance_type": instance_type,
+        "instances": launched,
+        "requested_by": role["user"],
+    }
+
+
+@app.post("/api/fleet/scale-down")
+async def api_fleet_scale_down(request: Request):
+    """Terminate spot workers (tag-verified in fleet.scale_down).
+
+    Body: ``{instanceIds: [...], force?: bool}``. Each matched registered
+    worker (by private_ip == worker ``host``) is marked ``draining=1`` on
+    its ``worker:{id}`` hash first; instances whose matched worker still has
+    ``active_jobs > 0`` are refused unless ``force`` is true.
+    """
+    role = await _require_writer(request)
+    body = await request.json()
+    instance_ids = body.get("instanceIds") or []
+    force = bool(body.get("force"))
+    if not instance_ids or not isinstance(instance_ids, list):
+        raise HTTPException(400, "instanceIds (non-empty list) is required")
+
+    # Map instance → registered worker (best-effort, by private IP).
+    try:
+        instances = await fleet.list_fleet()
+    except fleet.FleetError as e:
+        raise HTTPException(502, str(e))
+    ip_by_id = {i["instance_id"]: i.get("private_ip") for i in instances}
+    workers_by_ip = {w.get("host"): w for w in await _fleet_workers()
+                     if w.get("host")}
+
+    busy, draining = [], []
+    for iid in instance_ids:
+        worker = workers_by_ip.get(ip_by_id.get(iid))
+        if not worker:
+            continue
+        active = int(worker.get("active_jobs") or 0)
+        if active > 0 and not force:
+            busy.append({"instance_id": iid,
+                         "worker_id": worker["worker_id"],
+                         "active_jobs": active})
+            continue
+        await pool.hset(f"worker:{worker['worker_id']}", "draining", "1")
+        draining.append(worker["worker_id"])
+
+    if busy:
+        raise HTTPException(409, detail={
+            "error": "workers_busy",
+            "busy": busy,
+            "hint": "retry with {\"force\": true} to terminate anyway",
+        })
+
+    try:
+        terminated = await fleet.scale_down(instance_ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except fleet.FleetError as e:    # refused ids or AWS failure
+        raise HTTPException(502, str(e))
+
+    log.info("fleet scale-down by %s: %s (draining: %s)",
+             role["user"], instance_ids, draining)
+    return {
+        "status": "terminating",
+        "instances": terminated,
+        "draining_workers": draining,
+        "requested_by": role["user"],
+    }
+
+
+@app.post("/api/fleet/worker/{instance_id}/start")
+async def api_fleet_worker_start(instance_id: str, request: Request):
+    """Start a stopped pet worker (autonomous-enablements-worker*)."""
+    role = await _require_writer(request)
+    try:
+        result = await fleet.start_worker(instance_id)
+    except fleet.FleetError as e:
+        raise HTTPException(502, str(e))
+    log.info("fleet worker start by %s: %s", role["user"], instance_id)
+    return {"status": "starting", **result, "requested_by": role["user"]}
+
+
+@app.post("/api/fleet/worker/{instance_id}/stop")
+async def api_fleet_worker_stop(instance_id: str, request: Request):
+    """Stop a running pet worker (autonomous-enablements-worker*)."""
+    role = await _require_writer(request)
+    try:
+        result = await fleet.stop_worker(instance_id)
+    except fleet.FleetError as e:
+        raise HTTPException(502, str(e))
+    log.info("fleet worker stop by %s: %s", role["user"], instance_id)
+    return {"status": "stopping", **result, "requested_by": role["user"]}
 
 
 def start():
