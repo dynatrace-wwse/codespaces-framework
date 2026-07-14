@@ -1468,6 +1468,22 @@ _parseDynakubeYaml() {
   done < "$file"
 }
 
+getDtSessionId() {
+  # Per-user session identity: "<user>-<yyyymmdd>". Makes the DynaKube name and
+  # hostGroup unique per user+day, so many students can run the SAME training
+  # against ONE tenant and each can filter Grail (logs/pods/apps) to their own
+  # cluster. Priority: DT_HOSTGROUP (injected by Orbital per job) >
+  # GITHUB_USER-<date> (Codespaces) > empty (local/unknown: repo-scoped identity,
+  # pre-1.9 behavior).
+  local raw="${DT_HOSTGROUP:-}"
+  if [[ -z "$raw" && -n "${GITHUB_USER:-}" ]]; then
+    raw="${GITHUB_USER}-$(date +%Y%m%d)"
+  fi
+  [[ -z "$raw" ]] && return 0
+  # Sanitize to RFC-1123: lowercase alphanumerics and dashes only
+  echo "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//'
+}
+
 generateDynakube() {
   # Generates a Dynakube YAML from config into .devcontainer/yaml/gen/dynakube.yaml.
   # Usage: generateDynakube [mode]
@@ -1484,7 +1500,20 @@ generateDynakube() {
   # Kubernetes resource names must be lowercase RFC-1123. Repo names can be
   # mixed-case (e.g. Enablement-DTWiz-101), which the DynaKube validating webhook
   # rejects — silently breaking OneAgent injection. Lowercase for the Dynakube name.
-  local cluster_name="$(echo "${RepositoryName:-$(hostname)}" | tr '[:upper:]' '[:lower:]')"
+  local base_name="$(echo "${RepositoryName:-$(hostname)}" | tr '[:upper:]' '[:lower:]')"
+  local cluster_name="$base_name"
+  local session_id="$(getDtSessionId)"
+  if [[ -n "$session_id" ]]; then
+    # The operator derives child resource names from the DynaKube name (63-char
+    # k8s limit) — keep it <= 40 chars, sacrificing repo chars before session id.
+    local name_budget=$(( 40 - ${#session_id} - 1 ))
+    (( name_budget < 1 )) && name_budget=1
+    local repo_part="${base_name:0:$name_budget}"
+    repo_part="${repo_part%-}"
+    cluster_name="${repo_part}-${session_id}"
+    cluster_name="${cluster_name:0:40}"
+    cluster_name="${cluster_name%-}"
+  fi
   local api_url="${DT_TENANT}/api"
 
   local gen_dir="$REPO_PATH/.devcontainer/yaml/gen"
@@ -1579,7 +1608,7 @@ metadata:
 spec:
   apiUrl: ${api_url}
   tokens: ${cluster_name}
-  networkZone: ${cluster_name}
+  networkZone: ${base_name}
   skipCertCheck: true
   metadataEnrichment:
     enabled: true

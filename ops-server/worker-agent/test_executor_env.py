@@ -58,6 +58,28 @@ def test_non_coe_without_minted_fails_closed():
     assert "DT_LLM_TOKEN" not in env
 
 
+def test_hostgroup_written_for_user():
+    from datetime import datetime, timezone
+    env = _write(user="TestUser")
+    assert env["DT_HOSTGROUP"] == f"testuser-{datetime.now(timezone.utc):%Y%m%d}"
+
+
+def test_hostgroup_email_keeps_local_part_sanitized():
+    from datetime import datetime, timezone
+    env = _write(user="Sergio.Hinojosa@dynatrace.com")
+    assert env["DT_HOSTGROUP"] == f"sergio-hinojosa-{datetime.now(timezone.utc):%Y%m%d}"
+
+
+def test_hostgroup_omitted_without_user():
+    env = _write()
+    assert "DT_HOSTGROUP" not in env
+
+
+def test_hostgroup_explicit_wins_over_derived():
+    env = _write(hostgroup="alice-20260101", user="bob@example.com")
+    assert env["DT_HOSTGROUP"] == "alice-20260101"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
