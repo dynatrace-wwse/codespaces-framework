@@ -339,7 +339,7 @@ EOF
   [[ "$output" == *"networkZone: test-enablement"$'\n'* ]]
 }
 
-@test "generateDynakube: long repo name truncated to keep session id, max 40 chars" {
+@test "generateDynakube: long repo name truncated to keep session id, max 38 chars" {
   source_functions
   export RepositoryName="enablement-kubernetes-opentelemetry-openpipeline"
   export DT_HOSTGROUP="bob-20260714"
@@ -348,7 +348,7 @@ EOF
 
   name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
   name="${name_line#  name: }"
-  [ "${#name}" -le 40 ]
+  [ "${#name}" -le 38 ]
   [[ "$name" == *"-bob-20260714" ]]
   [[ "$name" != *"--"* ]] || true
   [[ "$name" != *"-" ]]

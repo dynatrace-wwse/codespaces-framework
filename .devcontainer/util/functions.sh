@@ -1504,14 +1504,15 @@ generateDynakube() {
   local cluster_name="$base_name"
   local session_id="$(getDtSessionId)"
   if [[ -n "$session_id" ]]; then
-    # The operator derives child resource names from the DynaKube name (63-char
-    # k8s limit) — keep it <= 40 chars, sacrificing repo chars before session id.
-    local name_budget=$(( 40 - ${#session_id} - 1 ))
+    # The operator's validating webhook enforces a HARD 38-char DynaKube name
+    # limit (child resources like <name>-activegate-<hash> must fit the 63-char
+    # k8s label limit) — sacrifice repo chars before the session id.
+    local name_budget=$(( 38 - ${#session_id} - 1 ))
     (( name_budget < 1 )) && name_budget=1
     local repo_part="${base_name:0:$name_budget}"
     repo_part="${repo_part%-}"
     cluster_name="${repo_part}-${session_id}"
-    cluster_name="${cluster_name:0:40}"
+    cluster_name="${cluster_name:0:38}"
     cluster_name="${cluster_name%-}"
   fi
   local api_url="${DT_TENANT}/api"
