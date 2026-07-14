@@ -353,3 +353,32 @@ sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/dashbo
         /home/ops/enablement-framework/codespaces-framework/ops-server/dashboard/fleet.py
 sudo systemctl restart ops-dashboard
 ```
+
+## Live sessions
+
+Instructor-led bootcamp cohorts (design: dynatrace-app-enablements/docs/live-training-architecture.md,
+Phase P1 backend). Endpoints in `dashboard/app.py`; pure decision logic in
+`dashboard/live_sessions.py` (no Redis — tested via
+`/home/ops/ops-venv/bin/python -m dashboard.test_live_sessions`). Called through
+the app's `orbital` app function (no X-Auth headers), so trainer actions are
+gated by matching the caller-supplied `trainerEmail` against the stored one —
+same openness as `/api/arena/*`.
+
+| Endpoint | Who | Description |
+|----------|-----|-------------|
+| `POST /api/live/sessions` | trainer | `{title, trainingId, ref?, trainerEmail, roster}` → state `open`; emails lowercased/trimmed, invalid (no `@`) dropped; 400 on missing fields / empty roster |
+| `GET /api/live/sessions?email=` | both | non-ended sessions where the email is trainer or on the roster; items carry joined/roster counts + `isTrainer`/`hasJoined` |
+| `GET /api/live/sessions/{id}?email=` | both | full state; `roster` + `joined` lists only when email == trainerEmail (learners get counts); 404 when missing/expired |
+| `POST /api/live/sessions/{id}/join` | learner | `{email}` — idempotent; 403 not on roster, 409 ended |
+| `POST /api/live/sessions/{id}/start` | trainer | open → running, sets `startedAt`; idempotent when running; 403 mismatch, 409 after ended |
+| `POST /api/live/sessions/{id}/end` | trainer | → ended, sets `endedAt`, applies TTLs; idempotent; 403 mismatch |
+
+Redis keys:
+- `live:session:{id}` — hash: title, trainingId, ref, trainerEmail, state (`open|running|ended`), createdAt, startedAt, endedAt
+- `live:session:{id}:roster` — set of lowercase invited emails
+- `live:session:{id}:joined` — hash email → ISO joinedAt
+- `live:sessions:index` — zset of sessionId scored by epoch createdAt
+
+TTL: on `end` the three `live:session:{id}*` keys get a 7-day TTL (matches
+`job:final` retention). The index entry is kept — the list endpoint skips
+members whose hash has expired.

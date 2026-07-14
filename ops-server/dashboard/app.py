@@ -68,6 +68,10 @@ app.include_router(codespace_router)
 # EC2 spot-worker fleet scaling (aws CLI, no boto3) — see dashboard/fleet.py.
 from dashboard import fleet  # noqa: E402
 
+# Live training sessions (bootcamp cohorts) — pure decision logic lives in
+# dashboard/live_sessions.py (tested without Redis); endpoints below stay thin.
+from dashboard import live_sessions  # noqa: E402
+
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Content Profiles</title><style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
@@ -4546,6 +4550,177 @@ async def api_arena_terminate(job_id: str):
     await pool.publish("ops:terminate", job_id)
     log.info("Arena termination requested for %s", job_id)
     return {"status": "termination_requested", "job_id": job_id}
+
+
+# ── Live training sessions (bootcamp cohorts) ─────────────────────────────────
+# Registry for instructor-led cohorts: a trainer creates a session with a
+# roster of emails, learners join from any tenant, the trainer starts/ends for
+# everyone at once. Called via the app's `orbital` app function, which sends
+# NO X-Auth headers — trainer actions are gated by matching the caller-supplied
+# trainerEmail against the stored one (same openness as /api/arena/*). All
+# decision logic is in dashboard/live_sessions.py (pure, unit-tested).
+
+
+def _live_keys(session_id: str) -> tuple[str, str, str]:
+    """The three Redis keys of a live session: (hash, roster set, joined hash)."""
+    base = f"live:session:{session_id}"
+    return base, f"{base}:roster", f"{base}:joined"
+
+
+class LiveSessionCreate(BaseModel):
+    title: str = ""
+    trainingId: str = ""
+    ref: str = ""                 # optional content branch
+    trainerEmail: str = ""
+    roster: list[str] = []
+
+
+class LiveSessionJoin(BaseModel):
+    email: str = ""
+
+
+class LiveSessionTrainerAction(BaseModel):
+    trainerEmail: str = ""
+
+
+@app.post("/api/live/sessions")
+async def api_live_session_create(body: LiveSessionCreate):
+    """Create a live session (state=open) with a roster of invited emails.
+
+    Emails are trimmed + lowercased; entries without an '@' are dropped.
+    400 when title/trainingId/trainerEmail is missing or the roster is empty
+    after normalization. Returns the full session JSON (trainer view).
+    """
+    try:
+        fields = live_sessions.validate_create(
+            body.title, body.trainingId, body.trainerEmail, body.roster)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    session_id = _new_job_id()
+    now = datetime.now(timezone.utc)
+    session = {
+        "title":        fields["title"],
+        "trainingId":   fields["trainingId"],
+        "ref":          (body.ref or "").strip(),
+        "trainerEmail": fields["trainerEmail"],
+        "state":        "open",
+        "createdAt":    now.isoformat(),
+        "startedAt":    "",
+        "endedAt":      "",
+    }
+    sess_key, roster_key, _ = _live_keys(session_id)
+    await pool.hset(sess_key, mapping=session)
+    await pool.sadd(roster_key, *fields["roster"])
+    await pool.zadd("live:sessions:index", {session_id: now.timestamp()})
+    log.info("Live session %s created by %s (%s, %d invited)", session_id,
+             fields["trainerEmail"], fields["trainingId"], len(fields["roster"]))
+    return live_sessions.shape_detail(
+        session_id, session, fields["roster"], {}, fields["trainerEmail"])
+
+
+@app.get("/api/live/sessions")
+async def api_live_sessions_list(email: str = ""):
+    """Active (state != ended) sessions visible to an email — as trainer or
+    roster member. Index entries whose keys have TTL-expired are skipped."""
+    email = live_sessions.normalize_email(email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email query parameter is required")
+    sessions = []
+    for session_id in await pool.zrevrange("live:sessions:index", 0, -1):
+        sess_key, roster_key, joined_key = _live_keys(session_id)
+        session = await pool.hgetall(sess_key)
+        if not session:
+            continue  # expired after `ended` — tolerate the stale index member
+        roster = await pool.smembers(roster_key)
+        if not live_sessions.is_listed(session, roster, email):
+            continue
+        joined = await pool.hgetall(joined_key)
+        sessions.append(live_sessions.shape_summary(
+            session_id, session, roster, joined, email))
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.get("/api/live/sessions/{session_id}")
+async def api_live_session_detail(session_id: str, email: str = ""):
+    """Full session state. The roster and per-learner joined list are only
+    included when the caller email matches trainerEmail; learners get counts."""
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return live_sessions.shape_detail(session_id, session, roster, joined, email)
+
+
+@app.post("/api/live/sessions/{session_id}/join")
+async def api_live_session_join(session_id: str, body: LiveSessionJoin):
+    """Learner joins a session they are invited to. Idempotent — re-joining
+    keeps the original joinedAt. 403 when not on the roster, 409 when ended."""
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    roster = await pool.smembers(roster_key)
+    err = live_sessions.join_error(session.get("state", ""), email, roster)
+    if err:
+        raise HTTPException(status_code=err[0], detail=err[1])
+    await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
+    return {"state": session.get("state", ""),
+            "joinedCount": await pool.hlen(joined_key)}
+
+
+@app.post("/api/live/sessions/{session_id}/start")
+async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction):
+    """Trainer starts the session: open → running (learners' waiting screens
+    flip). Idempotent when already running; 403 on trainerEmail mismatch."""
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    try:
+        new_state, changed = live_sessions.apply_transition(session.get("state", ""), "start")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if changed:
+        session["state"] = new_state
+        session["startedAt"] = datetime.now(timezone.utc).isoformat()
+        await pool.hset(sess_key, mapping={
+            "state": new_state, "startedAt": session["startedAt"]})
+        log.info("Live session %s started by %s", session_id, body.trainerEmail)
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
+@app.post("/api/live/sessions/{session_id}/end")
+async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction):
+    """Trainer ends the session: state → ended, freezes the board, and sets a
+    7-day TTL on the session keys (index entry kept; listing tolerates it)."""
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    new_state, changed = live_sessions.apply_transition(session.get("state", ""), "end")
+    if changed:
+        session["state"] = new_state
+        session["endedAt"] = datetime.now(timezone.utc).isoformat()
+        await pool.hset(sess_key, mapping={
+            "state": new_state, "endedAt": session["endedAt"]})
+        log.info("Live session %s ended by %s", session_id, body.trainerEmail)
+    for key in (sess_key, roster_key, joined_key):
+        await pool.expire(key, live_sessions.SESSION_TTL_SECONDS)
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
 
 
 # ── Framework test suites ─────────────────────────────────────────────────────
