@@ -1182,7 +1182,8 @@ class WorkerManager:
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
                              dt_env=job.get("dt_env"), tenant=job.get("tenant", ""),
-                             user=job.get("tenant_user") or job.get("user", ""))
+                             hostgroup=job.get("dt_hostgroup", ""),
+                             user=job.get("tenant_user") or job.get("user") or job.get("requested_by", ""))
 
         # app-layer-test rides this same provisioning path; it only swaps the final
         # step (the app-layer driver instead of integration.sh). Copy the driver
@@ -1443,7 +1444,8 @@ class WorkerManager:
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
                              dt_env=job.get("dt_env"), tenant=job.get("tenant", ""),
-                             user=job.get("tenant_user") or job.get("user", ""))
+                             hostgroup=job.get("dt_hostgroup", ""),
+                             user=job.get("tenant_user") or job.get("user") or job.get("requested_by", ""))
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -1730,7 +1732,8 @@ class WorkerManager:
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
                              dt_env=job.get("dt_env"), tenant=job.get("tenant", ""),
-                             user=job.get("tenant_user") or job.get("user", ""))
+                             hostgroup=job.get("dt_hostgroup", ""),
+                             user=job.get("tenant_user") or job.get("user") or job.get("requested_by", ""))
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -2086,7 +2089,7 @@ class WorkerManager:
 
     def _write_env_file(self, env_path: Path, arch: str, job_id: str = "",
                         dt_env: dict | None = None, tenant: str = "",
-                        user: str = ""):
+                        hostgroup: str = "", user: str = ""):
         """Mirror the GHA workflow's .env writing.
 
         Adds K3D_* port overrides so the in-container k3d cluster doesn't
@@ -2143,7 +2146,9 @@ class WorkerManager:
         if dt_oneagent:
             dt_lines += f"DT_ONEAGENT_TOKEN={dt_oneagent}\n"
 
-        hostgroup = _dt_hostgroup(user)
+        # Provision-time id wins (dashboard already derived + returned it to the
+        # app); deriving from the user is the fallback for jobs enqueued elsewhere.
+        hostgroup = hostgroup or _dt_hostgroup(user)
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(
             dt_lines

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timezone, timedelta
@@ -2834,6 +2835,22 @@ def _new_job_id() -> str:
     return f"{_b36(int(time.time() * 1000))}-{secrets.token_hex(2)}"
 
 
+def _dt_hostgroup(user: str) -> str:
+    """Per-user Grail-isolation id "<user>-<YYYYMMDD>" (DT_HOSTGROUP).
+
+    Derived ONCE at provision time and carried in the job dict + redis meta so
+    the worker's .env, the session-status API, and the app's DQL placeholder
+    substitution all agree on the same value (no date drift across midnight).
+    Email users keep only the local part; result is RFC-1123-safe.
+    Mirrors workers/manager.py and worker-agent/executor.py.
+    """
+    user = (user or "").split("@", 1)[0].lower()
+    user = re.sub(r"[^a-z0-9-]+", "-", user).strip("-")
+    if not user:
+        return ""
+    return f"{user}-{datetime.now(timezone.utc):%Y%m%d}"
+
+
 async def _find_job_by_subdomain(subdomain: str) -> tuple[str, dict, dict]:
     """Find a running job and app info from a wildcard subdomain label.
 
@@ -3655,6 +3672,11 @@ async def api_arena_provision(body: ArenaProvisionRequest):
                 repo_nwo, body.userId, exc,
             )
 
+    # Per-user Grail-isolation id — derived once here so the worker's .env
+    # (DT_HOSTGROUP → generateDynakube) and the app's {{DT_SESSION_ID}} DQL
+    # placeholder always agree.
+    dt_hostgroup = _dt_hostgroup(body.userId)
+
     job = {
         "job_id":        job_id,
         "type":          "daemon",
@@ -3665,6 +3687,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "trigger":       "enablement-app",
         "nightly_run_id": f"enablement-{body.trainingId}",
         "requested_by":  body.userId,
+        "dt_hostgroup":  dt_hostgroup,
     }
     if dt_env:
         job["dt_env"] = dt_env
@@ -3691,6 +3714,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "training_id":  body.trainingId,
         "expires_at":   expires_at,
         "token_provisioned": "1" if token_provisioned else "0",
+        "dt_hostgroup": dt_hostgroup,
     }
     if provisioned_token_ids:
         redis_meta["dt_token_ids"] = json.dumps(provisioned_token_ids)
@@ -3718,6 +3742,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "expiresAt":        expires_at,
         "status":           "provisioning",
         "tokenProvisioned": token_provisioned,
+        "dtSessionId":      dt_hostgroup,
     }
 
 
@@ -3771,6 +3796,7 @@ async def api_arena_session_status(job_id: str):
         "trainingId": meta.get("training_id", ""),
         "userId":     meta.get("arena_user", ""),
         "expiresAt":  meta.get("expires_at", ""),
+        "dtSessionId": meta.get("dt_hostgroup", ""),
     }
 
 
@@ -3811,6 +3837,7 @@ async def api_arena_user_session(userId: str, trainingId: str, tenant: str = "")
                     "trainingId": meta.get("training_id", ""),
                     "userId":     meta.get("arena_user", ""),
                     "expiresAt":  meta.get("expires_at", ""),
+                    "dtSessionId": meta.get("dt_hostgroup", ""),
                 }
         if cursor == 0:
             break

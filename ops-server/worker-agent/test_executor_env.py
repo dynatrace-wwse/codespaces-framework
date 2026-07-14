@@ -75,6 +75,11 @@ def test_hostgroup_omitted_without_user():
     assert "DT_HOSTGROUP" not in env
 
 
+def test_hostgroup_explicit_wins_over_derived():
+    env = _write(hostgroup="alice-20260101", user="bob@example.com")
+    assert env["DT_HOSTGROUP"] == "alice-20260101"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

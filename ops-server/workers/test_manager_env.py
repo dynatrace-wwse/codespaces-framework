@@ -84,6 +84,11 @@ def test_hostgroup_omitted_without_user(tmp_path):
     assert "DT_HOSTGROUP" not in env
 
 
+def test_hostgroup_explicit_wins_over_derived(tmp_path):
+    env = _write(tmp_path, hostgroup="alice-20260101", user="bob@example.com")
+    assert env["DT_HOSTGROUP"] == "alice-20260101"
+
+
 if __name__ == "__main__":
     import tempfile
     for name, fn in sorted(globals().items()):

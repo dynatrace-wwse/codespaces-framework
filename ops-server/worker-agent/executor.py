@@ -500,7 +500,8 @@ async def execute_daemon(
         overrides=dt_env_overrides,
         orbital_job_id=job_id,
         tenant=job.get("tenant", ""),
-        user=job.get("tenant_user") or job.get("user", ""),
+        hostgroup=job.get("dt_hostgroup", ""),
+        user=job.get("tenant_user") or job.get("user") or job.get("requested_by", ""),
     )
 
     start_time = time.time()
@@ -818,6 +819,7 @@ def _write_env_file(
     overrides: dict[str, str] | None = None,
     orbital_job_id: str = "",
     tenant: str = "",
+    hostgroup: str = "",
     user: str = "",
 ):
     """Write .devcontainer/.env with DT credentials.
@@ -857,7 +859,9 @@ def _write_env_file(
 
     if orbital_job_id:
         resolved["ORBITAL_JOB_ID"] = orbital_job_id
-    hostgroup = _dt_hostgroup(user)
+    # Provision-time id wins (dashboard already derived + returned it to the
+    # app); deriving from the user is the fallback for jobs enqueued elsewhere.
+    hostgroup = hostgroup or _dt_hostgroup(user)
     if hostgroup:
         resolved["DT_HOSTGROUP"] = hostgroup
     env_path.write_text("".join(f"{k}={v}\n" for k, v in resolved.items() if v))
