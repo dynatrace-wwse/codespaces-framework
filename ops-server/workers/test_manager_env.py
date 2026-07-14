@@ -73,6 +73,17 @@ def test_non_coe_without_minted_fails_closed(tmp_path):
     assert "DT_ONEAGENT_TOKEN" not in env  # omitted when unset
 
 
+def test_hostgroup_written_for_user(tmp_path):
+    from datetime import datetime, timezone
+    env = _write(tmp_path, user="Sergio.Hinojosa@dynatrace.com")
+    assert env["DT_HOSTGROUP"] == f"sergio-hinojosa-{datetime.now(timezone.utc):%Y%m%d}"
+
+
+def test_hostgroup_omitted_without_user(tmp_path):
+    env = _write(tmp_path)
+    assert "DT_HOSTGROUP" not in env
+
+
 if __name__ == "__main__":
     import tempfile
     for name, fn in sorted(globals().items()):

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -112,6 +113,23 @@ def _new_job_id() -> str:
     and resolved by this id (and shipped to Grail for long-term history).
     """
     return f"{_b36(int(time.time() * 1000))}-{secrets.token_hex(2)}"
+
+
+def _dt_hostgroup(user: str) -> str:
+    """Per-user Grail-isolation id "<user>-<YYYYMMDD>", written as DT_HOSTGROUP.
+
+    The framework's generateDynakube consumes it (getDtSessionId) so each
+    session gets a unique DynaKube name + hostGroup inside a shared tenant —
+    100 students can run the same training against one tenant and each filters
+    Grail to their own cluster. Email users keep only the local part; result is
+    RFC-1123-safe. (Duplicated in worker-agent/executor.py — separate deploy unit.)
+    """
+    user = (user or "").split("@", 1)[0].lower()
+    user = re.sub(r"[^a-z0-9-]+", "-", user).strip("-")
+    if not user:
+        return ""
+    return f"{user}-{datetime.now(timezone.utc):%Y%m%d}"
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1163,7 +1181,8 @@ class WorkerManager:
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
-                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
+                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""),
+                             user=job.get("tenant_user") or job.get("user", ""))
 
         # app-layer-test rides this same provisioning path; it only swaps the final
         # step (the app-layer driver instead of integration.sh). Copy the driver
@@ -1423,7 +1442,8 @@ class WorkerManager:
         await self._git_clone(head_repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
-                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
+                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""),
+                             user=job.get("tenant_user") or job.get("user", ""))
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -1709,7 +1729,8 @@ class WorkerManager:
         await self._git_clone(repo, ref, repo_dir)
         await self._make_world_writable(repo_dir)
         self._write_env_file(repo_dir / ".devcontainer" / ".env", arch="arm64", job_id=job_id,
-                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""))
+                             dt_env=job.get("dt_env"), tenant=job.get("tenant", ""),
+                             user=job.get("tenant_user") or job.get("user", ""))
 
         workspace  = f"/workspaces/{repo_name}"
         env_file_inside = f"{workspace}/.devcontainer/.env"
@@ -2064,7 +2085,8 @@ class WorkerManager:
         return content
 
     def _write_env_file(self, env_path: Path, arch: str, job_id: str = "",
-                        dt_env: dict | None = None, tenant: str = ""):
+                        dt_env: dict | None = None, tenant: str = "",
+                        user: str = ""):
         """Mirror the GHA workflow's .env writing.
 
         Adds K3D_* port overrides so the in-container k3d cluster doesn't
@@ -2121,6 +2143,7 @@ class WorkerManager:
         if dt_oneagent:
             dt_lines += f"DT_ONEAGENT_TOKEN={dt_oneagent}\n"
 
+        hostgroup = _dt_hostgroup(user)
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(
             dt_lines
@@ -2131,6 +2154,7 @@ class WorkerManager:
             f"EXTERNAL_HOSTNAME={external_hostname}\n"
             f"ORBITAL_ENVIRONMENT=true\n"
             f"ORBITAL_JOB_ID={job_id}\n"
+            + (f"DT_HOSTGROUP={hostgroup}\n" if hostgroup else "")
         )
 
     async def _git_clone(self, repo: str, ref: str, dest: Path):

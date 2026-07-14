@@ -28,9 +28,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import redis.asyncio as redis_async
@@ -53,6 +55,22 @@ from .config import (
 )
 
 log = logging.getLogger("ops-worker-agent")
+
+
+def _dt_hostgroup(user: str) -> str:
+    """Per-user Grail-isolation id "<user>-<YYYYMMDD>", written as DT_HOSTGROUP.
+
+    The framework's generateDynakube consumes it (getDtSessionId) so each
+    session gets a unique DynaKube name + hostGroup inside a shared tenant —
+    100 students can run the same training against one tenant and each filters
+    Grail to their own cluster. Email users keep only the local part; result is
+    RFC-1123-safe. (Duplicated in workers/manager.py — separate deploy unit.)
+    """
+    user = (user or "").split("@", 1)[0].lower()
+    user = re.sub(r"[^a-z0-9-]+", "-", user).strip("-")
+    if not user:
+        return ""
+    return f"{user}-{datetime.now(timezone.utc):%Y%m%d}"
 
 
 @dataclass
@@ -482,6 +500,7 @@ async def execute_daemon(
         overrides=dt_env_overrides,
         orbital_job_id=job_id,
         tenant=job.get("tenant", ""),
+        user=job.get("tenant_user") or job.get("user", ""),
     )
 
     start_time = time.time()
@@ -799,6 +818,7 @@ def _write_env_file(
     overrides: dict[str, str] | None = None,
     orbital_job_id: str = "",
     tenant: str = "",
+    user: str = "",
 ):
     """Write .devcontainer/.env with DT credentials.
 
@@ -837,6 +857,9 @@ def _write_env_file(
 
     if orbital_job_id:
         resolved["ORBITAL_JOB_ID"] = orbital_job_id
+    hostgroup = _dt_hostgroup(user)
+    if hostgroup:
+        resolved["DT_HOSTGROUP"] = hostgroup
     env_path.write_text("".join(f"{k}={v}\n" for k, v in resolved.items() if v))
 
 

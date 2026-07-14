@@ -15,6 +15,8 @@ setup() {
 
   export REPO_PATH="$FAKE_REPO"
   export RepositoryName="test-enablement"
+  # Session-identity inputs must not leak in from the host environment
+  unset DT_HOSTGROUP GITHUB_USER
   export ENV_FILE="$FAKE_REPO/.devcontainer/.env"
   export APP_REGISTRY="$TEST_DIR/app-registry"
   export FRAMEWORK_CACHE=""
@@ -293,6 +295,73 @@ EOF
   run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
   [[ "$output" != *"dynatrace-activegate"* ]]
   [[ "$output" != *"dynatrace-oneagent"* ]]
+}
+
+# ============================================================
+# Per-user session identity tests (getDtSessionId)
+# ============================================================
+
+@test "getDtSessionId: empty when no DT_HOSTGROUP or GITHUB_USER" {
+  source_functions
+
+  run getDtSessionId
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "getDtSessionId: DT_HOSTGROUP takes priority and is sanitized" {
+  source_functions
+  export DT_HOSTGROUP="Sergio.Hinojosa-20260714"
+  export GITHUB_USER="ignored"
+
+  run getDtSessionId
+  [ "$output" = "sergio-hinojosa-20260714" ]
+}
+
+@test "getDtSessionId: derives from GITHUB_USER plus date" {
+  source_functions
+  export GITHUB_USER="TestUser"
+
+  run getDtSessionId
+  [ "$output" = "testuser-$(date +%Y%m%d)" ]
+}
+
+@test "generateDynakube: DT_HOSTGROUP makes name and hostGroup unique, networkZone stays repo-scoped" {
+  source_functions
+  export DT_HOSTGROUP="alice-20260714"
+
+  generateDynakube cloudnative
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" == *"name: test-enablement-alice-20260714"* ]]
+  [[ "$output" == *"tokens: test-enablement-alice-20260714"* ]]
+  [[ "$output" == *"hostGroup: test-enablement-alice-20260714"* ]]
+  [[ "$output" == *"networkZone: test-enablement"$'\n'* ]]
+}
+
+@test "generateDynakube: long repo name truncated to keep session id, max 40 chars" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-opentelemetry-openpipeline"
+  export DT_HOSTGROUP="bob-20260714"
+
+  generateDynakube cloudnative
+
+  name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+  name="${name_line#  name: }"
+  [ "${#name}" -le 40 ]
+  [[ "$name" == *"-bob-20260714" ]]
+  [[ "$name" != *"--"* ]] || true
+  [[ "$name" != *"-" ]]
+}
+
+@test "generateDynakube: no session id keeps pre-1.9 repo-scoped identity" {
+  source_functions
+
+  generateDynakube cloudnative
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" == *"name: test-enablement"$'\n'* ]]
+  [[ "$output" == *"hostGroup: test-enablement"$'\n'* ]]
 }
 
 # ============================================================
