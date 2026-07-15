@@ -331,7 +331,7 @@ region `eu-west-2`); endpoints in `dashboard/app.py`; pure-logic tests in
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `GET /api/fleet` | none | EC2 instances (tag `project=autonomous-enablements` or Name prefix) joined with registered `worker:{id}` hashes (match: `private_ip` == worker `host`) |
-| `POST /api/fleet/scale-up` | writer | `{count, instanceType?}` — launches spot workers from golden AMI `ami-0ed76cf85fa7d2967`; subnet/SGs/key resolved live from worker-1 (`i-02b773319c758fe40`); **hard cap 4 per call** |
+| `POST /api/fleet/scale-up` | writer | `{count, instanceType?}` — launches spot workers from golden AMI `ami-01c331ae9b0054602`; subnet/SGs/key resolved live from worker-1 (`i-02b773319c758fe40`); **hard cap 4 per call** |
 | `POST /api/fleet/scale-down` | writer | `{instanceIds, force?}` — marks matched workers `draining=1`, 409s if a matched worker has `active_jobs > 0` (unless `force`), then terminates. Refuses any id not tagged `orbital-role=worker` / `Name=orbital-worker-spot` |
 | `POST /api/fleet/worker/{id}/start` `/stop` | writer | start/stop pet workers (`autonomous-enablements-worker*`, e.g. stopped worker-3 `i-03689a1374d39cb6a`) |
 

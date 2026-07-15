@@ -20,8 +20,13 @@ import json
 AWS_CLI = "/usr/local/bin/aws"
 REGION = "eu-west-2"
 
-# Golden worker AMI (pre-baked Sysbox + ops-worker-agent).
-WORKER_AMI = "ami-0ed76cf85fa7d2967"
+# Golden worker AMI v2 — baked 2026-07-15 from the LIVE worker-1 (docker +
+# sysbox + ops-worker-agent + current /home/ops/.env). v1 (ami-0ed76cf85fa7d2967,
+# from stopped worker-3) was bare Ubuntu — spot workers never registered.
+# NOTE: the baked agent boots as amd001 until cloud-init's user-data rewrites
+# WORKER_ID and restarts it — a few seconds of duplicate registration that the
+# real amd001's next heartbeat overwrites.
+WORKER_AMI = "ami-01c331ae9b0054602"
 # worker-1 — template instance whose subnet / security groups / key-name are
 # resolved dynamically at scale-up time so networking never drifts from prod.
 TEMPLATE_INSTANCE_ID = "i-02b773319c758fe40"
