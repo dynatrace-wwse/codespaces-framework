@@ -3607,6 +3607,43 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         raise HTTPException(status_code=404, detail=f"Training '{body.trainingId}' not found")
 
     repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
+
+    # Idempotency guard: one live session per (user, tenant, training). The app's
+    # UI checks this client-side before launching, but a direct call, a double
+    # click, or a network retry can still hit provision twice — which used to
+    # double-provision (two daemon jobs, two clusters, wasted slots). Return the
+    # EXISTING session instead of queuing a duplicate.
+    guard_tenant = (body.tenantUrl or body.tenantId or "").rstrip("/")
+    if body.userId:
+        cursor = 0
+        while True:
+            cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=200)
+            for key in keys:
+                m = await pool.hgetall(key)
+                if not m or m.get("terminating"):
+                    continue
+                if (m.get("arena_user") == body.userId
+                        and m.get("training_id") == body.trainingId
+                        and ((not guard_tenant)
+                             or guard_tenant in (m.get("dt_tenant_url", ""), m.get("arena_tenant", "")))):
+                    ex_id = m.get("job_id", key.split(":")[-1])
+                    log.info("Provision deduped: %s already has session %s for %s",
+                             body.userId, ex_id, body.trainingId)
+                    livelog = await pool.get(f"job:livelog:{ex_id}")
+                    status = ("ready" if livelog and "Daemon ready" in livelog
+                              else "queued" if m.get("worker_id") in ("queued", "") else "provisioning")
+                    return {
+                        "jobId": ex_id,
+                        "wsUrl": f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{ex_id}/shell",
+                        "expiresAt": m.get("expires_at", ""),
+                        "status": status,
+                        "tokenProvisioned": m.get("token_provisioned") == "1",
+                        "dtSessionId": m.get("dt_hostgroup", ""),
+                        "deduped": True,
+                    }
+            if cursor == 0:
+                break
+
     job_id = f"enablement-{_uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     # Cap Orbital-hosted training sessions at 2h so no daemon runs unbounded; the
