@@ -29,7 +29,12 @@ import urllib.request
 
 ORBITAL = "https://autonomous-enablements.whydevslovedynatrace.com"
 COE_APPS = "https://geu80787.apps.dynatrace.com"
-INGEST = f"{COE_APPS}/platform/classic/environment-api/v2/bizevents/ingest"
+# Tenant the training bizevents go to. Default COE (where the Live Board reads).
+# For a clean single-tenant SRO simulation, set INGEST_TENANT + INGEST_TOKEN_ENV
+# so progress doesn't aggregate across tenants for a recycled identity.
+INGEST_TENANT = os.environ.get("INGEST_TENANT", "geu80787")
+INGEST_TOKEN_ENV = os.environ.get("INGEST_TOKEN_ENV", "")  # env-var name in /home/ops/.env; empty = decrypt COE remote-grail token
+INGEST = f"https://{INGEST_TENANT}.apps.dynatrace.com/platform/classic/environment-api/v2/bizevents/ingest"
 TRAINING_ID = "kubernetes-101"
 TRAINING_TITLE = "Kubernetes 101"
 BOT_DOMAIN = os.environ.get("BOT_DOMAIN", "bootcamp.dev")
@@ -57,7 +62,16 @@ def http_json(url: str, payload=None, bearer: str | None = None, method=None):
 
 
 def coe_token() -> str:
-    """Decrypt the remote-grail COE platform token from /home/ops/.env."""
+    """Ingest token for INGEST_TENANT.
+
+    If INGEST_TOKEN_ENV is set, read that plaintext env var from /home/ops/.env
+    (e.g. SRO_MASTER_PLATFORM_TOKEN for an SRO run). Otherwise decrypt the COE
+    remote-grail platform token (default, matches the Live Board's read tenant).
+    """
+    if INGEST_TOKEN_ENV:
+        out = subprocess.run(["sudo", "grep", "-E", f"^{INGEST_TOKEN_ENV}=", "/home/ops/.env"],
+                             capture_output=True, text=True, check=True)
+        return out.stdout.strip().split("=", 1)[1]
     code = (
         "from cryptography.fernet import Fernet\n"
         "import re\n"
