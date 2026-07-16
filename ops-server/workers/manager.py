@@ -431,9 +431,28 @@ class WorkerManager:
                         rec = await self.pool.hgetall(key)
                     except Exception:
                         continue
-                    if rec.get("worker_id") != "master" or rec.get("terminating") != "1":
-                        continue
                     job_id = key.split("job:running:", 1)[1]
+                    worker_id = rec.get("worker_id", "")
+
+                    # Dead-worker orphan adoption: a remote worker (e.g. an
+                    # autoscaled spot instance) that is scaled down, reclaimed, or
+                    # crashes leaves its job:running keys behind — its own agent is
+                    # gone and the master reconciler used to skip all non-master
+                    # jobs, so the record lingered until the expiry reaper (hours).
+                    # Those ghosts break the provision idempotency guard (a student
+                    # re-provisioning would match a dead session) and inflate the
+                    # dashboard. If the owning worker is no longer registered, the
+                    # container is unreachable regardless of flags — reap the record.
+                    if (worker_id and worker_id != "master"
+                            and job_id not in self.active_jobs
+                            and not await self.pool.exists(f"worker:{worker_id}")):
+                        log.info("Reconciler: worker %s gone — reaping orphan %s",
+                                 worker_id, job_id)
+                        await self._force_clean_orphan(job_id)
+                        continue
+
+                    if worker_id != "master" or rec.get("terminating") != "1":
+                        continue
                     if job_id in self.active_jobs:
                         continue  # live task — listener + finally handle it
                     await self._kill_job_container(job_id, rec=rec)
