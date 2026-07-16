@@ -3622,6 +3622,13 @@ async def api_arena_provision(body: ArenaProvisionRequest):
                 m = await pool.hgetall(key)
                 if not m or m.get("terminating"):
                     continue
+                # Skip ghosts: a job whose owning worker deregistered (spot
+                # scale-down / crash) is a dead session — don't route a student
+                # to it. The terminate reconciler reaps these, but guard here too.
+                wid = m.get("worker_id", "")
+                if wid and wid != "master" and wid not in ("queued", "") \
+                        and not await pool.exists(f"worker:{wid}"):
+                    continue
                 if (m.get("arena_user") == body.userId
                         and m.get("training_id") == body.trainingId
                         and ((not guard_tenant)
