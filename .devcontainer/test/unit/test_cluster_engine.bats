@@ -217,3 +217,67 @@ source_functions() {
   deployCloudNative
   [ "$warned" -eq 1 ]
 }
+
+# ============================================================
+# waitK3dApiReady + createK3dCluster reachability gate
+# (regression: under load, k3d cluster listed but API not up →
+#  every downstream kubectl hits localhost:8080 → dead session)
+# ============================================================
+
+@test "waitK3dApiReady: returns 0 when kubectl reaches the API" {
+  source_functions
+  export K3D_CLUSTER_NAME=enablement K3D_API_READY_TIMEOUT=6
+  kubectl() { return 0; }
+  export -f kubectl
+  run waitK3dApiReady
+  [ "$status" -eq 0 ]
+}
+
+@test "waitK3dApiReady: returns non-zero when API never answers" {
+  source_functions
+  export K3D_CLUSTER_NAME=enablement K3D_API_READY_TIMEOUT=6
+  kubectl() { return 1; }
+  export -f kubectl
+  run waitK3dApiReady
+  [ "$status" -ne 0 ]
+}
+
+@test "attachK3dCluster: returns non-zero when nodes unreachable (no silent swallow)" {
+  source_functions
+  export K3D_CLUSTER_NAME=enablement
+  k3d() { return 0; }
+  export -f k3d
+  kubectl() { return 1; }
+  export -f kubectl
+  run attachK3dCluster
+  [ "$status" -ne 0 ]
+}
+
+@test "createK3dCluster: retries create when first cluster is unreachable" {
+  source_functions
+  export K3D_CLUSTER_NAME=enablement K3D_API_READY_TIMEOUT=3
+  export CREATE_CALLS_FILE="$TEST_DIR/create_calls"
+  : > "$CREATE_CALLS_FILE"
+  installK3d() { :; }; export -f installK3d
+  # k3d create records a call; list always shows the cluster present.
+  k3d() {
+    case "$1 $2" in
+      "cluster create") echo x >> "$CREATE_CALLS_FILE" ;;
+      "cluster list")   echo "enablement   1/1" ;;
+      "cluster delete") : ;;
+      "kubeconfig merge") : ;;
+    esac
+    return 0
+  }
+  export -f k3d
+  # API unreachable on first attempt, reachable on second (>=2 create calls).
+  kubectl() {
+    local n; n=$(wc -l < "$CREATE_CALLS_FILE" 2>/dev/null || echo 0)
+    [ "$n" -ge 2 ] && return 0 || return 1
+  }
+  export -f kubectl
+  installIngressController() { :; }; export -f installIngressController
+  run createK3dCluster
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CREATE_CALLS_FILE")" -eq 2 ]
+}

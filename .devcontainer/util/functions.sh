@@ -856,20 +856,59 @@ createK3dCluster() {
 
   installK3d
 
-  k3d cluster create "$K3D_CLUSTER_NAME" \
-    --api-port "$K3D_API_PORT" \
-    -p "${K3D_LB_HTTP_PORT}:80@loadbalancer" \
-    -p "${K3D_LB_HTTPS_PORT}:443@loadbalancer" \
-    --k3s-arg "--disable=traefik@server:0" \
-    --wait
+  # Under heavy concurrent provisioning (many sessions cold-starting k3d on one
+  # host at once) `k3d cluster create --wait` can return with the cluster listed
+  # but the API server not actually reachable / kubeconfig context not attached.
+  # The old code only checked `k3d cluster list | grep`, so a half-started cluster
+  # slipped through and every downstream kubectl hit localhost:8080 → dead session.
+  # Gate on the API actually answering, and retry the whole create once (a fresh
+  # delete+create clears a wedged partial cluster).
+  local attempt
+  for attempt in 1 2; do
+    k3d cluster create "$K3D_CLUSTER_NAME" \
+      --api-port "$K3D_API_PORT" \
+      -p "${K3D_LB_HTTP_PORT}:80@loadbalancer" \
+      -p "${K3D_LB_HTTPS_PORT}:443@loadbalancer" \
+      --k3s-arg "--disable=traefik@server:0" \
+      --wait
 
-  if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME} "; then
-    printInfo "K3d cluster '$K3D_CLUSTER_NAME' created — reach ingress at http://localhost:${K3D_LB_HTTP_PORT}/"
-    attachK3dCluster
-  else
-    printError "K3d cluster '$K3D_CLUSTER_NAME' failed to start"
-    return 1
-  fi
+    if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME} "; then
+      attachK3dCluster
+      if waitK3dApiReady; then
+        printInfo "K3d cluster '$K3D_CLUSTER_NAME' created — reach ingress at http://localhost:${K3D_LB_HTTP_PORT}/"
+        return 0
+      fi
+    fi
+
+    printWarn "K3d cluster '$K3D_CLUSTER_NAME' not reachable (attempt $attempt/2)"
+    if [[ "$attempt" -lt 2 ]]; then
+      printInfo "Tearing down partial cluster and retrying..."
+      k3d cluster delete "$K3D_CLUSTER_NAME" 2>/dev/null
+      sleep 5
+    fi
+  done
+
+  printError "K3d cluster '$K3D_CLUSTER_NAME' failed to become reachable after 2 attempts"
+  return 1
+}
+
+# Poll until the k3d API server answers (kubectl get nodes) or timeout.
+# Guards against the "cluster listed but API not up / context unattached" race
+# that silently breaks every subsequent kubectl call.
+waitK3dApiReady() {
+  : "${K3D_CLUSTER_NAME:=enablement}"
+  local timeout="${K3D_API_READY_TIMEOUT:-90}"
+  local waited=0
+  while (( waited < timeout )); do
+    if kubectl --context "k3d-${K3D_CLUSTER_NAME}" get nodes &>/dev/null; then
+      # Ensure it is also the CURRENT context so context-less kubectl calls work.
+      kubectl config use-context "k3d-${K3D_CLUSTER_NAME}" &>/dev/null
+      return 0
+    fi
+    sleep 3
+    waited=$(( waited + 3 ))
+  done
+  return 1
 }
 createK3sCluster() { createK3dCluster "$@"; }
 
@@ -884,8 +923,12 @@ attachK3dCluster(){
 
   if kubectl get nodes &>/dev/null; then
     printInfo "Connected to K3d cluster '$K3D_CLUSTER_NAME'"
+    return 0
   else
-    printWarn "Could not connect to K3d cluster '$K3D_CLUSTER_NAME'"
+    # Not fatal on its own — createK3dCluster's waitK3dApiReady gate will retry —
+    # but surface it as a non-zero so callers can react instead of proceeding blind.
+    printWarn "Could not connect to K3d cluster '$K3D_CLUSTER_NAME' yet"
+    return 1
   fi
 }
 attachK3sCluster() { attachK3dCluster "$@"; }
