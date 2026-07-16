@@ -18,6 +18,7 @@ The bizevent token is the remote-grail COE platform token, decrypted from
 """
 
 import argparse
+import os
 import json
 import random
 import subprocess
@@ -31,7 +32,8 @@ COE_APPS = "https://geu80787.apps.dynatrace.com"
 INGEST = f"{COE_APPS}/platform/classic/environment-api/v2/bizevents/ingest"
 TRAINING_ID = "kubernetes-101"
 TRAINING_TITLE = "Kubernetes 101"
-BOT_DOMAIN = "bootcamp.dev"
+BOT_DOMAIN = os.environ.get("BOT_DOMAIN", "bootcamp.dev")
+BOT_PREFIX = os.environ.get("BOT_PREFIX", "bot")
 STEP_COUNT = 4
 QUESTIONS = 5
 READY_TIMEOUT_S = 20 * 60
@@ -40,7 +42,7 @@ STATE_FILE = "/tmp/bootcamp_loadtest_state.json"
 
 
 def bot_email(i: int) -> str:
-    return f"bot{i:02d}@{BOT_DOMAIN}"
+    return f"{BOT_PREFIX}{i:02d}@{BOT_DOMAIN}"
 
 
 def http_json(url: str, payload=None, bearer: str | None = None, method=None):
