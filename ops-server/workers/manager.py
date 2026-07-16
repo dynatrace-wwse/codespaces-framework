@@ -24,6 +24,7 @@ from webhook.config import (
     DT_ENVIRONMENT,
     DT_OPERATOR_TOKEN,
     DT_INGEST_TOKEN,
+    DT_PLATFORM_TOKEN,
 )
 from telemetry.reporter import (
     report_test_result,
@@ -2164,6 +2165,10 @@ class WorkerManager:
         )
         if dt_oneagent:
             dt_lines += f"DT_ONEAGENT_TOKEN={dt_oneagent}\n"
+        # Platform token for the dtwiz suite + platform-token-native trainings
+        # (CoE / internal only; never written for a non-CoE tenant).
+        if is_coe and not dt_env and DT_PLATFORM_TOKEN:
+            dt_lines += f"DT_PLATFORM_TOKEN={DT_PLATFORM_TOKEN}\n"
 
         # Provision-time id wins (dashboard already derived + returned it to the
         # app); deriving from the user is the fallback for jobs enqueued elsewhere.
