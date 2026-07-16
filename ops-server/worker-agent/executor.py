@@ -45,6 +45,7 @@ from .config import (
     DT_OPERATOR_TOKEN,
     DT_INGEST_TOKEN,
     DT_LLM_TOKEN,
+    DT_PLATFORM_TOKEN,
     TEST_TIMEOUT,
     TEST_IMAGE,
     WORKER_ARCH,
@@ -850,6 +851,10 @@ def _write_env_file(
             "DT_INGEST_TOKEN":   DT_INGEST_TOKEN,
             "DT_LLM_TOKEN":      DT_LLM_TOKEN,
         }
+        # Platform token for the dtwiz suite + platform-token-native trainings
+        # (dtwiz uses DT_PLATFORM_TOKEN, not the classic operator/ingest pair).
+        if DT_PLATFORM_TOKEN:
+            resolved["DT_PLATFORM_TOKEN"] = DT_PLATFORM_TOKEN
     else:
         log.warning(
             "Daemon %s targets non-CoE tenant %s with no per-tenant tokens; writing "

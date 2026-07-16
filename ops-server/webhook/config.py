@@ -27,6 +27,8 @@ MAX_PARALLEL_AGENTS = int(os.environ.get("MAX_PARALLEL_AGENTS", "2"))
 DT_ENVIRONMENT = os.environ.get("DT_ENVIRONMENT", "")
 DT_OPERATOR_TOKEN = os.environ.get("DT_OPERATOR_TOKEN", "")
 DT_INGEST_TOKEN = os.environ.get("DT_INGEST_TOKEN", "")
+# Platform token (dt0s16) for the dtwiz suite + platform-token-native trainings.
+DT_PLATFORM_TOKEN = os.environ.get("DT_PLATFORM_TOKEN", "")
 
 # Codespaces tracker
 TRACKER_ENDPOINT = os.environ.get(

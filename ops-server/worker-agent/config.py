@@ -57,6 +57,8 @@ DT_ENVIRONMENT = os.environ.get("DT_ENVIRONMENT", "")
 DT_OPERATOR_TOKEN = os.environ.get("DT_OPERATOR_TOKEN", "")
 DT_INGEST_TOKEN = os.environ.get("DT_INGEST_TOKEN", "")
 DT_LLM_TOKEN = os.environ.get("DT_LLM_TOKEN", "")
+# Platform token (dt0s16) for the dtwiz suite + platform-token-native trainings.
+DT_PLATFORM_TOKEN = os.environ.get("DT_PLATFORM_TOKEN", "")
 
 # Timeouts
 TEST_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "900"))  # 15 min
