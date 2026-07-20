@@ -72,10 +72,13 @@
                     <select id="fleet-branch" class="fleet-branch-select">
                         <option value="">Select a branch…</option>
                     </select>
+                    <!-- No "Training" (daemon) here: a fleet-wide training spin
+                         (one daemon per repo) is never what you want and the
+                         endpoint only runs integration tests. Spin a single
+                         training from its Fleet row's "Training" action. -->
                     <select id="fleet-action" class="fleet-action-select">
                         <option value="integration-test">Integration test</option>
                         <option value="deploy-ghpages">Deploy GitHub Pages</option>
-                        <option value="daemon">Training</option>
                     </select>
                     <select id="fleet-arch" class="fleet-arch-select">
                         <option value="both">both arches</option>
