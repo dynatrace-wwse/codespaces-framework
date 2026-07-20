@@ -14,11 +14,11 @@ repos:
     repo: dynatrace-wwse/enablement-dtwiz-101
     status: active
     maintainer: "@shinojosa"
-    description: "DTWiz 101 — install Kubernetes, deploy the Dynatrace Operator, break things on purpose and troubleshoot them with Dynatrace. Generated with the Open Enablement CLI, hardened by hand."
-    tags: [kubernetes, dynatrace-app]
+    description: "DTWiz 101 — the dtwiz CLI, hands-on: install it, point it at a tenant, analyze + recommend, deploy an OpenTelemetry-instrumented demo app, and watch traces land in Grail. Platform-token-native; ~20 min with quizzes."
+    tags: [dtwiz, opentelemetry, dynatrace-app]
     title: "DTWiz 101"
-    primary_tag: kubernetes
-    duration: "1h"
+    primary_tag: dtwiz
+    duration: "20m"
 
   - name: enablement-kubernetes-opentelemetry
     repo: dynatrace-wwse/enablement-kubernetes-opentelemetry
