@@ -988,7 +988,8 @@ class WorkerManager:
         run_tag = job.get("nightly_run_id") or job.get("trigger") or "manual"
 
         livelog_key = f"job:livelog:{job_id}"
-        header = f"=== training-test for {repo} @ {ref or 'catalog branch'} ===\n"
+        header = (f"=== ACTION: training-test (end-to-end learner flow via the app path) ===\n"
+                  f"=== training-test for {repo} @ {ref or 'catalog branch'} ===\n")
         await self.pool.set(livelog_key, header, ex=7200)
 
         log_file = LOGS_DIR / f"{job_id}.log"
@@ -1061,7 +1062,8 @@ class WorkerManager:
             current = (await self.pool.get(livelog_key) or "")
             await self.pool.set(livelog_key, current + line + "\n", ex=7200)
 
-        header = f"=== deploy-ghpages for {repo} @ {branch} ===\n"
+        header = (f"=== ACTION: deploy-ghpages (publish training docs) ===\n"
+                  f"=== deploy-ghpages for {repo} @ {branch} ===\n")
         await self.pool.set(livelog_key, header, ex=7200)
 
         log_file   = LOGS_DIR / f"{job_id}.log"
@@ -1207,7 +1209,8 @@ class WorkerManager:
         prompt = self._build_agent_prompt(agent_type, job)
 
         livelog_key = f"job:livelog:{job_id}"
-        header = f"=== {agent_type} agent started for {repo} ===\n"
+        header = (f"=== ACTION: {agent_type} (Claude agent job) ===\n"
+                  f"=== {agent_type} agent started for {repo} ===\n")
         await self.pool.set(livelog_key, header, ex=7200)
 
         cmd = [
@@ -1505,6 +1508,7 @@ class WorkerManager:
 
         duration = int(time.time() - start_time)
         header = (
+            f"=== ACTION: {job.get('type', 'integration-test')} (devcontainer CI: postCreate + integration.sh) ===\n"
             f"=== JOB: {job_id} ===\n"
             f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: arm64 (master) ===\n"
             f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n"
@@ -1738,6 +1742,7 @@ class WorkerManager:
 
         duration = int(time.time() - start_time)
         log_header = (
+            f"=== ACTION: daemon (live training session environment) ===\n"
             f"=== JOB: {job_id} ===\n"
             f"=== REPO: {head_repo}@{ref} | TYPE: daemon ===\n"
             f"=== DURATION: {duration}s | EXIT: {rc} ===\n"
@@ -1797,7 +1802,7 @@ class WorkerManager:
         rc = proc.returncode or 0
         duration = int(time.time() - start)
 
-        full_log = f"=== framework-bats @ {ref} ===\n{output}"
+        full_log = f"=== ACTION: framework-test (bats unit suite) ===\n=== framework-bats @ {ref} ===\n{output}"
         log_file.write_text(full_log)
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1961,7 +1966,7 @@ class WorkerManager:
                 pass
 
         duration = int(time.time() - start_time)
-        full_log = f"=== framework-sysbox:{suite} @ {ref} ===\n" + "".join(sections)
+        full_log = f"=== ACTION: framework-test (suite {suite}) ===\n=== framework-sysbox:{suite} @ {ref} ===\n" + "".join(sections)
         log_file.write_text(self._mask_secrets(full_log))
         shutil.rmtree(work_dir, ignore_errors=True)
 

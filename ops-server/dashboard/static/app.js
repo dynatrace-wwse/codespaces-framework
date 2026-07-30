@@ -657,6 +657,7 @@ let currentJobId = null;
 let currentJobIsLive = false;
 let livelogAppTabsLoaded = false;
 let livelogPollCount = 0;
+let livelogMissCount = 0;
 // Most-recent rendered raw text (after ANSI processing). The search bar
 // re-highlights against this whenever the log refreshes or the query
 // changes, so search-state survives polling without losing position.
@@ -690,6 +691,7 @@ function openLiveLog(jobId, title, isAgent = false) {
     currentJobIsLive = false;
     livelogAppTabsLoaded = false;
     livelogPollCount = 0;
+    livelogMissCount = 0;
     currentSearchTerm = '';
     currentSearchIdx = -1;
     currentSearchTotal = 0;
@@ -733,7 +735,15 @@ function openLiveLog(jobId, title, isAgent = false) {
                     if (termBtn) termBtn.hidden = true;
                     if (shellBtn) shellBtn.hidden = true;
                 } else {
-                    // Both 404 — job is still in setup phase. Keep polling.
+                    // Both 404. For a genuinely-starting job keep polling a while,
+                    // but don't sit on "Initializing…" forever — after ~30 s of
+                    // double-404 the job either never ran (deferred/cancelled) or
+                    // its log expired. Say so instead of an eternal placeholder.
+                    livelogMissCount = (livelogMissCount || 0) + 1;
+                    if (livelogMissCount >= 15) {
+                        if (livelogPoll) { clearInterval(livelogPoll); livelogPoll = null; }
+                        pre.innerHTML = `<em style="color:var(--text-muted)">No log available for this job — it may never have started (deferred/cancelled), or its log has expired.</em>`;
+                    }
                     return;
                 }
             } else if (res.ok) {
@@ -867,6 +877,7 @@ function closeLiveLog() {
     currentJobIsLive = false;
     livelogAppTabsLoaded = false;
     livelogPollCount = 0;
+    livelogMissCount = 0;
 }
 
 async function terminateCurrentJob() {

@@ -684,14 +684,23 @@ async def api_repos():
 
 @app.get("/api/jobs/{job_id}/log")
 async def api_job_log(job_id: str):
-    """Plain-text log for a completed local worker job (7-day TTL)."""
+    """Plain-text log for a completed job. Redis (7-day TTL) first, then the
+    master's on-disk log file — master-run jobs stay readable forever even
+    after the Redis copy expires."""
     from fastapi.responses import PlainTextResponse
     content = await pool.get(f"job:log:{job_id}")
+    if content is None and re.fullmatch(r"[A-Za-z0-9._-]+", job_id):
+        path = Path("/home/ops/logs") / f"{job_id}.log"
+        try:
+            content = path.read_text(errors="replace")
+        except OSError:
+            content = None
     if content is None:
         return PlainTextResponse(
             f"No log found for job {job_id}.\n"
-            "Either the job hasn't finished, the 7-day TTL expired, "
-            "or the job ran on GitHub Actions (use the run URL instead).",
+            "Either the job never ran (deferred/cancelled), it ran on a worker "
+            "and its 7-day Redis copy expired, or it ran on GitHub Actions "
+            "(use the run URL instead).",
             status_code=404,
         )
     return PlainTextResponse(content)
@@ -2408,13 +2417,58 @@ async def _nightly_runs_map() -> dict[str, list]:
     return runs
 
 
+async def _latest_training_tests() -> tuple[list, dict]:
+    """Latest training-test per repo (nightly AND manual triggers) + per-repo
+    history. The Training tab shows the CURRENT state of every training —
+    superseded per-arch app-layer-test records are excluded (training-test is
+    always one amd64 session)."""
+    completed_raw = await pool.lrange("jobs:completed", -1500, -1)
+    latest: dict[str, dict] = {}
+    history: dict[str, list] = {}
+    for j in completed_raw:  # chronological — last wins
+        job = json.loads(j)
+        if job.get("type") != "training-test":
+            continue
+        repo = job.get("repo", "")
+        latest[repo] = job
+        result = job.get("result", {}) or {}
+        history.setdefault(repo, []).append({
+            "passed": bool(result.get("passed")),
+            "status": job.get("status", "completed"),
+            "finished_at": job.get("finished_at", ""),
+            "job_id": job.get("job_id", ""),
+            "run_id": job.get("nightly_run_id", ""),
+        })
+    return sorted(latest.values(), key=lambda j: j.get("repo", "")), history
+
+
 @app.get("/api/nightly/latest")
 async def api_nightly_latest():
-    """Latest nightly run results with per-repo build history for sparklines."""
+    """Latest nightly run results with per-repo build history for sparklines.
+    Training rows are the latest training-test per repo across nightly AND
+    manual triggers, so a manual rerun updates the board immediately."""
     runs = await _nightly_runs_map()
-    if not runs:
+    training_latest, training_history = await _latest_training_tests()
+    if not runs and not training_latest:
         return {"run_id": None, "results": []}
-    return _nightly_run_payload(runs, sorted(runs.keys())[-1])
+    payload = (_nightly_run_payload(runs, sorted(runs.keys())[-1])
+               if runs else {"run_id": None, "total": 0, "passed": 0, "failed": 0,
+                             "integration": {"total": 0, "passed": 0, "failed": 0},
+                             "results": []})
+    # Replace category-training rows (which would be the target nightly's
+    # app-layer/per-arch records) with the latest real training-tests.
+    results = [r for r in payload["results"] if r.get("category") != "training"]
+    for job in training_latest:
+        hist = [h for h in training_history.get(job.get("repo", ""), [])
+                if h["job_id"] != job.get("job_id", "")][-7:]
+        results.append({**job, "history": hist, "category": "training"})
+    payload["results"] = results
+    payload["training"] = {
+        "total": len(training_latest),
+        "passed": sum(1 for j in training_latest if j.get("result", {}).get("passed")),
+        "failed": sum(1 for j in training_latest if not j.get("result", {}).get("passed")),
+    }
+    return payload
 
 
 @app.post("/api/builds/trigger")

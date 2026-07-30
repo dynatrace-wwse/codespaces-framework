@@ -404,6 +404,7 @@ async def execute_integration_test(
     duration = int(time.time() - start_time)
     log_file.parent.mkdir(parents=True, exist_ok=True)
     header = (
+        f"=== ACTION: {job.get('type', 'integration-test')} (devcontainer CI: postCreate + integration.sh) ===\n"
         f"=== JOB: {job_id} ===\n"
         f"=== REPO: {head_repo}@{ref} (base: {repo}) | ARCH: {WORKER_ARCH} ===\n"
         f"=== DURATION: {duration}s | EXIT: {rc} | TIMED_OUT: {timed_out} ===\n"
@@ -667,6 +668,7 @@ async def execute_daemon(
     duration = int(time.time() - start_time)
     log_file.parent.mkdir(parents=True, exist_ok=True)
     header = (
+        f"=== ACTION: daemon (live training session environment) ===\n"
         f"=== DAEMON: {job_id} ===\n"
         f"=== REPO: {head_repo}@{ref} | ARCH: {WORKER_ARCH} ===\n"
         f"=== DURATION: {duration}s ===\n"
