@@ -2286,7 +2286,7 @@ class WorkerManager:
         dest.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://github.com/{repo}.git"
         proc = await asyncio.create_subprocess_exec(
-            "git", "clone", "--depth", "1", "--branch", ref, url, str(dest),
+            "git", "clone", "--depth", "1", "--no-single-branch", "--branch", ref, url, str(dest),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2294,7 +2294,7 @@ class WorkerManager:
         if proc.returncode != 0:
             log.warning("git clone --branch %s failed; retrying default branch", ref)
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth", "1", url, str(dest),
+                "git", "clone", "--depth", "1", "--no-single-branch", url, str(dest),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2475,7 +2475,7 @@ class WorkerManager:
         repo_dir.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://github.com/{repo}.git"
         proc = await asyncio.create_subprocess_exec(
-            "git", "clone", "--depth", "1", url, str(repo_dir),
+            "git", "clone", "--depth", "1", "--no-single-branch", url, str(repo_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
