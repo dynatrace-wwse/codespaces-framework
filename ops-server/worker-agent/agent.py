@@ -814,7 +814,7 @@ class WorkerAgent:
                 job["finished_at"] = datetime.now(timezone.utc).isoformat()
                 await self._publish_log(job)
                 await self.pool.rpush("jobs:completed", json.dumps(job))
-                await self.pool.ltrim("jobs:completed", -500, -1)
+                await self.pool.ltrim("jobs:completed", -1500, -1)
                 # Terminal record that OUTLIVES job:running so the Arena
                 # session-status endpoint can report failed/terminated/completed
                 # (drives the red banner + retained log). Mirrors workers/manager.py;

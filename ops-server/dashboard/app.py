@@ -522,7 +522,7 @@ async def api_repos():
     with open(repos_path) as f:
         data = yaml.safe_load(f)
 
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    completed_raw = await pool.lrange("jobs:completed", -1500, -1)
     local_matrix: dict[str, dict] = {}
     for raw in completed_raw:
         job = json.loads(raw)
@@ -658,6 +658,9 @@ async def api_repos():
             "builds": builds,
             "history": history_matrix.get(repo_full, {}),
             "latest_tag": _tag_str(release_map.get(repo_full)),
+            # App-delivered labs (repos.yaml tag `dynatrace-app`) can run the
+            # full e2e training test — gates the "Training test" fleet action.
+            "training_test": "dynatrace-app" in (r.get("tags") or []),
         })
 
     return {"repos": repos_out, "total": len(repos_out)}
@@ -1320,7 +1323,7 @@ async def api_queue_clear(request: Request, arch: str | None = None):
 async def api_rerun_job(job_id: str, request: Request):
     """Re-queue a completed job from history. Writer role required."""
     role = await _require_writer(request)
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    completed_raw = await pool.lrange("jobs:completed", -1500, -1)
     original = None
     for raw in completed_raw:
         try:
@@ -1682,10 +1685,10 @@ async def api_sync_run(request: Request):
 
 @app.get("/api/sync/history")
 async def api_sync_history(limit: int = 50):
-    """Past sync command runs. Sync jobs are rare and roll off the 500-cap jobs:completed
+    """Past sync command runs. Sync jobs are rare and roll off the 1500-cap jobs:completed
     list, so merge the dedicated sync:jobs:completed archive (cap 200; dedupe by job_id) —
     same pattern as Agentic History. Otherwise 'recent runs' looks empty."""
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    completed_raw = await pool.lrange("jobs:completed", -1500, -1)
     sync_raw = await pool.lrange("sync:jobs:completed", -200, -1)
     completed_raw = _merge_agent_history(completed_raw, sync_raw)
     rows = []
@@ -2241,9 +2244,9 @@ async def api_builds_history(
     Pass ``type=integration-test``, ``type=deploy-ghpages``, etc. to filter.
     ``repo`` is a substring match (case-insensitive) so the search bar works.
     """
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
+    completed_raw = await pool.lrange("jobs:completed", -1500, -1)
     # Merge the dedicated agent-job archive (agent jobs are rare and otherwise roll off
-    # the 500-cap jobs:completed list, leaving Agentic History empty). Dedupe by job_id.
+    # the 1500-cap jobs:completed list, leaving Agentic History empty). Dedupe by job_id.
     agent_raw = await pool.lrange("agent:jobs:completed", -300, -1)
     completed_raw = _merge_agent_history(completed_raw, agent_raw)
     rows = []
@@ -2315,62 +2318,87 @@ async def api_builds_history(
     }
 
 
-@app.get("/api/nightly/latest")
-async def api_nightly_latest():
-    """Latest nightly run results with per-repo build history for sparklines."""
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
-    nightly_jobs = []
-    for j in completed_raw:
-        job = json.loads(j)
-        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
-            nightly_jobs.append(job)
+# Job types shown on the Nightly tab. `integration-test` runs the devcontainer
+# CI (integration.sh); `training-test` (and its in-container predecessor
+# `app-layer-test`) replays the Enablement App learner flow — the UI groups the
+# latter two under the "training" category.
+NIGHTLY_TEST_TYPES = ("integration-test", "app-layer-test", "training-test")
 
-    if not nightly_jobs:
-        return {"run_id": None, "results": []}
 
-    # Group by run_id
-    runs: dict[str, list] = {}
-    for job in nightly_jobs:
-        rid = job["nightly_run_id"]
-        runs.setdefault(rid, []).append(job)
+def _nightly_category(job_type: str) -> str:
+    return "integration" if job_type == "integration-test" else "training"
 
-    latest_id = sorted(runs.keys())[-1]
-    latest = runs[latest_id]
 
-    # Build per-(repo, arch) history across all nightly runs (oldest→newest)
-    all_run_ids = sorted(runs.keys())
-    repo_arch_history: dict[str, list] = {}
-    for run_id in all_run_ids:
-        for job in runs[run_id]:
+def _nightly_history_key(job: dict) -> str:
+    """Sparkline grouping key. Category is part of the key so a repo's training
+    history never pollutes its integration history (same repo, same arch)."""
+    result = job.get("result", {}) or {}
+    arch = job.get("arch") or result.get("arch") or job.get("worker_arch") or "arm64"
+    return f"{job.get('repo', '')}|{arch}|{_nightly_category(job.get('type', ''))}"
+
+
+def _nightly_run_payload(runs: dict[str, list], target_id: str) -> dict:
+    """Shared shape for /api/nightly/latest and /api/nightly/run/{id}: results
+    for one run (each row tagged with its category) + per-key history built
+    across ALL runs, plus overall and per-category pass/fail counts."""
+    target_jobs = runs[target_id]
+
+    history: dict[str, list] = {}
+    for rid in sorted(runs.keys()):
+        for job in runs[rid]:
             result = job.get("result", {}) or {}
-            repo_k = job.get("repo", "")
-            arch_k = job.get("arch") or result.get("arch") or job.get("worker_arch") or "arm64"
-            key = f"{repo_k}|{arch_k}"
-            repo_arch_history.setdefault(key, []).append({
+            history.setdefault(_nightly_history_key(job), []).append({
                 "passed": bool(result.get("passed")),
                 "status": job.get("status", "completed"),
                 "finished_at": job.get("finished_at", ""),
                 "job_id": job.get("job_id", ""),
-                "run_id": run_id,
+                "run_id": rid,
             })
 
     results_out = []
-    for job in sorted(latest, key=lambda j: j.get("repo", "")):
-        result = job.get("result", {}) or {}
-        arch_k = job.get("arch") or result.get("arch") or job.get("worker_arch") or "arm64"
-        repo_k = job.get("repo", "")
-        key = f"{repo_k}|{arch_k}"
+    for job in sorted(target_jobs, key=lambda j: j.get("repo", "")):
         # History = previous nightly runs (exclude the current one), last 7
-        hist = [h for h in repo_arch_history.get(key, []) if h["run_id"] != latest_id][-7:]
-        results_out.append({**job, "history": hist})
+        hist = [h for h in history.get(_nightly_history_key(job), [])
+                if h["run_id"] != target_id][-7:]
+        results_out.append({**job, "history": hist,
+                            "category": _nightly_category(job.get("type", ""))})
 
+    def _counts(jobs: list) -> dict:
+        return {
+            "total": len(jobs),
+            "passed": sum(1 for j in jobs if j.get("result", {}).get("passed")),
+            "failed": sum(1 for j in jobs if not j.get("result", {}).get("passed")),
+        }
+
+    integration = [j for j in target_jobs if _nightly_category(j.get("type", "")) == "integration"]
+    training = [j for j in target_jobs if _nightly_category(j.get("type", "")) == "training"]
     return {
-        "run_id": latest_id,
-        "total": len(latest),
-        "passed": sum(1 for j in latest if j.get("result", {}).get("passed")),
-        "failed": sum(1 for j in latest if not j.get("result", {}).get("passed")),
+        "run_id": target_id,
+        **_counts(target_jobs),
+        "integration": _counts(integration),
+        "training": _counts(training),
         "results": results_out,
     }
+
+
+async def _nightly_runs_map() -> dict[str, list]:
+    """All nightly jobs from jobs:completed, grouped by nightly_run_id."""
+    completed_raw = await pool.lrange("jobs:completed", -1500, -1)
+    runs: dict[str, list] = {}
+    for j in completed_raw:
+        job = json.loads(j)
+        if job.get("type") in NIGHTLY_TEST_TYPES and job.get("nightly_run_id", "").startswith("nightly-"):
+            runs.setdefault(job["nightly_run_id"], []).append(job)
+    return runs
+
+
+@app.get("/api/nightly/latest")
+async def api_nightly_latest():
+    """Latest nightly run results with per-repo build history for sparklines."""
+    runs = await _nightly_runs_map()
+    if not runs:
+        return {"run_id": None, "results": []}
+    return _nightly_run_payload(runs, sorted(runs.keys())[-1])
 
 
 @app.post("/api/builds/trigger")
@@ -2390,11 +2418,32 @@ async def api_trigger_build(request: Request):
     requested_by = role["user"]
 
     job_type = body.get("type", "integration-test")
-    if job_type not in ("integration-test", "daemon", "app-layer-test"):
-        raise HTTPException(400, "type must be integration-test, daemon, or app-layer-test")
+    if job_type not in ("integration-test", "daemon", "app-layer-test", "training-test"):
+        raise HTTPException(400, "type must be integration-test, daemon, app-layer-test, or training-test")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    if job_type == "training-test":
+        # Full e2e training test: a master-side orchestrator provisions a real
+        # arena session (always amd64 — /api/arena/provision pins the arch) and
+        # drives every doc step through the exec API. One job, no per-arch fanout.
+        job = {
+            "type": "training-test",
+            "repo": repo,
+            "arch": "amd64",
+            "queue": "training",
+            "ref": ref,
+            "timestamp": timestamp,
+            "trigger": "dashboard",
+            "nightly_run_id": f"manual-{int(datetime.now(timezone.utc).timestamp())}",
+            "requested_by": requested_by,
+        }
+        await pool.rpush("queue:training", json.dumps(job))
+        return {"status": "queued", "repo": repo, "ref": ref, "type": job_type,
+                "requested_by": requested_by,
+                "jobs": [{"arch": "amd64", "queue": "queue:training"}]}
 
     arches = ["arm64", "amd64"] if arch == "both" else [arch]
-    timestamp = datetime.now(timezone.utc).isoformat()
     queued = []
     for a in arches:
         job = {
@@ -4845,79 +4894,31 @@ async def api_framework_runs(limit: int = 20):
 @app.get("/api/nightly/runs")
 async def api_nightly_runs():
     """List all nightly run IDs with pass/fail summaries (newest first)."""
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
-    runs: dict[str, dict] = {}
-    for j in completed_raw:
-        job = json.loads(j)
-        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
-            rid = job["nightly_run_id"]
-            r = job.get("result", {}) or {}
-            if rid not in runs:
-                runs[rid] = {"run_id": rid, "total": 0, "passed": 0, "failed": 0, "timestamp": job.get("timestamp", "")}
-            runs[rid]["total"] += 1
-            if r.get("passed"):
-                runs[rid]["passed"] += 1
-            else:
-                runs[rid]["failed"] += 1
-    sorted_runs = sorted(runs.values(), key=lambda x: x["run_id"], reverse=True)
-    return {"runs": sorted_runs}
+    all_runs = await _nightly_runs_map()
+    runs: list[dict] = []
+    for rid in sorted(all_runs.keys(), reverse=True):
+        jobs = all_runs[rid]
+        runs.append({
+            "run_id": rid,
+            "total": len(jobs),
+            "passed": sum(1 for j in jobs if (j.get("result") or {}).get("passed")),
+            "failed": sum(1 for j in jobs if not (j.get("result") or {}).get("passed")),
+            "timestamp": jobs[0].get("timestamp", ""),
+        })
+    return {"runs": runs}
 
 @app.get("/api/nightly/run/{run_id}")
 async def api_nightly_run(run_id: str):
     """Get nightly results for a specific run_id (or 'latest')."""
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
-    nightly_jobs = []
-    all_runs: dict[str, list] = {}
-    for j in completed_raw:
-        job = json.loads(j)
-        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
-            nightly_jobs.append(job)
-            all_runs.setdefault(job["nightly_run_id"], []).append(job)
-
+    all_runs = await _nightly_runs_map()
     if not all_runs:
         return {"run_id": None, "results": []}
 
-    if run_id == "latest":
-        target_id = sorted(all_runs.keys())[-1]
-    else:
-        target_id = run_id
-
-    target_jobs = all_runs.get(target_id, [])
-    if not target_jobs:
+    target_id = sorted(all_runs.keys())[-1] if run_id == "latest" else run_id
+    if not all_runs.get(target_id):
         raise HTTPException(404, f"No jobs found for nightly run {run_id}")
 
-    all_run_ids = sorted(all_runs.keys())
-    repo_arch_history: dict[str, list] = {}
-    for rid in all_run_ids:
-        for job in all_runs[rid]:
-            result = job.get("result", {}) or {}
-            repo_k = job.get("repo", "")
-            arch_k = job.get("arch") or result.get("arch") or "arm64"
-            key = f"{repo_k}|{arch_k}"
-            repo_arch_history.setdefault(key, []).append({
-                "passed": bool(result.get("passed")),
-                "status": job.get("status", "completed"),
-                "finished_at": job.get("finished_at", ""),
-                "job_id": job.get("job_id", ""),
-                "run_id": rid,
-            })
-
-    results_out = []
-    for job in sorted(target_jobs, key=lambda j: j.get("repo", "")):
-        result = job.get("result", {}) or {}
-        arch_k = job.get("arch") or result.get("arch") or "arm64"
-        repo_k = job.get("repo", "")
-        key = f"{repo_k}|{arch_k}"
-        hist = [h for h in repo_arch_history.get(key, []) if h["run_id"] != target_id][-7:]
-        results_out.append({**job, "history": hist})
-
-    return {
-        "run_id": target_id,
-        "total": len(target_jobs),
-        "passed": sum(1 for j in target_jobs if j.get("result", {}).get("passed")),
-        "failed": sum(1 for j in target_jobs if not j.get("result", {}).get("passed")),
-        "results": results_out,
-    }
+    return _nightly_run_payload(all_runs, target_id)
 
 
 @app.get("/api/nightly/run/{run_id}/summary")
@@ -4925,12 +4926,7 @@ async def api_nightly_run_summary(run_id: str):
     """Extract common error patterns from failed jobs in a nightly run."""
     import re as _re
 
-    completed_raw = await pool.lrange("jobs:completed", -500, -1)
-    all_runs: dict[str, list] = {}
-    for j in completed_raw:
-        job = json.loads(j)
-        if job.get("type") == "integration-test" and job.get("nightly_run_id", "").startswith("nightly-"):
-            all_runs.setdefault(job["nightly_run_id"], []).append(job)
+    all_runs = await _nightly_runs_map()
 
     if run_id == "latest":
         if not all_runs:
