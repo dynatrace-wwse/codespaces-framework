@@ -23,10 +23,12 @@ catch-all, same as /api/arena/*):
   GET/PUT /api/content/admin/profiles, /api/content/admin/tenant-map  (writer-gated)
 """
 
+import asyncio
 import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -222,19 +224,40 @@ async def _validate_repo(repo_full: str, branch: str = "main") -> dict:
         return {"valid": False, "reason": f"Validation error: {exc}"}
 
 
+# Latest-commit-sha cache: (owner, repo, branch) → (sha, fetched_at). The manifest
+# is called on every app boot (3×/boot today) by every tenant; without this each
+# call was 1 serial GitHub round-trip per profile source (~21 × 350ms ≈ 8s).
+# Content changes land on git push, so a short TTL only delays pickup by ≤60s.
+_SHA_CACHE: dict[tuple[str, str, str], tuple[str | None, float]] = {}
+_SHA_TTL = 60.0
+_SHA_NEG_TTL = 15.0  # failed lookups retry sooner
+
+
 async def _latest_sha(owner: str, repo: str, branch: str) -> str | None:
+    key = (owner, repo, branch)
+    cached = _SHA_CACHE.get(key)
+    if cached is not None:
+        sha, ts = cached
+        ttl = _SHA_TTL if sha is not None else _SHA_NEG_TTL
+        if time.monotonic() - ts < ttl:
+            return sha
     url = f"{GH_API}/repos/{owner}/{repo}/commits/{branch}?per_page=1"
     headers = {"Accept": "application/vnd.github+json"}
     if GH_TOKEN:
         headers["Authorization"] = f"Bearer {GH_TOKEN}"
+    sha = None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(url, headers=headers)
             if r.status_code == 200:
-                return r.json().get("sha")
+                sha = r.json().get("sha")
     except Exception as exc:
         log.warning("sha fetch failed %s/%s@%s: %s", owner, repo, branch, exc)
-    return None
+        # Keep serving the previous sha (if any) rather than flapping to None.
+        if cached is not None and cached[0] is not None:
+            return cached[0]
+    _SHA_CACHE[key] = (sha, time.monotonic())
+    return sha
 
 
 async def _build_sources(profile: dict) -> list[dict]:
@@ -248,21 +271,26 @@ async def _build_sources(profile: dict) -> list[dict]:
         s.get("repo", "").lower(): s.get("branch")
         for s in _load_sources() if s.get("repo") and s.get("branch")
     }
-    sources = []
+    entries = []
     for src in profile.get("sources", []):
         repo_full = src.get("repo", "")
         branch = managed_branch.get(repo_full.lower()) or src.get("branch", "main")
         owner, _, repo = repo_full.partition("/")
-        sha = await _latest_sha(owner, repo, branch) if owner and repo else None
-        sources.append({
-            "key": src.get("key"),
-            "category": src.get("category"),
-            "categoryLabel": src.get("categoryLabel"),
-            "repo": repo_full,
-            "branch": branch,
-            "version": sha,
-        })
-    return sources
+        entries.append((src, repo_full, branch, owner, repo))
+    # Fetch all shas concurrently — serial fetching cost ~350ms × N sources
+    # (≈8s for a 21-repo profile) on every manifest call.
+    shas = await asyncio.gather(*[
+        _latest_sha(owner, repo, branch) if owner and repo else asyncio.sleep(0)
+        for (_, _, branch, owner, repo) in entries
+    ])
+    return [{
+        "key": src.get("key"),
+        "category": src.get("category"),
+        "categoryLabel": src.get("categoryLabel"),
+        "repo": repo_full,
+        "branch": branch,
+        "version": sha,
+    } for (src, repo_full, branch, _, _), sha in zip(entries, shas)]
 
 
 @router.get("/manifest")
