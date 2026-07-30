@@ -44,6 +44,15 @@ log = logging.getLogger("ops-dashboard")
 
 app = FastAPI(title="Enablement Ops Dashboard", version="2.0.0")
 
+# OTel must wrap the app BEFORE it starts serving (middleware can't be added
+# later). Traces (FastAPI/Redis/httpx) + host gauges → COE; no OneAgent by design.
+try:
+    from dashboard.otel_setup import init_otel as _init_otel
+    _OTEL_ACTIVE = _init_otel(app, service_name="orbital-dashboard")
+except Exception as _exc:  # telemetry must never block operations
+    logging.getLogger("ops-dashboard").warning("OTel init failed (continuing without): %s", _exc)
+    _OTEL_ACTIVE = False
+
 # Content distribution service (multi-tenant content delivery, Phase 1):
 # serves curated profiles + proxies private-repo content with the Orbital
 # GitHub token, gated by a per-tenant X-Content-Key.
@@ -352,6 +361,13 @@ async def startup():
     global pool
     pool = redis.from_url(REDIS_URL, decode_responses=True)
     log.info("Dashboard connected to Redis")
+    # 5-min ops snapshot (tenants/trainings/workers/queues) → COE gauges + log line.
+    if _OTEL_ACTIVE:
+        try:
+            from dashboard import ops_snapshot
+            asyncio.get_running_loop().create_task(ops_snapshot.snapshot_loop(pool))
+        except Exception as exc:  # telemetry must never block operations
+            log.warning("ops snapshot start failed (continuing without): %s", exc)
 
 
 @app.on_event("shutdown")

@@ -23,6 +23,13 @@ log = logging.getLogger("ops-webhook")
 app = FastAPI(title="Enablement Ops Webhook", version="1.0.0")
 pool: redis.Redis | None = None
 
+# OTel traces → COE (must wrap the app before it starts serving).
+try:
+    from dashboard.otel_setup import init_otel as _init_otel
+    _init_otel(app, service_name="orbital-webhook")
+except Exception as _exc:  # telemetry must never block webhooks
+    log.warning("OTel init failed (continuing without): %s", _exc)
+
 
 @app.on_event("startup")
 async def startup():
