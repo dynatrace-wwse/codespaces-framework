@@ -3457,7 +3457,10 @@ _ARENA_REPOS = {
 }
 
 _ARENA_CATALOG_CACHE_KEY = "arena:catalog"
-_ARENA_CATALOG_TTL = 300  # 5 minutes
+# Titles/descriptions change only when a repo's mkdocs site_name changes — cache long.
+# The app calls this on EVERY boot of EVERY tenant; a cold rebuild used to be ~21
+# serial GitHub calls (~5.4s) on the boot critical path every 5 minutes.
+_ARENA_CATALOG_TTL = 3600  # 1 hour
 
 
 async def _fetch_arena_catalog() -> list[dict]:
@@ -3489,9 +3492,11 @@ async def _fetch_arena_catalog() -> list[dict]:
         except Exception:
             return repo, ""
 
+    # All repos concurrently — serial fetching put ~21 × ~250ms GitHub round-trips
+    # on the app-boot critical path whenever the cache was cold.
+    titles = await asyncio.gather(*[_get_mkdocs_title(repo) for repo in _ARENA_REPOS])
     trainings = []
-    for repo, meta in _ARENA_REPOS.items():
-        title, desc = await _get_mkdocs_title(repo)
+    for (repo, meta), (title, desc) in zip(_ARENA_REPOS.items(), titles):
         trainings.append({
             "id": meta["id"],
             "title": title,
