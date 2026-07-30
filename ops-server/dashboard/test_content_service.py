@@ -340,6 +340,7 @@ def test_pack_wanted_filter():
     assert cs._pack_wanted("docs/index.md")
     assert cs._pack_wanted("docs/sub/dir/page.md")
     assert cs._pack_wanted("assessments/scenario-k8s.json")
+    assert cs._pack_wanted(".assessment/quiz-1.json")
     assert not cs._pack_wanted("docs/img/pic.png")
     assert not cs._pack_wanted("README.md")
     assert not cs._pack_wanted("src/main.py")

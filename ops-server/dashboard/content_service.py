@@ -348,9 +348,14 @@ async def proxy_raw(
         raise HTTPException(404, "File not found.")
     if r.status_code >= 400:
         raise HTTPException(502, f"Upstream {r.status_code}.")
-    # Pass content through as-is (markdown / yaml / etc).
+    # Pass content through as-is (markdown / yaml / images / etc). A full-sha ref is
+    # immutable → let browsers cache lab images indefinitely (one fetch per student).
     from fastapi.responses import Response
-    return Response(content=r.content, media_type=r.headers.get("content-type", "text/plain"))
+    headers = {}
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return Response(content=r.content, media_type=r.headers.get("content-type", "text/plain"),
+                    headers=headers)
 
 
 # ── Content packs ───────────────────────────────────────────────────────────────
@@ -375,7 +380,8 @@ def _pack_wanted(path: str) -> bool:
         return True
     if path.startswith("docs/") and path.endswith(".md"):
         return True
-    if path.startswith("assessments/") and path.endswith(".json"):
+    # Lab-repo assessments live in `.assessment/`; standalone scenario repos use `assessments/`.
+    if path.startswith((".assessment/", "assessments/")) and path.endswith(".json"):
         return True
     return False
 
