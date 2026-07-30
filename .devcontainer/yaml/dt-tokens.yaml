@@ -13,6 +13,9 @@ tokens:
   - name_suffix: operator
     env_var: DT_OPERATOR_TOKEN
     scopes:
+      # .create is what the operator needs to ISSUE the ActiveGate its token —
+      # without it the AG pod never reaches Running (found by training-test).
+      - activeGateTokenManagement.create
       - activeGateTokenManagement.write
       - entities.read
       - settings.read
