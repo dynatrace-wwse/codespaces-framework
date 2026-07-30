@@ -58,6 +58,16 @@ class DTTokenProvisioner:
         oauth_client_secret: str = "",
     ):
         self.tenant_url = tenant_url.rstrip("/")
+        # The classic environment API (/api/v2/apiTokens) lives on the classic
+        # domain, not the apps domain — POSTing to *.apps.dynatrace.com returns
+        # 404 "request should go to *.live.dynatrace.com". Map gen3 URLs down;
+        # classic/live URLs pass through untouched.
+        self.classic_url = (
+            self.tenant_url
+            .replace(".apps.dynatrace.com", ".live.dynatrace.com")
+            .replace(".sprint.apps.dynatracelabs.com", ".sprint.dynatracelabs.com")
+            .replace(".dev.apps.dynatracelabs.com", ".dev.dynatracelabs.com")
+        )
         self._api_token = api_token
         self._oauth_client_id = oauth_client_id
         self._oauth_client_secret = oauth_client_secret
@@ -116,7 +126,7 @@ class DTTokenProvisioner:
         prefix = f"enbl-{repo_short}-{user_short}"
 
         headers = await self._auth_headers()
-        token_api = _TOKEN_API.format(tenant=self.tenant_url)
+        token_api = _TOKEN_API.format(tenant=self.classic_url)
 
         env: dict[str, str] = {}
         token_ids: list[str] = []
@@ -163,7 +173,7 @@ class DTTokenProvisioner:
         if not token_ids:
             return
         headers = await self._auth_headers()
-        token_api = _TOKEN_API.format(tenant=self.tenant_url)
+        token_api = _TOKEN_API.format(tenant=self.classic_url)
 
         async with httpx.AsyncClient(timeout=15) as client:
             for tid in token_ids:
