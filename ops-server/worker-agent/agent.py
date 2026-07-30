@@ -409,11 +409,18 @@ class WorkerAgent:
             except NotImplementedError:
                 pass
 
+        # Host metrics → COE (workers have no OneAgent by design; stdlib shipper).
+        try:
+            from metrics_shipper import metrics_loop
+        except ImportError:  # package-style import when run as a module
+            from .metrics_shipper import metrics_loop  # type: ignore
+
         await asyncio.gather(
             self._consume_queue(),
             self._heartbeat_loop(),
             self._terminate_listener(),
             self._terminate_reconciler(),
+            metrics_loop(WORKER_ID),
         )
 
     async def _terminate_listener(self):
