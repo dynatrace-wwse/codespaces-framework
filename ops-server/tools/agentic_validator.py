@@ -61,7 +61,7 @@ DOCS_BASE_URL = "https://dynatrace-wwse.github.io"
 
 PROVISION_TIMEOUT_S = 900   # 15 min max for cluster setup
 POLL_INTERVAL_S = 20
-EXEC_TIMEOUT_S = 120        # mirrors server-side timeout
+EXEC_TIMEOUT_S = 660        # covers the longest LAB_WAIT check budget (framework waitForPod: 60×10s)
 
 # trainingId → repo name mapping (mirrors _ARENA_REPOS in app.py)
 TRAINING_REPO_MAP: dict[str, str] = {
@@ -150,11 +150,18 @@ def wait_ready(session: requests.Session, job_id: str, timeout_s: int = PROVISIO
 
 
 def exec_command(session: requests.Session, job_id: str, command: str) -> dict[str, Any]:
-    """Run a non-interactive command inside the training container."""
+    """Run a non-interactive command inside the training container.
+
+    LAB_WAIT=1 switches the labs' check* verification helpers into their
+    bounded-retry mode: automation waits for the expected state (rollouts are
+    asynchronous), while learner clicks in the app — which never set LAB_WAIT —
+    get an instant answer.
+    """
     try:
         r = session.post(
             f"{ORBITAL_API}/api/arena/sessions/{job_id}/exec",
-            json={"command": command},
+            json={"command": f"export LAB_WAIT=1; {command}",
+                  "timeoutSeconds": EXEC_TIMEOUT_S},
             timeout=EXEC_TIMEOUT_S + 10,
         )
         if not r.ok:
