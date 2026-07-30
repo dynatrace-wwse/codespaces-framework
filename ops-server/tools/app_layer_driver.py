@@ -28,7 +28,8 @@ import sys
 # a minimal parser instead of importing yaml. Only the shapes these blocks use are
 # supported: top-level `key: scalar`, `key:`+`- list`, and one nested map (expect).
 
-BLOCK_RE = re.compile(r"<!--\s*(LAB_QUESTION|STEP_SETUP|LAB_SOLUTION)\s*(.*?)-->", re.S)
+# (?![A-Z]) so LAB_QUESTIONAIRE (assessment reference) never matches as LAB_QUESTION.
+BLOCK_RE = re.compile(r"<!--\s*(LAB_QUESTION|STEP_SETUP|LAB_SOLUTION)(?![A-Z])\s*(.*?)-->", re.S)
 
 
 def _unquote(s):
@@ -53,9 +54,12 @@ def parse_block(body):
         if not m or len(m.group(1)) > 0:   # only handle top-level keys here
             continue
         key, val = m.group(2), m.group(3).strip()
-        if val in ("|", ">", "|-", ">-"):   # block scalar (e.g. reveal) — consume + ignore
+        if val in ("|", ">", "|-", ">-"):   # block scalar (reveal, dql, …) — capture dedented
+            block = []
             while i < n and (lines[i].strip() == "" or lines[i].startswith((" ", "\t"))):
-                i += 1
+                block.append(lines[i]); i += 1
+            pad = min((len(l) - len(l.lstrip()) for l in block if l.strip()), default=0)
+            out[key] = "\n".join(l[pad:] if l.strip() else "" for l in block).strip("\n")
         elif val == "":                     # list or nested map
             children = []
             while i < n and (lines[i].strip() == "" or lines[i].startswith((" ", "\t"))):

@@ -249,6 +249,32 @@ def test_e2e_failure_still_terminates():
     assert any(p.endswith("/terminate") for _m, p in StubOrbital.log_requests)
 
 
+
+
+def test_parse_block_scalars_and_questionaire_exclusion():
+    """Regression: dql block scalars must be captured (were dropped -> false
+    'missing dql'), and LAB_QUESTIONAIRE must not match as LAB_QUESTION."""
+    from app_layer_driver import BLOCK_RE, parse_block
+    md = (
+        "<!-- LAB_QUESTION\n"
+        "type: dql-verification\n"
+        "question: \"q\"\n"
+        "buttonText: \"Check\"\n"
+        "dql: |\n"
+        "  fetch logs\n"
+        "  | filter contains(content, \"X\")\n"
+        "expect:\n"
+        "  operator: not-empty\n"
+        "-->\n"
+        "<!-- LAB_QUESTIONAIRE: k8s-101-fundamentals retake=false -->\n"
+    )
+    blocks = BLOCK_RE.findall(md)
+    assert len(blocks) == 1, blocks
+    doc = parse_block(blocks[0][1])
+    assert doc.get("dql", "").startswith("fetch logs"), doc
+    assert doc.get("expect", {}).get("operator") == "not-empty"
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted({k: v for k, v in globals().items()
