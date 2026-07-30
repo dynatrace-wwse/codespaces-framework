@@ -24,16 +24,19 @@ catch-all, same as /api/arena/*):
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
 import re
+import tarfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 
 log = logging.getLogger("ops-dashboard.content")
 
@@ -348,6 +351,156 @@ async def proxy_raw(
     # Pass content through as-is (markdown / yaml / etc).
     from fastapi.responses import Response
     return Response(content=r.content, media_type=r.headers.get("content-type", "text/plain"))
+
+
+# ── Content packs ───────────────────────────────────────────────────────────────
+# A pack is the text-file bundle a training import needs (mkdocs, devcontainer,
+# docs/**/*.md, assessments/**/*.json), built ONCE per commit sha from a single
+# GitHub tarball download and cached on disk. Tenants that import the same repo
+# hit the cache — the per-file GitHub round-trips (~15/repo, serial) disappear.
+# Images are NOT packed; they stay on the raw proxy / raw.githubusercontent.
+
+PACKS_DIR = Path(os.environ.get("CONTENT_PACKS_DIR", "/home/ops/content-packs"))
+PACK_FILE_MAX = 2 * 1024 * 1024      # skip single files larger than 2 MB
+PACK_TOTAL_MAX = 25 * 1024 * 1024    # abort packs larger than 25 MB of text
+PACK_KEEP_PER_REPO = 2               # GC: keep this many newest packs per repo
+
+_PACK_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _pack_wanted(path: str) -> bool:
+    """Files a training import reads. Keep in sync with the app's import-lab."""
+    if path in ("mkdocs.yml", "mkdocs.yaml", "enablement.yaml", "enablement.yml",
+                ".devcontainer/devcontainer.json"):
+        return True
+    if path.startswith("docs/") and path.endswith(".md"):
+        return True
+    if path.startswith("assessments/") and path.endswith(".json"):
+        return True
+    return False
+
+
+def _extract_pack_files(tarball: bytes) -> dict[str, str]:
+    """Extract wanted text files from a GitHub tarball. GitHub prefixes every
+    member with '{repo}-{sha}/', which we strip."""
+    files: dict[str, str] = {}
+    total = 0
+    with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as tar:
+        for member in tar:
+            if not member.isfile() or member.size > PACK_FILE_MAX:
+                continue
+            path = member.name.partition("/")[2]  # strip the tarball root dir
+            if not path or not _pack_wanted(path):
+                continue
+            total += member.size
+            if total > PACK_TOTAL_MAX:
+                raise HTTPException(502, "Pack too large.")
+            fh = tar.extractfile(member)
+            if fh is None:
+                continue
+            try:
+                files[path] = fh.read().decode("utf-8")
+            except UnicodeDecodeError:
+                log.warning("Pack: skipping non-utf8 file %s", path)
+    return files
+
+
+def _pack_path(owner: str, repo: str, sha: str) -> Path:
+    return PACKS_DIR / f"{owner}__{repo}__{sha}.json"
+
+
+def _pack_gc(owner: str, repo: str) -> None:
+    packs = sorted(PACKS_DIR.glob(f"{owner}__{repo}__*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in packs[PACK_KEEP_PER_REPO:]:
+        try:
+            old.unlink()
+        except OSError:  # pragma: no cover - defensive
+            pass
+
+
+async def _build_pack(owner: str, repo: str, sha: str) -> dict:
+    """Download the repo tarball at `sha` and build the pack dict. Cached on disk;
+    concurrent builders for the same key coalesce on an in-process lock."""
+    path = _pack_path(owner, repo, sha)
+    if path.is_file():
+        return json.loads(path.read_text())
+    lock = _PACK_LOCKS.setdefault(f"{owner}/{repo}@{sha}", asyncio.Lock())
+    async with lock:
+        if path.is_file():  # built while we waited
+            return json.loads(path.read_text())
+        headers = {"Accept": "application/vnd.github+json"}
+        if GH_TOKEN:
+            headers["Authorization"] = f"Bearer {GH_TOKEN}"
+        url = f"{GH_API}/repos/{owner}/{repo}/tarball/{sha}"
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                r = await client.get(url, headers=headers)
+        except Exception as exc:
+            raise HTTPException(502, f"Tarball fetch failed: {exc}")
+        if r.status_code == 404:
+            raise HTTPException(404, "Repo or ref not found.")
+        if r.status_code >= 400:
+            raise HTTPException(502, f"Tarball upstream {r.status_code}.")
+        pack = {
+            "repo": f"{owner}/{repo}",
+            "sha": sha,
+            "builtAt": datetime.now(timezone.utc).isoformat(),
+            "files": _extract_pack_files(r.content),
+        }
+        PACKS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(pack))
+        tmp.replace(path)  # atomic — readers never see a half-written pack
+        _pack_gc(owner, repo)
+        log.info("Pack built: %s/%s@%s (%d files)", owner, repo, sha[:12], len(pack["files"]))
+        return pack
+
+
+async def _resolve_pack_sha(owner: str, repo: str, ref: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        return ref
+    sha = await _latest_sha(owner, repo, ref)
+    if not sha:
+        raise HTTPException(404, f"Cannot resolve ref '{ref}'.")
+    return sha
+
+
+@router.get("/packs/{owner}/{repo}")
+async def get_pack(owner: str, repo: str, ref: str = "main", tenant: str | None = None):
+    """Return the import bundle for a repo at a ref (branch or full sha).
+    Tenant-domain gated + profile allowlist, like the raw proxy."""
+    classify_tenant(tenant)
+    repo_full = f"{owner}/{repo}".lower()
+    if repo_full not in _allowed_repos():
+        raise HTTPException(403, "Repository not in any profile.")
+    if not ref or ".." in ref or ref.startswith("/"):
+        raise HTTPException(400, "Invalid ref.")
+    sha = await _resolve_pack_sha(owner, repo, ref)
+    return await _build_pack(owner, repo, sha)
+
+
+@router.post("/packs/build")
+async def build_pack_internal(request: Request):
+    """Eager pack build, called by the webhook server on git push (localhost only).
+    Body: {"repo": "owner/repo", "branch": "main", "sha": "<head sha>"}."""
+    if request.client and request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(403, "Internal endpoint.")
+    body = await request.json()
+    repo_full = str(body.get("repo", "")).lower()
+    branch = str(body.get("branch") or "main")
+    sha = str(body.get("sha") or "")
+    owner, _, repo = repo_full.partition("/")
+    if not owner or not repo:
+        raise HTTPException(400, "Invalid repo.")
+    if repo_full not in _allowed_repos():
+        return {"status": "ignored", "reason": "repo not in any profile"}
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        sha = await _resolve_pack_sha(owner, repo, branch)
+    # Seed the sha cache so the next manifest reflects the push immediately.
+    _SHA_CACHE[(owner, repo, branch)] = (sha, time.monotonic())
+    pack = await _build_pack(owner, repo, sha)
+    return {"status": "built", "repo": repo_full, "sha": sha, "files": len(pack["files"])}
 
 
 # ── Profile management (writer-gated; org members only, via nginx X-Auth-User) ──

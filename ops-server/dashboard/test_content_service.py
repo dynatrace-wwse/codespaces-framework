@@ -320,6 +320,133 @@ def test_add_source_switches_branch_and_manifest_prefers_catalog():
             cs._latest_sha = orig_sha
 
 
+def _make_tarball(files: dict[str, str], root: str = "repo-abc123") -> bytes:
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(name=f"{root}/{path}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_pack_wanted_filter():
+    assert cs._pack_wanted("mkdocs.yml")
+    assert cs._pack_wanted("mkdocs.yaml")
+    assert cs._pack_wanted(".devcontainer/devcontainer.json")
+    assert cs._pack_wanted("docs/index.md")
+    assert cs._pack_wanted("docs/sub/dir/page.md")
+    assert cs._pack_wanted("assessments/scenario-k8s.json")
+    assert not cs._pack_wanted("docs/img/pic.png")
+    assert not cs._pack_wanted("README.md")
+    assert not cs._pack_wanted("src/main.py")
+    assert not cs._pack_wanted(".devcontainer/post-create.sh")
+
+
+def test_extract_pack_files_strips_root_and_filters():
+    tarball = _make_tarball({
+        "mkdocs.yml": "site_name: x",
+        "docs/index.md": "# hi",
+        "docs/img/pic.png": "binaryish",
+        "assessments/s1.json": "{}",
+        "README.md": "nope",
+    })
+    files = cs._extract_pack_files(tarball)
+    assert set(files) == {"mkdocs.yml", "docs/index.md", "assessments/s1.json"}
+    assert files["docs/index.md"] == "# hi"
+
+
+def test_build_pack_caches_on_disk_and_gc():
+    with tempfile.TemporaryDirectory() as d:
+        cs.PACKS_DIR = Path(d) / "packs"
+        calls = {"n": 0}
+
+        class _TarResp:
+            status_code = 200
+            content = _make_tarball({"mkdocs.yml": "site_name: x", "docs/a.md": "A"})
+
+        class _FakeClient:
+            def __init__(self, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, headers=None):
+                calls["n"] += 1
+                return _TarResp()
+
+        orig = cs.httpx.AsyncClient
+        cs.httpx.AsyncClient = _FakeClient
+        try:
+            sha1 = "a" * 40
+            p1 = asyncio.run(cs._build_pack("own", "repo", sha1))
+            assert p1["files"]["docs/a.md"] == "A" and p1["sha"] == sha1
+            assert calls["n"] == 1
+            # Second call = disk cache, no new fetch
+            p2 = asyncio.run(cs._build_pack("own", "repo", sha1))
+            assert p2["files"] == p1["files"] and calls["n"] == 1
+            # GC keeps only the newest PACK_KEEP_PER_REPO
+            for i in range(4):
+                asyncio.run(cs._build_pack("own", "repo", str(i) * 40))
+            left = list(cs.PACKS_DIR.glob("own__repo__*.json"))
+            assert len(left) == cs.PACK_KEEP_PER_REPO
+        finally:
+            cs.httpx.AsyncClient = orig
+
+
+def test_get_pack_gated_like_proxy():
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        # non-Dynatrace tenant → 403
+        _expect_http(403, cs.get_pack, "o", "r", ref="main", tenant="https://evil.example.com")
+        # not allowlisted → 403
+        _expect_http(403, cs.get_pack, "o", "r", ref="main",
+                     tenant="https://geu80787.apps.dynatrace.com")
+        # bad ref → 400
+        _expect_http(400, cs.get_pack, "dynatrace-wwse", "enablement-learning-bytes",
+                     ref="../evil", tenant="https://geu80787.apps.dynatrace.com")
+
+
+def test_resolve_pack_sha():
+    async def fake_sha(owner, repo, branch):
+        return "b" * 40 if branch == "main" else None
+    orig = cs._latest_sha; cs._latest_sha = fake_sha
+    try:
+        assert asyncio.run(cs._resolve_pack_sha("o", "r", "c" * 40)) == "c" * 40
+        assert asyncio.run(cs._resolve_pack_sha("o", "r", "main")) == "b" * 40
+        _expect_http(404, cs._resolve_pack_sha, "o", "r", "gone-branch")
+    finally:
+        cs._latest_sha = orig
+
+
+def test_latest_sha_cache():
+    calls = {"n": 0}
+
+    class _ShaResp:
+        status_code = 200
+        def json(self): return {"sha": "e" * 40}
+
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None):
+            calls["n"] += 1
+            return _ShaResp()
+
+    orig = cs.httpx.AsyncClient
+    cs.httpx.AsyncClient = _FakeClient
+    cs._SHA_CACHE.clear()
+    try:
+        assert asyncio.run(cs._latest_sha("o", "r", "main")) == "e" * 40
+        assert asyncio.run(cs._latest_sha("o", "r", "main")) == "e" * 40
+        assert calls["n"] == 1  # second call served from cache
+    finally:
+        cs.httpx.AsyncClient = orig
+        cs._SHA_CACHE.clear()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

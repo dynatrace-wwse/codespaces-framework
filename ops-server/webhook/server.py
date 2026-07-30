@@ -1,11 +1,13 @@
 """GitHub webhook listener — routes events to job queue."""
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 import redis.asyncio as redis
 
@@ -75,6 +77,14 @@ async def webhook(request: Request):
         await record_workflow_run(data, repo_full, delivery_id)
         return {"status": "recorded", "type": "workflow-run"}
 
+    # Pushes to content repos pre-build the training pack so the first tenant
+    # import after a content change never pays the tarball build. The dashboard
+    # ignores repos that are in no profile, so this is safe to fire for every push.
+    if event_type == "push":
+        branch = (data.get("ref") or "").removeprefix("refs/heads/")
+        asyncio.create_task(prebuild_content_pack(
+            repo_full, branch, data.get("after") or ""))
+
     jobs = route_event(event_type, action, data, repo_full, delivery_id)
 
     if jobs:
@@ -90,6 +100,21 @@ async def webhook(request: Request):
         return {"status": "queued", "jobs": queued}
 
     return {"status": "ignored", "event": f"{event_type}.{action}"}
+
+
+async def prebuild_content_pack(repo_full: str, branch: str, sha: str) -> None:
+    """Ask the dashboard (localhost) to build the content pack for a pushed repo.
+    Best-effort: content imports fall back to lazy builds if this fails."""
+    if not branch:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            r = await client.post("http://127.0.0.1:8080/api/content/packs/build",
+                                  json={"repo": repo_full, "branch": branch, "sha": sha})
+            log.info("Pack prebuild %s@%s: %s %s", repo_full, branch,
+                     r.status_code, r.text[:200])
+    except Exception as exc:
+        log.warning("Pack prebuild failed for %s@%s: %s", repo_full, branch, exc)
 
 
 async def record_workflow_run(data: dict, repo: str, delivery_id: str):
