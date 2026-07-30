@@ -242,7 +242,10 @@ def test_e2e_failure_still_terminates():
     out = proc.stdout
     assert "TRAINING_TEST: FAILURE" in out, out + proc.stderr
     assert proc.returncode == 1
-    assert "(held: neither)" in out
+    # Section-ordered engine: the failing check is reported inside its section
+    # and the section verdict line names it.
+    assert "[check] FAIL" in out, out
+    assert "-> SECTION FAIL" in out, out
     assert any(p.endswith("/terminate") for _m, p in StubOrbital.log_requests)
 
 

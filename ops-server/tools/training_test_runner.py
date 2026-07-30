@@ -11,19 +11,23 @@ outside in:
   3. wait for the environment to come up         (GET  /api/arena/sessions/{id})
   4. read the docs FROM the session (exec `cat docs/*.md`) so the steps tested
      always match the provisioned ref
-  5. drive every step like the app does:
+  5. walk the SECTIONS (docs/*.md, doc order) exactly as a learner does —
+     for each section, strictly in order:
+       quiz validation       -> every LAB_QUESTION block parses per importer rules
        STEP_SETUP            -> exec  interactive=true
-       shell-verification    -> exec  interactive=false            (baseline)
-       LAB_SOLUTION commands -> exec-start + exec-status polling   (the app's
-                                execLong path for long solution runs)
+       LAB_SOLUTION commands -> exec-start + exec-status polling, LAB_WAIT=1
+                                (the app's execLong path; BLOCKS until finished)
        LAB_SOLUTION verify   -> exec  interactive=true,  LAB_WAIT=1
-       shell-verification    -> exec  interactive=false, LAB_WAIT=1 (post-solve)
-     A check passes if it held at baseline OR post-solve (reproduce-then-fix
-     labs have gates that only hold before the fix).
-  6. validate every quiz block (multiple-choice / dql-verification /
-     instructor-code) the way the importer would — a broken quiz block means a
-     learner-visible broken step.
+       section checks        -> exec  interactive=false, LAB_WAIT=1
+     then a per-section PASS/FAIL before moving to the next section — a
+     failure names the exact section and step a learner would hit.
+  6. TRAINING VERDICT: one line per section in learner order.
   7. terminate the session                       (POST /api/arena/sessions/{id}/terminate)
+
+  Convention-driven: any training whose docs follow the framework grammar
+  (docs/*.md + STEP_SETUP / LAB_SOLUTION / LAB_QUESTION annotation blocks) is
+  testable with ZERO per-repo configuration. Golden example:
+  enablement-kubernetes-101.
 
 Prints TRAINING_TEST: SUCCESS|FAILURE and exits 0/1. All output is line-oriented
 so the worker can stream it to the dashboard livelog.
@@ -245,31 +249,6 @@ def doc_title(content):
             return s.lstrip("#").strip()[:80]
     return ""
 
-
-def run_checks(orbital, job_id, checks, phase, lab_wait, titles=None):
-    """Run every shell-verification once via the real exec API. Returns {idx: ok}."""
-    res = {}
-    cur = None
-    for idx, (fname, label, cmd, expect) in enumerate(checks):
-        if fname != cur:
-            cur = fname
-            t = (titles or {}).get(fname, "")
-            log(f"  -- section: {fname}{' — ' + t if t else ''} --")
-        command = with_wait(cmd) if lab_wait else cmd
-        timeout = WAIT_TIMEOUT_S if lab_wait else EXEC_TIMEOUT_S
-        r = orbital.exec(job_id, command, interactive=False, timeout_s=timeout)
-        ok = evaluate(r.get("stdout", ""), r.get("exitCode", -1), expect)
-        res[idx] = ok
-        log(f"  [{phase}] {'PASS' if ok else 'fail'}  [{fname}] {label} -> exit={r.get('exitCode')} "
-            f"expect={expect.get('operator')} {expect.get('value', '')}")
-        if not ok:
-            for ln in (r.get("stdout") or "").strip().splitlines()[-10:]:
-                log(f"        | {ln}")
-            if (r.get("stderr") or "").strip():
-                log(f"        | stderr: {r['stderr'].strip().splitlines()[-1][:200]}")
-    return res
-
-
 def wait_ready(orbital, job_id):
     """Poll session status AND stream the environment's own creation log inline
     ([env] prefix) — so a provisioning failure shows exactly which postCreate
@@ -395,84 +374,107 @@ def main():
         titles = {fname: doc_title(content) for fname, content in files}
         log(f"[4/7] docs: {len(files)} files -> {len(setups)} setup cmds, "
             f"{len(solutions)} solutions, {len(checks)} shell checks, {len(quizzes)} question blocks")
-        # The learner's path — every section (doc) in order with what we will
-        # exercise in it. A failure below names the exact section + step.
-        log("== SECTIONS (learner path) ==")
-        for i, (fname, _content) in enumerate(files, 1):
-            n_setup = sum(1 for f, _ in setups if f == fname)
-            n_checks = sum(1 for f, *_ in checks if f == fname)
-            n_sol = sum(1 for f, *_ in solutions if f == fname)
-            n_quiz = sum(1 for f, *_ in quizzes if f == fname)
-            log(f"  {i}. {fname}{' — ' + titles[fname] if titles.get(fname) else ''}"
-                f"  (setup:{n_setup} checks:{n_checks} solutions:{n_sol} quizzes:{n_quiz})")
-        if not checks and not solutions:
+        # The learner's path — sections (docs) strictly in doc order. Each
+        # section is exercised exactly as a learner walks it: setup -> solution
+        # (blocking, LAB_WAIT) -> solution verify -> the section's checks ->
+        # verdict. A failure names the section and the exact step. This is
+        # convention-driven (docs/*.md + STEP_SETUP / LAB_SOLUTION /
+        # LAB_QUESTION blocks — golden example: enablement-kubernetes-101);
+        # any training that follows the grammar is testable with zero config.
+        sections = []
+        for fname, text in files:
+            f_setups, f_solutions, f_checks, f_quizzes = extract_from_docs([(fname, text)])
+            sections.append({
+                "fname": fname,
+                "title": titles.get(fname, ""),
+                "setups": f_setups,
+                "solutions": f_solutions,
+                "checks": f_checks,
+                "quizzes": f_quizzes,
+            })
+        log("== LEARNER PATH ==")
+        for i, sec in enumerate(sections, 1):
+            log(f"  {i}. {sec['fname']}{' — ' + sec['title'] if sec['title'] else ''}"
+                f"  (setup:{len(sec['setups'])} solutions:{len(sec['solutions'])}"
+                f" checks:{len(sec['checks'])} quizzes:{len(sec['quizzes'])})")
+        if not any(sec["checks"] or sec["solutions"] for sec in sections):
             failures.append("no shell-verification checks and no solutions found — nothing to test")
 
-        # 5a. Quiz validation — every block a learner will click through.
-        bad_quiz = 0
-        for fname, qtype, _doc, problem in quizzes:
-            if problem:
-                bad_quiz += 1
-                log(f"  [quiz] BROKEN [{fname}] type={qtype}: {problem}")
-        log(f"[5/7] quizzes: {len(quizzes) - bad_quiz}/{len(quizzes)} blocks valid")
-        if bad_quiz:
-            failures.append(f"{bad_quiz} broken quiz block(s)")
+        # 5. Walk every section in order.
+        section_results = []
+        for i, sec in enumerate(sections, 1):
+            fname = sec["fname"]
+            sec_fail = []
+            t0 = time.time()
+            log("")
+            log(f"== SECTION {i}/{len(sections)}: {fname}"
+                f"{' — ' + sec['title'] if sec['title'] else ''} ==")
 
-        # 5b. STEP_SETUP — the actions the doc tells the learner to run.
-        log(f"== STEP_SETUP ({len(setups)}) ==")
-        _cur = None
-        for fname, c in setups:
-            if fname != _cur:
-                _cur = fname
-                log(f"  -- section: {fname}{' — ' + titles[fname] if titles.get(fname) else ''} --")
-            r = orbital.exec(job_id, c, interactive=True, timeout_s=SOLVE_TIMEOUT_S)
-            log(f"  [setup {fname}] exit={r.get('exitCode')}: {c}")
+            # Quiz blocks a learner would click through in this section.
+            for _f, qtype, _doc, problem in sec["quizzes"]:
+                if problem:
+                    sec_fail.append(f"broken quiz ({qtype}): {problem}")
+                    log(f"  [quiz] BROKEN type={qtype}: {problem}")
 
-        # 5c. Baseline checks — instant, no LAB_WAIT (exactly what a learner's
-        #     click does before the fix).
-        log(f"== shell-verification — baseline ({len(checks)}) ==")
-        baseline = run_checks(orbital, job_id, checks, "base", lab_wait=False, titles=titles) if checks else {}
-
-        # 6. Solutions through the app's execLong path, verify with LAB_WAIT.
-        log(f"== LAB_SOLUTION ({len(solutions)}) ==")
-        solve_fail = 0
-        _cur = None
-        for fname, cmds, ver in solutions:
-            if fname != _cur:
-                _cur = fname
-                log(f"  -- section: {fname}{' — ' + titles[fname] if titles.get(fname) else ''} --")
-            for c in cmds:
-                r = orbital.exec_long(job_id, with_wait(c), interactive=True, timeout_s=SOLVE_TIMEOUT_S)
-                log(f"  [solve {fname}] exit={r.get('exitCode')}: {c}")
-                if r.get("exitCode") != 0:
+            # STEP_SETUP — the actions the doc tells the learner to run first.
+            for _f, c in sec["setups"]:
+                r = orbital.exec(job_id, c, interactive=True, timeout_s=SOLVE_TIMEOUT_S)
+                ok = r.get("exitCode") == 0
+                log(f"  [setup] {'ok' if ok else 'FAIL'} exit={r.get('exitCode')}: {c}")
+                if not ok:
+                    sec_fail.append(f"setup failed: {c}")
                     for ln in (r.get("stdout") or "").strip().splitlines()[-8:]:
                         log(f"        | {ln}")
-            for v in ver:
-                r = orbital.exec(job_id, with_wait(v), interactive=True, timeout_s=WAIT_TIMEOUT_S)
-                ok = r.get("exitCode") == 0
-                solve_fail += 0 if ok else 1
-                log(f"  [verify {fname}] {'OK' if ok else 'FAIL'} exit={r.get('exitCode')}: {v}")
+
+            # LAB_SOLUTION — run it and BLOCK until done (LAB_WAIT), then its
+            # verify commands. Exactly the app's execLong path.
+            for _f, cmds, ver in sec["solutions"]:
+                for c in cmds:
+                    r = orbital.exec_long(job_id, with_wait(c), interactive=True, timeout_s=SOLVE_TIMEOUT_S)
+                    ok = r.get("exitCode") == 0
+                    log(f"  [solve] {'ok' if ok else 'FAIL'} exit={r.get('exitCode')}: {c}")
+                    if not ok:
+                        sec_fail.append(f"solution failed: {c}")
+                        for ln in (r.get("stdout") or "").strip().splitlines()[-8:]:
+                            log(f"        | {ln}")
+                for v in ver:
+                    r = orbital.exec(job_id, with_wait(v), interactive=True, timeout_s=WAIT_TIMEOUT_S)
+                    ok = r.get("exitCode") == 0
+                    log(f"  [solution-verify] {'OK' if ok else 'FAIL'} exit={r.get('exitCode')}: {v}")
+                    if not ok:
+                        sec_fail.append(f"solution verify failed: {v}")
+                        for ln in (r.get("stdout") or "").strip().splitlines()[-10:]:
+                            log(f"        | {ln}")
+
+            # The section's checks — after its solution finished, LAB_WAIT so
+            # slow rollouts settle. What a learner's check click must show.
+            for _f, label, cmd, expect in sec["checks"]:
+                r = orbital.exec(job_id, with_wait(cmd), interactive=False, timeout_s=WAIT_TIMEOUT_S)
+                ok = evaluate(r.get("stdout", ""), r.get("exitCode", -1), expect)
+                log(f"  [check] {'PASS' if ok else 'FAIL'} {label} -> exit={r.get('exitCode')}"
+                    f" expect={expect.get('operator')} {expect.get('value', '')}")
                 if not ok:
+                    sec_fail.append(f"check failed: {label}")
                     for ln in (r.get("stdout") or "").strip().splitlines()[-10:]:
                         log(f"        | {ln}")
-        if solve_fail:
-            failures.append(f"{solve_fail} solution verify failure(s)")
+                    if (r.get("stderr") or "").strip():
+                        log(f"        | stderr: {r['stderr'].strip().splitlines()[-1][:200]}")
 
-        # Post-solve checks — LAB_WAIT so we don't race the last rollout.
-        log(f"== shell-verification — post-solve ({len(checks)}) ==")
-        post = run_checks(orbital, job_id, checks, "post", lab_wait=True, titles=titles) if checks else {}
+            ok = not sec_fail
+            section_results.append((fname, sec["title"], ok, sec_fail, int(time.time() - t0)))
+            log(f"  -> SECTION {'PASS' if ok else 'FAIL'} ({int(time.time() - t0)}s)"
+                + ("" if ok else f" — {len(sec_fail)} problem(s)"))
+            if not ok:
+                failures.append(f"section {i} ({fname}): " + "; ".join(sec_fail[:3]))
 
-        # Verdict per check: held at baseline OR post-solve.
-        log(f"== verdict ({len(checks)} checks) ==")
-        passed = 0
-        for idx, (fname, label, _cmd, _exp) in enumerate(checks):
-            ok = baseline.get(idx, False) or post.get(idx, False)
-            passed += 1 if ok else 0
-            where = ("baseline" if baseline.get(idx) and not post.get(idx)
-                     else "post-solve" if post.get(idx) else "neither")
-            log(f"  {'PASS' if ok else 'FAIL'}  [{fname}] {label}  (held: {where})")
-        if passed != len(checks):
-            failures.append(f"{len(checks) - passed}/{len(checks)} checks failed in both phases")
+        # 6. Training verdict — one line per section, in learner order.
+        n_ok = sum(1 for _f, _t, ok, _e, _d in section_results if ok)
+        log("")
+        log(f"== TRAINING VERDICT ({n_ok}/{len(section_results)} sections passed) ==")
+        for i, (fname, title, ok, sec_fail, dur_s) in enumerate(section_results, 1):
+            log(f"  {i}. {'PASS' if ok else 'FAIL'}  {fname}"
+                f"{' — ' + title if title else ''}  ({dur_s}s)"
+                + ("" if ok else f"  [{'; '.join(sec_fail[:2])}]"))
 
     finally:
         # 7. Always release the environment — a leaked session burns a worker
