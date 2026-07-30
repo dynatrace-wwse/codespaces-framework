@@ -1612,6 +1612,17 @@ document.addEventListener('click', async e => {
 let syncCommandsCache = null;
 let activeSyncView = 'commands';
 
+// Nightly sub-tab switching (Training tests first — reuses the sync-tab styling)
+document.addEventListener('click', e => {
+    const ntab = e.target.closest('[data-nightly-view]');
+    if (!ntab) return;
+    const view = ntab.dataset.nightlyView;
+    document.querySelectorAll('[data-nightly-view]').forEach(t => t.classList.toggle('active', t === ntab));
+    document.querySelectorAll('.nightly-subview').forEach(sv => sv.hidden = true);
+    const target = document.getElementById(`nightly-view-${view}`);
+    if (target) target.hidden = false;
+});
+
 // Sub-tab switching
 document.addEventListener('click', e => {
     const stab = e.target.closest('.sync-tab');

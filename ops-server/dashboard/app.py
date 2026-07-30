@@ -3748,6 +3748,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
     provisioned_token_ids: list[str] = []
     token_provisioned = False
     mint_kind = ""  # "platform" when Orbital minted via the Account Management API (gen3)
+    mint_error = ""  # surfaced in the response so callers (training-test) can log WHY
 
     tenant_url = body.tenantUrl.rstrip("/") if body.tenantUrl else ""
     if body.dtEnv:
@@ -3771,6 +3772,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
             mint_kind = "platform"
         except Exception as exc:
             import logging as _log
+            mint_error = str(exc)[:300]
             _log.getLogger("ops-dashboard").warning(
                 "Platform-token provisioning failed for %s / %s: %s — falling back to worker creds",
                 repo_nwo, body.userId, exc)
@@ -3792,9 +3794,11 @@ async def api_arena_provision(body: ArenaProvisionRequest):
             dt_env = result.env
             provisioned_token_ids = result.token_ids
             token_provisioned = True
+            mint_kind = "classic"
         except Exception as exc:
             # Non-fatal: log and fall back to worker static creds
             import logging as _log
+            mint_error = str(exc)[:300]
             _log.getLogger("ops-dashboard").warning(
                 "Token provisioning failed for %s / %s: %s — falling back to worker creds",
                 repo_nwo, body.userId, exc,
@@ -3871,6 +3875,14 @@ async def api_arena_provision(body: ArenaProvisionRequest):
         "status":           "provisioning",
         "tokenProvisioned": token_provisioned,
         "dtSessionId":      dt_hostgroup,
+        # Mint story for callers that show the full flow (training-test log):
+        # token IDs + env-var names only — NEVER token values.
+        "mintKind": mint_kind or ("app" if body.dtEnv else "none"),
+        "mintDetail": [
+            {"envVar": k, "tokenId": tid}
+            for k, tid in zip([k for k in dt_env if k != "DT_ENVIRONMENT"], provisioned_token_ids)
+        ],
+        **({"mintError": mint_error} if mint_error else {}),
     }
 
 

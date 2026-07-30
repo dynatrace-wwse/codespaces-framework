@@ -105,6 +105,15 @@ class Orbital:
         _, body = self._req("GET", f"/api/arena/sessions/{job_id}")
         return body
 
+    def livelog(self, job_id):
+        """Raw text of the session's live provisioning log ('' when unavailable)."""
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{self.base}/api/jobs/{job_id}/livelog", timeout=15) as r:
+                return r.read().decode(errors="replace")
+        except Exception:
+            return ""
+
     def exec(self, job_id, command, interactive=False, timeout_s=EXEC_TIMEOUT_S):
         """Synchronous exec — the app's normal check path."""
         status, body = self._req(
@@ -228,10 +237,24 @@ def with_wait(cmd):
 
 # ── phases ──────────────────────────────────────────────────────────────────
 
-def run_checks(orbital, job_id, checks, phase, lab_wait):
+def doc_title(content):
+    """First markdown H1/H2 in a doc — the section name a learner sees."""
+    for ln in content.splitlines():
+        s = ln.strip()
+        if s.startswith("#"):
+            return s.lstrip("#").strip()[:80]
+    return ""
+
+
+def run_checks(orbital, job_id, checks, phase, lab_wait, titles=None):
     """Run every shell-verification once via the real exec API. Returns {idx: ok}."""
     res = {}
+    cur = None
     for idx, (fname, label, cmd, expect) in enumerate(checks):
+        if fname != cur:
+            cur = fname
+            t = (titles or {}).get(fname, "")
+            log(f"  -- section: {fname}{' — ' + t if t else ''} --")
         command = with_wait(cmd) if lab_wait else cmd
         timeout = WAIT_TIMEOUT_S if lab_wait else EXEC_TIMEOUT_S
         r = orbital.exec(job_id, command, interactive=False, timeout_s=timeout)
@@ -248,16 +271,34 @@ def run_checks(orbital, job_id, checks, phase, lab_wait):
 
 
 def wait_ready(orbital, job_id):
+    """Poll session status AND stream the environment's own creation log inline
+    ([env] prefix) — so a provisioning failure shows exactly which postCreate
+    step died, in the same log as the rest of the run."""
     deadline = time.time() + READY_TIMEOUT_S
     last = ""
+    seen = 0
+
+    def stream_env_log():
+        nonlocal seen
+        text = orbital.livelog(job_id)
+        if not text or len(text) <= seen:
+            return
+        for ln in text[seen:].splitlines():
+            ln = ln.strip()
+            if ln:
+                log(f"  [env] {ln}")
+        seen = len(text)
+
     while time.time() < deadline:
         st = orbital.session_status(job_id).get("status", "unknown")
         if st != last:
             log(f"  session {job_id}: {st}")
             last = st
+        stream_env_log()
         if st == "ready":
             return True
         if st in ("failed", "terminated", "expired"):
+            stream_env_log()
             log(f"ERROR: session entered terminal state '{st}' during provisioning")
             return False
         time.sleep(READY_POLL_S)
@@ -310,6 +351,17 @@ def main():
     log(f"[2/7] provisioned session {job_id} as {user_id}")
     log(f"      tenant={tenant or '(worker static creds)'} tokenMinted={minted} "
         f"dtSessionId={prov.get('dtSessionId', '')} expiresAt={prov.get('expiresAt', '')}")
+    # The mint story — names/ids only, never token values. This is the first
+    # thing that breaks when a tenant's credentials or scopes are wrong.
+    log(f"== TOKEN MINT (kind={prov.get('mintKind', 'unknown')}) ==")
+    for t in prov.get("mintDetail") or []:
+        log(f"  minted {t.get('envVar')} (tokenId={t.get('tokenId')})")
+    if prov.get("mintError"):
+        log(f"  MINT ERROR: {prov['mintError']}")
+    if minted and not prov.get("mintDetail"):
+        log("  (token values supplied by caller — nothing minted by Orbital)")
+    if not minted:
+        log("  no tokens minted — session will rely on worker static credentials")
     if os.environ.get("TRAINING_TEST_REQUIRE_MINT") == "1" and not minted:
         log("ERROR: TRAINING_TEST_REQUIRE_MINT=1 but no token was minted")
         if not args.keep_session:
@@ -340,8 +392,19 @@ def main():
             return 1
         files = split_doc_dump(dump.get("stdout", ""))
         setups, solutions, checks, quizzes = extract_from_docs(files)
+        titles = {fname: doc_title(content) for fname, content in files}
         log(f"[4/7] docs: {len(files)} files -> {len(setups)} setup cmds, "
             f"{len(solutions)} solutions, {len(checks)} shell checks, {len(quizzes)} question blocks")
+        # The learner's path — every section (doc) in order with what we will
+        # exercise in it. A failure below names the exact section + step.
+        log("== SECTIONS (learner path) ==")
+        for i, (fname, _content) in enumerate(files, 1):
+            n_setup = sum(1 for f, _ in setups if f == fname)
+            n_checks = sum(1 for f, *_ in checks if f == fname)
+            n_sol = sum(1 for f, *_ in solutions if f == fname)
+            n_quiz = sum(1 for f, *_ in quizzes if f == fname)
+            log(f"  {i}. {fname}{' — ' + titles[fname] if titles.get(fname) else ''}"
+                f"  (setup:{n_setup} checks:{n_checks} solutions:{n_sol} quizzes:{n_quiz})")
         if not checks and not solutions:
             failures.append("no shell-verification checks and no solutions found — nothing to test")
 
@@ -357,19 +420,27 @@ def main():
 
         # 5b. STEP_SETUP — the actions the doc tells the learner to run.
         log(f"== STEP_SETUP ({len(setups)}) ==")
+        _cur = None
         for fname, c in setups:
+            if fname != _cur:
+                _cur = fname
+                log(f"  -- section: {fname}{' — ' + titles[fname] if titles.get(fname) else ''} --")
             r = orbital.exec(job_id, c, interactive=True, timeout_s=SOLVE_TIMEOUT_S)
             log(f"  [setup {fname}] exit={r.get('exitCode')}: {c}")
 
         # 5c. Baseline checks — instant, no LAB_WAIT (exactly what a learner's
         #     click does before the fix).
         log(f"== shell-verification — baseline ({len(checks)}) ==")
-        baseline = run_checks(orbital, job_id, checks, "base", lab_wait=False) if checks else {}
+        baseline = run_checks(orbital, job_id, checks, "base", lab_wait=False, titles=titles) if checks else {}
 
         # 6. Solutions through the app's execLong path, verify with LAB_WAIT.
         log(f"== LAB_SOLUTION ({len(solutions)}) ==")
         solve_fail = 0
+        _cur = None
         for fname, cmds, ver in solutions:
+            if fname != _cur:
+                _cur = fname
+                log(f"  -- section: {fname}{' — ' + titles[fname] if titles.get(fname) else ''} --")
             for c in cmds:
                 r = orbital.exec_long(job_id, with_wait(c), interactive=True, timeout_s=SOLVE_TIMEOUT_S)
                 log(f"  [solve {fname}] exit={r.get('exitCode')}: {c}")
@@ -389,7 +460,7 @@ def main():
 
         # Post-solve checks — LAB_WAIT so we don't race the last rollout.
         log(f"== shell-verification — post-solve ({len(checks)}) ==")
-        post = run_checks(orbital, job_id, checks, "post", lab_wait=True) if checks else {}
+        post = run_checks(orbital, job_id, checks, "post", lab_wait=True, titles=titles) if checks else {}
 
         # Verdict per check: held at baseline OR post-solve.
         log(f"== verdict ({len(checks)} checks) ==")

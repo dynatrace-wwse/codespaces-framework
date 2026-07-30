@@ -598,42 +598,55 @@
                     <button class="btn btn-small" id="nightly-trigger-framework" data-action title="Trigger engine + app tests on AMD64">⚡ Framework Tests</button>
                 </div>
             </div>
-            <!-- Integration tests: devcontainer CI (postCreate + integration.sh) -->
-            <h3 class="nightly-section-title" style="margin:12px 0 6px;font-size:0.9rem;font-weight:600">Integration tests</h3>
-            <table id="nightly-table">
-                <thead>
-                    <tr>
-                        <th>Repository</th>
-                        <th>Arch</th>
-                        <th>Status</th>
-                        <th>History</th>
-                        <th>Duration</th>
-                        <th>Finished</th>
-                    </tr>
-                </thead>
-                <tbody id="nightly-body">
-                    <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
-                </tbody>
-            </table>
+            <!-- Sub-tabs (synchronizer-style). Training tests FIRST — they replay
+                 the full learner flow and matter more than container CI. -->
+            <nav class="sync-subnav" style="margin-top:12px">
+                <button class="sync-tab active" data-nightly-view="training">Training tests</button>
+                <button class="sync-tab" data-nightly-view="integration">Integration tests</button>
+            </nav>
+
             <!-- Training tests: full learner flow through the Enablement App path —
-                 provision arena session, drive every doc step via the exec API,
-                 solutions + quizzes, terminate. Log covers spin-up to verdict. -->
-            <h3 class="nightly-section-title" style="margin:20px 0 6px;font-size:0.9rem;font-weight:600">Training tests <span style="font-weight:400;color:var(--text-muted)">(end-to-end learner flow via the Enablement App path)</span></h3>
-            <table id="nightly-training-table">
-                <thead>
-                    <tr>
-                        <th>Repository</th>
-                        <th>Arch</th>
-                        <th>Status</th>
-                        <th>History</th>
-                        <th>Duration</th>
-                        <th>Finished</th>
-                    </tr>
-                </thead>
-                <tbody id="nightly-training-body">
-                    <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
-                </tbody>
-            </table>
+                 token mint, provision arena session (creation log streamed inline),
+                 drive every doc section/step via the exec API, solutions + quizzes,
+                 terminate. One log covers mint → spin-up → steps → verdict. -->
+            <div id="nightly-view-training" class="nightly-subview">
+                <h3 class="nightly-section-title" style="margin:12px 0 6px;font-size:0.9rem;font-weight:600">Training tests <span style="font-weight:400;color:var(--text-muted)">(end-to-end learner flow via the Enablement App path)</span></h3>
+                <table id="nightly-training-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>Arch</th>
+                            <th>Status</th>
+                            <th>History</th>
+                            <th>Duration</th>
+                            <th>Finished</th>
+                        </tr>
+                    </thead>
+                    <tbody id="nightly-training-body">
+                        <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Integration tests: devcontainer CI (postCreate + integration.sh) -->
+            <div id="nightly-view-integration" class="nightly-subview" hidden>
+                <h3 class="nightly-section-title" style="margin:12px 0 6px;font-size:0.9rem;font-weight:600">Integration tests</h3>
+                <table id="nightly-table">
+                    <thead>
+                        <tr>
+                            <th>Repository</th>
+                            <th>Arch</th>
+                            <th>Status</th>
+                            <th>History</th>
+                            <th>Duration</th>
+                            <th>Finished</th>
+                        </tr>
+                    </thead>
+                    <tbody id="nightly-body">
+                        <tr><td colspan="6" class="loading">Loading nightly results…</td></tr>
+                    </tbody>
+                </table>
+            </div>
             <!-- Nightly common-error summary (shown only when failures exist) -->
             <div id="nightly-errors-panel" hidden style="margin-top:16px">
                 <h3 style="margin:0 0 8px;font-size:0.9rem;font-weight:600">Common failure patterns</h3>
