@@ -223,6 +223,7 @@ async function loadFleet() {
                 <select class="action-select" id="action-${safeRepo}"
                         onchange="onRowActionChange('${safeRepo}')">
                     <option value="integration-test">Integration test</option>
+                    ${repo.training_test ? '<option value="training-test">Training test</option>' : ''}
                     <option value="deploy-ghpages">Deploy pages</option>
                     <option value="daemon">Training</option>
                 </select>
@@ -511,7 +512,9 @@ function renderBuildSpark(history) {
 function onRowActionChange(safeRepo) {
     const action  = document.getElementById(`action-${safeRepo}`)?.value || 'integration-test';
     const archSel = document.getElementById(`arch-${safeRepo}`);
-    if (archSel) archSel.hidden = action === 'deploy-ghpages';
+    // deploy-ghpages is arch-less; training-test always runs its arena session
+    // on amd64 (pinned by /api/arena/provision) — hide the selector for both.
+    if (archSel) archSel.hidden = action === 'deploy-ghpages' || action === 'training-test';
 }
 
 async function triggerBuildFromRow(repo, safeRepo, btn) {
@@ -1089,10 +1092,14 @@ async function loadNightly(runId) {
         return;
     }
 
+    const integ = data.integration || { total: data.total, passed: data.passed, failed: data.failed };
+    const train = data.training || { total: 0, passed: 0, failed: 0 };
     summary.innerHTML = `
         <div class="stat"><div class="value">${data.total}</div><div class="label">Total</div></div>
         <div class="stat"><div class="value" style="color:var(--green)">${data.passed}</div><div class="label">Passed</div></div>
         <div class="stat"><div class="value" style="color:var(--red)">${data.failed}</div><div class="label">Failed</div></div>
+        <div class="stat"><div class="value">${integ.passed}/${integ.total}</div><div class="label">Integration</div></div>
+        <div class="stat"><div class="value">${train.passed}/${train.total}</div><div class="label">Training</div></div>
         <div style="flex:1"></div>
         <div style="color:var(--text-muted);font-size:0.8rem">${data.run_id}</div>
     `;
@@ -1125,14 +1132,9 @@ function applyNightlyFilter() {
             return true;
         });
 
-    const tbody = document.getElementById('nightly-body');
-    if (!filtered.length) {
-        tbody.innerHTML = `<tr><td colspan="6" class="loading">No results match filter</td></tr>`;
-        return;
-    }
-    tbody.innerHTML = filtered.map(job => {
+    const nightlyRow = job => {
         const r = job.result || {};
-        const arch = r.arch || job.worker_arch || '?';
+        const arch = job.arch || r.arch || job.worker_arch || '?';
         const isTerminated = job.status === 'terminated';
         const cls = isTerminated ? 'status-terminated' : (r.passed ? 'status-pass' : 'status-fail');
         const label = isTerminated ? 'TERM' : (r.passed ? 'PASS' : 'FAIL');
@@ -1149,7 +1151,26 @@ function applyNightlyFilter() {
             <td>${r.duration_seconds || 0}s</td>
             <td>${formatTime(job.finished_at)}</td>
         </tr>`;
-    }).join('');
+    };
+
+    // Two sections: integration (devcontainer CI) vs training (full learner
+    // flow via the arena/exec API). Server tags each row with `category`;
+    // fall back on type for records that predate the split.
+    const isTraining = j => (j.category || (j.type === 'integration-test' ? 'integration' : 'training')) === 'training';
+    const integration = filtered.filter(j => !isTraining(j));
+    const training = filtered.filter(isTraining);
+
+    const tbody = document.getElementById('nightly-body');
+    tbody.innerHTML = integration.length
+        ? integration.map(nightlyRow).join('')
+        : `<tr><td colspan="6" class="loading">No integration results match filter</td></tr>`;
+
+    const trainingBody = document.getElementById('nightly-training-body');
+    if (trainingBody) {
+        trainingBody.innerHTML = training.length
+            ? training.map(nightlyRow).join('')
+            : `<tr><td colspan="6" class="loading">No training-test results match filter</td></tr>`;
+    }
 }
 
 async function loadNightlyErrorSummary(runId) {

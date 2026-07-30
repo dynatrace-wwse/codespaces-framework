@@ -35,7 +35,7 @@ remote SSH worker.
 **Redis key space (important ones):**
 - `queue:test:{arch}` — FIFO job queue per arch
 - `job:running:{job_id}` — hash: repo, branch, arch, started_at, worker_id, user, tenant, tenant_user, type
-- `jobs:completed` — list (capped 500; long history via Grail) of JSON job records
+- `jobs:completed` — list (capped 1500; long history via Grail) of JSON job records
 - `worker:{worker_id}` — hash: arch, capacity, active_jobs, host, ssh_host
 - `job:log:{job_id}` — raw log text, 7-day TTL
 - `shell:token:{token}` — single-use WebSocket auth token, 60-second TTL

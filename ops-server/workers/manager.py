@@ -8,6 +8,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,10 +70,10 @@ def _docker_rm_removed(returncode, stderr_text):
 
 
 # Claude-Code agent job types — archived to a dedicated list so Agentic History
-# isn't crowded out of the 500-cap jobs:completed list by integration/framework runs.
+# isn't crowded out of the 1500-cap jobs:completed list by integration/framework runs.
 AGENT_JOB_TYPES = {"fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab",
                    "validate-after-push", "deploy-ghpages"}
-# Sync-command jobs are likewise rare and roll off the 500-cap jobs:completed list,
+# Sync-command jobs are likewise rare and roll off the 1500-cap jobs:completed list,
 # leaving the Synchronizer "recent runs" empty — keep a dedicated list (cap 200).
 SYNC_JOB_TYPES = {"sync-command"}
 
@@ -147,6 +148,10 @@ class WorkerManager:
         self.pool: redis.Redis | None = None
         self.test_semaphore = asyncio.Semaphore(MAX_PARALLEL_WORKERS)
         self.agent_semaphore = asyncio.Semaphore(MAX_PARALLEL_AGENTS)
+        # training-test orchestrators are light on the master (the heavy arena
+        # session lands on the amd64 worker via /api/arena/provision), but each
+        # one holds a worker Sysbox slot downstream — cap concurrency.
+        self.training_semaphore = asyncio.Semaphore(2)
         self.active_jobs: dict[str, dict] = {}
         # Job IDs whose owners have requested termination. The job's finally
         # block consults this set to mark status='terminated' instead of 'failed'.
@@ -182,6 +187,9 @@ class WorkerManager:
             self._consume_queue("sync", self.agent_semaphore),
             # Local ARM worker consumes arch-specific queue
             self._consume_queue("test:arm64", self.test_semaphore),
+            # Training tests (full e2e through the arena API) — master-side
+            # orchestrator; the session container itself runs on amd64.
+            self._consume_queue("training", self.training_semaphore),
             # Legacy queue for backwards compatibility
             self._consume_queue("test", self.test_semaphore),
             self._terminate_listener(),
@@ -547,7 +555,7 @@ class WorkerManager:
                 "finished_at":  datetime.now(timezone.utc).isoformat(),
             }
             await self.pool.rpush("jobs:completed", json.dumps(record))
-            await self.pool.ltrim("jobs:completed", -500, -1)
+            await self.pool.ltrim("jobs:completed", -1500, -1)
         except Exception as e:
             log.warning("Could not write codespace history for %s: %s", job_id, e)
 
@@ -749,6 +757,22 @@ class WorkerManager:
                     "type":       "framework-test",
                 })
                 await self.pool.expire(running_key, 3600)
+            elif job.get("type") == "training-test":
+                # Full e2e training test — orchestrates a real arena session via
+                # the dashboard API. No lock: each run provisions its own session
+                # under a unique user, so concurrent runs never share state.
+                running_key = f"job:running:{job_id}"
+                await self.pool.hset(running_key, mapping={
+                    "job_id":     job_id,
+                    "repo":       job["repo"],
+                    "branch":     _branch_of(job),
+                    "arch":       "amd64",
+                    "ref":        _branch_of(job),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "worker_id":  "master",
+                    "type":       "training-test",
+                })
+                await self.pool.expire(running_key, LOCK_TTL_SECONDS)
             elif job.get("type") in ("fix-ci", "fix-issue", "review-pr", "migrate-gen3", "scaffold-lab", "deploy-ghpages"):
                 running_key = f"job:running:{job_id}"
                 _running_fields = {
@@ -804,8 +828,8 @@ class WorkerManager:
                 await self._publish_log(job)
                 _rec = json.dumps(job)
                 await self.pool.rpush("jobs:completed", _rec)
-                await self.pool.ltrim("jobs:completed", -500, -1)
-                # Agent jobs are rare but get crowded out of the 500-cap jobs:completed
+                await self.pool.ltrim("jobs:completed", -1500, -1)
+                # Agent jobs are rare but get crowded out of the 1500-cap jobs:completed
                 # list by integration/framework runs — so Agentic History looked empty.
                 # Keep a dedicated list (cap 300) so it survives.
                 if job.get("type") in AGENT_JOB_TYPES:
@@ -933,6 +957,9 @@ class WorkerManager:
             # app-layer driver (shell-verification + LAB_SOLUTION via the exec path).
             return await self._run_integration_test(job)
 
+        elif job_type == "training-test":
+            return await self._run_training_test(job)
+
         elif job_type == "daemon":
             return await self._run_daemon(job)
 
@@ -945,6 +972,70 @@ class WorkerManager:
         else:
             log.warning("Unknown job type: %s", job_type)
             return {"error": f"Unknown job type: {job_type}"}
+
+    async def _run_training_test(self, job: dict) -> dict:
+        """Full-fidelity e2e training test (tools/training_test_runner.py).
+
+        The runner talks to the dashboard's own arena API: provision (token
+        minting + daemon on amd64) → wait ready → drive every doc step through
+        /exec and /exec-start exactly like the Enablement App → validate quizzes
+        → terminate. We just stream its stdout to the livelog and record the
+        verdict; the heavy lifting happens in the session on the AMD worker.
+        """
+        repo = job["repo"]
+        job_id = job["job_id"]
+        ref = job.get("ref") or job.get("branch") or ""
+        run_tag = job.get("nightly_run_id") or job.get("trigger") or "manual"
+
+        livelog_key = f"job:livelog:{job_id}"
+        header = f"=== training-test for {repo} @ {ref or 'catalog branch'} ===\n"
+        await self.pool.set(livelog_key, header, ex=7200)
+
+        log_file = LOGS_DIR / f"{job_id}.log"
+        start_time = time.time()
+
+        runner = Path(__file__).resolve().parent.parent / "tools" / "training_test_runner.py"
+        cmd = [sys.executable, "-u", str(runner), "--repo", repo, "--run-tag", run_tag]
+        if ref:
+            cmd += ["--ref", ref]
+
+        env = dict(os.environ)
+        # Talk to the local dashboard directly — no nginx/oauth2-proxy hop.
+        env.setdefault("ORBITAL_API", "http://127.0.0.1:8080")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+
+        # Provisioning alone can take ~15 min; full k8s labs with operator
+        # deploys run ~30-45 min through the exec API. Hard cap at 90 min.
+        timeout_s = int(os.environ.get("TRAINING_TEST_TIMEOUT_S", "5400"))
+        timed_out = False
+        try:
+            output = await self._stream_to_redis(proc, livelog_key, timeout_s)
+        except asyncio.TimeoutError:
+            timed_out = True
+            output = f"(training-test timed out after {timeout_s}s — killing runner)"
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
+
+        log_file.write_text(self._mask_secrets(header + output + "\n"))
+        passed = (not timed_out) and proc.returncode == 0 \
+            and "TRAINING_TEST: SUCCESS" in output
+        return {
+            "job_type":         "training-test",
+            "exit_code":        proc.returncode if not timed_out else -1,
+            "duration_seconds": int(time.time() - start_time),
+            "passed":           passed,
+            "arch":             "amd64",
+            "log_file":         str(log_file),
+        }
 
     async def _run_deploy_ghpages(self, job: dict) -> dict:
         """Trigger deploy-ghpages.yaml via workflow_dispatch and stream progress.
