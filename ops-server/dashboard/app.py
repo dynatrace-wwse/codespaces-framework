@@ -3457,6 +3457,7 @@ _ARENA_REPOS = {
 }
 
 _ARENA_CATALOG_CACHE_KEY = "arena:catalog"
+_ARENA_BUILD_LOCK = asyncio.Lock()
 # Titles/descriptions change only when a repo's mkdocs site_name changes — cache long.
 # The app calls this on EVERY boot of EVERY tenant; a cold rebuild used to be ~21
 # serial GitHub calls (~5.4s) on the boot critical path every 5 minutes.
@@ -3539,11 +3540,17 @@ async def api_arena_trainings(tenant: str = ""):
     When `tenant` is given, the list is filtered to that tenant's content profile
     (so e.g. a 'core' tenant only sees the hands-on trainings in 'core')."""
     cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
-    if cached:
-        trainings = json.loads(cached)
-    else:
-        trainings = await _fetch_arena_catalog()
-        await pool.set(_ARENA_CATALOG_CACHE_KEY, json.dumps(trainings), ex=_ARENA_CATALOG_TTL)
+    if not cached:
+        # Single-flight: without this, N concurrent cache-misses (e.g. an install
+        # storm right after the TTL lapses) each ran the full GitHub scrape in
+        # parallel — observed 5× concurrent 3s rebuilds in load testing.
+        async with _ARENA_BUILD_LOCK:
+            cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
+            if not cached:
+                trainings = await _fetch_arena_catalog()
+                await pool.set(_ARENA_CATALOG_CACHE_KEY, json.dumps(trainings), ex=_ARENA_CATALOG_TTL)
+                cached = json.dumps(trainings)
+    trainings = json.loads(cached)
     if tenant:
         trainings = _filter_trainings_by_profile(trainings, tenant)
     return trainings

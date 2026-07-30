@@ -234,33 +234,49 @@ async def _validate_repo(repo_full: str, branch: str = "main") -> dict:
 _SHA_CACHE: dict[tuple[str, str, str], tuple[str | None, float]] = {}
 _SHA_TTL = 60.0
 _SHA_NEG_TTL = 15.0  # failed lookups retry sooner
+_SHA_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+
+
+def _sha_fresh(cached: tuple[str | None, float] | None) -> bool:
+    if cached is None:
+        return False
+    sha, ts = cached
+    return time.monotonic() - ts < (_SHA_TTL if sha is not None else _SHA_NEG_TTL)
 
 
 async def _latest_sha(owner: str, repo: str, branch: str) -> str | None:
     key = (owner, repo, branch)
     cached = _SHA_CACHE.get(key)
-    if cached is not None:
-        sha, ts = cached
-        ttl = _SHA_TTL if sha is not None else _SHA_NEG_TTL
-        if time.monotonic() - ts < ttl:
-            return sha
-    url = f"{GH_API}/repos/{owner}/{repo}/commits/{branch}?per_page=1"
-    headers = {"Accept": "application/vnd.github+json"}
-    if GH_TOKEN:
-        headers["Authorization"] = f"Bearer {GH_TOKEN}"
-    sha = None
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url, headers=headers)
-            if r.status_code == 200:
-                sha = r.json().get("sha")
-    except Exception as exc:
-        log.warning("sha fetch failed %s/%s@%s: %s", owner, repo, branch, exc)
-        # Keep serving the previous sha (if any) rather than flapping to None.
-        if cached is not None and cached[0] is not None:
+    if _sha_fresh(cached):
+        return cached[0]
+    # Single-flight per repo@branch: when the TTL lapses under load, N concurrent
+    # callers otherwise all hit GitHub at once (observed as a 7-10s manifest tail
+    # in storm testing). One caller refreshes; the rest serve the stale sha —
+    # content changes are picked up within one TTL either way.
+    lock = _SHA_LOCKS.setdefault(key, asyncio.Lock())
+    if lock.locked() and cached is not None:
+        return cached[0]
+    async with lock:
+        cached = _SHA_CACHE.get(key)
+        if _sha_fresh(cached):
             return cached[0]
-    _SHA_CACHE[key] = (sha, time.monotonic())
-    return sha
+        url = f"{GH_API}/repos/{owner}/{repo}/commits/{branch}?per_page=1"
+        headers = {"Accept": "application/vnd.github+json"}
+        if GH_TOKEN:
+            headers["Authorization"] = f"Bearer {GH_TOKEN}"
+        sha = None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(url, headers=headers)
+                if r.status_code == 200:
+                    sha = r.json().get("sha")
+        except Exception as exc:
+            log.warning("sha fetch failed %s/%s@%s: %s", owner, repo, branch, exc)
+            # Keep serving the previous sha (if any) rather than flapping to None.
+            if cached is not None and cached[0] is not None:
+                return cached[0]
+        _SHA_CACHE[key] = (sha, time.monotonic())
+        return sha
 
 
 async def _build_sources(profile: dict) -> list[dict]:
