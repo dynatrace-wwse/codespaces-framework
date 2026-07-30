@@ -10,7 +10,7 @@
 # All features are optional and can be toggled independently.
 
 # Operator and Dynakube versions
-operator_version: "1.9.0"
+operator_version: "1.10.2"
 dynakube_api_version: "v1beta6"
 
 # Monitoring mode: k8s-only | apponly | cloudnative
