@@ -27,6 +27,18 @@ def test_factory_none_for_non_dynatrace():
     assert a._gen3_platform_provisioner("https://evil.example.com") is None
 
 
+def test_oauth_bootstrap_stores_nothing():
+    """The bootstrap deploy endpoint must NOT persist the OAuth client anywhere —
+    Orbital holds no tenant credential at rest (self-managed tenants mint in-app)."""
+    import inspect
+    from dashboard import app_deploy
+    src = inspect.getsource(app_deploy.deploy_with_oauth)
+    assert "_encrypt" not in src, "bootstrap deploy must not encrypt+store the client"
+    assert "setex" not in src and ".set(" not in src, "bootstrap deploy must not write the client to Redis"
+    assert not hasattr(app_deploy, "get_registered_mint_client"), "registered-client store must be gone"
+    assert not hasattr(app_deploy, "MINTCLIENT_KEY"), "mint-client Redis key must be gone"
+
+
 def test_provision_route_registered():
     assert any(getattr(r, "path", "") == "/api/arena/provision" for r in a.app.routes)
     import inspect

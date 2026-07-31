@@ -3718,6 +3718,12 @@ def _gen3_platform_provisioner(tenant_url: str):
         sso_token_url=sso, account_api_host=api, oauth_client_id=cid, oauth_client_secret=csec)
 
 
+# NOTE: Orbital deliberately holds NO per-tenant OAuth client. Self-managed tenants mint
+# their own platform tokens INSIDE the app (the OAuth client lives in the app's app-state on
+# that tenant) and pass only token VALUES here via ArenaProvisionRequest.dtEnv. The env-based
+# _gen3_platform_provisioner remains only for tenants we own (COE/SRO/sprint, MINT_*_<DOMAIN>).
+
+
 @app.post("/api/arena/provision")
 async def api_arena_provision(body: ArenaProvisionRequest):
     """Provision a training environment — queues a real daemon job on the amd64 worker.

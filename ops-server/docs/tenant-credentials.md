@@ -6,16 +6,70 @@ Which scopes?** — for every operation Orbital performs on a target tenant.
 ## RECOMMENDATION (decision): one account-level OAuth client, one implementation
 
 Ask for **a single account-level OAuth client** (per account) — not platform tokens — and
-use it for everything. One client can be granted **both**:
-- **Environment** permissions on the target tenant(s): `app-engine:apps:install`,
-  `app-engine:apps:run`, `app-engine:apps:delete`, `settings:objects:read`,
-  `settings:objects:write`, `document:documents:read`.
-- **Account** permission: token management (for minting training tokens via the Account
-  Management API).
+use it for everything. One client is granted **both** (least privilege, all confirmed live):
 
-At call time Orbital does `client_credentials` against `sso.dynatrace.com` with the right
-`resource`: the **tenant/environment** for deploy + settings, the **account
-(`urn:dtaccount:…`)** for minting. Orbital already has this machinery (COE auto-deploy).
+| Level | Permission | For |
+|---|---|---|
+| Environment | `app-engine:apps:install` | install / upgrade the app |
+| Environment | `app-engine:apps:run` | run the app's functions |
+| Environment | `settings:objects:read` + `settings:objects:write` | remote-grail (analytics forwarding) + outbound allowlist |
+| Environment | `environment-api:activegate-tokens:write` (+ `:create`) | **mint DynaKube's ActiveGate token per K8s session** — without it every training with an operator fails at ActiveGate. The app mints this env-scoped from the client at provision time |
+| Environment | `app-engine:apps:delete` *(optional)* | Undeploy only |
+| Account | `platform-token:tokens:write` + `platform-token:tokens:manage` | mint + revoke per-user platform tokens via the Account Management API (`POST {api}/iam/v1/accounts/{uuid}/platform-tokens`) — **the only identity type that API accepts; every dt0s16 platform token is rejected** |
+
+**Deliberately NOT required** (drop from an over-broad client): `environment-api:api-tokens:write/read`
+(classic apiToken creation — on gen2 the app self-mints with its *own app identity* via the
+manifest scope `environment-api:api-tokens:write`, never the OAuth client; on gen3 it's
+disabled), `environment-api:activegate-tokens:read` (we never list AG tokens),
+`settings:objects:admin` (read/write suffice; admin only deletes *others'* objects). Granting
+these widens the blast radius for no functional gain.
+
+At call time Orbital does `client_credentials` against the realm SSO with the right
+`resource`: the **account (`urn:dtaccount:…`)** for both deploy and minting. Orbital
+already has this machinery (COE auto-deploy + sprint mint, both proven live).
+
+### Self-serve rollout (implemented 2026-07-31)
+
+The Register Tenant tab now has an **Account OAuth client** form (`POST /api/deploy/oauth`):
+the tenant admin pastes tenant URL + client id + secret + `urn:dtaccount:<uuid>`, Orbital
+
+1. mints a deploy bearer (`app-engine:apps:install app-engine:apps:run` + `settings:objects:*`,
+   falling back to the minimal set and warning when the client lacks settings),
+2. deploys/upgrades the app, sets remote-grail + outbound allowlist, registers content,
+3. probes the mint scopes (`platform-token:tokens:write platform-token:tokens:manage`) —
+   when granted and "enable token minting" is checked, stores the client **Fernet-encrypted**
+   in Redis (`deploy:mintclient:{tenant_id}`).
+
+Arena/training provisioning (`_tenant_platform_provisioner` in `dashboard/app.py`) prefers
+that registered client over the per-domain `MINT_*` env clients, so any tenant registered
+this way mints + revokes short-lived per-user platform tokens (scopes from the repo's
+`dt-tokens.yaml`, classic→platform translation in `provisioning/token_specs.py`) with no
+Orbital config change. Realm SSO + Account-API hosts default by domain
+(`SSO_TOKEN_URL_BY_DOMAIN` / `ACCOUNT_API_BY_DOMAIN` in `app_deploy.py`), overridable per
+request (`ssoUrl` / `apiHost`).
+
+### Why the client needs NO Grail / data scopes
+
+- **App runtime reads/writes** (DQL verification, leaderboards, documents, state) run with
+  the **app's manifest scopes + the calling user's grants** (`app.config.json`), not the
+  OAuth client. The client only installs the app.
+- **Training-session ingest** (operator/ingest) is carried by the **minted** per-user
+  platform tokens. The Account API lets the mint client create tokens with scopes the
+  client itself does not hold (verified live 2026-06-30) — so the client stays at
+  `platform-token:tokens:write/manage` and nothing more.
+- **Remote grail** is two halves: *writing the setting into the tenant* = `settings:objects:write`
+  (client has it); *the COE-side read token* = credential B, held separately — never the client.
+
+### External connections opened at install (disclosed in the UI)
+
+When the tenant enforces an app-function outbound allowlist (sprint/dev; prod usually
+doesn't), `_ensure_outbound_allowlist` ADDS (never removes/tightens):
+
+| Host | Why |
+|---|---|
+| `autonomous-enablements.whydevslovedynatrace.com` | Orbital — training content, session provisioning, live sessions |
+| `raw.githubusercontent.com`, `api.github.com` | training content + images |
+| `wwse.apps.dynatrace.com` | central enablement analytics (nam
 
 **Why one client, one implementation:** the app's self-mint scope
 `environment-api:api-tokens:write` is **deprecated**, and classic token creation is being
@@ -24,6 +78,65 @@ gen2/gen3 split disappears — one mint path for all tenants. Platform tokens wo
 **two** implementations (gen2 in-tenant self-mint vs gen3 account mint). So: **OAuth client +
 Account Management mint = one implementation that works everywhere.** The per-generation
 platform-token notes below are the fallback/legacy reference.
+
+---
+
+## THREAT MODEL — what an Orbital compromise means for a registered tenant
+
+**Read this before rolling out to customer/prospect tenants.** When a tenant enables token
+minting, Orbital holds that tenant's account OAuth client (Fernet-encrypted in Redis, key
+`GH_OAUTH_ENC_KEY` in `/home/ops/.env`). Be honest about the blast radius.
+
+### The dangerous scope is `platform-token:tokens:write`, and it is effectively account-admin
+
+The Account Management API **does not restrict a minted token's scopes to what the minting
+client holds** — that is *by design* (it's how a client with only `platform-token:tokens:write`
+mints an operator token carrying `storage:metrics:write`). Consequence: an attacker who
+extracts the client can mint a platform token with **any scope in the account**, on **any
+environment in that account** (the mint call takes `resource:[urn:dtenvironment:*]` as a
+free parameter). So the minting client is **not** least-privilege in effect — it is a key to
+the whole account.
+
+**A hacker with the client + secret + account URN could:**
+- Mint a token with `storage:logs:read` / `storage:*:read` and **read all customer Grail
+  data** (logs, spans, metrics, entities) — not just enablement data.
+- Mint `settings:objects:write` and **reconfigure the tenant** (alerting, security rules,
+  data retention, OpenPipeline).
+- Mint `app-engine:apps:install` and **install arbitrary apps**.
+- Do this on **every environment in the account**, not only the one that registered.
+- Mint **long-lived** tokens (expiry is attacker-chosen) that survive after the breach.
+
+The deploy-only environment scopes (`app-engine:apps:install/run`, `settings:objects:*`) are
+comparatively bounded; **the account mint permission is the crown jewel.** Deleting the OAuth
+client in myaccount instantly revokes all of it — that is the customer's kill switch.
+
+### Mitigations in place
+- Client stored Fernet-encrypted (not plaintext); never logged; API returns client_id only.
+- Minted **session** tokens are env-scoped (`urn:dtenvironment:{env_id}`) + short-lived
+  (4h) + tagged `enablement` + revoked on terminate — the *legitimate* use is tightly bound.
+- nginx allows the deploy endpoints signed-out but they only *use* a supplied credential;
+  the stored client is reachable only via provisioning code, not any read endpoint.
+
+### Mitigations NOT yet in place (do before customer GA)
+- **Encryption key + Redis on the same host** — an attacker with Orbital root gets both the
+  ciphertext and `GH_OAUTH_ENC_KEY`. A KMS / HSM-held key, or a per-tenant key the customer
+  controls, would stop plaintext extraction from a host compromise.
+- **No scope ceiling on the account side** — ask Dynatrace whether a mint client can be
+  capped to a *fixed scope allowlist* (mint only these N scopes) and *fixed environment*.
+  If yes, that collapses the blast radius from "account admin" to "can mint operator/ingest
+  on one env." **This is the single most important ask.**
+- **Egress/anomaly monitoring** on the mint path (alert on scopes/resources outside the
+  enablement set).
+
+### The lower-blast-radius alternative — app-held client, not Orbital-held
+Move the OAuth client into the **app's own encrypted app-state on the tenant**; app functions
+call SSO + Account API directly and pass minted token *values* to Orbital (the
+`ArenaProvisionRequest.dtEnv` path already exists). Then **Orbital holds no tenant
+credential** — a single Orbital compromise exposes *nothing*; each tenant's secret lives only
+in that tenant. Trade-off: the secret sits in tenant app-state (whoever can invoke the admin
+app functions there can use it) and app functions need `sso.dynatrace.com` + the account API
+host on their outbound allowlist. This is arguably the correct end-state for customer tenants;
+the Orbital-held model is fine for tenants we own (COE/SRO/sprint).
 
 ---
 
