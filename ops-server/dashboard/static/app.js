@@ -3319,36 +3319,47 @@ let regWired = false;
 
 function wireRegister() {
     if (regWired) return; regWired = true;
-    document.getElementById('reg-deploy').addEventListener('click', () => goRegister('deploy'));
-    document.getElementById('reg-undeploy').addEventListener('click', () => goRegister('undeploy'));
+    document.getElementById('reg-oa-deploy').addEventListener('click', () => goRegisterOauth('deploy'));
+    document.getElementById('reg-oa-undeploy').addEventListener('click', () => goRegisterOauth('undeploy'));
 }
 
 function setRegBusy(b) {
     document.getElementById('reg-spin').classList.toggle('busy', b);
     document.getElementById('reg-bar').hidden = !b;
-    document.getElementById('reg-deploy').disabled = b;
-    document.getElementById('reg-undeploy').disabled = b;
+    for (const id of ['reg-oa-deploy', 'reg-oa-undeploy']) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = b;
+    }
 }
 
-async function goRegister(action) {
-    const t = document.getElementById('reg-tenant').value.trim();
-    const k = document.getElementById('reg-token').value.trim();
-    const m = document.getElementById('reg-msg');
+async function goRegisterOauth(action) {
+    const t = document.getElementById('reg-oa-tenant').value.trim();
+    const cid = document.getElementById('reg-oa-cid').value.trim();
+    const sec = document.getElementById('reg-oa-secret').value.trim();
+    const urn = document.getElementById('reg-oa-urn').value.trim();
+    const m = document.getElementById('reg-oa-msg');
     if (!t) { m.textContent = 'tenant required'; return; }
+    if (!cid || !sec) { m.textContent = 'client id + secret required'; return; }
+    if (!urn.startsWith('urn:dtaccount:')) { m.textContent = 'account URN required (urn:dtaccount:<uuid>)'; return; }
     m.textContent = ''; setRegBusy(true);
     try {
-        const r = await fetch('/api/deploy/token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, token: k }) });
+        const r = await fetch('/api/deploy/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, clientId: cid, clientSecret: sec, accountUrn: urn }) });
         const raw = await r.text();
         let j = {}; try { j = JSON.parse(raw); } catch (_) { /* non-JSON gateway page */ }
         if (r.ok) {
-            document.getElementById('reg-token').value = '';
+            document.getElementById('reg-oa-secret').value = '';
             if (action !== 'deploy') { m.textContent = '✓ undeployed ' + t; }
             else {
                 const v = j.version || '?';
                 const s = j.status === 'up-to-date' ? `already up-to-date (v${v})` : j.status === 'upgraded' ? `upgraded v${j.from} → v${v}` : `installed v${v}`;
-                m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '') + (j.allowlist ? `<br><span class="content-hint">outbound: ${escapeHtml(j.allowlist)}</span>` : '');
+                const mint = j.mintReady
+                    ? ' · <strong style="color:#2da44e">mint scopes verified</strong> — now paste this client into the app (Admin → Token minting)'
+                    : ' · <strong style="color:#d29922">mint scopes MISSING</strong> (grant platform-token:tokens:write/manage before configuring the app)';
+                m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + mint
+                    + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '')
+                    + ((j.warnings || []).length ? `<br><span class="content-hint">⚠ ${j.warnings.map(escapeHtml).join('<br>⚠ ')}</span>` : '');
             }
-            loadRegisterAudit();
+            loadRegisterAudit(); loadMintClients();
         } else if (r.status === 401) {
             m.textContent = '✗ Sign in as a GitHub org member to deploy.';
         } else {
@@ -3361,6 +3372,9 @@ async function goRegister(action) {
         setRegBusy(false);
     }
 }
+
+// goRegister (token-paste deploy) removed with its UI card — /api/deploy/token remains
+// for the in-app Admin "Update now" flow (stash + app-start).
 
 async function loadRegisterAudit() {
     try {
@@ -3389,10 +3403,10 @@ async function loadMintClients() {
         const j = await r.json();
         const rows = j.mintClients || [];
         el.innerHTML = rows.length
-            ? '<h3 style="margin:24px 0 8px">Token-mint OAuth clients (gen3, read-only)</h3>'
-              + '<p class="content-hint" style="margin:0 0 6px">Account OAuth clients used to mint platform tokens for trainings on gen3 tenants. Rotate in myaccount.dynatrace.com; the secret is never shown.</p>'
-              + '<table><thead><tr><th>Domain</th><th>Client ID</th><th>Account</th></tr></thead><tbody>'
-              + rows.map(c => `<tr><td>${escapeHtml(c.domain)}</td><td><code>${escapeHtml(c.clientId)}</code></td><td><code style="font-size:0.72rem">${escapeHtml(c.account)}</code></td></tr>`).join('')
+            ? '<h3 style="margin:24px 0 8px">Legacy env mint clients (tenants we own)</h3>'
+              + '<p class="content-hint" style="margin:0 0 6px">Per-domain account OAuth clients Orbital holds in its env for the tenants we operate (COE/SRO/sprint). Self-managed tenants are NOT here — they hold their own client inside the app and mint locally. Rotate in myaccount.dynatrace.com; the secret is never shown.</p>'
+              + '<table><thead><tr><th>Domain</th><th>Client ID</th><th>Account</th><th>Source</th></tr></thead><tbody>'
+              + rows.map(c => `<tr><td>${escapeHtml(c.domain)}</td><td><code>${escapeHtml(c.clientId)}</code></td><td><code style="font-size:0.72rem">${escapeHtml(c.account)}</code></td><td>${escapeHtml(c.scope || '')}</td></tr>`).join('')
               + '</tbody></table>'
             : '';
     } catch { el.innerHTML = ''; }

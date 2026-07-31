@@ -403,12 +403,17 @@ COE_TENANT_IDS = {"wwse", "geu80787"}
 REMOTE_GRAIL_SCHEMA = "app:my.dynatrace.enablements:remote-grail"
 REMOTE_GRAIL_SCHEMA_VERSION = "1.1"
 # Hosts the app's functions must reach for content delivery + manual GitHub imports
-# + forwarding training bizevents to the central tenant.
+# + forwarding training bizevents to the central tenant + (gen3 self-mint) the account SSO
+# and Account Management API so the app can mint per-user platform tokens with its own
+# stored OAuth client. sso/api.dynatrace.com cover prod; sprint/dev realms differ — their
+# hosts are added from the stored client's ssoUrl/apiHost when the app is configured there.
 OUTBOUND_HOSTS = [
     "autonomous-enablements.whydevslovedynatrace.com",
     "raw.githubusercontent.com",
     "api.github.com",
     COE_TENANT_HOST,
+    "sso.dynatrace.com",
+    "api.dynatrace.com",
 ]
 
 
@@ -835,6 +840,150 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
             "remote_grail": remote_grail, "warnings": warnings}
 
 
+# ── Account-OAuth-client BOOTSTRAP deploy (transient — Orbital stores NOTHING) ───
+#
+# First-install chicken-and-egg: the app can't hold its own OAuth client until it's
+# installed. So the tenant admin pastes the account OAuth client (id + secret + account
+# URN) ONCE to land the app. Orbital uses it for the single deploy call and DISCARDS it —
+# it is never written to Redis, disk, or logs. After this, the admin configures the client
+# INSIDE the app (app-state, tenant-local); from then on the app self-mints user tokens and
+# self-updates by handing Orbital only short-lived, install-scoped bearers. Orbital holds no
+# tenant credential at rest — an Orbital compromise exposes nothing.
+#
+# Design + threat model: ops-server/docs/tenant-credentials.md.
+
+MINT_SCOPE = "platform-token:tokens:write platform-token:tokens:manage"
+# Realm SSO token endpoints + Account Management API hosts per domain class
+# (classify_tenant → prod/sprint/dev). Overridable per request for unusual realms.
+SSO_TOKEN_URL_BY_DOMAIN = {
+    "prod": "https://sso.dynatrace.com/sso/oauth2/token",
+    "sprint": "https://sso-sprint.dynatracelabs.com/sso/oauth2/token",
+    "dev": "https://sso-dev.dynatracelabs.com/sso/oauth2/token",
+}
+ACCOUNT_API_BY_DOMAIN = {
+    "prod": "https://api.dynatrace.com",
+    "sprint": "https://api-hardening.internal.dynatracelabs.com",
+    "dev": "https://api-hardening.internal.dynatracelabs.com",
+}
+# Environment permissions the client needs for a full deploy. settings:objects:* are
+# best-effort (post-install remote-grail + outbound allowlist) — if the client lacks
+# them SSO 400s the full request and we retry with the minimal set.
+OAUTH_DEPLOY_SCOPES_FULL = ("app-engine:apps:install app-engine:apps:run "
+                            "settings:objects:read settings:objects:write")
+OAUTH_DEPLOY_SCOPES_MIN = "app-engine:apps:install app-engine:apps:run"
+OAUTH_UNDEPLOY_SCOPES = "app-engine:apps:delete"
+
+
+async def _oauth_bearer(sso_url: str, cid: str, csec: str, resource: str,
+                        scope: str) -> tuple[str | None, int, str]:
+    """client_credentials grant. Returns (access_token|None, http_status, error_snippet).
+    The secret goes into the form only — never logged."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(sso_url, data={
+                "grant_type": "client_credentials", "client_id": cid,
+                "client_secret": csec, "resource": resource, "scope": scope,
+            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if r.status_code == 200:
+            return r.json().get("access_token"), 200, ""
+        return None, r.status_code, r.text[:200]
+    except Exception as exc:
+        return None, 0, str(exc)
+
+
+@router.post("/api/deploy/oauth")
+async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default=None)):
+    """BOOTSTRAP deploy/undeploy with an account-level OAuth client — transient, Orbital
+    stores NOTHING. The tenant admin pastes the client once to land the app; we mint a
+    bearer, deploy, probe whether the client CAN mint platform tokens (so the UI can tell
+    the admin to finish setup inside the app), and discard every credential. The client is
+    NEVER written to Redis/disk/logs. After this the admin configures the client inside the
+    app (app-state, tenant-local); the app then self-mints user tokens and self-updates,
+    handing Orbital only short-lived install bearers.
+
+    Like /api/deploy/token, NOT org-member-gated: the OAuth client IS the account's
+    authority."""
+    user = x_auth_user or "anonymous"
+    action = body.get("action", "deploy")
+    if action not in ("deploy", "undeploy"):
+        raise HTTPException(400, "action must be deploy or undeploy.")
+    tenant = (body.get("tenant") or "").strip()
+    cid = (body.get("clientId") or "").strip()
+    csec = (body.get("clientSecret") or "").strip()
+    account_urn = (body.get("accountUrn") or "").strip()
+    tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    if not (cid and csec):
+        raise HTTPException(400, "clientId and clientSecret are required.")
+    if not account_urn.startswith("urn:dtaccount:"):
+        raise HTTPException(400, "accountUrn must look like urn:dtaccount:<uuid>.")
+    sso_url = (body.get("ssoUrl") or "").strip() or SSO_TOKEN_URL_BY_DOMAIN.get(
+        domain, SSO_TOKEN_URL_BY_DOMAIN["prod"])
+
+    # 1. Deploy bearer — full scope set first, minimal on SSO 400 (client lacks settings:*).
+    scope_warnings: list[str] = []
+    if action == "undeploy":
+        token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_UNDEPLOY_SCOPES)
+    else:
+        token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_DEPLOY_SCOPES_FULL)
+        if token is None and st == 400:
+            token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_DEPLOY_SCOPES_MIN)
+            if token:
+                scope_warnings.append(
+                    "client lacks settings:objects:read/write — remote-grail + outbound "
+                    "allowlist will be skipped; grant those environment permissions for a full install.")
+    if token is None:
+        await _audit(user, tenant_id, action, "oauth-error", via="oauth-bootstrap",
+                     client_id=cid, status=st, detail=err)
+        raise HTTPException(502, f"OAuth token request failed (HTTP {st}): {err}. "
+                                 f"Check client id/secret, the account URN, and that the client has "
+                                 f"app-engine:apps:install + app-engine:apps:run on this environment.")
+
+    if action == "undeploy":
+        ok, msg = await _run_undeploy(token, tenant)
+        del token
+        await _audit(user, tenant_id, "undeploy", "undeployed" if ok else "undeploy-error",
+                     via="oauth-bootstrap", client_id=cid, detail=msg)
+        if not ok:
+            raise HTTPException(502, f"Undeploy failed: {msg}")
+        return {"ok": True, "tenant": tenant_id, "action": "undeploy"}
+
+    res = await _deploy_with_status(token, tenant)
+    allowlist = ""
+    remote_grail = ""
+    if res["status"] != "error":
+        allowlist = await _ensure_outbound_allowlist(token, tenant)
+        remote_grail = await _ensure_remote_grail(token, tenant)
+    del token
+    if res["status"] == "error":
+        await _audit(user, tenant_id, "deploy", "deploy-error", via="oauth-bootstrap",
+                     client_id=cid, rc=res.get("rc"))
+        raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
+
+    # 2. Mint probe — can this client mint platform tokens? (Advisory only: tells the admin
+    #    the client is ready to paste INTO the app. We store nothing either way.)
+    mint_bearer, mint_st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, MINT_SCOPE)
+    mint_ready = mint_bearer is not None
+    if mint_bearer:
+        del mint_bearer
+    del csec  # discard the secret — never persisted
+    if not mint_ready:
+        scope_warnings.append(
+            f"token minting NOT available (SSO HTTP {mint_st}): the client lacks the account "
+            f"permissions platform-token:tokens:write + platform-token:tokens:manage. Grant them "
+            f"before configuring the client inside the app, or hands-on labs can't mint per-user tokens.")
+
+    reg = await _register_in_content_service(user, tenant)
+    profile = (reg or {}).get("profile")
+    url = _app_url(tenant)
+    warnings = _scope_warnings(allowlist, remote_grail) + scope_warnings
+    await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
+                 **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
+                 allowlist=allowlist, remote_grail=remote_grail, mint_ready=mint_ready, warnings=warnings)
+    return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
+            "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
+            "remote_grail": remote_grail, "mintReady": mint_ready, "warnings": warnings}
+
+
 @router.get("/api/deploy/audit")
 async def deploy_audit(limit: int = 50, x_auth_user: str | None = Header(default=None)):
     _require_writer(x_auth_user)
@@ -854,7 +1003,10 @@ async def mint_clients(x_auth_user: str | None = Header(default=None)):
         if cid:
             out.append({"domain": dom.lower(), "clientId": cid,
                         "account": os.environ.get(f"MINT_RESOURCE_{dom}", ""),
-                        "sso": os.environ.get(f"MINT_SSO_{dom}", "")})
+                        "sso": os.environ.get(f"MINT_SSO_{dom}", ""), "scope": "domain (env, legacy)"})
+    # No per-tenant clients are stored on Orbital by design — self-managed tenants hold
+    # their own OAuth client inside the app (app-state), and mint locally. This lists only
+    # the legacy per-domain env clients used for tenants we own (COE/SRO/sprint).
     return {"mintClients": out}
 
 
