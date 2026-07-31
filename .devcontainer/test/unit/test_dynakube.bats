@@ -354,6 +354,79 @@ EOF
   [[ "$name" != *"-" ]]
 }
 
+# Operator >= 1.10 tightens the DynaKube name limit per enabled feature:
+# telemetryIngest -> 37 (-otel-collector suffix), KSPM -> 35, extensions -> 31.
+
+@test "generateDynakube: telemetry_ingest caps name at 37 (operator 1.10 -otel-collector suffix)" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-101"
+  export DT_HOSTGROUP="training-test-1102-20260731"
+
+  cat > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml" <<'EOF'
+telemetry_ingest: true
+EOF
+
+  generateDynakube apponly
+
+  name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+  name="${name_line#  name: }"
+  [ "${#name}" -le 37 ]
+  [[ "$name" == *"-training-test-1102-20260731" ]]
+}
+
+@test "generateDynakube: telemetry_ingest off keeps the 38 cap" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-101"
+  export DT_HOSTGROUP="training-test-1102-20260731"
+
+  cat > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml" <<'EOF'
+telemetry_ingest: false
+EOF
+
+  generateDynakube apponly
+
+  name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+  name="${name_line#  name: }"
+  [ "${#name}" -le 38 ]
+  [ "${#name}" -ge 38 ]
+}
+
+@test "generateDynakube: kspm and extensions tighten the cap further (35 / 31)" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-opentelemetry-openpipeline"
+  export DT_HOSTGROUP="bob-20260714"
+
+  cat > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml" <<'EOF'
+mode: cloudnative
+telemetry_ingest: true
+kspm: true
+extensions: true
+EOF
+
+  generateDynakube cloudnative
+
+  name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+  name="${name_line#  name: }"
+  [ "${#name}" -le 31 ]
+  [[ "$name" == *"-bob-20260714" ]]
+}
+
+@test "generateDynakube: no session id also respects the feature cap (long repo names)" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-opentelemetry-openpipeline"
+
+  cat > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml" <<'EOF'
+telemetry_ingest: true
+EOF
+
+  generateDynakube apponly
+
+  name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+  name="${name_line#  name: }"
+  [ "${#name}" -le 37 ]
+  [[ "$name" != *"-" ]]
+}
+
 @test "generateDynakube: no session id keeps pre-1.9 repo-scoped identity" {
   source_functions
 

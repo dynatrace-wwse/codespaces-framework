@@ -1556,16 +1556,25 @@ generateDynakube() {
   local base_name="$(echo "${RepositoryName:-$(hostname)}" | tr '[:upper:]' '[:lower:]')"
   local cluster_name="$base_name"
   local session_id="$(getDtSessionId)"
+  # The operator's validating webhook enforces a HARD DynaKube name limit
+  # (child resources like <name>-activegate-<hash> must fit the 63-char k8s
+  # label limit). Operator >= 1.10 tightens it per enabled feature:
+  # base 38, telemetryIngest 37 (-otel-collector), KSPM 35, extensions 31.
+  local name_cap=38
+  [[ "${DK_TELEMETRY_INGEST:-false}" == "true" && name_cap -gt 37 ]] && name_cap=37
+  [[ "${DK_KSPM:-false}" == "true" && name_cap -gt 35 ]] && name_cap=35
+  [[ "${DK_EXTENSIONS:-false}" == "true" && name_cap -gt 31 ]] && name_cap=31
   if [[ -n "$session_id" ]]; then
-    # The operator's validating webhook enforces a HARD 38-char DynaKube name
-    # limit (child resources like <name>-activegate-<hash> must fit the 63-char
-    # k8s label limit) — sacrifice repo chars before the session id.
-    local name_budget=$(( 38 - ${#session_id} - 1 ))
+    # Sacrifice repo chars before the session id.
+    local name_budget=$(( name_cap - ${#session_id} - 1 ))
     (( name_budget < 1 )) && name_budget=1
     local repo_part="${base_name:0:$name_budget}"
     repo_part="${repo_part%-}"
     cluster_name="${repo_part}-${session_id}"
-    cluster_name="${cluster_name:0:38}"
+    cluster_name="${cluster_name:0:$name_cap}"
+    cluster_name="${cluster_name%-}"
+  else
+    cluster_name="${cluster_name:0:$name_cap}"
     cluster_name="${cluster_name%-}"
   fi
   local api_url="${DT_TENANT}/api"
