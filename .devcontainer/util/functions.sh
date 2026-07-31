@@ -1430,9 +1430,19 @@ dynatraceDeployOperator() {
   # Create the secret for Dynakube to use. Name must be lowercase (k8s RFC-1123)
   # and match the lowercased Dynakube name derived in generateDynakube.
   local dk_secret_name="$(echo "$RepositoryName" | tr '[:upper:]' '[:lower:]')"
+  # Platform-token sessions (gen3 tenants): the operator token is a dt0s16 and
+  # cannot self-mint the ActiveGate's token, so Orbital pre-mints one and hands
+  # it over as DT_ACTIVEGATE_TOKEN — wire it into the secret (the operator
+  # picks up the activeGateAuthToken key automatically). Without it the AG pod
+  # never reaches Running on platform-token sessions.
+  local ag_literal=()
+  if [ -n "${DT_ACTIVEGATE_TOKEN}" ]; then
+    ag_literal=(--from-literal="activeGateAuthToken=$DT_ACTIVEGATE_TOKEN")
+  fi
   kubectl -n dynatrace create secret generic "$dk_secret_name" \
     --from-literal="apiToken=$DT_OPERATOR_TOKEN" \
     --from-literal="dataIngestToken=$DT_INGEST_TOKEN" \
+    "${ag_literal[@]}" \
     2>/dev/null || true
 
   waitForAllPods dynatrace
