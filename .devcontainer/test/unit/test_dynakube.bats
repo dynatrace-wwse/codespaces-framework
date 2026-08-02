@@ -498,3 +498,63 @@ EOF
   [[ "$result" == *"dynatrace-wwse-test-enablement"* ]]
   [[ "$result" == *"framework.version"* ]]
 }
+
+# ============================================================
+# Sprint ActiveGate image workaround
+# ============================================================
+
+@test "isSprintTenant: true for sprint apps + api URLs, false for prod/sro" {
+  source_functions
+
+  run isSprintTenant "https://ydi9582h.sprint.apps.dynatracelabs.com"
+  [ "$status" -eq 0 ]
+  run isSprintTenant "https://ydi9582h.sprint.dynatracelabs.com/api"
+  [ "$status" -eq 0 ]
+
+  run isSprintTenant "https://geu80787.apps.dynatrace.com"
+  [ "$status" -ne 0 ]
+  run isSprintTenant "https://sro97894.apps.dynatrace.com"
+  [ "$status" -ne 0 ]
+}
+
+@test "isSprintTenant: falls back to DT_ENVIRONMENT when no arg" {
+  source_functions
+
+  DT_ENVIRONMENT="https://ydi9582h.sprint.apps.dynatracelabs.com" run isSprintTenant
+  [ "$status" -eq 0 ]
+  DT_ENVIRONMENT="https://geu80787.apps.dynatrace.com" run isSprintTenant
+  [ "$status" -ne 0 ]
+}
+
+@test "_pickLatestActiveGateTag: picks newest clean version, ignores sig/att/fips/raw" {
+  source_functions
+
+  output="$(printf "%s\n" \
+    "1.341.34.20260703-181150" \
+    "1.343.52.20260727-092518" \
+    "1.339.39.20260605-153224" \
+    "1.343.52.20260727-092518-fips" \
+    "sha256-deadbeef.sig" \
+    "1.341.31-raw" \
+    "sha256-cafe.att" | _pickLatestActiveGateTag)"
+  [ "$output" = "1.343.52.20260727-092518" ]
+}
+
+@test "_pickLatestActiveGateTag: empty when no clean version tags" {
+  source_functions
+
+  output="$(printf "%s\n" "latest" "sha256-x.sig" "1.341.31-raw" | _pickLatestActiveGateTag)"
+  [ -z "$output" ]
+}
+
+@test "fixSprintActiveGateImage: no-op (returns 0, no kubectl) on non-sprint tenant" {
+  source_functions
+  # kubectl stub that would fail the test if called
+  kubectl() { echo "KUBECTL_SHOULD_NOT_RUN" >&2; return 1; }
+  export -f kubectl
+
+  DT_ENVIRONMENT="https://geu80787.apps.dynatrace.com" run fixSprintActiveGateImage
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"KUBECTL_SHOULD_NOT_RUN"* ]]
+  [[ "$output" != *"downgrading to the latest available"* ]]
+}

@@ -1304,6 +1304,60 @@ printSecrets(){
     printInfo "Dynatrace Otel Endpoint: $DT_OTEL_ENDPOINT"
 }
 
+# ── Sprint ActiveGate image workaround ──────────────────────────────────────────
+# Sprint tenants resolve the ActiveGate image to a private build ECR
+# (478983378254.dkr.ecr.us-east-1.amazonaws.com) that a public k3d cluster cannot
+# authenticate to, so the AG pod stays in ImagePullBackOff and the DynaKube never
+# finishes. Prod/gen2 tenants serve the AG from their own tenant registry and are
+# unaffected. On sprint we swap the AG image to the latest PUBLIC ActiveGate build so
+# the many internal/onboarding trainings that run on sprint still work.
+
+isSprintTenant() {
+  # Returns 0 if the tenant URL is a sprint tenant. $1 defaults to $DT_ENVIRONMENT.
+  local url="${1:-$DT_ENVIRONMENT}"
+  case "$url" in
+    *sprint.apps.dynatracelabs.com*|*.sprint.dynatracelabs.com*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_pickLatestActiveGateTag() {
+  # Read a newline-delimited tag list on stdin; echo the newest clean version tag
+  # (form N.N.N.N-N). Ignores signature/attestation (.sig/.att) and -fips/-raw variants.
+  grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | sort -V | tail -1
+}
+
+latestPublicActiveGateImage() {
+  # Echo the newest pullable image ref on public.ecr.aws/dynatrace/dynatrace-activegate,
+  # or return non-zero if it can't be resolved (offline / API change).
+  local repo="public.ecr.aws/dynatrace/dynatrace-activegate" token tag
+  token="$(curl -fsS https://public.ecr.aws/token/ 2>/dev/null | jq -r '.token // empty')" || return 1
+  [ -n "$token" ] || return 1
+  tag="$(curl -fsS -H "Authorization: Bearer $token" \
+        "https://public.ecr.aws/v2/dynatrace/dynatrace-activegate/tags/list" 2>/dev/null \
+        | jq -r '.tags[]?' | _pickLatestActiveGateTag)"
+  [ -n "$tag" ] || return 1
+  echo "${repo}:${tag}"
+}
+
+fixSprintActiveGateImage() {
+  # No-op unless the tenant is sprint. On sprint: warn and patch the deployed DynaKube's
+  # spec.activeGate.image to the latest public build (the operator then recreates the AG
+  # pod with a pullable image). Best-effort — never fails the deploy.
+  isSprintTenant || return 0
+  printWarn "ActiveGate images by default on Sprint won't be found, hence downgrading to the latest available ActiveGate image."
+  local img dk
+  if ! img="$(latestPublicActiveGateImage)"; then
+    printWarn "Could not resolve a public ActiveGate image — leaving the default."
+    return 0
+  fi
+  dk="$(kubectl get dynakube -n dynatrace --no-headers 2>/dev/null | awk '{print $1}' | head -1)"
+  [ -n "$dk" ] || return 0
+  printInfo "Pinning ActiveGate image to $img"
+  kubectl -n dynatrace patch dynakube "$dk" --type=merge \
+    -p "{\"spec\":{\"activeGate\":{\"image\":\"$img\"}}}" >/dev/null 2>&1
+}
+
 deployCloudNative() {
   # Warn if running on k3d — OneAgent DaemonSet will CrashLoopBackOff on container-based nodes
   if [[ "${CLUSTER_ENGINE:-k3d}" != "kind" ]]; then
@@ -1367,6 +1421,10 @@ deployDynatrace() {
   fi
 
   kubectl -n dynatrace apply -f "$gen_file"
+
+  # Sprint tenants ship an unpullable private-ECR ActiveGate image — swap it for the
+  # latest public build so the AG can actually start (no-op on prod/gen2 tenants).
+  fixSprintActiveGateImage
 
   # Wait for ActiveGate to be ready (the critical component for cluster monitoring)
   waitForPod dynatrace activegate
