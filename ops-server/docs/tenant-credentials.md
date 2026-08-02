@@ -3,6 +3,45 @@
 One place that answers: **Platform token or OAuth client? Tenant- or account-level?
 Which scopes?** — for every operation Orbital performs on a target tenant.
 
+---
+
+## END STATE (2026-07-31) — the app holds the credential, Orbital stores NOTHING
+
+The design has moved to **app-held minting**. Read this first; the sections below are the
+per-generation reference.
+
+1. **Bootstrap (once):** the tenant admin pastes an account OAuth client in Orbital's
+   Register Tenant tab. Orbital mints one deploy bearer, installs the app, and **discards
+   every credential** — the client is never written to Redis, disk, or logs. (Enforced by a
+   test: `test_oauth_bootstrap_stores_nothing`.)
+2. **Configure (once):** the admin pastes the same client **into the app** (Admin → Token
+   minting → the `mintCredentials` app function). It is stored in the app's own **app-state**
+   on that tenant (admin-ACL, function-readable, tenant-local). The app verifies the client
+   can mint (account platform-token scope + environment ActiveGate scope) before storing.
+3. **Steady state:** the **app** — not Orbital — mints per-user platform tokens (account API,
+   env-scoped, short-TTL, tagged) and DynaKube ActiveGate tokens for each training session,
+   and revokes them at session end. Orbital only ever receives the resulting token **values**
+   (`ArenaProvisionRequest.dtEnv`). **Orbital holds no tenant credential at any point.**
+4. **Self-update:** the app mints a short-lived, install-scoped bearer from its stored client
+   and hands only that to Orbital, which builds + deploys the new version and discards it. The
+   client secret never leaves the tenant; app-state persists across versions.
+
+**Why this is safe:** a full Orbital compromise exposes **no** tenant credential — there is
+nothing at rest to steal. The secret lives only on its own tenant, reachable only by an admin
+there, and only ever leaves as ephemeral, purpose-scoped bearers. See the threat model below.
+
+**Verified live 2026-07-31:** the app-held mint sequence (account bearer → platform token
+mint → ActiveGate token → install bearer) succeeds on sprint with a real client. Classic
+self-mint (app's own identity) verified end-to-end through the app UI on SRO
+(`tokenProvisioned: true`). Platform mint verified end-to-end via the training-test runner on
+sprint for k8s-101 (operator+ingest dt0s16 + AG dt0g02) and dtwiz-101 (full pass, 101s).
+
+**Legacy note:** the per-domain `MINT_*_<DOMAIN>` env clients on Orbital remain ONLY for the
+tenants we operate (COE / SRO / sprint). For customer/SE tenants there is no Orbital-held
+credential — the app self-mints.
+
+---
+
 ## RECOMMENDATION (decision): one account-level OAuth client, one implementation
 
 Ask for **a single account-level OAuth client** (per account) — not platform tokens — and
