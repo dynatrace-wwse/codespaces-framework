@@ -4795,6 +4795,13 @@ class LiveSessionJoinByCode(BaseModel):
 class LiveSessionProvisionAll(BaseModel):
     trainerEmail: str = ""
     tenant: str = ""              # trainer's arena tenant URL
+    # Subset of roster emails to provision this call (empty = whole roster) —
+    # lets the app chunk large rosters under its 120s function cap.
+    emails: list[str] = []
+    # Per-learner app-minted token env (email -> {dtEnv, dtTokenIds}). Orbital
+    # stores no tenant credential, so the app mints and passes values through,
+    # exactly as the single-user /api/arena/provision path does.
+    perUser: dict[str, dict] = {}
 
 
 async def _reserve_join_code(session_id: str) -> str:
@@ -4948,7 +4955,10 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction):
         raise HTTPException(status_code=404, detail="Session not found or expired")
     if not live_sessions.is_trainer(body.trainerEmail, session):
         raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
-    new_state, changed = live_sessions.apply_transition(session.get("state", ""), "end")
+    try:
+        new_state, changed = live_sessions.apply_transition(session.get("state", ""), "end")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     if changed:
         session["state"] = new_state
         session["endedAt"] = datetime.now(timezone.utc).isoformat()
@@ -5065,14 +5075,20 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     if not live_sessions.is_trainer(body.trainerEmail, session):
         raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
     roster = await pool.smembers(roster_key)
+    wanted = {e.strip().lower() for e in body.emails if e.strip()} if body.emails else None
     results = []
     for email in sorted(roster):
+        if wanted is not None and email.lower() not in wanted:
+            continue
+        per = body.perUser.get(email) or body.perUser.get(email.lower()) or {}
         try:
             provisioned = await api_arena_provision(ArenaProvisionRequest(
                 trainingId=session.get("trainingId", ""),
                 userId=email,
                 tenantUrl=(body.tenant or "").rstrip("/"),
                 ref=session.get("ref", ""),
+                dtEnv=per.get("dtEnv") or {},
+                dtTokenIds=per.get("dtTokenIds") or [],
             ))
             results.append({
                 "email":  email,

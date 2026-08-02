@@ -369,3 +369,14 @@ if __name__ == "__main__":
             fn()
             print(f"ok {name}")
     print("all workshop tests passed")
+
+
+def test_end_from_scheduled_raises_value_error():
+    """`end` on a scheduled session must raise (endpoint maps it to 409, not 500).
+
+    Regression: the live end endpoint 500'd when a trainer ended a workshop
+    that was never started — caught during the 8-bot herd mini-test.
+    """
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        ls.apply_transition("scheduled", "end")
