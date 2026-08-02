@@ -81,6 +81,10 @@ from dashboard import fleet  # noqa: E402
 # dashboard/live_sessions.py (tested without Redis); endpoints below stay thin.
 from dashboard import live_sessions  # noqa: E402
 
+# Structured workshop pad (EPIC-002) — pure decision logic in
+# dashboard/live_pad.py (tested without Redis); endpoints below stay thin.
+from dashboard import live_pad  # noqa: E402
+
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Content Profiles</title><style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
@@ -4766,6 +4770,12 @@ class LiveSessionCreate(BaseModel):
     ref: str = ""                 # optional content branch
     trainerEmail: str = ""
     roster: list[str] = []
+    # Workshop scheduling (EPIC-002) — all optional; absent fields keep the
+    # pre-workshop behavior (immediate state=open, no seat cap).
+    scheduledAt: str = ""         # ISO8601 UTC → initial state "scheduled"
+    timezone: str = ""            # IANA zone name
+    durationMinutes: int = 0
+    maxSeats: int = 0             # 0 = unlimited
 
 
 class LiveSessionJoin(BaseModel):
@@ -4776,6 +4786,28 @@ class LiveSessionTrainerAction(BaseModel):
     trainerEmail: str = ""
 
 
+class LiveSessionJoinByCode(BaseModel):
+    code: str = ""
+    email: str = ""
+    name: str = ""
+
+
+class LiveSessionProvisionAll(BaseModel):
+    trainerEmail: str = ""
+    tenant: str = ""              # trainer's arena tenant URL
+
+
+async def _reserve_join_code(session_id: str) -> str:
+    """Generate a join code and claim it via SET NX on live:joincode:{code}
+    so two sessions can never share one. 31^6 ≈ 887M codes — collisions are
+    vanishingly rare, but retry a few times anyway."""
+    for _ in range(20):
+        code = live_sessions.generate_join_code()
+        if await pool.set(f"live:joincode:{code}", session_id, nx=True):
+            return code
+    raise HTTPException(status_code=500, detail="could not allocate a unique join code")
+
+
 @app.post("/api/live/sessions")
 async def api_live_session_create(body: LiveSessionCreate):
     """Create a live session (state=open) with a roster of invited emails.
@@ -4783,25 +4815,38 @@ async def api_live_session_create(body: LiveSessionCreate):
     Emails are trimmed + lowercased; entries without an '@' are dropped.
     400 when title/trainingId/trainerEmail is missing or the roster is empty
     after normalization. Returns the full session JSON (trainer view).
+
+    Workshops (EPIC-002): scheduledAt/timezone/durationMinutes/maxSeats are
+    optional; creating WITH scheduledAt yields state "scheduled" (open the
+    room later via /open-registration or /start), without it state "open"
+    exactly as before. Every session gets a unique join code (trainer-only
+    in payloads) resolvable via POST /api/live/sessions/join-by-code.
     """
     try:
         fields = live_sessions.validate_create(
             body.title, body.trainingId, body.trainerEmail, body.roster)
+        schedule = live_sessions.validate_schedule(
+            body.scheduledAt, body.timezone, body.durationMinutes, body.maxSeats)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     session_id = _new_job_id()
+    join_code = await _reserve_join_code(session_id)
     now = datetime.now(timezone.utc)
     session = {
         "title":        fields["title"],
         "trainingId":   fields["trainingId"],
         "ref":          (body.ref or "").strip(),
         "trainerEmail": fields["trainerEmail"],
-        "state":        "open",
+        "state":        live_sessions.initial_state(schedule["scheduledAt"]),
         "createdAt":    now.isoformat(),
         "startedAt":    "",
         "endedAt":      "",
+        "joinCode":     join_code,
     }
+    # Optional workshop fields — only written when present so pre-workshop
+    # sessions (and their payloads) stay byte-identical.
+    session.update({k: v for k, v in schedule.items() if v})
     sess_key, roster_key, _ = _live_keys(session_id)
     await pool.hset(sess_key, mapping=session)
     await pool.sadd(roster_key, *fields["roster"])
@@ -4869,8 +4914,9 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
 
 @app.post("/api/live/sessions/{session_id}/start")
 async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction):
-    """Trainer starts the session: open → running (learners' waiting screens
-    flip). Idempotent when already running; 403 on trainerEmail mismatch."""
+    """Trainer starts the session: scheduled|open → running (learners'
+    waiting screens flip). Idempotent when already running; 403 on
+    trainerEmail mismatch."""
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -4908,12 +4954,805 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction):
         session["endedAt"] = datetime.now(timezone.utc).isoformat()
         await pool.hset(sess_key, mapping={
             "state": new_state, "endedAt": session["endedAt"]})
+        await _store_pad_export(session_id, session)
         log.info("Live session %s ended by %s", session_id, body.trainerEmail)
-    for key in (sess_key, roster_key, joined_key):
-        await pool.expire(key, live_sessions.SESSION_TTL_SECONDS)
+    await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
+@app.post("/api/live/sessions/{session_id}/cancel")
+async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerAction):
+    """Trainer cancels a scheduled/open workshop: state → cancelled, sets
+    cancelledAt, freezes the pad into the export snapshot, and applies the
+    same 7-day TTL as ended (entity + index kept so learners see it was
+    cancelled rather than a vanished session). Idempotent; 409 once running
+    or ended; 403 on trainerEmail mismatch."""
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    try:
+        new_state, changed = live_sessions.apply_transition(session.get("state", ""), "cancel")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if changed:
+        session["state"] = new_state
+        session["cancelledAt"] = datetime.now(timezone.utc).isoformat()
+        await pool.hset(sess_key, mapping={
+            "state": new_state, "cancelledAt": session["cancelledAt"]})
+        await _store_pad_export(session_id, session)
+        log.info("Live session %s cancelled by %s", session_id, body.trainerEmail)
+    await _expire_live_session_keys(session_id, session)
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
+@app.post("/api/live/sessions/{session_id}/open-registration")
+async def api_live_session_open_registration(session_id: str, body: LiveSessionTrainerAction):
+    """Trainer opens registration on a scheduled workshop: scheduled → open.
+    Idempotent when already open; 409 once running/ended/cancelled; 403 on
+    trainerEmail mismatch."""
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    try:
+        new_state, changed = live_sessions.apply_transition(session.get("state", ""), "open-registration")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if changed:
+        session["state"] = new_state
+        await pool.hset(sess_key, "state", new_state)
+        log.info("Live session %s registration opened by %s", session_id, body.trainerEmail)
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
+@app.post("/api/live/sessions/join-by-code")
+async def api_live_session_join_by_code(body: LiveSessionJoinByCode):
+    """Join a workshop by its 6-char code (case-insensitive) — appends the
+    email to the roster (self-registration), unlike /join which requires an
+    invite. 404 unknown code, 409 when full (maxSeats) or ended/cancelled.
+    Returns the session summary (learner view — no joinCode echo)."""
+    code = live_sessions.normalize_join_code(body.code)
+    if not code:
+        raise HTTPException(status_code=400, detail="a join code is required")
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    session_id = await pool.get(f"live:joincode:{code}")
+    if not session_id:
+        raise HTTPException(status_code=404, detail="Unknown join code")
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    roster = await pool.smembers(roster_key)
+    err = live_sessions.join_by_code_error(
+        session.get("state", ""), email, roster,
+        int(session.get("maxSeats") or 0))
+    if err:
+        raise HTTPException(status_code=err[0], detail=err[1])
+    await pool.sadd(roster_key, email)
+    await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return {"sessionId": session_id,
+            **live_sessions.shape_summary(session_id, session, roster, joined, email)}
+
+
+@app.post("/api/live/sessions/{session_id}/provision-all")
+async def api_live_session_provision_all(session_id: str, body: LiveSessionProvisionAll):
+    """Trainer pre-provisions a training environment for every roster email.
+
+    Reuses the arena provision path verbatim (including its one-active-
+    session-per-user+tenant+training dedupe): already-active learners are
+    reported as "already-active", everyone else gets a daemon job queued
+    exactly as POST /api/arena/provision would. tenant = the trainer's arena
+    tenant URL; the session's trainingId/ref drive repo + branch."""
+    sess_key, roster_key, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    roster = await pool.smembers(roster_key)
+    results = []
+    for email in sorted(roster):
+        try:
+            provisioned = await api_arena_provision(ArenaProvisionRequest(
+                trainingId=session.get("trainingId", ""),
+                userId=email,
+                tenantUrl=(body.tenant or "").rstrip("/"),
+                ref=session.get("ref", ""),
+            ))
+            results.append({
+                "email":  email,
+                "status": "already-active" if provisioned.get("deduped") else "queued",
+                "jobId":  provisioned.get("jobId", ""),
+            })
+        except HTTPException as exc:
+            results.append({"email": email, "status": "error",
+                            "error": str(exc.detail)[:200]})
+        except Exception as exc:
+            results.append({"email": email, "status": "error",
+                            "error": str(exc)[:200]})
+    log.info("Live session %s provision-all by %s: %d queued, %d active, %d errors",
+             session_id, body.trainerEmail,
+             sum(1 for r in results if r["status"] == "queued"),
+             sum(1 for r in results if r["status"] == "already-active"),
+             sum(1 for r in results if r["status"] == "error"))
+    return {"results": results}
+
+
+@app.get("/api/live/sessions/{session_id}/readiness")
+async def api_live_session_readiness(session_id: str, trainerEmail: str = ""):
+    """Trainer's per-learner provisioning board: for each roster email the
+    state of their environment for THIS training — none | queued |
+    provisioning | ready | failed. "ready" is the same "Daemon ready"
+    livelog contract as the arena session-status endpoint; "failed" only
+    when a failed terminal record newer than the session exists (be honest
+    — no invented states)."""
+    sess_key, roster_key, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    roster = await pool.smembers(roster_key)
+    training_id = session.get("trainingId", "")
+
+    # One scan of the running arena jobs → email -> meta for this training.
+    running_by_email: dict[str, dict] = {}
+    cursor = 0
+    while True:
+        cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=200)
+        for key in keys:
+            meta = await pool.hgetall(key)
+            if not meta or meta.get("terminating"):
+                continue
+            user = live_sessions.normalize_email(meta.get("arena_user"))
+            if meta.get("training_id") == training_id and user in roster:
+                running_by_email[user] = meta
+        if cursor == 0:
+            break
+
+    # Failed records: recent jobs:completed entries matched by (email,
+    # training, finished after the session was created).
+    failed_by_email: dict[str, str] = {}
+    for raw in await pool.lrange("jobs:completed", -500, -1):
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+        user = live_sessions.failed_job_email(
+            record, roster, training_id, since=session.get("createdAt", ""))
+        if user and user not in running_by_email:
+            failed_by_email[user] = record.get("job_id", "")
+
+    results = []
+    for email in sorted(roster):
+        meta = running_by_email.get(email)
+        if meta:
+            job_id = meta.get("job_id", "")
+            livelog = await pool.get(f"job:livelog:{job_id}") if job_id else ""
+            results.append({"email": email,
+                            "state": live_sessions.readiness_state(meta, livelog),
+                            "jobId": job_id})
+        elif email in failed_by_email:
+            results.append({"email": email, "state": "failed",
+                            "jobId": failed_by_email[email]})
+        else:
+            results.append({"email": email, "state": "none"})
+    return {"results": results}
+
+
+@app.get("/api/live/capacity")
+async def api_live_capacity(needed: int = 0):
+    """Read-only fleet headroom check for a workshop of `needed` learners —
+    worker heartbeat capacities minus the running-job count per worker. An
+    approximation (heartbeat hashes, no cluster-wide slot ledger) but honest
+    enough for a fail-loud pre-flight."""
+    workers = await _fleet_workers()
+    active_counts: dict[str, int] = {}
+    cursor = 0
+    while True:
+        cursor, keys = await pool.scan(cursor, match="job:running:*", count=200)
+        for key in keys:
+            try:
+                meta = await pool.hgetall(key)
+            except Exception:
+                continue
+            wid = meta.get("worker_id", "")
+            if wid:
+                active_counts[wid] = active_counts.get(wid, 0) + 1
+        if cursor == 0:
+            break
+    return live_sessions.capacity_summary(workers, active_counts, needed)
+
+
+# ── Structured workshop pad (EPIC-002) ────────────────────────────────────────
+# Shared notes (welcome/solutions markdown) + Q&A for a live session, stored
+# in Redis streams (NOT pub/sub) so late joiners and the export replay the
+# full history. Browser access is via /pad/{id} — a self-contained page that
+# claims a single-use pad token (shell-token pattern) for an 8h pad session;
+# live updates are SSE (nginx: proxy_buffering off on /api/live/*stream).
+# All decision logic is in dashboard/live_pad.py (pure, unit-tested).
+
+
+def _pad_keys(session_id: str) -> tuple[str, str, str]:
+    """The three Redis keys of a session pad: (sections hash, qa stream,
+    export string)."""
+    base = f"live:pad:{session_id}"
+    return f"{base}:sections", f"{base}:qa", f"{base}:export"
+
+
+async def _expire_live_session_keys(session_id: str, session: dict):
+    """Apply the ended/cancelled 7-day TTL to every key of a session — the
+    session hash/roster/joined, the join-code pointer, and the raw pad keys
+    (the pad export carries its own 30-day TTL). expire on a missing key is
+    a no-op, so this is safe for sessions without a pad or join code."""
+    sections_key, qa_key, _ = _pad_keys(session_id)
+    keys = [*_live_keys(session_id), sections_key, qa_key]
+    if session.get("joinCode"):
+        keys.append(f"live:joincode:{session['joinCode']}")
+    for key in keys:
+        await pool.expire(key, live_sessions.SESSION_TTL_SECONDS)
+
+
+async def _store_pad_export(session_id: str, session: dict):
+    """Freeze the pad into a standalone HTML snapshot (live:pad:{id}:export,
+    30-day TTL) — called on the end/cancel transition."""
+    sections_key, qa_key, export_key = _pad_keys(session_id)
+    sections = await pool.hgetall(sections_key)
+    entries = await pool.xrange(qa_key)
+    html_doc = live_pad.render_export(
+        session, sections, live_pad.assemble_qa(entries))
+    await pool.set(export_key, html_doc, ex=live_pad.EXPORT_TTL_SECONDS)
+
+
+async def _require_live_session(session_id: str) -> dict:
+    session = await pool.hgetall(f"live:session:{session_id}")
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    return session
+
+
+def _pad_frozen_guard(session: dict):
+    """Pad writes stop once the session is ended/cancelled — the export
+    snapshot has already been frozen and would silently drop them."""
+    if session.get("state") in ("ended", "cancelled"):
+        raise HTTPException(status_code=409,
+                            detail=f"session is {session.get('state')} — the pad is read-only")
+
+
+async def _pad_add_question(session_id: str, session: dict, email: str,
+                            name: str, text: str) -> dict:
+    _pad_frozen_guard(session)
+    try:
+        text = live_pad.clean_text(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _, qa_key, _ = _pad_keys(session_id)
+    ts = datetime.now(timezone.utc).isoformat()
+    entry_id = await pool.xadd(qa_key, {
+        "type": "question", "qid": "", "email": email, "name": name,
+        "text": text, "ts": ts})
+    return {"qid": entry_id, "ts": ts}
+
+
+async def _pad_add_answer(session_id: str, session: dict, email: str,
+                          name: str, qid: str, text: str) -> dict:
+    _pad_frozen_guard(session)
+    try:
+        text = live_pad.clean_text(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _, qa_key, _ = _pad_keys(session_id)
+    question = await pool.xrange(qa_key, min=qid, max=qid) if qid else []
+    if not question or question[0][1].get("type") != "question":
+        raise HTTPException(status_code=404, detail="question not found")
+    ts = datetime.now(timezone.utc).isoformat()
+    await pool.xadd(qa_key, {
+        "type": "answer", "qid": qid, "email": email, "name": name,
+        "text": text, "ts": ts})
+    return {"qid": qid, "ts": ts}
+
+
+async def _pad_set_section(session_id: str, session: dict, email: str,
+                           key: str, markdown: str) -> dict:
+    _pad_frozen_guard(session)
+    err = live_pad.section_error(key, email, session)
+    if err:
+        raise HTTPException(status_code=err[0], detail=err[1])
+    sections_key, _, _ = _pad_keys(session_id)
+    await pool.hset(sections_key, key, markdown or "")
+    return {"key": key, "saved": True}
+
+
+async def _pad_event_stream(session_id: str):
+    """SSE generator: one full snapshot event, then incremental qa events via
+    blocking XREAD (15 s block, keepalive comment between). Section edits
+    have no stream — change detection piggybacks on each wake (≤15 s lag)."""
+    sections_key, qa_key, _ = _pad_keys(session_id)
+    sections = await pool.hgetall(sections_key)
+    entries = await pool.xrange(qa_key)
+    last_id = entries[-1][0] if entries else "0-0"
+    yield ("event: snapshot\ndata: "
+           + json.dumps(live_pad.shape_pad(sections, entries)) + "\n\n")
+    known = {k: sections.get(k, "") for k in live_pad.SECTION_KEYS}
+    while True:
+        result = await pool.xread({qa_key: last_id}, block=15000, count=100)
+        if result:
+            for _stream, new_entries in result:
+                for entry_id, fields in new_entries:
+                    last_id = entry_id
+                    event = dict(fields)
+                    if event.get("type") == "question":
+                        event["qid"] = entry_id
+                    yield "event: qa\ndata: " + json.dumps(event) + "\n\n"
+        else:
+            yield ": keepalive\n\n"
+        sections = await pool.hgetall(sections_key)
+        current = {k: sections.get(k, "") for k in live_pad.SECTION_KEYS}
+        if current != known:
+            known = current
+            yield "event: sections\ndata: " + json.dumps(current) + "\n\n"
+
+
+def _sse_response(generator) -> StreamingResponse:
+    return StreamingResponse(generator, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+class LivePadSection(BaseModel):
+    trainerEmail: str = ""
+    key: str = ""
+    markdown: str = ""
+
+
+class LivePadQuestion(BaseModel):
+    email: str = ""
+    name: str = ""
+    text: str = ""
+
+
+class LivePadAnswer(BaseModel):
+    trainerEmail: str = ""
+    name: str = ""
+    qid: str = ""
+    text: str = ""
+
+
+class LivePadTokenRequest(BaseModel):
+    email: str = ""
+    name: str = ""
+    role: str = ""                # "trainer" | "learner"
+
+
+class LivePadClaim(BaseModel):
+    token: str = ""
+
+
+class LivePadSessionBody(BaseModel):
+    """padSession-authed writes from the /pad/{id} page — identity comes from
+    the claimed pad-session record server-side, never from client fields."""
+    padSession: str = ""
+    key: str = ""
+    markdown: str = ""
+    qid: str = ""
+    text: str = ""
+
+
+async def _resolve_pad_session(pad_session: str) -> dict:
+    raw = await pool.get(f"live:padsession:{pad_session}") if pad_session else None
+    if not raw:
+        raise HTTPException(status_code=401, detail="invalid or expired pad session")
+    return json.loads(raw)
+
+
+@app.get("/api/live/sessions/{session_id}/pad")
+async def api_live_pad_get(session_id: str):
+    """Full pad state: the two structured sections + Q&A with answers
+    assembled under their questions. Poll-friendly (the in-app tab reads
+    this via the orbital proxy); the popup page uses the SSE stream."""
+    await _require_live_session(session_id)
+    sections_key, qa_key, _ = _pad_keys(session_id)
+    sections = await pool.hgetall(sections_key)
+    entries = await pool.xrange(qa_key)
+    return live_pad.shape_pad(sections, entries)
+
+
+@app.post("/api/live/sessions/{session_id}/pad/section")
+async def api_live_pad_section(session_id: str, body: LivePadSection):
+    """Trainer sets a structured section (welcome|solutions markdown)."""
+    session = await _require_live_session(session_id)
+    return await _pad_set_section(session_id, session,
+                                  body.trainerEmail, body.key, body.markdown)
+
+
+@app.post("/api/live/sessions/{session_id}/pad/question")
+async def api_live_pad_question(session_id: str, body: LivePadQuestion):
+    """Anyone in the session asks a question (max 2000 chars, HTML
+    stripped). The entry's stream id becomes its qid."""
+    session = await _require_live_session(session_id)
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    return await _pad_add_question(session_id, session, email,
+                                   (body.name or "").strip(), body.text)
+
+
+@app.post("/api/live/sessions/{session_id}/pad/answer")
+async def api_live_pad_answer(session_id: str, body: LivePadAnswer):
+    """Trainer answers a question (qid = the question's stream id)."""
+    session = await _require_live_session(session_id)
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="only the trainer can answer questions")
+    return await _pad_add_answer(session_id, session,
+                                 live_sessions.normalize_email(body.trainerEmail),
+                                 (body.name or "").strip(), body.qid, body.text)
+
+
+@app.get("/api/live/sessions/{session_id}/pad/stream")
+async def api_live_pad_stream(session_id: str):
+    """SSE pad feed (snapshot + incremental) — session-scoped variant."""
+    await _require_live_session(session_id)
+    return _sse_response(_pad_event_stream(session_id))
+
+
+@app.get("/api/live/sessions/{session_id}/pad/export")
+async def api_live_pad_export(session_id: str, email: str = ""):
+    """The frozen pad snapshot (standalone HTML) — available to the trainer
+    and any roster member once the session ended or was cancelled."""
+    session = await _require_live_session(session_id)
+    roster = await pool.smembers(f"live:session:{session_id}:roster")
+    if not (live_sessions.is_trainer(email, session)
+            or live_sessions.on_roster(email, roster)):
+        raise HTTPException(status_code=403, detail="email is not on the session roster")
+    _, _, export_key = _pad_keys(session_id)
+    html_doc = await pool.get(export_key)
+    if not html_doc:
+        raise HTTPException(status_code=404,
+                            detail="no export snapshot yet (session has not ended or been cancelled)")
+    return HTMLResponse(html_doc)
+
+
+@app.post("/api/live/sessions/{session_id}/pad-token")
+async def api_live_pad_token(session_id: str, body: LivePadTokenRequest):
+    """Issue a single-use 60-second pad handoff token (shell-token pattern).
+
+    Called via the app's authed orbital proxy; the token rides the
+    /pad/{id}?token=… URL and is claimed exactly once by the page, which
+    mints the 8h pad session. Trainer role requires the trainerEmail match;
+    learners must be on the roster."""
+    session = await _require_live_session(session_id)
+    try:
+        role = live_pad.validate_role(body.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    if role == "trainer":
+        if not live_sessions.is_trainer(email, session):
+            raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    else:
+        roster = await pool.smembers(f"live:session:{session_id}:roster")
+        if not (live_sessions.on_roster(email, roster)
+                or live_sessions.is_trainer(email, session)):
+            raise HTTPException(status_code=403, detail="email is not on the session roster")
+    token = secrets.token_hex(16)
+    await pool.set(f"live:padtoken:{token}", json.dumps({
+        "sessionId": session_id, "email": email,
+        "name": (body.name or "").strip(), "role": role,
+    }), ex=live_pad.PAD_TOKEN_TTL_SECONDS)
+    return {"token": token,
+            "padUrl": f"https://autonomous-enablements.whydevslovedynatrace.com/pad/{session_id}?token={token}"}
+
+
+@app.post("/api/live/pad-claim")
+async def api_live_pad_claim(body: LivePadClaim):
+    """Claim a single-use pad token → mint the multi-use pad session (8h).
+
+    Same atomic GET+DEL as the shell-token WebSocket validation."""
+    pipe = pool.pipeline(transaction=True)
+    pipe.get(f"live:padtoken:{body.token}")
+    pipe.delete(f"live:padtoken:{body.token}")
+    raw, _ = await pipe.execute()
+    if not raw:
+        raise HTTPException(status_code=401, detail="invalid or expired pad token")
+    identity = json.loads(raw)
+    pad_session = secrets.token_hex(16)
+    await pool.set(f"live:padsession:{pad_session}", raw,
+                   ex=live_pad.PAD_SESSION_TTL_SECONDS)
+    session = await pool.hgetall(f"live:session:{identity['sessionId']}") or {}
+    return {"padSession": pad_session, **identity,
+            "title": session.get("title", ""), "state": session.get("state", "")}
+
+
+@app.post("/api/live/pad/section")
+async def api_live_pad_section_ps(body: LivePadSessionBody):
+    """padSession-authed section write (identity from the pad session)."""
+    identity = await _resolve_pad_session(body.padSession)
+    if identity.get("role") != "trainer":
+        raise HTTPException(status_code=403, detail="only the trainer can edit pad sections")
+    session = await _require_live_session(identity["sessionId"])
+    return await _pad_set_section(identity["sessionId"], session,
+                                  identity.get("email", ""), body.key, body.markdown)
+
+
+@app.post("/api/live/pad/question")
+async def api_live_pad_question_ps(body: LivePadSessionBody):
+    """padSession-authed question (identity from the pad session)."""
+    identity = await _resolve_pad_session(body.padSession)
+    session = await _require_live_session(identity["sessionId"])
+    return await _pad_add_question(identity["sessionId"], session,
+                                   identity.get("email", ""),
+                                   identity.get("name", ""), body.text)
+
+
+@app.post("/api/live/pad/answer")
+async def api_live_pad_answer_ps(body: LivePadSessionBody):
+    """padSession-authed answer (trainer pad sessions only)."""
+    identity = await _resolve_pad_session(body.padSession)
+    if identity.get("role") != "trainer":
+        raise HTTPException(status_code=403, detail="only the trainer can answer questions")
+    session = await _require_live_session(identity["sessionId"])
+    return await _pad_add_answer(identity["sessionId"], session,
+                                 identity.get("email", ""),
+                                 identity.get("name", ""), body.qid, body.text)
+
+
+@app.get("/api/live/pad/stream")
+async def api_live_pad_stream_ps(padSession: str = ""):
+    """padSession-authed SSE pad feed (EventSource can't set headers, so the
+    pad session rides the query string)."""
+    identity = await _resolve_pad_session(padSession)
+    await _require_live_session(identity["sessionId"])
+    return _sse_response(_pad_event_stream(identity["sessionId"]))
+
+
+# Self-contained pad page (the /shell/{job_id} pattern: inline CSS/JS, no
+# external deps). Plain string + placeholder substitution — NOT an f-string —
+# so the CSS/JS braces stay readable. __SESSION_ID__/__BASE__ are JSON-encoded
+# on the way in.
+_PAD_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workshop Pad</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; background: #1a1a2e; color: #d4d4d4;
+  font-family: -apple-system, 'Segoe UI', sans-serif; }
+body { display: flex; flex-direction: column; }
+#topbar { background: #16213e; color: #a0aec0; font-size: 12px; line-height: 38px;
+  padding: 0 16px; display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0; border-bottom: 1px solid #0d3460; gap: 16px; }
+#brand { display: flex; align-items: center; gap: 8px; }
+#brand-logo { color: #00b4d8; font-size: 18px; }
+#brand-name { color: #e2e8f0; font-weight: 600; font-size: 13px; letter-spacing: .3px; }
+#who { font-size: 11px; color: #718096; white-space: nowrap; }
+#main { flex: 1; overflow-y: auto; padding: 20px; max-width: 860px; width: 100%;
+  margin: 0 auto; }
+.card { background: #16213e; border: 1px solid #0d3460; border-radius: 6px;
+  padding: 14px 16px; margin-bottom: 14px; }
+.card h3 { color: #00b4d8; font-size: 13px; margin-bottom: 10px;
+  text-transform: uppercase; letter-spacing: .5px; }
+.md { font-size: 13px; line-height: 1.55; color: #c9d1d9; word-break: break-word; }
+.md h1, .md h2, .md h3 { color: #e2e8f0; margin: 10px 0 6px; }
+.md h1 { font-size: 16px; } .md h2 { font-size: 14px; } .md h3 { font-size: 13px; }
+.md code { background: #0d1117; border: 1px solid #0d3460; border-radius: 3px;
+  padding: 1px 5px; font: 12px ui-monospace, Menlo, monospace; color: #79c0ff; }
+.md pre { background: #0d1117; border: 1px solid #0d3460; border-radius: 4px;
+  padding: 10px; overflow-x: auto; margin: 8px 0; }
+.md pre code { background: none; border: 0; padding: 0; }
+.md a { color: #58a6ff; }
+.empty { color: #718096; font-size: 12px; font-style: italic; }
+textarea { width: 100%; background: #0d1117; color: #e6edf3;
+  border: 1px solid #0d3460; border-radius: 4px; padding: 8px;
+  font: 12px ui-monospace, Menlo, monospace; resize: vertical; min-height: 70px; }
+textarea:focus, input:focus { outline: 1px solid #00b4d8; }
+button { background: #0e639c; color: #fff; border: 0; border-radius: 4px;
+  padding: 6px 14px; font-size: 12px; cursor: pointer; }
+button:hover { background: #1177bb; }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 8px; margin-top: 8px; align-items: flex-start; }
+.q { border-top: 1px solid #0d3460; padding: 10px 0; }
+.q:first-child { border-top: 0; }
+.q .who { color: #e2e8f0; font-size: 12px; font-weight: 600; }
+.q .ts { color: #718096; font-size: 10px; font-weight: 400; margin-left: 6px; }
+.q .text { font-size: 13px; margin-top: 4px; white-space: pre-wrap;
+  word-break: break-word; }
+.a { margin: 8px 0 0 18px; padding-left: 10px; border-left: 2px solid #00b4d8; }
+.a .who { color: #00b4d8; }
+#err { display: none; margin: 40px auto; max-width: 480px; text-align: center;
+  color: #fc8181; font-size: 13px; line-height: 1.6; }
+.saved { color: #48bb78; font-size: 11px; margin-left: 8px; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <div id="brand">
+    <span id="brand-logo">⬡</span>
+    <span id="brand-name">Workshop Pad</span>
+    <span id="title" style="color:#718096"></span>
+  </div>
+  <span id="who">Connecting…</span>
+</div>
+<div id="err"></div>
+<div id="main" style="display:none">
+  <div class="card" id="card-welcome">
+    <h3>Welcome</h3>
+    <div class="md" id="md-welcome"><span class="empty">Nothing here yet.</span></div>
+    <div id="edit-welcome" style="display:none">
+      <div class="row"><textarea id="ta-welcome" placeholder="Markdown…"></textarea></div>
+      <div class="row"><button onclick="saveSection('welcome')">Save</button><span class="saved" id="ok-welcome"></span></div>
+    </div>
+  </div>
+  <div class="card" id="card-solutions">
+    <h3>Solutions</h3>
+    <div class="md" id="md-solutions"><span class="empty">Nothing here yet.</span></div>
+    <div id="edit-solutions" style="display:none">
+      <div class="row"><textarea id="ta-solutions" placeholder="Markdown…"></textarea></div>
+      <div class="row"><button onclick="saveSection('solutions')">Save</button><span class="saved" id="ok-solutions"></span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Questions &amp; Answers</h3>
+    <div id="qa"><span class="empty">No questions yet — ask the first one below.</span></div>
+    <div class="row">
+      <textarea id="compose" maxlength="2000" placeholder="Ask a question…"></textarea>
+      <button onclick="ask()">Ask</button>
+    </div>
+  </div>
+</div>
+<script>
+(async () => {
+  const SESSION_ID = __SESSION_ID__;
+  const BASE = __BASE__;
+  const store = 'padsession-' + SESSION_ID;
+  const esc = s => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  // Tiny markdown renderer: escape first, then fences, headings, bold,
+  // inline code, links, line breaks. Deliberately minimal.
+  function md(src) {
+    if (!src) return '<span class="empty">Nothing here yet.</span>';
+    let out = esc(src);
+    out = out.replace(/```([\\s\\S]*?)```/g, (m, c) => '<pre><code>' + c.replace(/^\\n/, '') + '</code></pre>');
+    out = out.replace(/^### (.*)$/gm, '<h3>$1</h3>');
+    out = out.replace(/^## (.*)$/gm, '<h2>$1</h2>');
+    out = out.replace(/^# (.*)$/gm, '<h1>$1</h1>');
+    out = out.replace(/\\*\\*([^*]+)\\*\\*/g, '<b>$1</b>');
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    out = out.replace(/\\[([^\\]]+)\\]\\((https?:[^)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return out.replace(/\\n/g, '<br>');
+  }
+  function fail(msg) {
+    document.getElementById('err').style.display = 'block';
+    document.getElementById('err').textContent = msg;
+    document.getElementById('who').textContent = '';
+  }
+
+  // ── Claim the single-use token → 8h pad session (survives reloads via
+  // sessionStorage; the URL token is dead after first use). ──
+  let me = null;
+  try { me = JSON.parse(sessionStorage.getItem(store) || 'null'); } catch (e) {}
+  const urlToken = new URLSearchParams(location.search).get('token') || '';
+  if (!me && urlToken) {
+    try {
+      const r = await fetch(BASE + '/api/live/pad-claim', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: urlToken})});
+      if (r.ok) { me = await r.json(); sessionStorage.setItem(store, JSON.stringify(me)); }
+    } catch (e) {}
+  }
+  if (!me) return fail('This pad link has expired — reopen the pad from the app to get a fresh one.');
+
+  document.getElementById('main').style.display = 'block';
+  document.getElementById('title').textContent = me.title ? '· ' + me.title : '';
+  document.getElementById('who').textContent = (me.name || me.email) + ' (' + me.role + ')';
+  const isTrainer = me.role === 'trainer';
+  if (isTrainer) ['welcome', 'solutions'].forEach(k =>
+    document.getElementById('edit-' + k).style.display = 'block');
+
+  // ── State + rendering (SSE is the single source of truth — own posts
+  // come back through the stream, no local echo). ──
+  let S = {sections: {}, qa: []};
+  function renderSections() {
+    for (const k of ['welcome', 'solutions']) {
+      document.getElementById('md-' + k).innerHTML = md(S.sections[k] || '');
+      const ta = document.getElementById('ta-' + k);
+      if (isTrainer && document.activeElement !== ta) ta.value = S.sections[k] || '';
+    }
+  }
+  function renderQa() {
+    const host = document.getElementById('qa');
+    if (!S.qa.length) { host.innerHTML = '<span class="empty">No questions yet — ask the first one below.</span>'; return; }
+    host.innerHTML = S.qa.map((q, i) => {
+      let h = '<div class="q"><div class="who">' + esc(q.name || q.email) +
+        '<span class="ts">' + esc((q.ts || '').replace('T', ' ').slice(0, 16)) + '</span></div>' +
+        '<div class="text">' + esc(q.text) + '</div>';
+      for (const a of q.answers) h += '<div class="a"><div class="who">' + esc(a.name || 'Trainer') +
+        '<span class="ts">' + esc((a.ts || '').replace('T', ' ').slice(0, 16)) + '</span></div>' +
+        '<div class="text">' + esc(a.text) + '</div></div>';
+      if (isTrainer) h += '<div class="row"><textarea id="ans-' + i + '" style="min-height:40px" placeholder="Answer…"></textarea>' +
+        '<button onclick="answer(' + i + ')">Reply</button></div>';
+      return h + '</div>';
+    }).join('');
+  }
+
+  async function post(path, body) {
+    const r = await fetch(BASE + path, {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({padSession: me.padSession}, body))});
+    if (!r.ok) alert('Request failed (' + r.status + '): ' + await r.text());
+    return r.ok;
+  }
+  window.ask = async () => {
+    const ta = document.getElementById('compose');
+    if (ta.value.trim() && await post('/api/live/pad/question', {text: ta.value})) ta.value = '';
+  };
+  window.answer = async (i) => {
+    const ta = document.getElementById('ans-' + i);
+    if (ta.value.trim()) await post('/api/live/pad/answer', {qid: S.qa[i].qid, text: ta.value});
+  };
+  window.saveSection = async (k) => {
+    if (await post('/api/live/pad/section', {key: k, markdown: document.getElementById('ta-' + k).value})) {
+      const ok = document.getElementById('ok-' + k);
+      ok.textContent = 'saved'; setTimeout(() => ok.textContent = '', 1500);
+    }
+  };
+
+  // ── Live updates (SSE; EventSource reconnects on its own) ──
+  const es = new EventSource(BASE + '/api/live/pad/stream?padSession=' + encodeURIComponent(me.padSession));
+  es.addEventListener('snapshot', e => {
+    S = JSON.parse(e.data); renderSections(); renderQa();
+  });
+  es.addEventListener('sections', e => {
+    S.sections = JSON.parse(e.data); renderSections();
+  });
+  es.addEventListener('qa', e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'question') {
+      if (!S.qa.some(q => q.qid === ev.qid))
+        S.qa.push({qid: ev.qid, name: ev.name, email: ev.email, text: ev.text, ts: ev.ts, answers: []});
+    } else if (ev.type === 'answer') {
+      const q = S.qa.find(q => q.qid === ev.qid);
+      if (q) q.answers.push({name: ev.name, text: ev.text, ts: ev.ts});
+    }
+    renderQa();
+  });
+  es.onerror = () => { document.getElementById('who').textContent = (me.name || me.email) + ' (reconnecting…)'; };
+  es.onopen = () => { document.getElementById('who').textContent = (me.name || me.email) + ' (' + me.role + ')'; };
+})();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/pad/{session_id}", response_class=HTMLResponse)
+async def live_pad_page(session_id: str, token: str = ""):
+    """Standalone workshop pad page (Welcome/Solutions + Q&A, live via SSE).
+
+    Same handoff as /shell/{job_id}: opened from the app with a single-use
+    ?token= (minted by the authed pad-token endpoint), which the page claims
+    for an 8h pad session. Self-contained — inline CSS/JS, no external deps.
+    """
+    base_url = "https://autonomous-enablements.whydevslovedynatrace.com"
+    return HTMLResponse(_PAD_PAGE_HTML
+                        .replace("__SESSION_ID__", json.dumps(session_id))
+                        .replace("__BASE__", json.dumps(base_url)))
 
 
 # ── Framework test suites ─────────────────────────────────────────────────────

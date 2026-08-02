@@ -6,14 +6,22 @@ thin: they read/write the Redis keys and delegate every decision here.
 
 Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
   live:session:{id}         hash  title, trainingId, ref, trainerEmail,
-                                  state (open|running|ended),
+                                  state (scheduled|open|running|ended|cancelled),
                                   createdAt, startedAt, endedAt
+                                  + OPTIONAL workshop fields (EPIC-002):
+                                  scheduledAt, timezone, durationMinutes,
+                                  maxSeats, joinCode, cancelledAt
   live:session:{id}:roster  set   lowercase invited emails
   live:session:{id}:joined  hash  email -> ISO joinedAt
   live:sessions:index       zset  sessionId scored by epoch createdAt
+  live:joincode:{code}      str   sessionId (join-by-code lookup, code UPPER)
 """
 
-STATES = ("open", "running", "ended")
+import secrets
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+STATES = ("scheduled", "open", "running", "ended", "cancelled")
 
 # TTL applied to the three session keys when a session ends — matches the
 # job:final 7-day retention. The index entry is kept; listing tolerates
@@ -68,6 +76,73 @@ def validate_create(title, training_id, trainer_email, roster) -> dict:
             "trainerEmail": trainer, "roster": members}
 
 
+# ── Workshop scheduling (EPIC-002) ────────────────────────────────────────────
+
+def validate_schedule(scheduled_at, timezone_name, duration_minutes,
+                      max_seats) -> dict:
+    """Validate + normalize the OPTIONAL workshop scheduling fields.
+
+    Returns storage-ready strings ('' = absent — the hash field is simply not
+    written, keeping pre-workshop sessions byte-identical). Raises ValueError
+    (→ HTTP 400) on a malformed value.
+    """
+    out = {"scheduledAt": "", "timezone": "", "durationMinutes": "",
+           "maxSeats": ""}
+    when = (scheduled_at or "").strip()
+    if when:
+        try:
+            datetime.fromisoformat(when.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"scheduledAt is not a valid ISO8601 timestamp: '{when}'")
+        out["scheduledAt"] = when
+    tz = (timezone_name or "").strip()
+    if tz:
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            raise ValueError(f"timezone is not a valid IANA zone name: '{tz}'")
+        out["timezone"] = tz
+    for field, value in (("durationMinutes", duration_minutes),
+                         ("maxSeats", max_seats)):
+        if value in (None, "", 0):
+            continue
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be an integer")
+        if n < 0:
+            raise ValueError(f"{field} must be >= 0")
+        if n:
+            out[field] = str(n)
+    return out
+
+
+def initial_state(scheduled_at) -> str:
+    """Create WITH scheduledAt → 'scheduled'; without → 'open' (the
+    pre-workshop behavior, so existing callers are unaffected)."""
+    return "scheduled" if (scheduled_at or "").strip() else "open"
+
+
+# ── Join codes ────────────────────────────────────────────────────────────────
+
+# A-Z/2-9 minus confusables (I, L, O and the digits 0/1 they mimic).
+JOIN_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+JOIN_CODE_LENGTH = 6
+
+
+def generate_join_code(rng=secrets) -> str:
+    """A 6-char join code from the confusable-free alphabet. Uniqueness is
+    enforced by the caller via SET NX on live:joincode:{code}."""
+    return "".join(rng.choice(JOIN_CODE_ALPHABET)
+                   for _ in range(JOIN_CODE_LENGTH))
+
+
+def normalize_join_code(code) -> str:
+    """Canonical join-code form: trimmed + uppercased (codes are
+    case-insensitive on input, stored/looked-up UPPER)."""
+    return (code or "").strip().upper()
+
+
 # ── Roster / trainer gating ───────────────────────────────────────────────────
 
 def is_trainer(email, session) -> bool:
@@ -85,11 +160,35 @@ def on_roster(email, roster) -> bool:
 
 
 def join_error(state, email, roster):
-    """Return (http_status, detail) blocking a join, or None when allowed."""
+    """Return (http_status, detail) blocking a join, or None when allowed.
+
+    Joining is allowed in scheduled/open/running (late joiners OK)."""
     if not on_roster(email, roster):
         return 403, "email is not on the session roster"
     if state == "ended":
         return 409, "session has ended"
+    if state == "cancelled":
+        return 409, "session has been cancelled"
+    return None
+
+
+def join_by_code_error(state, email, roster, max_seats):
+    """Return (http_status, detail) blocking a join-by-code, or None.
+
+    Unlike join_error, the email need NOT be on the roster — joining by code
+    APPENDS it. Already-rostered emails re-join idempotently and are never
+    seat-blocked; new emails are rejected when maxSeats>0 and the roster is
+    full."""
+    if state == "ended":
+        return 409, "session has ended"
+    if state == "cancelled":
+        return 409, "session has been cancelled"
+    if state not in ("scheduled", "open", "running"):
+        return 409, f"session is not joinable in state '{state}'"
+    if on_roster(email, roster):
+        return None
+    if max_seats and len(roster or ()) >= max_seats:
+        return 409, f"session is full ({max_seats} seats taken)"
     return None
 
 
@@ -97,9 +196,14 @@ def join_error(state, email, roster):
 
 # action -> {current_state: (new_state, changed)}. Absent = illegal.
 _TRANSITIONS = {
-    "start": {"open": ("running", True), "running": ("running", False)},
+    "open-registration": {"scheduled": ("open", True),
+                          "open": ("open", False)},
+    "start": {"scheduled": ("running", True), "open": ("running", True),
+              "running": ("running", False)},
     "end":   {"open": ("ended", True), "running": ("ended", True),
               "ended": ("ended", False)},
+    "cancel": {"scheduled": ("cancelled", True), "open": ("cancelled", True),
+               "cancelled": ("cancelled", False)},
 }
 
 
@@ -125,10 +229,32 @@ def is_listed(session, roster, email) -> bool:
     return is_trainer(email, session) or on_roster(email, roster)
 
 
+# Optional workshop fields echoed in payloads only when stored on the hash —
+# absent fields add no keys, keeping pre-workshop payloads byte-identical.
+_WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
+                    "cancelledAt")
+
+
+def workshop_fields(session, email) -> dict:
+    """The optional workshop (EPIC-002) fields of a session payload.
+
+    Ints come back as ints; joinCode is included EXCLUSIVELY for the trainer,
+    never for learners."""
+    out = {}
+    for field in _WORKSHOP_FIELDS:
+        value = session.get(field, "")
+        if value:
+            out[field] = (int(value)
+                          if field in ("durationMinutes", "maxSeats") else value)
+    if session.get("joinCode") and is_trainer(email, session):
+        out["joinCode"] = session["joinCode"]
+    return out
+
+
 def shape_summary(session_id, session, roster, joined, email) -> dict:
     """One item of GET /api/live/sessions?email= (learner + trainer lists)."""
     e = normalize_email(email)
-    return {
+    out = {
         "sessionId":    session_id,
         "title":        session.get("title", ""),
         "trainingId":   session.get("trainingId", ""),
@@ -141,6 +267,8 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
         "isTrainer":    is_trainer(e, session),
         "hasJoined":    e in (joined or {}),
     }
+    out.update(workshop_fields(session, e))
+    return out
 
 
 def shape_detail(session_id, session, roster, joined, email) -> dict:
@@ -161,8 +289,65 @@ def shape_detail(session_id, session, roster, joined, email) -> dict:
         "joinedCount":  len(joined or {}),
         "rosterCount":  len(roster or ()),
     }
+    out.update(workshop_fields(session, email))
     if is_trainer(email, session):
         out["roster"] = sorted(roster or ())
         out["joined"] = [{"email": k, "joinedAt": v}
                          for k, v in sorted((joined or {}).items())]
     return out
+
+
+# ── Provisioning readiness / capacity (EPIC-002) ─────────────────────────────
+
+def readiness_state(meta, livelog) -> str:
+    """Classify a running arena job for the trainer's readiness board — same
+    contract as the session-status endpoint: 'ready' means the executor wrote
+    "Daemon ready" to the livelog; unassigned worker means still 'queued'."""
+    if livelog and "Daemon ready" in livelog:
+        return "ready"
+    if meta.get("worker_id") in ("queued", ""):
+        return "queued"
+    return "provisioning"
+
+
+def failed_job_email(record, roster, training_id, since="") -> str | None:
+    """Map a jobs:completed record to a roster email when it is a FAILED
+    daemon job for this session's training, finished after `since` (the
+    session's createdAt — older failures are unrelated). None otherwise.
+
+    Arena daemon jobs carry the training id in nightly_run_id
+    ("enablement-{trainingId}") and the learner email in requested_by."""
+    if record.get("type") != "daemon" or record.get("status") != "failed":
+        return None
+    if record.get("nightly_run_id") != f"enablement-{training_id}":
+        return None
+    email = normalize_email(record.get("requested_by"))
+    if email not in set(roster or ()):
+        return None
+    if since and record.get("finished_at", "") < since:
+        return None
+    return email
+
+
+def capacity_summary(workers, active_counts, needed) -> dict:
+    """GET /api/live/capacity payload from worker heartbeat hashes + per-worker
+    active-job counts. Pure math — the endpoint only gathers the inputs."""
+    def _int(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    items, total_capacity, total_active = [], 0, 0
+    for worker in sorted(workers or [], key=lambda w: w.get("worker_id", "")):
+        wid = worker.get("worker_id", "")
+        capacity = _int(worker.get("capacity"))
+        active = _int((active_counts or {}).get(wid))
+        total_capacity += capacity
+        total_active += active
+        items.append({"id": wid, "capacity": capacity, "active": active})
+    available = max(total_capacity - total_active, 0)
+    needed = max(_int(needed), 0)
+    return {"capacity": total_capacity, "active": total_active,
+            "available": available, "needed": needed,
+            "sufficient": available >= needed, "workers": items}
