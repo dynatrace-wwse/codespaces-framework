@@ -1,6 +1,7 @@
 """Dashboard — web UI and API for the multi-arch ops platform."""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -84,6 +85,10 @@ from dashboard import live_sessions  # noqa: E402
 # Structured workshop pad (EPIC-002) — pure decision logic in
 # dashboard/live_pad.py (tested without Redis); endpoints below stay thin.
 from dashboard import live_pad  # noqa: E402
+
+# PII masking for anonymous (public) reads — pure transforms in
+# dashboard/masking.py (tested without Redis).
+from dashboard import masking  # noqa: E402
 
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Content Profiles</title><style>
@@ -478,6 +483,57 @@ async def _require_writer(request: Request) -> dict:
             },
         )
     return role
+
+
+# ── Service bearer + PII masking (public reads) ──────────────────────────────
+# The Dynatrace app's `orbital` app function sends `Authorization: Bearer
+# <token>` (from the tenant's orbital-config app-settings secret). ORBITAL_TOKEN
+# in /home/ops/.env holds the accepted value(s) (comma-separated to allow
+# rotation). Callers presenting it are "service" callers and get FULL payloads;
+# signed-in org members (nginx-verified X-Auth-User) also get full payloads;
+# everyone else is anonymous and gets emails/tenants masked (dashboard is
+# public — see dashboard/masking.py).
+#
+# X-Auth-User is only trustworthy on nginx locations that either hard-gate
+# (auth_request) or opportunistically set AND clear it — the catch-all and
+# arena locations clear it explicitly so it cannot be spoofed by clients.
+
+ORBITAL_TOKENS = tuple(
+    t.strip() for t in os.environ.get("ORBITAL_TOKEN", "").split(",") if t.strip())
+
+
+def _is_service_caller(request: Request) -> bool:
+    """True when the request carries a bearer matching a configured
+    ORBITAL_TOKEN. Always False when no token is configured (fail closed:
+    an empty config must not turn every caller into a service caller)."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return False
+    presented = auth[7:].strip()
+    return any(hmac.compare_digest(presented, t) for t in ORBITAL_TOKENS)
+
+
+def _has_full_access(request: Request) -> bool:
+    """Masking decision for public reads: service bearer OR a signed-in org
+    member (X-Auth-User is set by nginx only after oauth2-proxy validated
+    the session, and cleared on anonymous fallbacks)."""
+    return bool(request.headers.get("x-auth-user", "")) or _is_service_caller(request)
+
+
+async def _require_service_or_writer(request: Request) -> None:
+    """Auth gate for live-session write endpoints: the app's service bearer
+    OR a signed-in writer. 401 otherwise (403 for a signed-in non-member)."""
+    if _is_service_caller(request):
+        return
+    if request.headers.get("x-auth-user", ""):
+        await _require_writer(request)
+        return
+    raise HTTPException(
+        status_code=401,
+        detail={"error": "unauthorized",
+                "reason": "this endpoint requires the Orbital service bearer "
+                          "or a signed-in org member session"},
+    )
 
 
 @app.get("/api/auth/role")
@@ -1097,14 +1153,19 @@ async def api_agent_fix_issue(request: Request):
 
 
 @app.get("/api/builds/running")
-async def api_builds_running():
+async def api_builds_running(request: Request):
     """Currently executing tests, plus pending queue depths.
 
     Workers write a ``job:running:<run_id>`` HASH when they pick up a job and
     delete it when done. Concurrency per (repo, branch, arch) is enforced via
     ``running:lock:<triple>`` STRING keys (see workers/manager.py and
     worker-agent/agent.py).
+
+    Public endpoint — anonymous callers get arena_user/arena_tenant masked
+    (learner emails + tenant URLs are PII); signed-in org members and the
+    app's service bearer get full values.
     """
+    full = _has_full_access(request)
     queues = {}
     for arch in ("arm64", "amd64"):
         queues[arch] = await pool.llen(f"queue:test:{arch}")
@@ -1130,8 +1191,10 @@ async def api_builds_running():
                 "started_at": meta.get("started_at"),
                 "worker_id": meta.get("worker_id"),
                 "type": meta.get("type", "integration-test"),
-                "arena_user": meta.get("arena_user"),
-                "arena_tenant": meta.get("arena_tenant"),
+                "arena_user": meta.get("arena_user") if full
+                              else masking.mask_email(meta.get("arena_user")),
+                "arena_tenant": meta.get("arena_tenant") if full
+                                else masking.mask_tenant(meta.get("arena_tenant")),
                 "provider": meta.get("provider", "sysbox"),
                 "stage": meta.get("stage"),
             })
@@ -1278,8 +1341,12 @@ async def api_terminate_job(job_id: str, request: Request):
 
 
 @app.get("/api/queue/list")
-async def api_queue_list():
-    """Contents of the pending test queues (arm64 + amd64), unordered."""
+async def api_queue_list(request: Request):
+    """Contents of the pending test queues (arm64 + amd64), unordered.
+
+    Public — requested_by (a learner email for queued arena jobs) is masked
+    for anonymous callers."""
+    full = _has_full_access(request)
     result = []
     for arch in ("arm64", "amd64"):
         items = await pool.lrange(f"queue:test:{arch}", 0, -1)
@@ -1297,7 +1364,8 @@ async def api_queue_list():
                 "ref":          j.get("ref") or j.get("branch") or j.get("head_branch") or "main",
                 "type":         j.get("type", "integration-test"),
                 "queued_at":    j.get("timestamp") or j.get("queued_at"),
-                "requested_by": j.get("requested_by", ""),
+                "requested_by": j.get("requested_by", "") if full
+                                else masking.mask_email(j.get("requested_by", "")),
             })
     return {"items": result, "total": len(result)}
 
@@ -3951,7 +4019,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
 
 
 @app.get("/api/arena/sessions/{job_id}")
-async def api_arena_session_status(job_id: str):
+async def api_arena_session_status(job_id: str, request: Request):
     """Return current session status.
 
     Status transitions:
@@ -3993,19 +4061,25 @@ async def api_arena_session_status(job_id: str):
     else:
         status = "provisioning"
 
+    # Anonymous callers get the learner identity masked (the app's bearer /
+    # signed-in members get full values — the app needs them for the UI + DQL
+    # session-id substitution).
+    full = _has_full_access(request)
     return {
         "jobId":      job_id,
         "status":     status,
         "wsUrl":      f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
         "trainingId": meta.get("training_id", ""),
-        "userId":     meta.get("arena_user", ""),
+        "userId":     meta.get("arena_user", "") if full
+                      else masking.mask_email(meta.get("arena_user", "")),
         "expiresAt":  meta.get("expires_at", ""),
-        "dtSessionId": meta.get("dt_hostgroup", ""),
+        "dtSessionId": meta.get("dt_hostgroup", "") if full
+                       else masking.mask_email(meta.get("dt_hostgroup", "")),
     }
 
 
 @app.get("/api/arena/user-session")
-async def api_arena_user_session(userId: str, trainingId: str, tenant: str = ""):
+async def api_arena_user_session(userId: str, trainingId: str, request: Request, tenant: str = ""):
     """Find an existing running session for a given user + training + tenant.
 
     Session uniqueness is (user, tenant, training): the SAME user may have a
@@ -4034,14 +4108,17 @@ async def api_arena_user_session(userId: str, trainingId: str, tenant: str = "")
                     status = "queued"
                 else:
                     status = "provisioning"
+                full = _has_full_access(request)
                 return {
                     "jobId":      job_id,
                     "status":     status,
                     "wsUrl":      f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
                     "trainingId": meta.get("training_id", ""),
-                    "userId":     meta.get("arena_user", ""),
+                    "userId":     meta.get("arena_user", "") if full
+                                  else masking.mask_email(meta.get("arena_user", "")),
                     "expiresAt":  meta.get("expires_at", ""),
-                    "dtSessionId": meta.get("dt_hostgroup", ""),
+                    "dtSessionId": meta.get("dt_hostgroup", "") if full
+                                   else masking.mask_email(meta.get("dt_hostgroup", "")),
                 }
         if cursor == 0:
             break
@@ -4049,7 +4126,7 @@ async def api_arena_user_session(userId: str, trainingId: str, tenant: str = "")
 
 
 @app.get("/api/arena/active-sessions")
-async def api_arena_active_sessions(userId: str, tenant: str = ""):
+async def api_arena_active_sessions(userId: str, request: Request, tenant: str = ""):
     """Every running session for a user+tenant, ACROSS all trainings.
 
     Server-side resource guard: only one live environment per user+tenant is
@@ -4058,6 +4135,7 @@ async def api_arena_active_sessions(userId: str, tenant: str = ""):
     the learner switches browser/device (localStorage can't see those). Mirrors
     user-session but drops the training filter and returns a list.
     """
+    full = _has_full_access(request)
     sessions = []
     cursor = 0
     while True:
@@ -4081,7 +4159,8 @@ async def api_arena_active_sessions(userId: str, tenant: str = ""):
                     "jobId":      job_id,
                     "status":     status,
                     "trainingId": meta.get("training_id", ""),
-                    "userId":     meta.get("arena_user", ""),
+                    "userId":     meta.get("arena_user", "") if full
+                                  else masking.mask_email(meta.get("arena_user", "")),
                     "expiresAt":  meta.get("expires_at", ""),
                 })
         if cursor == 0:
@@ -4816,7 +4895,7 @@ async def _reserve_join_code(session_id: str) -> str:
 
 
 @app.post("/api/live/sessions")
-async def api_live_session_create(body: LiveSessionCreate):
+async def api_live_session_create(body: LiveSessionCreate, request: Request):
     """Create a live session (state=open) with a roster of invited emails.
 
     Emails are trimmed + lowercased; entries without an '@' are dropped.
@@ -4828,7 +4907,10 @@ async def api_live_session_create(body: LiveSessionCreate):
     room later via /open-registration or /start), without it state "open"
     exactly as before. Every session gets a unique join code (trainer-only
     in payloads) resolvable via POST /api/live/sessions/join-by-code.
+
+    Auth: service bearer (the app's orbital function) or a signed-in writer.
     """
+    await _require_service_or_writer(request)
     try:
         fields = live_sessions.validate_create(
             body.title, body.trainingId, body.trainerEmail, body.roster)
@@ -4865,12 +4947,17 @@ async def api_live_session_create(body: LiveSessionCreate):
 
 
 @app.get("/api/live/sessions")
-async def api_live_sessions_list(email: str = ""):
+async def api_live_sessions_list(request: Request, email: str = ""):
     """Active (state != ended) sessions visible to an email — as trainer or
-    roster member. Index entries whose keys have TTL-expired are skipped."""
+    roster member. Index entries whose keys have TTL-expired are skipped.
+
+    The email is caller-supplied (the app proxy authenticates with the
+    service bearer, not per-user) — anonymous callers therefore get masked
+    trainer emails and never a joinCode."""
     email = live_sessions.normalize_email(email)
     if not live_sessions.is_valid_email(email):
         raise HTTPException(status_code=400, detail="a valid email query parameter is required")
+    full = _has_full_access(request)
     sessions = []
     for session_id in await pool.zrevrange("live:sessions:index", 0, -1):
         sess_key, roster_key, joined_key = _live_keys(session_id)
@@ -4881,22 +4968,28 @@ async def api_live_sessions_list(email: str = ""):
         if not live_sessions.is_listed(session, roster, email):
             continue
         joined = await pool.hgetall(joined_key)
-        sessions.append(live_sessions.shape_summary(
-            session_id, session, roster, joined, email))
+        item = live_sessions.shape_summary(
+            session_id, session, roster, joined, email)
+        sessions.append(item if full else masking.mask_live_summary(item))
     return {"sessions": sessions, "count": len(sessions)}
 
 
 @app.get("/api/live/sessions/{session_id}")
-async def api_live_session_detail(session_id: str, email: str = ""):
+async def api_live_session_detail(session_id: str, request: Request, email: str = ""):
     """Full session state. The roster and per-learner joined list are only
-    included when the caller email matches trainerEmail; learners get counts."""
+    included when the caller email matches trainerEmail; learners get counts.
+
+    The trainerEmail match is caller-supplied — anonymous callers get the
+    masked view (no roster/joined/joinCode, masked trainer email) even when
+    they present the trainer's email."""
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
-    return live_sessions.shape_detail(session_id, session, roster, joined, email)
+    detail = live_sessions.shape_detail(session_id, session, roster, joined, email)
+    return detail if _has_full_access(request) else masking.mask_live_detail(detail)
 
 
 @app.post("/api/live/sessions/{session_id}/join")
@@ -4920,10 +5013,11 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
 
 
 @app.post("/api/live/sessions/{session_id}/start")
-async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction):
+async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction, request: Request):
     """Trainer starts the session: scheduled|open → running (learners'
     waiting screens flip). Idempotent when already running; 403 on
-    trainerEmail mismatch."""
+    trainerEmail mismatch. Auth: service bearer or signed-in writer."""
+    await _require_service_or_writer(request)
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -4946,9 +5040,11 @@ async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction
 
 
 @app.post("/api/live/sessions/{session_id}/end")
-async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction):
+async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, request: Request):
     """Trainer ends the session: state → ended, freezes the board, and sets a
-    7-day TTL on the session keys (index entry kept; listing tolerates it)."""
+    7-day TTL on the session keys (index entry kept; listing tolerates it).
+    Auth: service bearer or signed-in writer."""
+    await _require_service_or_writer(request)
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -4973,12 +5069,14 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction):
 
 
 @app.post("/api/live/sessions/{session_id}/cancel")
-async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerAction):
+async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerAction, request: Request):
     """Trainer cancels a scheduled/open workshop: state → cancelled, sets
     cancelledAt, freezes the pad into the export snapshot, and applies the
     same 7-day TTL as ended (entity + index kept so learners see it was
     cancelled rather than a vanished session). Idempotent; 409 once running
-    or ended; 403 on trainerEmail mismatch."""
+    or ended; 403 on trainerEmail mismatch. Auth: service bearer or
+    signed-in writer."""
+    await _require_service_or_writer(request)
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -5003,10 +5101,11 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
 
 
 @app.post("/api/live/sessions/{session_id}/open-registration")
-async def api_live_session_open_registration(session_id: str, body: LiveSessionTrainerAction):
+async def api_live_session_open_registration(session_id: str, body: LiveSessionTrainerAction, request: Request):
     """Trainer opens registration on a scheduled workshop: scheduled → open.
     Idempotent when already open; 409 once running/ended/cancelled; 403 on
-    trainerEmail mismatch."""
+    trainerEmail mismatch. Auth: service bearer or signed-in writer."""
+    await _require_service_or_writer(request)
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -5027,11 +5126,16 @@ async def api_live_session_open_registration(session_id: str, body: LiveSessionT
 
 
 @app.post("/api/live/sessions/join-by-code")
-async def api_live_session_join_by_code(body: LiveSessionJoinByCode):
+async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Request):
     """Join a workshop by its 6-char code (case-insensitive) — appends the
     email to the roster (self-registration), unlike /join which requires an
     invite. 404 unknown code, 409 when full (maxSeats) or ended/cancelled.
-    Returns the session summary (learner view — no joinCode echo)."""
+    Returns the session summary (learner view — no joinCode echo).
+
+    Auth: service bearer or signed-in writer — learners always join through
+    the app's authed proxy, so an anonymous caller has no business here
+    (prevents code-guessing roster injection + email harvesting)."""
+    await _require_service_or_writer(request)
     code = live_sessions.normalize_join_code(body.code)
     if not code:
         raise HTTPException(status_code=400, detail="a join code is required")
@@ -5060,14 +5164,16 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode):
 
 
 @app.post("/api/live/sessions/{session_id}/provision-all")
-async def api_live_session_provision_all(session_id: str, body: LiveSessionProvisionAll):
+async def api_live_session_provision_all(session_id: str, body: LiveSessionProvisionAll, request: Request):
     """Trainer pre-provisions a training environment for every roster email.
 
     Reuses the arena provision path verbatim (including its one-active-
     session-per-user+tenant+training dedupe): already-active learners are
     reported as "already-active", everyone else gets a daemon job queued
     exactly as POST /api/arena/provision would. tenant = the trainer's arena
-    tenant URL; the session's trainingId/ref drive repo + branch."""
+    tenant URL; the session's trainingId/ref drive repo + branch.
+    Auth: service bearer or signed-in writer."""
+    await _require_service_or_writer(request)
     sess_key, roster_key, _ = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -5110,7 +5216,7 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
 
 
 @app.get("/api/live/sessions/{session_id}/readiness")
-async def api_live_session_readiness(session_id: str, trainerEmail: str = ""):
+async def api_live_session_readiness(session_id: str, request: Request, trainerEmail: str = ""):
     """Trainer's per-learner provisioning board: for each roster email the
     state of their environment for THIS training — none | queued |
     provisioning | ready | failed. "ready" is the same "Daemon ready"
@@ -5168,7 +5274,10 @@ async def api_live_session_readiness(session_id: str, trainerEmail: str = ""):
                             "jobId": failed_by_email[email]})
         else:
             results.append({"email": email, "state": "none"})
-    return {"results": results}
+    payload = {"results": results}
+    # trainerEmail is caller-supplied — anonymous callers who know it must
+    # not harvest the roster; they get masked emails (states stay visible).
+    return payload if _has_full_access(request) else masking.mask_readiness(payload)
 
 
 @app.get("/api/live/capacity")
@@ -5377,15 +5486,17 @@ async def _resolve_pad_session(pad_session: str) -> dict:
 
 
 @app.get("/api/live/sessions/{session_id}/pad")
-async def api_live_pad_get(session_id: str):
+async def api_live_pad_get(session_id: str, request: Request):
     """Full pad state: the two structured sections + Q&A with answers
     assembled under their questions. Poll-friendly (the in-app tab reads
-    this via the orbital proxy); the popup page uses the SSE stream."""
+    this via the orbital proxy); the popup page uses the SSE stream.
+    Anonymous callers get question authors' emails masked."""
     await _require_live_session(session_id)
     sections_key, qa_key, _ = _pad_keys(session_id)
     sections = await pool.hgetall(sections_key)
     entries = await pool.xrange(qa_key)
-    return live_pad.shape_pad(sections, entries)
+    pad = live_pad.shape_pad(sections, entries)
+    return pad if _has_full_access(request) else masking.mask_pad(pad)
 
 
 @app.post("/api/live/sessions/{session_id}/pad/section")
@@ -5420,8 +5531,13 @@ async def api_live_pad_answer(session_id: str, body: LivePadAnswer):
 
 
 @app.get("/api/live/sessions/{session_id}/pad/stream")
-async def api_live_pad_stream(session_id: str):
-    """SSE pad feed (snapshot + incremental) — session-scoped variant."""
+async def api_live_pad_stream(session_id: str, request: Request):
+    """SSE pad feed (snapshot + incremental) — session-scoped variant.
+
+    Auth: service bearer or signed-in writer. The popup page uses the
+    padSession-authed /api/live/pad/stream instead; this variant has no
+    per-user credential, so anonymous access would leak Q&A emails."""
+    await _require_service_or_writer(request)
     await _require_live_session(session_id)
     return _sse_response(_pad_event_stream(session_id))
 
@@ -5444,13 +5560,16 @@ async def api_live_pad_export(session_id: str, email: str = ""):
 
 
 @app.post("/api/live/sessions/{session_id}/pad-token")
-async def api_live_pad_token(session_id: str, body: LivePadTokenRequest):
+async def api_live_pad_token(session_id: str, body: LivePadTokenRequest, request: Request):
     """Issue a single-use 60-second pad handoff token (shell-token pattern).
 
     Called via the app's authed orbital proxy; the token rides the
     /pad/{id}?token=… URL and is claimed exactly once by the page, which
     mints the 8h pad session. Trainer role requires the trainerEmail match;
-    learners must be on the roster."""
+    learners must be on the roster. Auth: service bearer or signed-in
+    writer (an anonymous caller supplying a rostered email must not be able
+    to mint pad identities)."""
+    await _require_service_or_writer(request)
     session = await _require_live_session(session_id)
     try:
         role = live_pad.validate_role(body.role)
