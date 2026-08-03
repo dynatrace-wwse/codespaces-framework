@@ -693,12 +693,21 @@ async def api_repos():
     with open(repos_path) as f:
         data = yaml.safe_load(f)
 
+    # Decode once and keep only what both passes below need: the list holds up
+    # to 1500 records and used to be json.loads'd twice per request (once here,
+    # once for the sparklines), which dominated this endpoint's ~1.6 s p50.
     completed_raw = await pool.lrange("jobs:completed", -1500, -1)
-    local_matrix: dict[str, dict] = {}
+    completed: list[dict] = []
     for raw in completed_raw:
-        job = json.loads(raw)
-        if job.get("type") != "integration-test":
+        try:
+            job = json.loads(raw)
+        except Exception:
             continue
+        if job.get("type") == "integration-test":
+            completed.append(job)
+
+    local_matrix: dict[str, dict] = {}
+    for job in completed:
         repo = job["repo"]
         arch = job.get("arch") or job.get("result", {}).get("arch") or job.get("worker_arch") or "arm64"
         result = job.get("result", {}) or {}
@@ -713,13 +722,7 @@ async def api_repos():
 
     # History sparklines: last 10 integration-test builds per (repo, arch)
     history_matrix: dict[str, dict[str, list]] = {}
-    for raw in reversed(completed_raw):  # newest first
-        try:
-            hj = json.loads(raw)
-        except Exception:
-            continue
-        if hj.get("type") != "integration-test":
-            continue
+    for hj in reversed(completed):  # newest first
         hr = hj.get("repo", "")
         ha = hj.get("arch") or hj.get("result", {}).get("arch") or hj.get("worker_arch") or "arm64"
         hres = hj.get("result", {}) or {}
@@ -782,15 +785,39 @@ async def api_repos():
         if stale:
             results = await asyncio.gather(*[_fetch_latest_tag(rp) for rp in stale])
             updated = False
+            # Empty tags are cached too. A repo with no GitHub release at all
+            # (enablement-dtwiz-101) returns "" forever, and skipping the write
+            # left it permanently "missing from cache" — so every single request
+            # to this endpoint re-fetched it from api.github.com. Caching the
+            # empty value ages it out through the same 30 min window; the cost is
+            # that a transient fetch failure also blanks latest_tag until then.
             for repo, tag in results:
-                if tag:
-                    release_map[repo] = {"tag": tag, "ts": now_ts}
-                    updated = True
+                release_map[repo] = {"tag": tag, "ts": now_ts}
+                updated = True
             if updated:
                 try:
                     await pool.set("fleet:release-tags", json.dumps(release_map), ex=86400)
                 except Exception:
                     pass
+
+    # GHA workflow_run fallback records, in ONE keyspace pass. This used to be a
+    # scan_iter(match=f"ci:{repo_full}:*:main") inside the per-repo loop below —
+    # i.e. ~27 full keyspace scans on every request to this endpoint, which is
+    # most of its ~1.6 s p50. Keys are written by webhook/server.py as
+    # `ci:{repo}:{workflow}:{branch}`; repo contains a '/' and the workflow name
+    # may itself contain ':', so the repo is recovered by matching against the
+    # known repo set rather than by splitting on the last ':'.
+    displayed_set = set(displayed_repos)
+    ci_by_repo: dict[str, list[dict]] = {}
+    async for key in pool.scan_iter(match="ci:*:main", count=500):
+        middle = key[len("ci:"):-len(":main")]
+        repo_full = next((rp for rp in displayed_set
+                          if middle == rp or middle.startswith(rp + ":")), "")
+        if not repo_full:
+            continue
+        wf_data = await pool.hgetall(key)
+        if wf_data:
+            ci_by_repo.setdefault(repo_full, []).append(wf_data)
 
     repos_out = []
     for r in data.get("repos", []):
@@ -804,10 +831,7 @@ async def api_repos():
         builds: dict[str, dict] = dict(local_matrix.get(repo_full, {}))
 
         # Fall back to GHA workflow_run records for any arch we don't have locally
-        async for key in pool.scan_iter(match=f"ci:{repo_full}:*:main", count=500):
-            wf_data = await pool.hgetall(key)
-            if not wf_data:
-                continue
+        for wf_data in ci_by_repo.get(repo_full, []):
             workflow = wf_data.get("workflow", "")
             arch = next((a for a in ("arm64", "amd64") if workflow.lower().endswith(a)), None)
             if not arch or arch in builds:
