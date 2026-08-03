@@ -5947,17 +5947,22 @@ button:disabled { opacity: .5; cursor: default; }
   }
 
   // ── Claim the single-use token → 8h pad session (survives reloads via
-  // sessionStorage; the URL token is dead after first use). ──
+  // sessionStorage; the URL token is dead after first use). A fresh URL token
+  // always WINS over a stored session — reopening from the app may carry a
+  // different identity/role; a dead token (page reload) falls back to the
+  // stored session. The token is stripped from the URL after the claim
+  // attempt so reloads don't retry a dead token. ──
   let me = null;
   try { me = JSON.parse(sessionStorage.getItem(store) || 'null'); } catch (e) {}
   const urlToken = new URLSearchParams(location.search).get('token') || '';
-  if (!me && urlToken) {
+  if (urlToken) {
     try {
       const r = await fetch(BASE + '/api/live/pad-claim', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: urlToken})});
       if (r.ok) { me = await r.json(); sessionStorage.setItem(store, JSON.stringify(me)); }
     } catch (e) {}
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
   }
   if (!me) return fail('This pad link has expired — reopen the pad from the app to get a fresh one.');
 
