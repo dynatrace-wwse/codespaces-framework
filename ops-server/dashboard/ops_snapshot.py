@@ -64,7 +64,7 @@ async def _collect(pool) -> dict:
     packs = len(list(content_service.PACKS_DIR.glob("*.json"))) if content_service.PACKS_DIR.is_dir() else 0
 
     workers, active, capacity = {}, 0, 0
-    async for key in pool.scan_iter("worker:*"):
+    async for key in pool.scan_iter("worker:*", count=500):
         try:
             h = await pool.hgetall(key)
         except Exception:
@@ -78,7 +78,7 @@ async def _collect(pool) -> dict:
         capacity += workers[wid]["capacity"]
 
     running = 0
-    async for _ in pool.scan_iter("job:running:*"):
+    async for _ in pool.scan_iter("job:running:*", count=500):
         running += 1
     queued = 0
     for q in ("queue:test:amd64", "queue:test:arm64", "queue:agent"):

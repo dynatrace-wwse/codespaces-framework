@@ -559,7 +559,7 @@ class WorkerAgent:
         """
         while self._running:
             try:
-                async for key in self.pool.scan_iter(match="job:running:*"):
+                async for key in self.pool.scan_iter(match="job:running:*", count=500):
                     try:
                         rec = await self.pool.hgetall(key)
                     except Exception:

@@ -804,7 +804,7 @@ async def api_repos():
         builds: dict[str, dict] = dict(local_matrix.get(repo_full, {}))
 
         # Fall back to GHA workflow_run records for any arch we don't have locally
-        async for key in pool.scan_iter(match=f"ci:{repo_full}:*:main"):
+        async for key in pool.scan_iter(match=f"ci:{repo_full}:*:main", count=500):
             wf_data = await pool.hgetall(key)
             if not wf_data:
                 continue
@@ -870,7 +870,7 @@ async def api_workers():
     are sorted master-first so the dashboard pins the master at the top.
     """
     worker_keys = []
-    async for key in pool.scan_iter("worker:*"):
+    async for key in pool.scan_iter("worker:*", count=500):
         # Skip port-pool lists (worker:<id>:app_ports_free) — they are Redis
         # lists, not hashes, and would cause a WRONGTYPE error on hgetall.
         if key.endswith(":app_ports_free"):
@@ -1268,7 +1268,7 @@ async def api_builds_running(request: Request):
     queues["sync"]  = await pool.llen("queue:sync")
 
     running = []
-    async for key in pool.scan_iter(match="job:running:*"):
+    async for key in pool.scan_iter(match="job:running:*", count=500):
         # Tolerate the legacy STRING shape until all workers are on the
         # post-lock-fix code. New shape is HASH at job:running:{run_id};
         # legacy is STRING at job:running:{repo}:{arch}.
@@ -1316,7 +1316,7 @@ async def api_builds_running(request: Request):
 
     # Surface deferred jobs so the dashboard can show "queued behind a running test"
     deferred = []
-    async for key in pool.scan_iter(match="deferred:*"):
+    async for key in pool.scan_iter(match="deferred:*", count=500):
         triple = key.split(":", 1)[1]
         depth = await pool.llen(key)
         if depth:
@@ -6785,7 +6785,7 @@ async def api_health():
 
         # Worker count (skip port-pool list keys)
         worker_count = 0
-        async for key in pool.scan_iter("worker:*"):
+        async for key in pool.scan_iter("worker:*", count=500):
             if not key.endswith(":app_ports_free"):
                 worker_count += 1
 
@@ -6816,7 +6816,7 @@ async def api_health():
 async def _fleet_workers() -> list[dict]:
     """Registered worker:{id} hashes (same scan as /api/workers)."""
     workers = []
-    async for key in pool.scan_iter("worker:*"):
+    async for key in pool.scan_iter("worker:*", count=500):
         # Skip port-pool lists (worker:<id>:app_ports_free) — Redis lists,
         # not hashes; hgetall would raise WRONGTYPE.
         if key.endswith(":app_ports_free"):
