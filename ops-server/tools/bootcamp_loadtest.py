@@ -15,16 +15,32 @@ Usage (from ops-server/, any python3 — stdlib only):
 
 The bizevent token is the remote-grail COE platform token, decrypted from
 /home/ops/.env (needs sudo) — the same credential the app's ingest path uses.
+
+Every emitted bizevent is stamped with ``sourceTenant`` (mirrors the app's
+server-side stamp in ingestTrainingEvent.function.ts) so tenant-scoped boards
+can filter rehearsal traffic. Default is the COE apps domain; for an SRO
+rehearsal pass ``--tenant https://sro97894.apps.dynatrace.com``.
+
+Teardown (``--terminate``) is state-file independent: it drains queued bot
+provisions from ``queue:test:amd64`` first (so freed slots can't backfill),
+then terminates every live bot session discovered via
+``/api/arena/active-sessions`` — plus anything the state file still tracks.
+The state file is per-invoking-user (``/tmp/bootcamp_loadtest_state-$USER.json``,
+legacy shared path read as fallback) so runs by different users can't collide
+on file permissions.
 """
 
 import argparse
+import getpass
 import os
 import json
 import random
+import re
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ORBITAL = "https://autonomous-enablements.whydevslovedynatrace.com"
@@ -43,11 +59,47 @@ STEP_COUNT = 4
 QUESTIONS = 5
 READY_TIMEOUT_S = 20 * 60
 POLL_INTERVAL_S = 20
-STATE_FILE = "/tmp/bootcamp_loadtest_state.json"
+PROVISION_QUEUE = "queue:test:amd64"
+# Highest bot index probed by --terminate's live-session scan (env-overridable).
+TERMINATE_SCAN_MAX = int(os.environ.get("BOT_SCAN_MAX", "100"))
+
+
+def state_file_for(user: str) -> str:
+    """Per-user state path — avoids cross-user /tmp permission collisions."""
+    return f"/tmp/bootcamp_loadtest_state-{user}.json"
+
+
+STATE_FILE = state_file_for(getpass.getuser())
+LEGACY_STATE_FILE = "/tmp/bootcamp_loadtest_state.json"  # pre-per-user path, read-only fallback
 
 
 def bot_email(i: int) -> str:
     return f"{BOT_PREFIX}{i:02d}@{BOT_DOMAIN}"
+
+
+BOT_EMAIL_RE = re.compile(rf"^{re.escape(BOT_PREFIX)}\d+@{re.escape(BOT_DOMAIN)}$")
+
+
+def is_bot_email(email) -> bool:
+    """True for load-test bot identities (bot\\d+@bootcamp.dev by default)."""
+    return bool(BOT_EMAIL_RE.match((email or "").strip().lower()))
+
+
+def queue_entry_bot_email(raw):
+    """Bot email owning a queued provision payload, or None.
+
+    Queued arena jobs (see api_arena_provision) carry the learner email in
+    ``requested_by``. Non-JSON entries and non-bot jobs return None — those
+    entries must never be touched (other users' jobs share the queue).
+    """
+    try:
+        j = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(j, dict):
+        return None
+    email = (j.get("requested_by") or "").strip().lower()
+    return email if is_bot_email(email) else None
 
 
 def http_json(url: str, payload=None, bearer: str | None = None, method=None):
@@ -114,14 +166,20 @@ def coe_token() -> str:
 
 
 def load_state() -> dict:
-    try:
-        return json.load(open(STATE_FILE))
-    except Exception:
-        return {}
+    for path in (STATE_FILE, LEGACY_STATE_FILE):
+        try:
+            return json.load(open(path))
+        except Exception:
+            continue
+    return {}
 
 
 def save_state(state: dict):
-    json.dump(state, open(STATE_FILE, "w"), indent=2)
+    """Best-effort persist — a stale/foreign-owned /tmp file must not crash a run."""
+    try:
+        json.dump(state, open(STATE_FILE, "w"), indent=2)
+    except Exception as e:
+        print(f"  WARNING: could not write state file {STATE_FILE}: {e} — continuing without it")
 
 
 # ── Provisioning ─────────────────────────────────────────────────────────────
@@ -180,7 +238,7 @@ def wait_ready(state: dict):
 
 # ── Telemetry ────────────────────────────────────────────────────────────────
 
-def base_event(email: str, event_type: str, extra: dict) -> dict:
+def base_event(email: str, event_type: str, extra: dict, tenant: str = COE_APPS) -> dict:
     return {
         "event.type": f"com.dynatrace.enablement.training.{event_type}",
         "userEmail": email,
@@ -188,6 +246,10 @@ def base_event(email: str, event_type: str, extra: dict) -> dict:
         "trainingTitle": TRAINING_TITLE,
         "trainingType": "lab",
         "trainingCategory": "hands-on",
+        # The app's ingest function stamps sourceTenant server-side on every
+        # event (ingestTrainingEvent.function.ts) — tenant-scoped boards (SRO)
+        # filter on it, so rehearsal traffic must carry it too (--tenant flag).
+        "sourceTenant": tenant,
         "tags": json.dumps(["kubernetes", "bootcamp-loadtest"]),
         "timestamp": None,  # filled at send time
         **extra,
@@ -202,7 +264,7 @@ def emit(token: str, event: dict):
         print(f"    ingest HTTP {status} for {event['event.type']}")
 
 
-def emit_cohort(n: int):
+def emit_cohort(n: int, tenant: str = COE_APPS):
     """Emit a realistic funnel: everyone starts, most progress, ~70% finish."""
     token = coe_token()
     rng = random.Random(42)
@@ -210,12 +272,12 @@ def emit_cohort(n: int):
     for i in range(1, n + 1):
         email = bot_email(i)
         print(f"  {email}:")
-        emit(token, base_event(email, "started", {"stepCount": STEP_COUNT}))
+        emit(token, base_event(email, "started", {"stepCount": STEP_COUNT}, tenant))
         steps_done = STEP_COUNT if rng.random() < 0.7 else rng.randint(1, STEP_COUNT - 1)
         for s in range(1, steps_done + 1):
             emit(token, base_event(email, "step.completed", {
                 "stepIndex": s - 1, "stepCount": STEP_COUNT, "completedSteps": s,
-            }))
+            }, tenant))
             time.sleep(0.2)
         correct = 0
         for q in range(QUESTIONS if steps_done == STEP_COUNT else rng.randint(0, 3)):
@@ -223,7 +285,7 @@ def emit_cohort(n: int):
             correct += ok
             emit(token, base_event(email, "question.answered", {
                 "questionIndex": q, "correct": bool(ok), "points": 10 if ok else 0,
-            }))
+            }, tenant))
             time.sleep(0.1)
         if steps_done == STEP_COUNT:
             finishers += 1
@@ -233,7 +295,7 @@ def emit_cohort(n: int):
                 "timeSpent": rng.randint(300, 1500),
                 "completedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
                 "stepCount": STEP_COUNT, "completedSteps": STEP_COUNT,
-            }))
+            }, tenant))
             print(f"    completed score={min(score, QUESTIONS*10)}/{QUESTIONS*10}")
         else:
             print(f"    in-progress at step {steps_done}/{STEP_COUNT}")
@@ -242,18 +304,126 @@ def emit_cohort(n: int):
 
 # ── Teardown / status ────────────────────────────────────────────────────────
 
-def terminate():
-    state = load_state()
-    for email, s in state.get("sessions", {}).items():
+def _redis_cli(*args):
+    """Run redis-cli against the local (master) Redis, auth from env or /home/ops/.env."""
+    pw = os.environ.get("REDIS_PASSWORD", "")
+    if not pw:
+        try:
+            out = subprocess.run(
+                ["sudo", "-n", "grep", "-E", "^REDIS_PASSWORD=", "/home/ops/.env"],
+                capture_output=True, text=True)
+            if out.returncode == 0 and "=" in out.stdout:
+                pw = out.stdout.strip().split("=", 1)[1]
+        except Exception:
+            pw = ""
+    env = dict(os.environ)
+    if pw:
+        env["REDISCLI_AUTH"] = pw  # avoids the -a plaintext-password warning
+    return subprocess.run(["redis-cli", *args], capture_output=True, text=True, env=env)
+
+
+def drain_bot_queue(queue: str = PROVISION_QUEUE) -> int:
+    """Remove QUEUED bot provisions so freed slots can't backfill during drain.
+
+    During a mass-terminate, every slot a terminated bot frees immediately pulls
+    the next queued bot provision — termination never converges. Only entries
+    whose ``requested_by`` matches the bot pattern are LREM'd; other users'
+    queued jobs are never touched (never DEL the whole queue).
+    """
+    out = _redis_cli("lrange", queue, "0", "-1")
+    if out.returncode != 0:
+        print(f"  WARNING: cannot read {queue} ({out.stderr.strip()[:200] or 'redis-cli failed'})"
+              f" — queued bot provisions (if any) NOT drained; they will backfill freed slots")
+        return 0
+    matched = [raw for raw in out.stdout.splitlines() if raw and queue_entry_bot_email(raw)]
+    if not matched:
+        print(f"  No queued bot provisions in {queue}.")
+        return 0
+    print(f"  WARNING: {len(matched)} queued bot provision(s) still in {queue} — "
+          f"removing them BEFORE terminating so freed slots don't backfill")
+    removed = 0
+    for raw in matched:
+        res = _redis_cli("lrem", queue, "1", raw)
+        try:
+            removed += int(res.stdout.strip() or 0) if res.returncode == 0 else 0
+        except ValueError:
+            pass
+    print(f"  Removed {removed}/{len(matched)} queued bot provision(s) from {queue} "
+          f"(other users' jobs untouched)")
+    return removed
+
+
+def live_bot_sessions(scan_max: int) -> dict:
+    """Live bot sessions discovered from Orbital — state-file independent.
+
+    A killed run leaves live sessions the (stale or unreadable) state file
+    doesn't track, so teardown asks Orbital directly:
+    GET /api/arena/active-sessions?userId=<bot email> for bot01..bot{scan_max}.
+    Returns {email: [jobId, ...]}.
+    """
+    found = {}
+    for i in range(1, scan_max + 1):
+        email = bot_email(i)
+        try:
+            _, body = http_json(
+                f"{ORBITAL}/api/arena/active-sessions?"
+                + urllib.parse.urlencode({"userId": email}),
+                bearer=orbital_bearer())
+        except Exception:
+            continue
+        job_ids = [s["jobId"] for s in body.get("sessions", []) if s.get("jobId")]
+        if job_ids:
+            found[email] = job_ids
+    return found
+
+
+def merge_terminate_targets(live: dict, state_sessions: dict) -> list:
+    """Ordered, de-duplicated (email, jobId) teardown targets.
+
+    Union of the live Orbital scan (authoritative — survives a killed run whose
+    state file is stale/partial) and the state file (catches sessions the scan
+    missed, e.g. Orbital briefly unreachable for one probe). Live entries come
+    first; a jobId tracked by both sources is terminated once.
+    """
+    targets = {}  # (email, jobId) -> None (ordered set)
+    for email, job_ids in (live or {}).items():
+        for jid in job_ids:
+            targets[(email, jid)] = None
+    for email, s in (state_sessions or {}).items():
+        jid = (s or {}).get("jobId")
+        if jid:
+            targets[(email, jid)] = None
+    return list(targets)
+
+
+def terminate(scan_max: int = TERMINATE_SCAN_MAX):
+    # 1. Queue first — otherwise every slot we free below pulls a queued bot
+    #    provision and termination never converges (2026-08-03 load test).
+    drain_bot_queue()
+
+    # 2. Targets = live scan (authoritative) ∪ state file (may be stale/empty).
+    print(f"  Scanning live sessions for {BOT_PREFIX}01..{BOT_PREFIX}{scan_max:02d}@{BOT_DOMAIN}…")
+    targets = merge_terminate_targets(
+        live_bot_sessions(scan_max), load_state().get("sessions", {}))
+    if not targets:
+        print("  No live or tracked bot sessions found.")
+    for email, job_id in targets:
         try:
             status, body = http_json(
-                f"{ORBITAL}/api/arena/sessions/{s['jobId']}/terminate", {},
+                f"{ORBITAL}/api/arena/sessions/{job_id}/terminate", {},
                 bearer=orbital_bearer())
-            print(f"  {email}: {body.get('status', status)}")
+            print(f"  {email}: {body.get('status', status)} ({job_id})")
         except urllib.error.HTTPError as e:
-            print(f"  {email}: HTTP {e.code}")
+            print(f"  {email}: HTTP {e.code} ({job_id})")
+        except Exception as e:
+            print(f"  {email}: {e} ({job_id})")
         time.sleep(1)
     save_state({})
+    try:  # best-effort: clear the legacy shared file too so it can't resurface
+        if os.path.exists(LEGACY_STATE_FILE):
+            os.remove(LEGACY_STATE_FILE)
+    except OSError:
+        pass
     print("State cleared.")
 
 
@@ -275,12 +445,25 @@ def main():
                     help="skip provisioning; just emit the telemetry funnel")
     ap.add_argument("--no-emit", action="store_true",
                     help="provision + wait only; skip telemetry")
-    ap.add_argument("--terminate", action="store_true")
+    ap.add_argument("--terminate", action="store_true",
+                    help="full bot teardown: FIRST removes queued bot provisions from "
+                         f"{PROVISION_QUEUE} (only entries whose requested_by matches "
+                         f"{BOT_PREFIX}<N>@{BOT_DOMAIN} — other users' queued jobs are "
+                         "never touched) so freed slots don't backfill, THEN terminates "
+                         "every live bot session found via /api/arena/active-sessions "
+                         f"(scans bot 1..max(--sessions, {TERMINATE_SCAN_MAX}); override "
+                         "with BOT_SCAN_MAX) plus anything in the state file, then "
+                         "clears the state file")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--tenant", default=f"https://{INGEST_TENANT}.apps.dynatrace.com",
+                    help="sourceTenant stamped on every emitted bizevent "
+                         "(default: derived from INGEST_TENANT, i.e. the tenant the "
+                         "events are ingested into; pass "
+                         "https://sro97894.apps.dynatrace.com for an SRO rehearsal)")
     args = ap.parse_args()
 
     if args.terminate:
-        return terminate()
+        return terminate(max(args.sessions, TERMINATE_SCAN_MAX))
     if args.status:
         return status()
     if not args.emit_only:
@@ -290,7 +473,7 @@ def main():
         wait_ready(state)
     if not args.no_emit:
         print(f"\nEmitting telemetry funnel for {args.sessions} bots…")
-        emit_cohort(args.sessions)
+        emit_cohort(args.sessions, args.tenant.rstrip("/"))
 
 
 if __name__ == "__main__":

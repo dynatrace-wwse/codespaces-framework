@@ -67,6 +67,19 @@ LOCK_TTL_SECONDS = 7200
 # this guarantees a terminated session always converges to a clean state.
 RECONCILE_INTERVAL = 15
 
+# Bounded retry for slot re-initialization. Under mass-terminate the old slot
+# container's removal can still be in progress when release() re-inits, so the
+# first docker run hits "Conflict: name already in use". One failed attempt
+# must NOT shrink the pool forever — retry with backoff before giving up.
+SLOT_REINIT_ATTEMPTS = 5
+SLOT_REINIT_BACKOFF_S = 5  # doubled each attempt, capped at SLOT_REINIT_BACKOFF_MAX_S
+SLOT_REINIT_BACKOFF_MAX_S = 60
+
+
+def _reinit_backoff_s(attempt: int) -> int:
+    """Backoff (seconds) before re-init retry ``attempt`` (1-based): 5,10,20,40,60."""
+    return min(SLOT_REINIT_BACKOFF_S * (2 ** (attempt - 1)), SLOT_REINIT_BACKOFF_MAX_S)
+
 
 def _terminate_candidate_names(job_id, slot_sb_name=None, redis_sb_name=None):
     """Ordered, de-duplicated Sysbox container names to try when killing a job.
@@ -81,6 +94,20 @@ def _terminate_candidate_names(job_id, slot_sb_name=None, redis_sb_name=None):
         if n and n not in names:
             names.append(n)
     return names
+
+
+def _is_container_name_conflict(stderr_text) -> bool:
+    """Whether a ``docker run`` failure is a container-name conflict.
+
+    Under mass-terminate, a terminate's ``docker rm -f`` for a slot container
+    can still be in flight (or the pre-create rm timed out under daemon load)
+    when ``_init_slot`` issues its ``docker run`` — Docker then rejects the
+    create with 'Conflict. The container name "/sb-slot-…" is already in use'.
+    Detecting it lets _init_slot force-remove and retry once instead of
+    dropping the slot from the pool until the next agent restart.
+    """
+    text = stderr_text or ""
+    return "is already in use" in text or "Conflict" in text
 
 
 def _docker_rm_removed(returncode, stderr_text):
@@ -207,20 +234,45 @@ class SysboxPool:
 
         # Start outer Sysbox with the workspace directory mounted at /workspaces.
         # The port is fixed per slot so no dynamic allocation is needed.
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "run", "-d",
-            "--runtime=sysbox-runc",
-            "--name", slot.sb_name,
-            "-p", f"{slot.port}:{K3D_LB_HTTP_PORT}",
-            "-v", f"{slot.workspace}:/workspaces",
-            "docker:25-dind",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
+        # Retried once on a name conflict: under mass-terminate, a concurrent
+        # ``docker rm -f`` of the same slot name (terminate listener/reconciler)
+        # can race this create — the pre-create rm above sees nothing (or the
+        # removal is still in flight), then the run hits "name already in use"
+        # and the slot used to fall out of the pool until agent restart.
+        for attempt in (1, 2):
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "run", "-d",
+                "--runtime=sysbox-runc",
+                "--name", slot.sb_name,
+                "-p", f"{slot.port}:{K3D_LB_HTTP_PORT}",
+                "-v", f"{slot.workspace}:/workspaces",
+                "docker:25-dind",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode == 0:
+                break
+            err_text = err.decode(errors="replace")
+            if attempt == 1 and _is_container_name_conflict(err_text):
+                log.warning(
+                    "Slot %d: name conflict on %s (concurrent rm in flight?) — "
+                    "force-removing and retrying once",
+                    slot.index, slot.sb_name,
+                )
+                try:
+                    rm = await asyncio.create_subprocess_exec(
+                        "docker", "rm", "-fv", slot.sb_name,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(rm.wait(), timeout=30)
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+                continue
             log.error(
                 "Slot %d: sysbox start failed: %s",
-                slot.index, err.decode(errors="replace")[:300],
+                slot.index, err_text[:300],
             )
             return False
 
@@ -282,13 +334,22 @@ class SysboxPool:
         """
         if not healthy:
             log.warning("Slot %d unhealthy — re-initializing", slot.index)
-            ok = await self._init_slot(slot)
-            if not ok:
-                log.error(
-                    "Slot %d re-init failed — slot removed from pool until next agent restart",
-                    slot.index,
-                )
-            # _init_slot puts slot back into the queue on success.
+            for attempt in range(1, SLOT_REINIT_ATTEMPTS + 1):
+                # _init_slot puts slot back into the queue on success.
+                if await self._init_slot(slot):
+                    return
+                if attempt < SLOT_REINIT_ATTEMPTS:
+                    backoff = _reinit_backoff_s(attempt)
+                    log.warning(
+                        "Slot %d re-init attempt %d/%d failed — retrying in %ds",
+                        slot.index, attempt, SLOT_REINIT_ATTEMPTS, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+            log.error(
+                "Slot %d re-init failed after %d attempts — "
+                "slot removed from pool until next agent restart",
+                slot.index, SLOT_REINIT_ATTEMPTS,
+            )
             return
 
         # Wipe inner docker state without touching the outer Sysbox or its image cache.
