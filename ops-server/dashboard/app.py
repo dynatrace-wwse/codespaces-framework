@@ -19,7 +19,7 @@ import termios
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import redis.asyncio as redis
@@ -89,6 +89,7 @@ from dashboard import live_pad  # noqa: E402
 # PII masking for anonymous (public) reads — pure transforms in
 # dashboard/masking.py (tested without Redis).
 from dashboard import masking  # noqa: E402
+from dashboard import training_dedupe  # noqa: E402
 
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Content Profiles</title><style>
@@ -1429,31 +1430,34 @@ async def api_terminate_job(job_id: str, request: Request):
 
 @app.get("/api/queue/list")
 async def api_queue_list(request: Request):
-    """Contents of the pending test queues (arm64 + amd64), unordered.
+    """Contents of the pending job queues (arm64 + amd64 tests + training),
+    unordered.
+
+    ``queue:training`` is included so a training-test that is enqueued but
+    still waiting behind the 2-wide training semaphore (no ``job:running:*``
+    key yet) is visible in the dashboard's Queued panel — otherwise the
+    trigger looks dead and users double-click, spawning duplicates.
 
     Public — requested_by (a learner email for queued arena jobs) is masked
     for anonymous callers."""
     full = _has_full_access(request)
     result = []
-    for arch in ("arm64", "amd64"):
-        items = await pool.lrange(f"queue:test:{arch}", 0, -1)
+    # (queue key, default arch). training-test jobs always pin amd64.
+    for queue_key, arch in (
+        ("queue:test:arm64", "arm64"),
+        ("queue:test:amd64", "amd64"),
+        ("queue:training",   "amd64"),
+    ):
+        items = await pool.lrange(queue_key, 0, -1)
         for position, raw in enumerate(items):
             try:
                 j = json.loads(raw)
             except Exception:
                 continue
-            result.append({
-                "queue":        f"queue:test:{arch}",
-                "arch":         arch,
-                "position":     position,
-                "job_id":       j.get("job_id", ""),
-                "repo":         j.get("repo", ""),
-                "ref":          j.get("ref") or j.get("branch") or j.get("head_branch") or "main",
-                "type":         j.get("type", "integration-test"),
-                "queued_at":    j.get("timestamp") or j.get("queued_at"),
-                "requested_by": j.get("requested_by", "") if full
-                                else masking.mask_email(j.get("requested_by", "")),
-            })
+            requested_by = j.get("requested_by", "") if full \
+                else masking.mask_email(j.get("requested_by", ""))
+            result.append(training_dedupe.queue_item_view(
+                j, queue_key, arch, position, requested_by))
     return {"items": result, "total": len(result)}
 
 
@@ -1462,13 +1466,13 @@ async def api_queue_delete_item(job_id: str, request: Request):
     """Remove a pending job from a test queue by job_id. Writer role required."""
     await _require_writer(request)
     removed = 0
-    for arch in ("arm64", "amd64"):
-        items = await pool.lrange(f"queue:test:{arch}", 0, -1)
+    for queue_key in ("queue:test:arm64", "queue:test:amd64", "queue:training"):
+        items = await pool.lrange(queue_key, 0, -1)
         for raw in items:
             try:
                 j = json.loads(raw)
                 if j.get("job_id") == job_id:
-                    count = await pool.lrem(f"queue:test:{arch}", 1, raw)
+                    count = await pool.lrem(queue_key, 1, raw)
                     removed += count
                     break
             except Exception:
@@ -1476,7 +1480,7 @@ async def api_queue_delete_item(job_id: str, request: Request):
         if removed:
             break
     if not removed:
-        raise HTTPException(404, f"Job {job_id} not found in any test queue")
+        raise HTTPException(404, f"Job {job_id} not found in any pending queue")
     log.info("Queue item %s deleted", job_id)
     return {"removed": removed, "job_id": job_id}
 
@@ -2656,6 +2660,26 @@ async def api_trigger_build(request: Request):
         # Full e2e training test: a master-side orchestrator provisions a real
         # arena session (always amd64 — /api/arena/provision pins the arch) and
         # drives every doc step through the exec API. One job, no per-arch fanout.
+        #
+        # Dedupe (mirrors the integration-test running:lock:* pattern): a real
+        # run burns a worker slot + a full ~8-min SRO session, so a double-click
+        # (the training job is invisible while it waits behind the 2-wide
+        # training semaphore — no job:running:* key exists yet) must NOT enqueue
+        # a duplicate. SET NX a repo+ref-scoped lock here; the worker DELs it in
+        # _run_training_test's finally. Repo+ref scoped so the nightly (distinct
+        # repos) is never blocked; EX auto-expires so a crashed run can't wedge
+        # the repo forever.
+        lock_key = training_dedupe.training_lock_key(repo, ref)
+        acquired = await pool.set(
+            lock_key, requested_by, nx=True,
+            ex=training_dedupe.TRAINING_LOCK_TTL_SECONDS,
+        )
+        if not acquired:
+            holder = await pool.get(lock_key) or ""
+            return JSONResponse(
+                status_code=409,
+                content=training_dedupe.already_queued_response(repo, ref, holder),
+            )
         job = {
             "type": "training-test",
             "repo": repo,
