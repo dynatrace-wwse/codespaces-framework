@@ -794,6 +794,7 @@
                     <input type="text" id="reg-oa-cid" placeholder="client id (dt0s02.…)" style="width:180px">
                     <input type="password" id="reg-oa-secret" placeholder="client secret" style="width:220px">
                     <input type="text" id="reg-oa-urn" placeholder="urn:dtaccount:<uuid>" style="width:280px">
+                    <input type="email" id="reg-oa-email" placeholder="your email (optional — install attribution)" style="width:260px" title="Recorded in the tenant registry so the CoE knows who owns this install. Optional.">
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                     <!-- No data-action: the OAuth client is the account's authority — stays
@@ -812,6 +813,11 @@
             <h3 style="margin:24px 0 8px">Recent deploy activity</h3>
             <table id="reg-audit">
                 <thead><tr><th>When</th><th>User</th><th>Tenant</th><th>Stage</th><th>Action</th><th>Result</th><th>Version</th><th>Via</th></tr></thead>
+                <tbody><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+            </table>
+            <h3 style="margin:24px 0 8px">Tenants <span class="content-hint" style="font-weight:normal">(attribution registry — who deployed where; org members only)</span></h3>
+            <table id="reg-tenants">
+                <thead><tr><th>Tenant</th><th>Deployer</th><th>Identity</th><th>Account URN</th><th>Via</th><th>Version</th><th>First seen</th><th>Last deploy</th></tr></thead>
                 <tbody><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
             </table>
             <div id="reg-mint-clients"></div>

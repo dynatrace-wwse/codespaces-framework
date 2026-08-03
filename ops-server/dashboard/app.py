@@ -570,6 +570,55 @@ async def _require_arena_auth(request: Request) -> None:
     )
 
 
+# ── Tenant-attribution registry (EPIC-002 §9) ────────────────────────────────
+# Durable WHO-deployed-WHERE record (dashboard/tenant_registry.py): written at
+# every deploy call site in app_deploy.py; the app's runtime backstop merges
+# the admin's identity in on first admin visit. Distinct from tenant_map.json
+# (content delivery). Both endpoints are auth-gated → entries returned unmasked.
+
+from dashboard import tenant_registry  # noqa: E402
+
+
+@app.post("/api/tenants/register-identity")
+async def tenants_register_identity(request: Request):
+    """Runtime backstop: the Dynatrace app calls this (service bearer from the
+    tenant's orbital-config secret) on first admin visit, reporting the admin's
+    email/name + accountUrn so installs that arrived without attribution (token
+    / auto paths) get an owner. Fills deployerEmail only if the deploy-time
+    record left it empty; always refreshes lastSeen + identity fields."""
+    if not _is_service_caller(request):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "unauthorized",
+                    "reason": "this endpoint requires the Orbital service bearer"})
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    tenant = (body.get("tenant") or "").strip()
+    email = (body.get("email") or "").strip()
+    name = (body.get("name") or "").strip()
+    account_urn = (body.get("accountUrn") or "").strip()
+    if not tenant:
+        raise HTTPException(400, "tenant is required.")
+    if not (email or name or account_urn):
+        raise HTTPException(400, "at least one of email, name, accountUrn is required.")
+    tenant_id, _ = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    entry = await tenant_registry.record_identity(
+        pool, tenant_id, email=email, name=name, account_urn=account_urn)
+    return {"ok": True, "tenant": tenant_id, "entry": entry}
+
+
+@app.get("/api/tenants/registry")
+async def tenants_registry(request: Request):
+    """CoE tenant list: every registered install with its attribution
+    (accountUrn, clientId, deployerEmail, via, firstSeen, lastDeploy,
+    appVersion + runtime identity). Writer or service bearer only — full
+    (unmasked) payload by design."""
+    await _require_service_or_writer(request)
+    return {"tenants": await tenant_registry.list_entries(pool)}
+
+
 @app.get("/api/auth/role")
 async def api_auth_role(request: Request):
     """Resolve the caller's role for the dashboard UI.
