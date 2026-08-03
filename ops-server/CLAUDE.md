@@ -377,6 +377,7 @@ Redis keys:
 - `live:session:{id}` — hash: title, trainingId, ref, trainerEmail, state (`open|running|ended`), createdAt, startedAt, endedAt
 - `live:session:{id}:roster` — set of lowercase invited emails
 - `live:session:{id}:joined` — hash email → ISO joinedAt
+- `live:session:{id}:tenants` — hash email → normalized tenant URL the learner joined FROM (cross-tenant workshops; absent for pre-fix joins)
 - `live:sessions:index` — zset of sessionId scored by epoch createdAt
 
 TTL: on `end` the three `live:session:{id}*` keys get a 7-day TTL (matches

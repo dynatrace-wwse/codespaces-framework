@@ -4952,6 +4952,12 @@ def _live_keys(session_id: str) -> tuple[str, str, str]:
     return base, f"{base}:roster", f"{base}:joined"
 
 
+def _live_tenants_key(session_id: str) -> str:
+    """Hash email -> normalized tenant URL the learner joined FROM (cross-
+    tenant workshops). Entries absent for pre-fix joins — always optional."""
+    return f"live:session:{session_id}:tenants"
+
+
 class LiveSessionCreate(BaseModel):
     title: str = ""
     trainingId: str = ""
@@ -4968,6 +4974,9 @@ class LiveSessionCreate(BaseModel):
 
 class LiveSessionJoin(BaseModel):
     email: str = ""
+    # Learner's own tenant URL — stamped SERVER-side by the app function
+    # (never trusted from the browser). Optional: legacy callers omit it.
+    tenant: str = ""
 
 
 class LiveSessionTrainerAction(BaseModel):
@@ -4978,6 +4987,8 @@ class LiveSessionJoinByCode(BaseModel):
     code: str = ""
     email: str = ""
     name: str = ""
+    # Learner's own tenant URL (see LiveSessionJoin.tenant).
+    tenant: str = ""
 
 
 class LiveSessionProvisionAll(BaseModel):
@@ -5117,6 +5128,11 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
     await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
+    # Cross-tenant workshops: remember which tenant the learner joined FROM
+    # (last join wins — a re-join from another tenant updates it).
+    tenant = live_sessions.normalize_tenant(body.tenant)
+    if tenant:
+        await pool.hset(_live_tenants_key(session_id), email, tenant)
     return {"state": session.get("state", ""),
             "joinedCount": await pool.hlen(joined_key)}
 
@@ -5266,6 +5282,10 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
         raise HTTPException(status_code=err[0], detail=err[1])
     await pool.sadd(roster_key, email)
     await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
+    # Cross-tenant workshops: record the joiner's tenant (same as /join).
+    tenant = live_sessions.normalize_tenant(body.tenant)
+    if tenant:
+        await pool.hset(_live_tenants_key(session_id), email, tenant)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return {"sessionId": session_id,
@@ -5281,19 +5301,35 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     reported as "already-active", everyone else gets a daemon job queued
     exactly as POST /api/arena/provision would. tenant = the trainer's arena
     tenant URL; the session's trainingId/ref drive repo + branch.
+
+    Cross-tenant workshops: the trainer's app can only mint tokens for ITS
+    OWN tenant, so ONLY learners whose recorded join-tenant matches
+    body.tenant are provisioned. Others are reported honestly instead of
+    being pinned to the wrong tenant: "foreign-tenant" (provisions on entry
+    from their own tenant) or "not-joined" (tenant unknown until they join).
     Auth: service bearer or signed-in writer."""
     await _require_service_or_writer(request)
-    sess_key, roster_key, _ = _live_keys(session_id)
+    sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     if not live_sessions.is_trainer(body.trainerEmail, session):
         raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
     roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
     wanted = {e.strip().lower() for e in body.emails if e.strip()} if body.emails else None
     results = []
     for email in sorted(roster):
         if wanted is not None and email.lower() not in wanted:
+            continue
+        skip = live_sessions.provision_skip_status(
+            email in joined, joined_tenants.get(email, ""), body.tenant)
+        if skip:
+            results.append({"email": email, "status": skip,
+                            "message": (live_sessions.FOREIGN_TENANT_MESSAGE
+                                        if skip == "foreign-tenant"
+                                        else live_sessions.NOT_JOINED_MESSAGE)})
             continue
         per = body.perUser.get(email) or body.perUser.get(email.lower()) or {}
         try:
@@ -5318,29 +5354,41 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
         except Exception as exc:
             results.append({"email": email, "status": "error",
                             "error": str(exc)[:200]})
-    log.info("Live session %s provision-all by %s: %d queued, %d active, %d errors",
+    log.info("Live session %s provision-all by %s: %d queued, %d active, "
+             "%d foreign-tenant, %d not-joined, %d errors",
              session_id, body.trainerEmail,
              sum(1 for r in results if r["status"] == "queued"),
              sum(1 for r in results if r["status"] == "already-active"),
+             sum(1 for r in results if r["status"] == "foreign-tenant"),
+             sum(1 for r in results if r["status"] == "not-joined"),
              sum(1 for r in results if r["status"] == "error"))
     return {"results": results}
 
 
 @app.get("/api/live/sessions/{session_id}/readiness")
-async def api_live_session_readiness(session_id: str, request: Request, trainerEmail: str = ""):
+async def api_live_session_readiness(session_id: str, request: Request,
+                                     trainerEmail: str = "", tenant: str = ""):
     """Trainer's per-learner provisioning board: for each roster email the
     state of their environment for THIS training — none | queued |
     provisioning | ready | failed. "ready" is the same "Daemon ready"
     livelog contract as the arena session-status endpoint; "failed" only
     when a failed terminal record newer than the session exists (be honest
-    — no invented states)."""
-    sess_key, roster_key, _ = _live_keys(session_id)
+    — no invented states).
+
+    Cross-tenant workshops: with `tenant` (the trainer's tenant, sent by the
+    updated app function) learners without an environment are classified
+    honestly instead of "none": "foreign" (joined from another tenant —
+    provisions on entry there) or "not-joined" (never joined). Without
+    `tenant` the legacy "none" contract is preserved."""
+    sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     if not live_sessions.is_trainer(trainerEmail, session):
         raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
     roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
     training_id = session.get("trainingId", "")
 
     # One scan of the running arena jobs → email -> meta for this training.
@@ -5384,7 +5432,10 @@ async def api_live_session_readiness(session_id: str, request: Request, trainerE
             results.append({"email": email, "state": "failed",
                             "jobId": failed_by_email[email]})
         else:
-            results.append({"email": email, "state": "none"})
+            results.append({"email": email,
+                            "state": live_sessions.readiness_gap_state(
+                                email in joined,
+                                joined_tenants.get(email, ""), tenant)})
     payload = {"results": results}
     # trainerEmail is caller-supplied — anonymous callers who know it must
     # not harvest the roster; they get masked emails (states stay visible).
@@ -5437,7 +5488,8 @@ async def _expire_live_session_keys(session_id: str, session: dict):
     (the pad export carries its own 30-day TTL). expire on a missing key is
     a no-op, so this is safe for sessions without a pad or join code."""
     sections_key, qa_key, _ = _pad_keys(session_id)
-    keys = [*_live_keys(session_id), sections_key, qa_key]
+    keys = [*_live_keys(session_id), _live_tenants_key(session_id),
+            sections_key, qa_key]
     if session.get("joinCode"):
         keys.append(f"live:joincode:{session['joinCode']}")
     for key in keys:

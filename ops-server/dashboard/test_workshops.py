@@ -259,6 +259,56 @@ def test_failed_job_email_matching():
                                "2026-07-14T11:00:00+00:00") is None
 
 
+# ── Cross-tenant join: tenant capture + provision/readiness decisions ────────
+
+SRO = "https://sro97894.apps.dynatrace.com"
+COE = "https://geu80787.apps.dynatrace.com"
+
+
+def test_normalize_tenant_trims_lowercases_and_strips_slash():
+    assert ls.normalize_tenant("  HTTPS://SRO97894.Apps.Dynatrace.com/  ") == SRO
+    assert ls.normalize_tenant(SRO + "///") == SRO
+    assert ls.normalize_tenant("") == ""
+    assert ls.normalize_tenant(None) == ""
+
+
+def test_provision_skip_same_tenant_provisions():
+    assert ls.provision_skip_status(True, SRO, SRO) is None
+    # trailing slash / case variance must not block provisioning
+    assert ls.provision_skip_status(True, SRO + "/", SRO.upper()) is None
+
+
+def test_provision_skip_foreign_tenant():
+    assert ls.provision_skip_status(True, SRO, COE) == "foreign-tenant"
+
+
+def test_provision_skip_not_joined():
+    assert ls.provision_skip_status(False, "", COE) == "not-joined"
+    # never joined even with a stale tenant record → still not-joined
+    assert ls.provision_skip_status(False, SRO, COE) == "not-joined"
+
+
+def test_provision_skip_backward_compatible_when_tenant_absent():
+    # pre-fix join (no tenant recorded) or legacy caller (no workshop tenant):
+    # keep the old behavior — provision.
+    assert ls.provision_skip_status(True, "", COE) is None
+    assert ls.provision_skip_status(True, SRO, "") is None
+
+
+def test_readiness_gap_state_with_trainer_tenant():
+    assert ls.readiness_gap_state(False, "", COE) == "not-joined"
+    assert ls.readiness_gap_state(True, SRO, COE) == "foreign"
+    assert ls.readiness_gap_state(True, COE, COE) == "none"
+    # joined pre-fix (tenant unrecorded) → not provably foreign → none
+    assert ls.readiness_gap_state(True, "", COE) == "none"
+
+
+def test_readiness_gap_state_legacy_without_trainer_tenant():
+    # legacy app (no tenant param) keeps the original "none" contract
+    assert ls.readiness_gap_state(False, "", "") == "none"
+    assert ls.readiness_gap_state(True, SRO, "") == "none"
+
+
 # ── Pad: question hygiene + section gate ─────────────────────────────────────
 
 def test_clean_text_strips_html_and_caps_length():
