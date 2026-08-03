@@ -111,6 +111,27 @@ def load_env_qa() -> dict[str, str]:
 # Orbital API helpers
 # ---------------------------------------------------------------------------
 
+def orbital_bearer() -> str:
+    """Service bearer for Orbital's /api/arena/* endpoints (arena auth).
+
+    ORBITAL_TOKEN from the environment wins; otherwise sudo-read it from
+    /home/ops/.env. Empty result = legacy caller: Orbital logs
+    ARENA-LEGACY-CALLER during the compat window and 401s once
+    ARENA_AUTH_ENFORCE=1.
+    """
+    tok = os.environ.get("ORBITAL_TOKEN", "")
+    if not tok:
+        try:
+            out = subprocess.run(
+                ["sudo", "-n", "grep", "-E", "^ORBITAL_TOKEN=", "/home/ops/.env"],
+                capture_output=True, text=True)
+            if out.returncode == 0 and "=" in out.stdout:
+                tok = out.stdout.strip().split("=", 1)[1]
+        except Exception:
+            tok = ""
+    return tok.split(",")[0].strip()
+
+
 def provision(session: requests.Session, training_id: str, env_qa: dict[str, str]) -> str:
     """Queue a daemon session. Returns job_id."""
     payload = {
@@ -609,6 +630,11 @@ def main():
 
     session = requests.Session()
     session.headers["User-Agent"] = "DT-QA-Validator/1.0"
+    bearer = orbital_bearer()
+    if bearer:
+        # Arena endpoints are auth-gated (compat window): send the Orbital
+        # service bearer so this tool is not an ARENA-LEGACY-CALLER.
+        session.headers["Authorization"] = f"Bearer {bearer}"
 
     training_ids = (
         [args.training_id] if args.training_id

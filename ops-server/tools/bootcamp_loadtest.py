@@ -61,6 +61,33 @@ def http_json(url: str, payload=None, bearer: str | None = None, method=None):
         return resp.status, (json.loads(body) if body.strip() else {})
 
 
+_ORBITAL_BEARER: str | None = None
+
+
+def orbital_bearer() -> str:
+    """Service bearer for Orbital's /api/arena/* endpoints (arena auth).
+
+    ORBITAL_TOKEN from the environment wins; otherwise sudo-read it from
+    /home/ops/.env (same pattern as coe_token below). Cached. Empty result =
+    legacy caller: Orbital logs ARENA-LEGACY-CALLER during the compat window
+    and 401s once ARENA_AUTH_ENFORCE=1.
+    """
+    global _ORBITAL_BEARER
+    if _ORBITAL_BEARER is None:
+        tok = os.environ.get("ORBITAL_TOKEN", "")
+        if not tok:
+            try:
+                out = subprocess.run(
+                    ["sudo", "-n", "grep", "-E", "^ORBITAL_TOKEN=", "/home/ops/.env"],
+                    capture_output=True, text=True)
+                if out.returncode == 0 and "=" in out.stdout:
+                    tok = out.stdout.strip().split("=", 1)[1]
+            except Exception:
+                tok = ""
+        _ORBITAL_BEARER = tok.split(",")[0].strip()
+    return _ORBITAL_BEARER
+
+
 def coe_token() -> str:
     """Ingest token for INGEST_TENANT.
 
@@ -113,7 +140,7 @@ def provision(n: int) -> dict:
                 "userId": email,
                 "tenantId": "geu80787",
                 "tenantUrl": COE_APPS,
-            })
+            }, bearer=orbital_bearer())
             sessions[email] = {"jobId": body["jobId"], "dtSessionId": body.get("dtSessionId", "")}
             print(f"  {email}: {body['jobId']} dtSessionId={body.get('dtSessionId')}")
         except urllib.error.HTTPError as e:
@@ -130,7 +157,8 @@ def wait_ready(state: dict):
     while pending and time.time() < deadline:
         for email, s in list(pending.items()):
             try:
-                _, body = http_json(f"{ORBITAL}/api/arena/sessions/{s['jobId']}")
+                _, body = http_json(f"{ORBITAL}/api/arena/sessions/{s['jobId']}",
+                                    bearer=orbital_bearer())
             except Exception:
                 continue
             st = body.get("status")
@@ -219,7 +247,8 @@ def terminate():
     for email, s in state.get("sessions", {}).items():
         try:
             status, body = http_json(
-                f"{ORBITAL}/api/arena/sessions/{s['jobId']}/terminate", {})
+                f"{ORBITAL}/api/arena/sessions/{s['jobId']}/terminate", {},
+                bearer=orbital_bearer())
             print(f"  {email}: {body.get('status', status)}")
         except urllib.error.HTTPError as e:
             print(f"  {email}: HTTP {e.code}")
@@ -232,7 +261,8 @@ def status():
     state = load_state()
     for email, s in state.get("sessions", {}).items():
         try:
-            _, body = http_json(f"{ORBITAL}/api/arena/sessions/{s['jobId']}")
+            _, body = http_json(f"{ORBITAL}/api/arena/sessions/{s['jobId']}",
+                                bearer=orbital_bearer())
             print(f"  {email}: {body.get('status')} {s['jobId']} {s.get('dtSessionId','')}")
         except Exception as e:
             print(f"  {email}: ? ({e})")
