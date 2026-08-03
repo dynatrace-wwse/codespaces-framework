@@ -47,6 +47,7 @@ Environment (all optional):
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -73,12 +74,38 @@ def log(msg=""):
     print(msg, flush=True)
 
 
+def orbital_bearer() -> str:
+    """Service bearer for Orbital's /api/arena/* endpoints (arena auth).
+
+    ORBITAL_TOKEN is in the environment when run under an ops service
+    (systemd EnvironmentFile=/home/ops/.env — the training-test worker path);
+    manual runs fall back to sudo-reading /home/ops/.env (same pattern as
+    bootcamp_loadtest). Empty result = legacy caller: Orbital logs
+    ARENA-LEGACY-CALLER during the compat window and 401s once
+    ARENA_AUTH_ENFORCE=1.
+    """
+    tok = os.environ.get("ORBITAL_TOKEN", "")
+    if not tok:
+        try:
+            out = subprocess.run(
+                ["sudo", "-n", "grep", "-E", "^ORBITAL_TOKEN=", "/home/ops/.env"],
+                capture_output=True, text=True)
+            if out.returncode == 0 and "=" in out.stdout:
+                tok = out.stdout.strip().split("=", 1)[1]
+        except Exception:
+            tok = ""
+    return tok.split(",")[0].strip()  # comma-separated for rotation; send the first
+
+
 class Orbital:
     def __init__(self, base):
         self.base = base.rstrip("/")
+        self.bearer = orbital_bearer()
 
     def _req(self, method, path, body=None, timeout=30):
         req = urllib.request.Request(self.base + path, method=method)
+        if self.bearer:
+            req.add_header("Authorization", f"Bearer {self.bearer}")
         if body is not None:
             req.add_header("Content-Type", "application/json")
             req.data = json.dumps(body).encode()

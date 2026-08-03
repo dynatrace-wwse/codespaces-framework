@@ -536,6 +536,40 @@ async def _require_service_or_writer(request: Request) -> None:
     )
 
 
+async def _require_arena_auth(request: Request) -> None:
+    """Auth gate for the arena session endpoints (provision, exec, shell-token,
+    terminate, session lookups) — with a COMPATIBILITY WINDOW.
+
+    Passes for the app's service bearer (orbitalFetch sends it from the
+    tenant's orbital-config secret) or a signed-in org member. While
+    ARENA_AUTH_ENFORCE != "1" (the compat window), anonymous callers are STILL
+    ALLOWED but logged loudly (ARENA-LEGACY-CALLER) so every remaining
+    unauthenticated caller can be inventoried from the journal before
+    enforcement flips. Setting ARENA_AUTH_ENFORCE=1 in /home/ops/.env turns
+    anonymous access into a 401.
+
+    The env var is read per-request on purpose: flipping enforcement must not
+    depend on module import order, and tests can toggle it directly.
+    """
+    if _is_service_caller(request):
+        return
+    if request.headers.get("x-auth-user", ""):
+        await _require_writer(request)
+        return
+    if os.environ.get("ARENA_AUTH_ENFORCE", "") != "1":
+        client_ip = (request.headers.get("x-real-ip", "")
+                     or (request.client.host if request.client else "unknown"))
+        log.warning("ARENA-LEGACY-CALLER: %s %s from %s",
+                    request.method, request.url.path, client_ip)
+        return
+    raise HTTPException(
+        status_code=401,
+        detail={"error": "unauthorized",
+                "reason": "this endpoint requires the Orbital service bearer "
+                          "or a signed-in org member session"},
+    )
+
+
 @app.get("/api/auth/role")
 async def api_auth_role(request: Request):
     """Resolve the caller's role for the dashboard UI.
@@ -3797,7 +3831,7 @@ def _gen3_platform_provisioner(tenant_url: str):
 
 
 @app.post("/api/arena/provision")
-async def api_arena_provision(body: ArenaProvisionRequest):
+async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     """Provision a training environment — queues a real daemon job on the amd64 worker.
 
     If tenantUrl + auth credentials are provided, auto-creates scoped DT API tokens
@@ -3806,6 +3840,7 @@ async def api_arena_provision(body: ArenaProvisionRequest):
 
     Returns: { jobId, wsUrl, expiresAt, status: "provisioning", tokenProvisioned: bool }
     """
+    await _require_arena_auth(request)
     import uuid as _uuid
     from provisioning import DTTokenProvisioner, load_token_specs
 
@@ -4029,7 +4064,14 @@ async def api_arena_session_status(job_id: str, request: Request):
       failed      → creation failed; the retained log explains why (logAvailable)
       terminated  → explicitly terminated
       expired     → job:running key missing and no terminal record (TTL elapsed)
+
+    Gated by _require_arena_auth: every known caller (the app's orbitalFetch,
+    training_test_runner, bootcamp_loadtest, agentic_validator) can carry the
+    service bearer, and the learner-facing /shell + /terminal pages poll
+    /api/jobs/{id}/livelog — NOT this endpoint — so nothing anonymous needs it.
+    The compat window inventories any caller this audit missed.
     """
+    await _require_arena_auth(request)
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
         # job:running is gone — distinguish a FAILED creation (so the student can
@@ -4087,6 +4129,7 @@ async def api_arena_user_session(userId: str, trainingId: str, request: Request,
     match. `tenant` is the caller's own environment URL (getEnvironmentUrl()),
     compared against the job's stored tenant URL/id. Returns 404 if none found.
     """
+    await _require_arena_auth(request)
     cursor = 0
     while True:
         cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=100)
@@ -4134,7 +4177,11 @@ async def api_arena_active_sessions(userId: str, request: Request, tenant: str =
     provisioned while ANY session is still running here — authoritative even when
     the learner switches browser/device (localStorage can't see those). Mirrors
     user-session but drops the training filter and returns a list.
+
+    Compat window: anonymous callers still get the (PII-masked) list; under
+    ARENA_AUTH_ENFORCE=1 they get 401 instead.
     """
+    await _require_arena_auth(request)
     full = _has_full_access(request)
     sessions = []
     cursor = 0
@@ -4169,12 +4216,21 @@ async def api_arena_active_sessions(userId: str, request: Request, tenant: str =
 
 
 @app.post("/api/arena/sessions/{job_id}/shell-token")
-async def api_arena_shell_token(job_id: str):
+async def api_arena_shell_token(job_id: str, request: Request):
     """Issue a single-use 60-second shell token for an arena session.
 
     Arena orbital proxy function calls this server-side (no browser OAuth needed).
     The returned token is passed to the /terminal/{job_id}?token=... page.
+
+    NOTE (enforcement blocker): the /shell/{job_id} and /terminal/{job_id}
+    pages ALSO call this anonymously from the learner's browser (their inline
+    JS refreshes the 60 s token right before connecting). Browser JS cannot
+    hold the service bearer, so those flows will show up as
+    ARENA-LEGACY-CALLER during the compat window and would break under
+    ARENA_AUTH_ENFORCE=1 — they need a page-scoped token scheme before
+    enforcement flips.
     """
+    await _require_arena_auth(request)
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
         raise HTTPException(status_code=404, detail="Session not found or expired")
@@ -4606,7 +4662,7 @@ class ArenaExecRequest(BaseModel):
 
 
 @app.post("/api/arena/sessions/{job_id}/exec-start")
-async def api_arena_session_exec_start(job_id: str, body: ArenaExecRequest):
+async def api_arena_session_exec_start(job_id: str, body: ArenaExecRequest, request: Request):
     """Start a command in the background and return an execId immediately.
 
     For long-running commands (solution runs: operator deploy, ActiveGate
@@ -4614,6 +4670,7 @@ async def api_arena_session_exec_start(job_id: str, body: ArenaExecRequest):
     starts the exec here and polls /exec-status/{execId} until done. The
     result is kept in Redis for 1 h.
     """
+    await _require_arena_auth(request)
     import uuid as _uuid
 
     meta = await pool.hgetall(f"job:running:{job_id}")
@@ -4638,8 +4695,9 @@ async def api_arena_session_exec_start(job_id: str, body: ArenaExecRequest):
 
 
 @app.get("/api/arena/sessions/{job_id}/exec-status/{exec_id}")
-async def api_arena_session_exec_status(job_id: str, exec_id: str):
+async def api_arena_session_exec_status(job_id: str, exec_id: str, request: Request):
     """Poll a background exec started via /exec-start. Returns {done, stdout, stderr, exitCode}."""
+    await _require_arena_auth(request)
     raw = await pool.get(f"exec:result:{job_id}:{exec_id}")
     if not raw:
         raise HTTPException(status_code=404, detail="Unknown or expired execId")
@@ -4647,7 +4705,7 @@ async def api_arena_session_exec_status(job_id: str, exec_id: str):
 
 
 @app.post("/api/arena/sessions/{job_id}/exec")
-async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
+async def api_arena_session_exec(job_id: str, body: ArenaExecRequest, request: Request):
     """Run a command inside the training container.
 
     Uses the same SSH→docker-exec chain as the PTY bridge but without a TTY.
@@ -4658,6 +4716,7 @@ async def api_arena_session_exec(job_id: str, body: ArenaExecRequest):
 
     Returns: { stdout, stderr, exitCode }
     """
+    await _require_arena_auth(request)
     meta = await pool.hgetall(f"job:running:{job_id}")
     if not meta:
         raise HTTPException(status_code=404, detail="Session not found or expired")
@@ -4773,7 +4832,7 @@ async def _arena_exec_run(job_id: str, meta: dict, body: ArenaExecRequest) -> di
 
 
 @app.post("/api/arena/sessions/{job_id}/terminate")
-async def api_arena_terminate(job_id: str):
+async def api_arena_terminate(job_id: str, request: Request):
     """Terminate a training session from the Arena app (no oauth2-proxy auth required).
 
     Publishes on ``ops:terminate`` — the worker kills the Sysbox container and
@@ -4783,6 +4842,7 @@ async def api_arena_terminate(job_id: str):
 
     Returns 404 if the job is not currently running.
     """
+    await _require_arena_auth(request)
     if not await pool.exists(f"job:running:{job_id}"):
         in_completed = await pool.exists(f"job:log:{job_id}")
         detail = (
@@ -5188,6 +5248,8 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
             continue
         per = body.perUser.get(email) or body.perUser.get(email.lower()) or {}
         try:
+            # Pass the trainer's (already-authenticated) request through the
+            # arena gate — provision-all itself is service/writer-gated above.
             provisioned = await api_arena_provision(ArenaProvisionRequest(
                 trainingId=session.get("trainingId", ""),
                 userId=email,
@@ -5195,7 +5257,7 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                 ref=session.get("ref", ""),
                 dtEnv=per.get("dtEnv") or {},
                 dtTokenIds=per.get("dtTokenIds") or [],
-            ))
+            ), request)
             results.append({
                 "email":  email,
                 "status": "already-active" if provisioned.get("deduped") else "queued",
