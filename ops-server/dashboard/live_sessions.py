@@ -409,6 +409,28 @@ def readiness_state(meta, livelog) -> str:
     return "provisioning"
 
 
+TRAINER_ROLE = "trainer"
+LEARNER_ROLE = "learner"
+
+
+def roster_targets(roster, trainer_email, include_trainer) -> list[tuple[str, str]]:
+    """(email, role) pairs that provision-all and the readiness board walk.
+
+    WS-4: a trainer runs the lab alongside the cohort, so they get an
+    environment and a board row of their own. Appended only when asked for and
+    only when they are not already an invited learner — a trainer who put
+    themselves on the roster stays a single 'learner' row rather than
+    appearing twice.
+
+    Roster order is sorted for a stable board; the trainer is always last.
+    """
+    targets = [(e, LEARNER_ROLE) for e in sorted(roster or ())]
+    trainer = normalize_email(trainer_email)
+    if include_trainer and trainer and trainer not in set(roster or ()):
+        targets.append((trainer, TRAINER_ROLE))
+    return targets
+
+
 def failed_job_email(record, roster, training_id, since="") -> str | None:
     """Map a jobs:completed record to a roster email when it is a FAILED
     daemon job for this session's training, finished after `since` (the

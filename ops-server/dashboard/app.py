@@ -5059,6 +5059,12 @@ class LiveSessionProvisionAll(BaseModel):
     # stores no tenant credential, so the app mints and passes values through,
     # exactly as the single-user /api/arena/provision path does.
     perUser: dict[str, dict] = {}
+    # WS-4: also provision an environment for the trainer. Off by default so
+    # existing callers behave identically; the app sends it (with a perUser
+    # entry for the trainer) when the trainer wants to run the lab alongside
+    # the cohort. Solutions need no flag — the app shows every LAB_SOLUTION
+    # block to instructors regardless of the tenant-wide solutions-mode toggle.
+    includeTrainer: bool = False
 
 
 async def _reserve_join_code(session_id: str) -> str:
@@ -5398,13 +5404,23 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
     wanted = {e.strip().lower() for e in body.emails if e.strip()} if body.emails else None
     results = []
-    for email in sorted(roster):
-        if wanted is not None and email.lower() not in wanted:
+    # WS-4: the trainer is provisioned like a learner but is never subject to the
+    # joined/tenant skips — they are calling from body.tenant, so their tenant is
+    # known by construction and they never "join" their own workshop.
+    targets = live_sessions.roster_targets(
+        roster, session.get("trainerEmail"), body.includeTrainer)
+    for email, role in targets:
+        # `emails` is the caller's chunk of the roster, so it filters LEARNERS
+        # only — includeTrainer is explicit intent and must not be cancelled out
+        # by a chunk that happens not to contain the trainer's address.
+        if (wanted is not None and role == live_sessions.LEARNER_ROLE
+                and email.lower() not in wanted):
             continue
-        skip = live_sessions.provision_skip_status(
+        skip = (live_sessions.provision_skip_status(
             email in joined, joined_tenants.get(email, ""), body.tenant)
+            if role == "learner" else "")
         if skip:
-            results.append({"email": email, "status": skip,
+            results.append({"email": email, "role": role, "status": skip,
                             "message": (live_sessions.FOREIGN_TENANT_MESSAGE
                                         if skip == "foreign-tenant"
                                         else live_sessions.NOT_JOINED_MESSAGE)})
@@ -5423,14 +5439,15 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
             ), request)
             results.append({
                 "email":  email,
+                "role":   role,
                 "status": "already-active" if provisioned.get("deduped") else "queued",
                 "jobId":  provisioned.get("jobId", ""),
             })
         except HTTPException as exc:
-            results.append({"email": email, "status": "error",
+            results.append({"email": email, "role": role, "status": "error",
                             "error": str(exc.detail)[:200]})
         except Exception as exc:
-            results.append({"email": email, "status": "error",
+            results.append({"email": email, "role": role, "status": "error",
                             "error": str(exc)[:200]})
     log.info("Live session %s provision-all by %s: %d queued, %d active, "
              "%d foreign-tenant, %d not-joined, %d errors",
@@ -5468,6 +5485,11 @@ async def api_live_session_readiness(session_id: str, request: Request,
     joined = await pool.hgetall(joined_key)
     joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
     training_id = session.get("trainingId", "")
+    # WS-4: the trainer gets a row of their own so their environment is visible
+    # on the same board (they run the lab too, with solutions unlocked). Kept
+    # separate from the roster so learner counts and masking are unaffected.
+    trainer_email = live_sessions.normalize_email(session.get("trainerEmail"))
+    watched = set(roster) | ({trainer_email} if trainer_email else set())
 
     # One scan of the running arena jobs → email -> meta for this training.
     running_by_email: dict[str, dict] = {}
@@ -5479,7 +5501,7 @@ async def api_live_session_readiness(session_id: str, request: Request,
             if not meta or meta.get("terminating"):
                 continue
             user = live_sessions.normalize_email(meta.get("arena_user"))
-            if meta.get("training_id") == training_id and user in roster:
+            if meta.get("training_id") == training_id and user in watched:
                 running_by_email[user] = meta
         if cursor == 0:
             break
@@ -5493,25 +5515,30 @@ async def api_live_session_readiness(session_id: str, request: Request,
         except Exception:
             continue
         user = live_sessions.failed_job_email(
-            record, roster, training_id, since=session.get("createdAt", ""))
+            record, watched, training_id, since=session.get("createdAt", ""))
         if user and user not in running_by_email:
             failed_by_email[user] = record.get("job_id", "")
 
+    rows = live_sessions.roster_targets(roster, trainer_email, include_trainer=True)
     results = []
-    for email in sorted(roster):
+    for email, role in rows:
         meta = running_by_email.get(email)
         if meta:
             job_id = meta.get("job_id", "")
             livelog = await pool.get(f"job:livelog:{job_id}") if job_id else ""
-            results.append({"email": email,
+            results.append({"email": email, "role": role,
                             "state": live_sessions.readiness_state(meta, livelog),
                             "jobId": job_id})
         elif email in failed_by_email:
-            results.append({"email": email, "state": "failed",
+            results.append({"email": email, "role": role, "state": "failed",
                             "jobId": failed_by_email[email]})
         else:
-            results.append({"email": email,
-                            "state": live_sessions.readiness_gap_state(
+            results.append({"email": email, "role": role,
+                            # The trainer's tenant is the one they are asking from,
+                            # and they never join their own workshop — so the
+                            # foreign/not-joined classifications don't apply.
+                            "state": "none" if role == "trainer"
+                            else live_sessions.readiness_gap_state(
                                 email in joined,
                                 joined_tenants.get(email, ""), tenant)})
     payload = {"results": results}
