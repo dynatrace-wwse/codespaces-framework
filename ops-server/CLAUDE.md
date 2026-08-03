@@ -208,13 +208,22 @@ Both master and AMD worker use the same layout under the `ops` user:
 /home/ubuntu/enablement-framework/codespaces-framework/ ← edits happen here (master only)
 ```
 
-**Master only** has both paths (edit + production). The AMD worker only has the `ops` path.
+**Master only** has both paths (edit + production). Workers only have the `ops` path.
 
-AMD worker git pull (future):
+There are **two AMD workers** — `autonomous-enablements-worker` (amd001) and
+`autonomous-enablements-worker-2` (amd002). Every worker-agent change must be
+pulled AND the service restarted on **both**:
+
 ```bash
-ssh autonomous-enablements-worker \
-  "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework pull"
+for w in autonomous-enablements-worker autonomous-enablements-worker-2; do
+  ssh $w "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework pull --ff-only origin main \
+          && sudo systemctl restart ops-worker-agent"
+done
 ```
+
+A pull without the restart deploys nothing — the running python process keeps
+its imported code. If a load test / live sessions are running on the worker
+(`docker ps | grep sb-slot`), pull immediately but defer the restart.
 
 After editing on master (`ubuntu` path), sync to production (`ops` path) and restart:
 ```bash
@@ -226,8 +235,20 @@ sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/dashbo
 sudo systemctl restart ops-dashboard ops-worker
 ```
 
-> **Note:** AMD worker was historically at `/home/ops/codespaces-framework/` (no wrapper dir).
-> Migration to the canonical path: stop service → clone to new path → update systemd WorkingDirectory → restart.
+Verify all three hosts are on the same commit (drift here is the historical
+cause of "passes one night, fails the next" nightly results):
+```bash
+sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework rev-parse --short HEAD
+for w in autonomous-enablements-worker autonomous-enablements-worker-2; do
+  ssh $w "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework rev-parse --short HEAD"
+done
+```
+
+> **Note:** amd001 was historically at `/home/ops/codespaces-framework/` (no wrapper
+> dir). That stale checkout is quarantined as `/home/ops/codespaces-framework.LEGACY-stale-jul01`
+> (2026-08-03) and `/home/ops/worker-agent` now symlinks to the canonical path on
+> both workers. The systemd unit always ran from the canonical path — the legacy
+> dir only ever misled humans and agents inspecting the box.
 
 ---
 

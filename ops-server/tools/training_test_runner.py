@@ -74,6 +74,44 @@ def log(msg=""):
     print(msg, flush=True)
 
 
+# ── ANSI palette — same family as the framework's printInfo/printWarn so this
+# log reads like postCreate/integration output. The env stream's separator
+# lines end in an unterminated \033[35m (magenta), which would bleed into every
+# following runner line — so every relayed line is suffixed with RESET, and the
+# runner's own markers carry their color explicitly.
+RESET = "\033[0m"
+BOLD = "\033[1m"
+RED = "\033[0;31m"
+GREEN = "\033[0;32m"
+YELLOW = "\033[1;33m"
+CYAN = "\033[0;36m"
+GREY = "\033[0;90m"
+
+
+def tag(ok, word_ok, word_fail="FAIL"):
+    """Colored pass/fail word for step lines: green when ok, red when not."""
+    return f"{GREEN}{word_ok}{RESET}" if ok else f"{RED}{word_fail}{RESET}"
+
+
+def header(msg):
+    log(f"{CYAN}{BOLD}{msg}{RESET}")
+
+
+def step(n, msg):
+    """Numbered [n/7] progress marker."""
+    log(f"{CYAN}[{n}/7]{RESET} {msg}")
+
+
+def error(msg):
+    log(f"{RED}{msg}{RESET}")
+
+
+def relay(prefix, line):
+    """A line captured from the session (env log / command output): keep its own
+    colors but force a RESET at the end so leaked codes never bleed onward."""
+    log(f"{GREY}{prefix}{RESET} {line}{RESET}")
+
+
 def orbital_bearer() -> str:
     """Service bearer for Orbital's /api/arena/* endpoints (arena auth).
 
@@ -292,23 +330,24 @@ def wait_ready(orbital, job_id):
         for ln in text[seen:].splitlines():
             ln = ln.strip()
             if ln:
-                log(f"  [env] {ln}")
+                relay("  [env]", ln)
         seen = len(text)
 
     while time.time() < deadline:
         st = orbital.session_status(job_id).get("status", "unknown")
         if st != last:
-            log(f"  session {job_id}: {st}")
+            color = GREEN if st == "ready" else (RED if st in ("failed", "terminated", "expired") else YELLOW)
+            log(f"  session {job_id}: {color}{st}{RESET}")
             last = st
         stream_env_log()
         if st == "ready":
             return True
         if st in ("failed", "terminated", "expired"):
             stream_env_log()
-            log(f"ERROR: session entered terminal state '{st}' during provisioning")
+            error(f"ERROR: session entered terminal state '{st}' during provisioning")
             return False
         time.sleep(READY_POLL_S)
-    log(f"ERROR: session not ready after {READY_TIMEOUT_S}s")
+    error(f"ERROR: session not ready after {READY_TIMEOUT_S}s")
     return False
 
 
@@ -323,7 +362,7 @@ def main():
 
     orbital = Orbital(args.orbital)
     started = time.time()
-    log(f"=== TRAINING TEST — {args.repo} @ {args.ref or '(catalog branch)'} via {args.orbital} ===")
+    header(f"=== TRAINING TEST — {args.repo} @ {args.ref or '(catalog branch)'} via {args.orbital} ===")
 
     # 1. Resolve training in the arena catalog (no hardcoded repo map — the
     #    catalog is the single source of truth, same list the app shows).
@@ -331,11 +370,11 @@ def main():
     training = next((t for t in trainings
                      if t.get("repoUrl", "").rstrip("/").endswith("/" + args.repo.split("/")[-1])), None)
     if training is None:
-        log(f"ERROR: {args.repo} not in the arena catalog ({len(trainings)} trainings) — "
-            "not an app-delivered training")
-        log("TRAINING_TEST: FAILURE")
+        error(f"ERROR: {args.repo} not in the arena catalog ({len(trainings)} trainings) — "
+              "not an app-delivered training")
+        log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
         return 1
-    log(f"[1/7] catalog: id={training['id']} title={training.get('title', '')!r}")
+    step(1, f"catalog: id={training['id']} title={training.get('title', '')!r}")
 
     # 2. Provision — unique user per run so the one-session-per-user guard never
     #    dedupes onto a stale session, and per-user Grail isolation gets a fresh id.
@@ -354,36 +393,36 @@ def main():
     prov = orbital.provision(payload)
     job_id = prov["jobId"]
     minted = bool(prov.get("tokenProvisioned"))
-    log(f"[2/7] provisioned session {job_id} as {user_id}")
+    step(2, f"provisioned session {job_id} as {user_id}")
     log(f"      tenant={tenant or '(worker static creds)'} tokenMinted={minted} "
         f"dtSessionId={prov.get('dtSessionId', '')} expiresAt={prov.get('expiresAt', '')}")
     # The mint story — names/ids only, never token values. This is the first
     # thing that breaks when a tenant's credentials or scopes are wrong.
-    log(f"== TOKEN MINT (kind={prov.get('mintKind', 'unknown')}) ==")
+    header(f"== TOKEN MINT (kind={prov.get('mintKind', 'unknown')}) ==")
     for t in prov.get("mintDetail") or []:
-        log(f"  minted {t.get('envVar')} (tokenId={t.get('tokenId')})")
+        log(f"  minted {GREEN}{t.get('envVar')}{RESET} (tokenId={t.get('tokenId')})")
     if prov.get("mintError"):
-        log(f"  MINT ERROR: {prov['mintError']}")
+        error(f"  MINT ERROR: {prov['mintError']}")
     if minted and not prov.get("mintDetail"):
         log("  (token values supplied by caller — nothing minted by Orbital)")
     if not minted:
-        log("  no tokens minted — session will rely on worker static credentials")
+        log(f"  {YELLOW}no tokens minted — session will rely on worker static credentials{RESET}")
     if os.environ.get("TRAINING_TEST_REQUIRE_MINT") == "1" and not minted:
-        log("ERROR: TRAINING_TEST_REQUIRE_MINT=1 but no token was minted")
+        error("ERROR: TRAINING_TEST_REQUIRE_MINT=1 but no token was minted")
         if not args.keep_session:
             orbital.terminate(job_id)
-        log("TRAINING_TEST: FAILURE")
+        log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
         return 1
 
     failures = []
     try:
         # 3. Wait for the environment (cluster + operator + apps) to come up.
-        log(f"[3/7] waiting for session readiness (cap {READY_TIMEOUT_S}s)…")
+        step(3, f"waiting for session readiness (cap {READY_TIMEOUT_S}s)…")
         if not wait_ready(orbital, job_id):
             failures.append("session never became ready")
-            log("TRAINING_TEST: FAILURE")
+            log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
             return 1
-        log(f"      ready after {int(time.time() - started)}s")
+        log(f"      {GREEN}ready after {int(time.time() - started)}s{RESET}")
 
         # 4. Read the docs from inside the session — guaranteed to match the ref
         #    the environment was provisioned from.
@@ -394,13 +433,13 @@ def main():
         )
         if dump.get("exitCode") != 0:
             failures.append(f"could not read docs from session: {dump.get('stderr', '')[:200]}")
-            log("TRAINING_TEST: FAILURE")
+            log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
             return 1
         files = split_doc_dump(dump.get("stdout", ""))
         setups, solutions, checks, quizzes = extract_from_docs(files)
         titles = {fname: doc_title(content) for fname, content in files}
-        log(f"[4/7] docs: {len(files)} files -> {len(setups)} setup cmds, "
-            f"{len(solutions)} solutions, {len(checks)} shell checks, {len(quizzes)} question blocks")
+        step(4, f"docs: {len(files)} files -> {len(setups)} setup cmds, "
+             f"{len(solutions)} solutions, {len(checks)} shell checks, {len(quizzes)} question blocks")
         # The learner's path — sections (docs) strictly in doc order. Each
         # section is exercised exactly as a learner walks it: setup -> solution
         # (blocking, LAB_WAIT) -> solution verify -> the section's checks ->
@@ -419,7 +458,7 @@ def main():
                 "checks": f_checks,
                 "quizzes": f_quizzes,
             })
-        log("== LEARNER PATH ==")
+        header("== LEARNER PATH ==")
         for i, sec in enumerate(sections, 1):
             log(f"  {i}. {sec['fname']}{' — ' + sec['title'] if sec['title'] else ''}"
                 f"  (setup:{len(sec['setups'])} solutions:{len(sec['solutions'])}"
@@ -434,24 +473,24 @@ def main():
             sec_fail = []
             t0 = time.time()
             log("")
-            log(f"== SECTION {i}/{len(sections)}: {fname}"
-                f"{' — ' + sec['title'] if sec['title'] else ''} ==")
+            header(f"== SECTION {i}/{len(sections)}: {fname}"
+                   f"{' — ' + sec['title'] if sec['title'] else ''} ==")
 
             # Quiz blocks a learner would click through in this section.
             for _f, qtype, _doc, problem in sec["quizzes"]:
                 if problem:
                     sec_fail.append(f"broken quiz ({qtype}): {problem}")
-                    log(f"  [quiz] BROKEN type={qtype}: {problem}")
+                    log(f"  [quiz] {RED}BROKEN{RESET} type={qtype}: {problem}")
 
             # STEP_SETUP — the actions the doc tells the learner to run first.
             for _f, c in sec["setups"]:
                 r = orbital.exec(job_id, c, interactive=True, timeout_s=SOLVE_TIMEOUT_S)
                 ok = r.get("exitCode") == 0
-                log(f"  [setup] {'ok' if ok else 'FAIL'} exit={r.get('exitCode')}: {c}")
+                log(f"  [setup] {tag(ok, 'ok')} exit={r.get('exitCode')}: {c}")
                 if not ok:
                     sec_fail.append(f"setup failed: {c}")
                     for ln in (r.get("stdout") or "").strip().splitlines()[-8:]:
-                        log(f"        | {ln}")
+                        relay("        |", ln)
 
             # LAB_SOLUTION — run it and BLOCK until done (LAB_WAIT), then its
             # verify commands. Exactly the app's execLong path.
@@ -459,37 +498,38 @@ def main():
                 for c in cmds:
                     r = orbital.exec_long(job_id, with_wait(c), interactive=True, timeout_s=SOLVE_TIMEOUT_S)
                     ok = r.get("exitCode") == 0
-                    log(f"  [solve] {'ok' if ok else 'FAIL'} exit={r.get('exitCode')}: {c}")
+                    log(f"  [solve] {tag(ok, 'ok')} exit={r.get('exitCode')}: {c}")
                     if not ok:
                         sec_fail.append(f"solution failed: {c}")
                         for ln in (r.get("stdout") or "").strip().splitlines()[-8:]:
-                            log(f"        | {ln}")
+                            relay("        |", ln)
                 for v in ver:
                     r = orbital.exec(job_id, with_wait(v), interactive=True, timeout_s=WAIT_TIMEOUT_S)
                     ok = r.get("exitCode") == 0
-                    log(f"  [solution-verify] {'OK' if ok else 'FAIL'} exit={r.get('exitCode')}: {v}")
+                    log(f"  [solution-verify] {tag(ok, 'OK')} exit={r.get('exitCode')}: {v}")
                     if not ok:
                         sec_fail.append(f"solution verify failed: {v}")
                         for ln in (r.get("stdout") or "").strip().splitlines()[-10:]:
-                            log(f"        | {ln}")
+                            relay("        |", ln)
 
             # The section's checks — after its solution finished, LAB_WAIT so
             # slow rollouts settle. What a learner's check click must show.
             for _f, label, cmd, expect in sec["checks"]:
                 r = orbital.exec(job_id, with_wait(cmd), interactive=False, timeout_s=WAIT_TIMEOUT_S)
                 ok = evaluate(r.get("stdout", ""), r.get("exitCode", -1), expect)
-                log(f"  [check] {'PASS' if ok else 'FAIL'} {label} -> exit={r.get('exitCode')}"
+                log(f"  [check] {tag(ok, 'PASS')} {label} -> exit={r.get('exitCode')}"
                     f" expect={expect.get('operator')} {expect.get('value', '')}")
                 if not ok:
                     sec_fail.append(f"check failed: {label}")
                     for ln in (r.get("stdout") or "").strip().splitlines()[-10:]:
-                        log(f"        | {ln}")
+                        relay("        |", ln)
                     if (r.get("stderr") or "").strip():
-                        log(f"        | stderr: {r['stderr'].strip().splitlines()[-1][:200]}")
+                        relay("        |", f"stderr: {r['stderr'].strip().splitlines()[-1][:200]}")
 
             ok = not sec_fail
             section_results.append((fname, sec["title"], ok, sec_fail, int(time.time() - t0)))
-            log(f"  -> SECTION {'PASS' if ok else 'FAIL'} ({int(time.time() - t0)}s)"
+            verdict = f"{GREEN}{BOLD}SECTION PASS{RESET}" if ok else f"{RED}{BOLD}SECTION FAIL{RESET}"
+            log(f"  -> {verdict} ({int(time.time() - t0)}s)"
                 + ("" if ok else f" — {len(sec_fail)} problem(s)"))
             if not ok:
                 failures.append(f"section {i} ({fname}): " + "; ".join(sec_fail[:3]))
@@ -497,29 +537,29 @@ def main():
         # 6. Training verdict — one line per section, in learner order.
         n_ok = sum(1 for _f, _t, ok, _e, _d in section_results if ok)
         log("")
-        log(f"== TRAINING VERDICT ({n_ok}/{len(section_results)} sections passed) ==")
+        header(f"== TRAINING VERDICT ({n_ok}/{len(section_results)} sections passed) ==")
         for i, (fname, title, ok, sec_fail, dur_s) in enumerate(section_results, 1):
-            log(f"  {i}. {'PASS' if ok else 'FAIL'}  {fname}"
+            log(f"  {i}. {tag(ok, 'PASS')}  {fname}"
                 f"{' — ' + title if title else ''}  ({dur_s}s)"
-                + ("" if ok else f"  [{'; '.join(sec_fail[:2])}]"))
+                + ("" if ok else f"  {RED}[{'; '.join(sec_fail[:2])}]{RESET}"))
 
     finally:
         # 7. Always release the environment — a leaked session burns a worker
         #    slot for the full 2 h TTL.
         if args.keep_session:
-            log(f"[7/7] --keep-session: leaving {job_id} running")
+            step(7, f"--keep-session: leaving {job_id} running")
         else:
             status, _ = orbital.terminate(job_id)
-            log(f"[7/7] terminated session {job_id} (HTTP {status})")
+            step(7, f"terminated session {job_id} (HTTP {status})")
 
     dur = int(time.time() - started)
     if failures:
-        log(f"\nRESULT: FAILURE after {dur}s — " + "; ".join(failures))
-        log("TRAINING_TEST: FAILURE")
+        log(f"\n{RED}RESULT: FAILURE after {dur}s — " + "; ".join(failures) + RESET)
+        log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
         return 1
-    log(f"\nRESULT: all steps passed end-to-end in {dur}s "
-        f"(provision -> mint -> steps -> solutions -> quizzes -> terminate)")
-    log("TRAINING_TEST: SUCCESS")
+    log(f"\n{GREEN}RESULT: all steps passed end-to-end in {dur}s "
+        f"(provision -> mint -> steps -> solutions -> quizzes -> terminate){RESET}")
+    log(f"{GREEN}{BOLD}TRAINING_TEST: SUCCESS{RESET}")
     return 0
 
 
