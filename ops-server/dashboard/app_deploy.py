@@ -921,9 +921,12 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     cid = (body.get("clientId") or "").strip()
     csec = (body.get("clientSecret") or "").strip()
     account_urn = (body.get("accountUrn") or "").strip()
-    # Optional attribution: the Register Tenant form asks the admin for their email so the
-    # tenant-attribution registry can answer "who owns this install" later. Never required.
+    # Optional attribution: the Register Tenant form asks the admin for their email (so the
+    # tenant-attribution registry can answer "who owns this install" later) and a friendly
+    # tenant name (the account name is NOT retrievable via API, so the registrant supplies
+    # it). Never required.
     deployer_email = (body.get("deployerEmail") or "").strip()
+    friendly_name = (body.get("friendlyName") or "").strip()
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     if not (cid and csec):
         raise HTTPException(400, "clientId and clientSecret are required.")
@@ -993,7 +996,8 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     # record them (attribution only, never the secret) before they are discarded.
     await tenant_registry.record_deploy(
         _pool(), tenant_id, "oauth-bootstrap", account_urn=account_urn, client_id=cid,
-        deployer=deployer_email or (x_auth_user or ""), app_version=res.get("to") or "")
+        deployer=deployer_email or (x_auth_user or ""), friendly_name=friendly_name,
+        app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, mint_ready=mint_ready, warnings=warnings)

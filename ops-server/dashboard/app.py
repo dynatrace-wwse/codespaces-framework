@@ -599,22 +599,26 @@ async def tenants_register_identity(request: Request):
     email = (body.get("email") or "").strip()
     name = (body.get("name") or "").strip()
     account_urn = (body.get("accountUrn") or "").strip()
+    # Optional registrant-supplied friendly tenant name (the account name is
+    # not retrievable via API) — set when provided, never blanked by empty.
+    friendly_name = (body.get("friendlyName") or "").strip()
     if not tenant:
         raise HTTPException(400, "tenant is required.")
     if not (email or name or account_urn):
         raise HTTPException(400, "at least one of email, name, accountUrn is required.")
     tenant_id, _ = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     entry = await tenant_registry.record_identity(
-        pool, tenant_id, email=email, name=name, account_urn=account_urn)
+        pool, tenant_id, email=email, name=name, account_urn=account_urn,
+        friendly_name=friendly_name)
     return {"ok": True, "tenant": tenant_id, "entry": entry}
 
 
 @app.get("/api/tenants/registry")
 async def tenants_registry(request: Request):
     """CoE tenant list: every registered install with its attribution
-    (accountUrn, clientId, deployerEmail, via, firstSeen, lastDeploy,
-    appVersion + runtime identity). Writer or service bearer only — full
-    (unmasked) payload by design."""
+    (friendlyName, accountUrn, clientId, deployerEmail, via, firstSeen,
+    lastDeploy, appVersion + runtime identity). Writer or service bearer only
+    — full (unmasked) payload by design."""
     await _require_service_or_writer(request)
     return {"tenants": await tenant_registry.list_entries(pool)}
 

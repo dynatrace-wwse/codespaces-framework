@@ -14,9 +14,9 @@ at the only moments we ever hold it:
      admin visit (service bearer), merging the admin's email/name in.
 
 Redis layout (Orbital Redis, same instance as jobs):
-  tenant:registry:{tenant_id}  hash — accountUrn, clientId, deployerEmail, via,
-                               firstSeen, lastDeploy, appVersion, identityEmail,
-                               identityName, lastSeen
+  tenant:registry:{tenant_id}  hash — accountUrn, clientId, deployerEmail,
+                               friendlyName, via, firstSeen, lastDeploy,
+                               appVersion, identityEmail, identityName, lastSeen
   tenant:registry:index        set of registered tenant_ids
 
 The shaping/merge logic is pure (no Redis) and unit-tested in
@@ -47,8 +47,8 @@ def _now_iso() -> str:
 # ── Pure shaping / merge logic ───────────────────────────────────────────────
 
 def shape_deploy(via: str, *, account_urn: str = "", client_id: str = "",
-                 deployer: str = "", app_version: str = "",
-                 now: str | None = None) -> dict:
+                 deployer: str = "", friendly_name: str = "",
+                 app_version: str = "", now: str | None = None) -> dict:
     """Fields a deploy call site contributes. Empty values are DROPPED so a
     later, less-informed deploy (e.g. token after oauth-bootstrap) never
     blanks attribution captured earlier."""
@@ -59,6 +59,8 @@ def shape_deploy(via: str, *, account_urn: str = "", client_id: str = "",
         fields["clientId"] = client_id
     if deployer:
         fields["deployerEmail"] = deployer
+    if friendly_name:
+        fields["friendlyName"] = friendly_name
     if app_version:
         fields["appVersion"] = app_version
     return fields
@@ -75,10 +77,13 @@ def merge_fields(existing: dict, fields: dict) -> dict:
 
 
 def merge_identity(existing: dict, *, email: str = "", name: str = "",
-                   account_urn: str = "", now: str | None = None) -> dict:
+                   account_urn: str = "", friendly_name: str = "",
+                   now: str | None = None) -> dict:
     """Runtime-backstop merge (POST /api/tenants/register-identity): always
     refresh lastSeen + the identity fields; FILL deployerEmail only when the
-    deploy-time record left it empty (deploy-time attribution wins)."""
+    deploy-time record left it empty (deploy-time attribution wins).
+    friendlyName (registrant-supplied — the account name is not retrievable
+    via API) is set when provided, never blanked by an empty value."""
     now = now or _now_iso()
     out: dict = {"lastSeen": now}
     if email:
@@ -89,6 +94,8 @@ def merge_identity(existing: dict, *, email: str = "", name: str = "",
         out["identityName"] = name
     if account_urn:
         out["accountUrn"] = account_urn
+    if friendly_name:
+        out["friendlyName"] = friendly_name
     return merge_fields(existing or {}, out)
 
 
@@ -96,7 +103,8 @@ def merge_identity(existing: dict, *, email: str = "", name: str = "",
 
 async def record_deploy(pool, tenant_id: str, via: str, *,
                         account_urn: str = "", client_id: str = "",
-                        deployer: str = "", app_version: str = "") -> None:
+                        deployer: str = "", friendly_name: str = "",
+                        app_version: str = "") -> None:
     """Best-effort registry write at a deploy call site — a registry failure
     must NEVER break a deploy, so every error is swallowed (logged)."""
     try:
@@ -104,7 +112,8 @@ async def record_deploy(pool, tenant_id: str, via: str, *,
         existing = await pool.hgetall(key)
         fields = merge_fields(existing or {}, shape_deploy(
             via, account_urn=account_urn, client_id=client_id,
-            deployer=deployer, app_version=app_version))
+            deployer=deployer, friendly_name=friendly_name,
+            app_version=app_version))
         await pool.hset(key, mapping=fields)
         await pool.sadd(INDEX_KEY, tenant_id)
     except Exception as exc:
@@ -113,13 +122,15 @@ async def record_deploy(pool, tenant_id: str, via: str, *,
 
 
 async def record_identity(pool, tenant_id: str, *, email: str = "",
-                          name: str = "", account_urn: str = "") -> dict:
+                          name: str = "", account_urn: str = "",
+                          friendly_name: str = "") -> dict:
     """Merge the app-reported admin identity into the registry and return the
     resulting entry. Raises on Redis errors (the endpoint reports them)."""
     key = registry_key(tenant_id)
     existing = await pool.hgetall(key) or {}
     fields = merge_identity(existing, email=email, name=name,
-                            account_urn=account_urn)
+                            account_urn=account_urn,
+                            friendly_name=friendly_name)
     await pool.hset(key, mapping=fields)
     await pool.sadd(INDEX_KEY, tenant_id)
     return {**existing, **fields, "tenant": tenant_id}

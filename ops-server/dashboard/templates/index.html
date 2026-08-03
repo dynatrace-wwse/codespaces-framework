@@ -795,6 +795,7 @@
                     <input type="password" id="reg-oa-secret" placeholder="client secret" style="width:220px">
                     <input type="text" id="reg-oa-urn" placeholder="urn:dtaccount:<uuid>" style="width:280px">
                     <input type="email" id="reg-oa-email" placeholder="your email (optional — install attribution)" style="width:260px" title="Recorded in the tenant registry so the CoE knows who owns this install. Optional.">
+                    <input type="text" id="reg-oa-name" placeholder="tenant name (friendly, optional)" style="width:220px" title="A human-readable name for this tenant (e.g. the account/customer name) — the account name is not retrievable via API, so you supply it. Shown in the CoE tenant registry. Optional.">
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                     <!-- No data-action: the OAuth client is the account's authority — stays
@@ -817,8 +818,8 @@
             </table>
             <h3 style="margin:24px 0 8px">Tenants <span class="content-hint" style="font-weight:normal">(attribution registry — who deployed where; org members only)</span></h3>
             <table id="reg-tenants">
-                <thead><tr><th>Tenant</th><th>Deployer</th><th>Identity</th><th>Account URN</th><th>Via</th><th>Version</th><th>First seen</th><th>Last deploy</th></tr></thead>
-                <tbody><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+                <thead><tr><th>Tenant</th><th>Name</th><th>Deployer</th><th>Identity</th><th>Account URN</th><th>Via</th><th>Version</th><th>First seen</th><th>Last deploy</th></tr></thead>
+                <tbody><tr><td colspan="9" class="loading">Loading…</td></tr></tbody>
             </table>
             <div id="reg-mint-clients"></div>
         </section>

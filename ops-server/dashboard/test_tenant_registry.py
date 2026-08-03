@@ -32,6 +32,15 @@ def test_shape_deploy_keeps_provided_attribution():
     assert f["via"] == "oauth-bootstrap"
 
 
+def test_shape_deploy_friendly_name_set_when_provided():
+    f = tr.shape_deploy("oauth-bootstrap", friendly_name="ACME Corp (prod)",
+                        now="2026-08-03T10:00:00+00:00")
+    assert f["friendlyName"] == "ACME Corp (prod)"
+    # empty → dropped, so an HSET never blanks a name captured earlier
+    f2 = tr.shape_deploy("token", now="t2")
+    assert "friendlyName" not in f2
+
+
 def test_deploy_vias_match_locked_design():
     assert set(tr.DEPLOY_VIAS) == {"sso-deploy", "auto", "token", "oauth-bootstrap"}
 
@@ -76,6 +85,17 @@ def test_merge_identity_always_updates_identity_fields_and_urn():
     assert out["identityName"] == "New Name"
     assert out["accountUrn"] == "urn:dtaccount:new"
     assert out["lastSeen"] == "t3"
+
+
+def test_merge_identity_friendly_name_set_when_provided_never_blanked():
+    # provided → set (latest registrant-supplied name wins)
+    out = tr.merge_identity({"firstSeen": "t0", "friendlyName": "Old Name"},
+                            email="a@b.com", friendly_name="New Name", now="t1")
+    assert out["friendlyName"] == "New Name"
+    # empty → absent from the merge, so the stored name survives the HSET
+    out2 = tr.merge_identity({"firstSeen": "t0", "friendlyName": "Kept Name"},
+                             email="a@b.com", now="t2")
+    assert "friendlyName" not in out2
 
 
 def test_merge_identity_stamps_first_seen_for_unseen_tenant():
