@@ -14,7 +14,11 @@ restart. Now the conflict is detected (force-remove + one in-place retry) and
 release() retries the whole re-init with bounded backoff before giving up.
 """
 
+import asyncio
+
+from . import agent
 from .agent import (
+    SysboxPool,
     SLOT_REINIT_ATTEMPTS,
     SLOT_REINIT_BACKOFF_MAX_S,
     _is_container_name_conflict,
@@ -53,6 +57,76 @@ def test_backoff_doubles_and_caps():
 def test_backoff_never_exceeds_cap():
     for a in range(1, 20):
         assert _reinit_backoff_s(a) <= SLOT_REINIT_BACKOFF_MAX_S
+
+
+# ── release(healthy=False) bounded retry ─────────────────────────────────────
+# The docker-facing _init_slot is stubbed; only the retry/backoff/queue contract
+# of release() is exercised, so these stay pure and fast.
+
+def _pool_with_stubbed_init(fail_first_n: int):
+    """SysboxPool(1) whose _init_slot fails ``fail_first_n`` times, then succeeds.
+
+    The stub mirrors the real contract: on success the slot is put back into
+    the pool queue and True is returned; on failure nothing is enqueued.
+    """
+    pool = SysboxPool(1)
+    calls = []
+
+    async def fake_init(slot):
+        calls.append(slot.index)
+        if len(calls) <= fail_first_n:
+            return False
+        await pool._queue.put(slot)
+        return True
+
+    pool._init_slot = fake_init
+    return pool, calls
+
+
+def _run_release_unhealthy(pool):
+    """Drive release(healthy=False) with instant (recorded) sleeps."""
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        await real_sleep(0)
+
+    agent.asyncio.sleep = fake_sleep
+    try:
+        asyncio.run(pool.release(pool.slots[0], healthy=False))
+    finally:
+        agent.asyncio.sleep = real_sleep
+    return sleeps
+
+
+def test_release_retries_transient_failure_and_returns_slot_to_pool():
+    # Two failed re-inits (old container's rm still in flight), third succeeds —
+    # the slot MUST come back instead of being dropped forever.
+    pool, calls = _pool_with_stubbed_init(fail_first_n=2)
+    sleeps = _run_release_unhealthy(pool)
+    assert len(calls) == 3
+    assert sleeps == [5, 10]          # capped-exponential backoff between attempts
+    assert pool._queue.qsize() == 1   # slot restored to the pool
+
+
+def test_release_happy_first_attempt_no_backoff():
+    # Pre-fix behavior preserved: first re-init succeeds → no sleeps, one call.
+    pool, calls = _pool_with_stubbed_init(fail_first_n=0)
+    sleeps = _run_release_unhealthy(pool)
+    assert len(calls) == 1
+    assert sleeps == []
+    assert pool._queue.qsize() == 1
+
+
+def test_release_gives_up_after_bounded_attempts():
+    # Permanent failure (e.g. docker daemon wedged): retry exactly
+    # SLOT_REINIT_ATTEMPTS times, then drop — never an unbounded loop.
+    pool, calls = _pool_with_stubbed_init(fail_first_n=10 ** 6)
+    sleeps = _run_release_unhealthy(pool)
+    assert len(calls) == SLOT_REINIT_ATTEMPTS
+    assert len(sleeps) == SLOT_REINIT_ATTEMPTS - 1
+    assert pool._queue.qsize() == 0
 
 
 if __name__ == "__main__":
