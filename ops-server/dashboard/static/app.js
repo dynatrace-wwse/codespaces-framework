@@ -3337,13 +3337,14 @@ async function goRegisterOauth(action) {
     const cid = document.getElementById('reg-oa-cid').value.trim();
     const sec = document.getElementById('reg-oa-secret').value.trim();
     const urn = document.getElementById('reg-oa-urn').value.trim();
+    const email = (document.getElementById('reg-oa-email') || { value: '' }).value.trim();
     const m = document.getElementById('reg-oa-msg');
     if (!t) { m.textContent = 'tenant required'; return; }
     if (!cid || !sec) { m.textContent = 'client id + secret required'; return; }
     if (!urn.startsWith('urn:dtaccount:')) { m.textContent = 'account URN required (urn:dtaccount:<uuid>)'; return; }
     m.textContent = ''; setRegBusy(true);
     try {
-        const r = await fetch('/api/deploy/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, clientId: cid, clientSecret: sec, accountUrn: urn }) });
+        const r = await fetch('/api/deploy/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, clientId: cid, clientSecret: sec, accountUrn: urn, deployerEmail: email }) });
         const raw = await r.text();
         let j = {}; try { j = JSON.parse(raw); } catch (_) { /* non-JSON gateway page */ }
         if (r.ok) {
@@ -3388,10 +3389,27 @@ async function loadRegisterAudit() {
     } catch (e) { /* ignore */ }
 }
 
+// Tenant-attribution registry (EPIC-002 §9) — who deployed where. Writer-gated:
+// anonymous callers get a 401 and see the sign-in hint instead of rows.
+async function loadTenantRegistry() {
+    const b = document.querySelector('#reg-tenants tbody');
+    if (!b) return;
+    try {
+        const r = await fetch('/api/tenants/registry', { credentials: 'same-origin' });
+        if (!r.ok) { b.innerHTML = '<tr><td colspan="8" class="content-hint">Sign in as an org member to view the tenant registry.</td></tr>'; return; }
+        const rows = (await r.json()).tenants || [];
+        const d = s => escapeHtml((s || '').replace('T', ' ').slice(0, 19));
+        b.innerHTML = rows.length
+            ? rows.map(t => `<tr><td><code>${escapeHtml(t.tenant || '')}</code></td><td>${escapeHtml(t.deployerEmail || '')}</td><td>${escapeHtml(t.identityName ? `${t.identityName} <${t.identityEmail || ''}>` : (t.identityEmail || ''))}</td><td><code>${escapeHtml(t.accountUrn || '')}</code></td><td>${escapeHtml(t.via || '')}</td><td>${escapeHtml(t.appVersion || '')}</td><td>${d(t.firstSeen)}</td><td>${d(t.lastDeploy)}</td></tr>`).join('')
+            : '<tr><td colspan="8" class="content-hint">none yet</td></tr>';
+    } catch (e) { /* ignore */ }
+}
+
 function loadRegister() {
     wireRegister();
     loadRegisterAudit();
     loadMintClients();
+    loadTenantRegistry();
 }
 
 async function loadMintClients() {

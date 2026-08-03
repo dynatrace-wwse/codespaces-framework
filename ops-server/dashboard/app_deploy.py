@@ -38,6 +38,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from webhook.config import REDIS_URL
 from dashboard.content_service import classify_tenant, register_tenant
 from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KEY) — COE token + stashed deploy token
+from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -581,10 +582,13 @@ async def deploy_start(tenant: str, action: str = "deploy", x_auth_user: str | N
     return await _begin_sso_flow(tenant, action, user)
 
 
-async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str, token: str) -> HTMLResponse:
+async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str, token: str,
+                         via: str = "sso-deploy", deployer: str = "") -> HTMLResponse:
     """Run the install/upgrade (or uninstall) with a valid bearer and return the result page.
     Shared by the SSO callback and the in-app COE/SRO auto-deploy path. The caller owns the
-    token's lifetime and must `del` it after this returns (it is never logged here)."""
+    token's lifetime and must `del` it after this returns (it is never logged here).
+    `via`/`deployer` feed the tenant-attribution registry (deployer = GitHub username on the
+    SSO path; empty on app-triggered paths — the runtime backstop fills identity later)."""
     app_url = _app_url(tenant_url)
     if action == "undeploy":
         ok, msg = await _run_undeploy(token, tenant_url)
@@ -608,6 +612,8 @@ async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str
 
     reg = await _register_in_content_service(user, tenant_url)
     profile = (reg or {}).get("profile")
+    await tenant_registry.record_deploy(_pool(), tenant_id, via, deployer=deployer,
+                                        app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"],
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile,
                  remote_grail=remote_grail)
@@ -667,7 +673,7 @@ async def deploy_app_start(tenant: str, action: str = "deploy", nonce: str = "")
         if not token:
             return HTMLResponse(_page(f"{auto} auto-deploy not configured.", ok=False), status_code=503)
         try:
-            return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token)
+            return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token, via="auto")
         finally:
             del token
 
@@ -685,7 +691,7 @@ async def deploy_app_start(tenant: str, action: str = "deploy", nonce: str = "")
             return HTMLResponse(_page("Tenant mismatch for this update session.", ok=False), status_code=400)
         token = stashed.get("token", "")
         try:
-            return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token)
+            return await _finish_deploy(f"app:{tenant_id}", tenant_id, tenant, action, token, via="token")
         finally:
             del token
 
@@ -759,7 +765,8 @@ async def deploy_callback(request: Request):
 
     tenant_url = flow["tenant"]
     try:
-        return await _finish_deploy(user, tenant_id, tenant_url, action, token)
+        return await _finish_deploy(user, tenant_id, tenant_url, action, token,
+                                    via="sso-deploy", deployer=user)
     finally:
         del token  # discard the delegated credential on every path
 
@@ -832,6 +839,9 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
     warnings = _scope_warnings(allowlist, remote_grail)
+    await tenant_registry.record_deploy(
+        _pool(), tenant_id, "auto" if auto else "token",
+        deployer=x_auth_user or "", app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, warnings=warnings)
@@ -911,6 +921,9 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     cid = (body.get("clientId") or "").strip()
     csec = (body.get("clientSecret") or "").strip()
     account_urn = (body.get("accountUrn") or "").strip()
+    # Optional attribution: the Register Tenant form asks the admin for their email so the
+    # tenant-attribution registry can answer "who owns this install" later. Never required.
+    deployer_email = (body.get("deployerEmail") or "").strip()
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     if not (cid and csec):
         raise HTTPException(400, "clientId and clientSecret are required.")
@@ -976,6 +989,11 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
     warnings = _scope_warnings(allowlist, remote_grail) + scope_warnings
+    # The bootstrap path is the ONE moment Orbital ever sees the account URN + client id —
+    # record them (attribution only, never the secret) before they are discarded.
+    await tenant_registry.record_deploy(
+        _pool(), tenant_id, "oauth-bootstrap", account_urn=account_urn, client_id=cid,
+        deployer=deployer_email or (x_auth_user or ""), app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, mint_ready=mint_ready, warnings=warnings)
