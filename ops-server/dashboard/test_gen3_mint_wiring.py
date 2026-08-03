@@ -14,8 +14,11 @@ def test_factory_builds_for_sprint():
     p = a._gen3_platform_provisioner("https://ydi9582h.sprint.apps.dynatracelabs.com")
     assert isinstance(p, PlatformTokenProvisioner)
     assert p.env_id == "ydi9582h"
-    assert p.account_uuid == "abc-123"
-    assert p.account_api_host == "https://api-hardening.internal.dynatracelabs.com"
+    # Derived from whatever MINT_RESOURCE_SPRINT is in scope: the fallback above only
+    # applies when the real /home/ops/.env has not already populated it (setdefault),
+    # so hardcoding the fake uuid fails whenever another test module loads the env first.
+    assert p.account_uuid == os.environ["MINT_RESOURCE_SPRINT"].rsplit(":", 1)[-1]
+    assert p.account_api_host == os.environ["MINT_API_HOST_SPRINT"]
 
 
 def test_factory_none_when_no_creds_for_domain():

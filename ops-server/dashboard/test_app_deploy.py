@@ -328,7 +328,9 @@ def test_register_buttons_have_no_guest_gate():
     import re
     here = os.path.dirname(os.path.abspath(__file__))
     html = open(os.path.join(here, "templates", "index.html"), encoding="utf-8").read()
-    for bid in ("reg-deploy", "reg-undeploy"):
+    # Renamed to reg-oa-* when the OAuth-client bootstrap deploy replaced the
+    # token-paste form (59e93ad) — the guest-gate rule is unchanged.
+    for bid in ("reg-oa-deploy", "reg-oa-undeploy"):
         m = re.search(r"<button[^>]*\bid=\"" + bid + r"\"[^>]*>", html)
         assert m, f"button #{bid} not found in index.html"
         assert "data-action" not in m.group(0), \
@@ -475,3 +477,79 @@ def test_scope_warnings_flags_missing_settings_scope():
     # clean results → no warnings
     assert dep._scope_warnings("added 1 host(s)", "enabled → wwse") == []
     assert dep._scope_warnings("", "skipped (central tenant — stores locally)") == []
+
+
+# ── _ensure_orbital_config (seed the app's Orbital service token) ───────────────
+
+def test_ensure_orbital_config_skips_without_orbital_token():
+    orig = dep._orbital_service_token
+    dep._orbital_service_token = lambda: None
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("tok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        dep._orbital_service_token = orig
+    assert "ORBITAL_TOKEN not configured" in msg
+
+
+def test_ensure_orbital_config_creates_when_absent():
+    import httpx
+    captured = {}
+    orig_tok = dep._orbital_service_token
+    dep._orbital_service_token = lambda: "ORB-SECRET"
+    orig_client = _grail_client(captured, existing_items=[])
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._orbital_service_token = orig_tok
+    assert msg == "token seeded"
+    # App-settings v2 takes ONE object (not a list) and kebab-case query params.
+    assert captured["post"]["schemaId"] == "orbital-config"
+    assert captured["post"]["value"]["token"] == "ORB-SECRET"
+    assert captured["get_params"]["schema-id"] == "orbital-config"
+
+
+def test_ensure_orbital_config_fills_empty_existing_object():
+    import httpx
+    captured = {}
+    orig_tok = dep._orbital_service_token
+    dep._orbital_service_token = lambda: "ORB-SECRET"
+    orig_client = _grail_client(captured, existing_items=[{"objectId": "obj-9", "value": {"token": ""}}])
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._orbital_service_token = orig_tok
+    assert msg == "token seeded"
+    assert captured["put_url"].endswith("/obj-9")
+    assert captured["put"]["value"]["token"] == "ORB-SECRET"
+
+
+def test_ensure_orbital_config_never_clobbers_configured_token():
+    """The API masks secrets on read, so a non-empty value can't be compared —
+    the only safe rule is to leave it alone."""
+    import httpx
+    captured = {}
+    orig_tok = dep._orbital_service_token
+    dep._orbital_service_token = lambda: "ORB-SECRET"
+    orig_client = _grail_client(
+        captured, existing_items=[{"objectId": "obj-9", "value": {"token": "***bb81c3df***"}}])
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._orbital_service_token = orig_tok
+    assert msg == "already configured"
+    assert "put" not in captured and "post" not in captured
+
+
+def test_scope_warnings_flags_unseeded_orbital_config():
+    w = dep._scope_warnings("added 1 host(s)", "enabled → wwse",
+                            "skipped (token lacks app-settings:objects:write)")
+    assert len(w) == 1
+    assert "Orbital token NOT configured" in w[0]
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse",
+                               "seed failed (HTTP 500)") != []
+    # seeded / pre-existing → silent
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "token seeded") == []
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "already configured") == []
