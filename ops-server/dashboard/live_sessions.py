@@ -13,6 +13,9 @@ Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
                                   maxSeats, joinCode, cancelledAt
   live:session:{id}:roster  set   lowercase invited emails
   live:session:{id}:joined  hash  email -> ISO joinedAt
+  live:session:{id}:tenants hash  email -> normalized tenant URL the learner
+                                  joined FROM (cross-tenant workshops; absent
+                                  for pre-fix joins — backward compatible)
   live:sessions:index       zset  sessionId scored by epoch createdAt
   live:joincode:{code}      str   sessionId (join-by-code lookup, code UPPER)
 """
@@ -50,6 +53,66 @@ def normalize_roster(emails) -> list[str]:
             seen.add(n)
             out.append(n)
     return out
+
+
+# ── Tenants (cross-tenant workshops) ─────────────────────────────────────────
+#
+# ROOT CONSTRAINT: the trainer's app instance can only mint tokens for ITS OWN
+# tenant, so bulk provisioning can never provision a foreign-tenant learner
+# correctly. The learner's tenant is captured at join time (app-function stamps
+# it server-side); provision-all then only provisions same-tenant learners and
+# reports the rest honestly — foreign learners provision on entry from their
+# own tenant via the unchanged single-user flow.
+
+FOREIGN_TENANT_MESSAGE = "provisions on entry from their own tenant"
+NOT_JOINED_MESSAGE = "hasn't joined yet — will provision on entry"
+
+
+def normalize_tenant(tenant) -> str:
+    """Canonical tenant-URL form for equality checks: trimmed, lowercased,
+    no trailing slash (the app sends https://<env>.apps.dynatrace.com)."""
+    return (tenant or "").strip().rstrip("/").lower()
+
+
+def provision_skip_status(has_joined, joined_tenant, workshop_tenant):
+    """Decide whether provision-all may provision a roster email.
+
+    Returns None → provision; otherwise the skip status string:
+      "not-joined"     — never joined, tenant unknown (provisions on entry)
+      "foreign-tenant" — joined from a DIFFERENT tenant than the workshop's
+                         provisioning tenant (provisions on entry there)
+
+    Backward compatible: a joined entry WITHOUT a recorded tenant (pre-fix
+    join) or a missing workshop tenant keeps the legacy behavior (provision).
+    """
+    if not has_joined:
+        return "not-joined"
+    jt = normalize_tenant(joined_tenant)
+    wt = normalize_tenant(workshop_tenant)
+    if jt and wt and jt != wt:
+        return "foreign-tenant"
+    return None
+
+
+def readiness_gap_state(has_joined, joined_tenant, trainer_tenant) -> str:
+    """State for a roster email with NO running job and NO failed record.
+
+    With the trainer's tenant supplied (updated app), be honest on the board:
+      "not-joined" — the learner never joined (will provision on entry)
+      "foreign"    — joined from another tenant (provisions on entry there)
+      "none"       — joined same-tenant (or tenant unrecorded), simply not
+                     provisioned yet
+    Without a trainer tenant (legacy app) always "none" — the old contract.
+    """
+    tt = normalize_tenant(trainer_tenant)
+    if not tt:
+        return "none"
+    if not has_joined:
+        return "not-joined"
+    jt = normalize_tenant(joined_tenant)
+    if jt and jt != tt:
+        return "foreign"
+    return "none"
 
 
 # ── Create validation ─────────────────────────────────────────────────────────
