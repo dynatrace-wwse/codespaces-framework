@@ -86,6 +86,13 @@ from dashboard import live_sessions  # noqa: E402
 # dashboard/live_pad.py (tested without Redis); endpoints below stay thin.
 from dashboard import live_pad  # noqa: E402
 
+# Cross-tenant workshop progress (PROG-1). Training bizevents are written ONCE,
+# to COE; Orbital holds the COE read token and proxies the DQL, so a trainer
+# sees learners running on any tenant without the events being duplicated.
+# DQL + record folding live in dashboard/live_progress.py (pure, unit-tested).
+from dashboard import live_progress  # noqa: E402
+from dashboard.app_deploy import COE_TENANT_URL, _coe_remote_grail_token  # noqa: E402
+
 # PII masking for anonymous (public) reads — pure transforms in
 # dashboard/masking.py (tested without Redis).
 from dashboard import masking  # noqa: E402
@@ -5511,6 +5518,121 @@ async def api_live_session_readiness(session_id: str, request: Request,
     # trainerEmail is caller-supplied — anonymous callers who know it must
     # not harvest the roster; they get masked emails (states stay visible).
     return payload if _has_full_access(request) else masking.mask_readiness(payload)
+
+
+PROGRESS_CACHE_TTL = 15          # seconds — a board poll of ~5s must not mean a DQL each time
+PROGRESS_QUERY_TIMEOUT_MS = 30000
+
+
+async def _query_coe_grail(query: str) -> list[dict]:
+    """Run one DQL against COE with Orbital's stored read token.
+
+    Orbital is the ONLY holder of this token — the app never sees it, which is
+    the whole point of proxying: a learner's tenant can read its cohort's
+    progress without being handed COE credentials. Raises HTTPException with a
+    caller-safe message; the token is never logged or returned.
+    """
+    token = _coe_remote_grail_token()
+    if not token:
+        raise HTTPException(status_code=503, detail=(
+            "COE Grail token not configured on Orbital — set REMOTE_GRAIL_COE_TOKEN_ENC "
+            "(and GH_OAUTH_ENC_KEY) in /home/ops/.env and restart ops-dashboard"))
+    url = f"{COE_TENANT_URL.rstrip('/')}/platform/storage/query/v1/query:execute"
+    try:
+        async with httpx.AsyncClient(timeout=45) as c:
+            r = await c.post(url,
+                             headers={"Authorization": f"Bearer {token}",
+                                      "Content-Type": "application/json"},
+                             json={"query": query,
+                                   "requestTimeoutMilliseconds": PROGRESS_QUERY_TIMEOUT_MS})
+    except Exception as exc:
+        log.warning("progress: COE query transport error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"COE query failed: {exc}")
+    if r.status_code == 401 or r.status_code == 403:
+        raise HTTPException(status_code=502, detail=(
+            f"COE rejected Orbital's Grail token (HTTP {r.status_code}) — it needs "
+            "storage:bizevents:read and may have expired"))
+    if r.status_code != 200:
+        raise HTTPException(status_code=502,
+                            detail=f"COE query failed (HTTP {r.status_code}): {r.text[:200]}")
+    body = r.json()
+    # A query that exceeded requestTimeoutMilliseconds comes back with a
+    # requestToken and no result. Say so rather than reporting an empty cohort.
+    result = body.get("result")
+    if result is None:
+        raise HTTPException(status_code=504, detail=(
+            "COE query did not finish within "
+            f"{PROGRESS_QUERY_TIMEOUT_MS // 1000}s — narrow the workshop window and retry"))
+    return result.get("records", []) or []
+
+
+@app.get("/api/live/sessions/{session_id}/progress")
+async def api_live_session_progress(session_id: str, request: Request,
+                                    trainerEmail: str = "", email: str = "",
+                                    refresh: int = 0):
+    """Live progress of everyone in a workshop, wherever they are running it.
+
+    Every training bizevent lands on COE exactly once (a foreign tenant
+    forwards it there via the app's remote-grail routing). Orbital queries COE
+    with DQL on the caller's behalf and folds the records into one row per
+    learner — so nothing is duplicated per tenant and there is a single source
+    of truth for "how far is this cohort".
+
+    Visible to the whole cohort, not just the trainer: a learner (roster member
+    or code-joiner) gets the same states and percentages with every identity
+    masked except their own row. Cached for PROGRESS_CACHE_TTL seconds —
+    `refresh=1` bypasses it.
+    """
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    caller = live_sessions.normalize_email(email)
+    is_trainer = live_sessions.is_trainer(trainerEmail, session)
+    if not is_trainer and caller not in roster and caller not in joined:
+        raise HTTPException(status_code=403,
+                            detail="Not a participant of this workshop")
+
+    cache_key = f"live:progress:{session_id}"
+    payload = None
+    if not refresh:
+        cached = await pool.get(cache_key)
+        if cached:
+            try:
+                payload = json.loads(cached)
+                payload["cached"] = True
+            except Exception:
+                payload = None
+
+    if payload is None:
+        # The cohort = invited roster + anyone who joined by code. Roster
+        # members with zero events still get a row (see shape_progress).
+        cohort = sorted(set(roster) | set(joined.keys()))
+        training_id = session.get("trainingId", "")
+        query = live_progress.build_progress_query(
+            session_id, training_id, cohort, live_progress.since_timestamp(session))
+        records = await _query_coe_grail(query)
+        payload = live_progress.shape_progress(records, cohort)
+        payload.update({
+            "workshopId": session_id,
+            "workshopName": session.get("title", ""),
+            "trainingId": training_id,
+            "trainingKey": live_progress.training_key(training_id),
+            "source": COE_TENANT_URL,
+            "cached": False,
+        })
+        await pool.setex(cache_key, PROGRESS_CACHE_TTL, json.dumps(payload))
+
+    # trainerEmail/email are caller-supplied and unverified (the app function
+    # sends no X-Auth headers) — only a verified org member or the matching
+    # trainer sees raw addresses; everyone else gets the board with identities
+    # masked apart from their own row.
+    if is_trainer or _has_full_access(request):
+        return payload
+    return masking.mask_progress(payload, keep=caller)
 
 
 @app.get("/api/live/capacity")

@@ -103,6 +103,34 @@ def test_mask_readiness_masks_roster_emails_keeps_states():
     assert payload["results"][0]["email"] == "alice@x.com"
 
 
+def test_mask_progress_hides_identities_but_keeps_the_board_readable():
+    payload = {"results": [
+        {"email": "alice@x.com", "state": "completed", "progressPct": 100,
+         "tenant": "https://sro97894.apps.dynatrace.com"},
+        {"email": "bob@y.com", "state": "not-started", "progressPct": None, "tenant": ""},
+    ], "summary": {"total": 2, "completed": 1}}
+    masked = m.mask_progress(payload)
+    assert masked["results"][0]["email"] == "al***@x***"
+    assert masked["results"][0]["tenant"] == "https://sro***"
+    assert masked["results"][0]["progressPct"] == 100
+    assert masked["results"][1]["email"] == "bo***@y***"
+    assert masked["summary"] == {"total": 2, "completed": 1}
+    assert payload["results"][0]["email"] == "alice@x.com"  # input untouched
+
+
+def test_mask_progress_keeps_the_callers_own_row():
+    payload = {"results": [
+        {"email": "alice@x.com", "state": "in-progress", "tenant": "https://a.apps.dynatrace.com"},
+        {"email": "bob@y.com", "state": "in-progress", "tenant": "https://b.apps.dynatrace.com"},
+    ]}
+    masked = m.mask_progress(payload, keep="Alice@X.com")
+    assert masked["results"][0]["email"] == "alice@x.com"
+    assert masked["results"][0]["tenant"] == "https://a.apps.dynatrace.com"
+    assert masked["results"][1]["email"] == "bo***@y***"
+    # An empty keep must not un-mask rows with an empty email.
+    assert m.mask_progress({"results": [{"email": "", "state": "x"}]})["results"][0]["email"] == ""
+
+
 def test_mask_pad_masks_question_author_emails():
     payload = {"sections": {"welcome": "hi"}, "qa": [
         {"qid": "1-0", "name": "Alice", "email": "alice@x.com",

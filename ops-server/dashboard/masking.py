@@ -80,6 +80,24 @@ def mask_readiness(payload: dict) -> dict:
                         for row in payload.get("results", [])]}
 
 
+def mask_progress(payload: dict, keep: str = "") -> dict:
+    """Non-trainer view of GET /api/live/sessions/{id}/progress.
+
+    The board is meant to be visible to the cohort, so the states, percentages
+    and the summary all stay — only the identities are masked, including the
+    tenant (which is itself identifying in a cross-tenant workshop). `keep` is
+    the caller's own email: their own row stays readable so they can find
+    themselves on the board.
+    """
+    keep = str(keep or "").strip().lower()
+    return {**payload,
+            "results": [row if str(row.get("email", "")).lower() == keep and keep
+                        else {**row,
+                              "email": mask_email(row.get("email", "")),
+                              "tenant": mask_tenant(row.get("tenant", ""))}
+                        for row in payload.get("results", [])]}
+
+
 def mask_pad(payload: dict) -> dict:
     """Anonymous view of GET /api/live/sessions/{id}/pad — question authors'
     emails are masked (names stay: they are free-text display names)."""
