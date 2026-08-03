@@ -448,3 +448,167 @@ def test_end_from_scheduled_raises_value_error():
     import pytest as _pytest
     with _pytest.raises(ValueError):
         ls.apply_transition("scheduled", "end")
+
+
+# ── RFE-C: chat + attendee rail ───────────────────────────────────────────────
+
+def _chat(mid, text, email="l@x.com", name="Lea", role="learner", ts="2026-08-03T10:00:00+00:00"):
+    return (mid, {"email": email, "name": name, "role": role, "text": text, "ts": ts})
+
+
+def test_assemble_chat_keeps_arrival_order_and_marks_pins():
+    msgs = lp.assemble_chat([_chat("1-0", "first"), _chat("2-0", "second")],
+                            pins={"2-0"})
+    assert [m["text"] for m in msgs] == ["first", "second"]
+    assert [m["pinned"] for m in msgs] == [False, True]
+    assert msgs[0]["mid"] == "1-0"
+
+
+def test_assemble_chat_clear_watermark_hides_everything_up_to_it():
+    entries = [_chat("1-0", "before"), _chat("2-0", "at"), _chat("3-0", "after")]
+    msgs = lp.assemble_chat(entries, cleared_before="2-0")
+    assert [m["text"] for m in msgs] == ["after"]
+    # No watermark = nothing hidden.
+    assert len(lp.assemble_chat(entries)) == 3
+
+
+def test_assemble_chat_compares_stream_ids_numerically_not_lexically():
+    """'10-0' is AFTER '9-0'. A string compare would keep message 10 visible
+    after a clear at 9 — the whole point of the watermark."""
+    entries = [_chat("9-0", "nine"), _chat("10-0", "ten")]
+    assert lp.assemble_chat(entries, cleared_before="10-0") == []
+    assert [m["text"] for m in lp.assemble_chat(entries, cleared_before="9-0")] == ["ten"]
+
+
+def test_assemble_chat_sequence_component_orders_within_the_same_ms():
+    entries = [_chat("5-1", "a"), _chat("5-2", "b"), _chat("5-10", "c")]
+    kept = [m["text"] for m in lp.assemble_chat(entries, cleared_before="5-2")]
+    assert kept == ["c"]
+
+
+def test_assemble_chat_tolerates_junk_ids_and_empty_input():
+    assert lp.assemble_chat([]) == []
+    assert lp.assemble_chat(None) == []
+    # A junk id parses to (0, 0) — it must not raise.
+    assert len(lp.assemble_chat([_chat("junk", "x")])) == 1
+
+
+def test_rate_limit_error_allows_the_nth_and_refuses_the_next():
+    assert lp.rate_limit_error(1) is None
+    assert lp.rate_limit_error(lp.CHAT_RATE_LIMIT) is None
+    status, detail = lp.rate_limit_error(lp.CHAT_RATE_LIMIT + 1)
+    assert status == 429
+    assert str(lp.CHAT_RATE_LIMIT) in detail
+
+
+def test_clean_chat_strips_html_and_enforces_the_shorter_cap():
+    assert lp.clean_chat("  <b>hi</b>  ") == "hi"
+    lp.clean_chat("x" * lp.CHAT_MAX_CHARS)          # at the cap is fine
+    for bad in ("", "   ", "<b></b>", "x" * (lp.CHAT_MAX_CHARS + 1)):
+        try:
+            lp.clean_chat(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_clean_text_keeps_the_longer_question_cap():
+    """Chat's cap must not have narrowed Q&A — the two share the function."""
+    assert lp.CHAT_MAX_CHARS < lp.QUESTION_MAX_CHARS
+    lp.clean_text("x" * lp.QUESTION_MAX_CHARS)
+
+
+def test_is_present_window_naive_aware_and_junk():
+    from datetime import datetime, timedelta, timezone as tz
+    now = datetime(2026, 8, 3, 10, 0, tzinfo=tz.utc)
+    fresh = (now - timedelta(seconds=10)).isoformat()
+    stale = (now - timedelta(seconds=lp.PRESENCE_WINDOW_SECONDS + 1)).isoformat()
+    assert lp.is_present(fresh, now) is True
+    assert lp.is_present(stale, now) is False
+    # Naive timestamps are read as UTC rather than crashing on the subtraction.
+    assert lp.is_present((now - timedelta(seconds=5)).replace(tzinfo=None).isoformat(), now) is True
+    for junk in ("", None, "not-a-date"):
+        assert lp.is_present(junk, now) is False
+    # A heartbeat from the future (clock skew) is not "present".
+    assert lp.is_present((now + timedelta(seconds=300)).isoformat(), now) is False
+
+
+def test_display_name_falls_back_to_the_local_part_never_the_address():
+    assert lp.display_name("Lea", "lea@x.com") == "Lea"
+    assert lp.display_name("", "lea@x.com") == "lea"
+    assert lp.display_name("  ", "lea@x.com") == "lea"
+    assert "@" not in lp.display_name("", "lea@x.com")
+
+
+def _presence(email_to_ts):
+    import json as _json
+    return {e: _json.dumps({"name": "", "role": "learner", "ts": t})
+            for e, t in email_to_ts.items()}
+
+
+def test_shape_attendees_always_has_a_trainer_row_even_with_nobody_joined():
+    rows = lp.shape_attendees({}, {}, _session(), {})
+    assert [r["email"] for r in rows] == [TRAINER]
+    assert rows[0]["role"] == "trainer"
+    assert rows[0]["present"] is False
+
+
+def test_shape_attendees_sorts_trainer_then_present_then_name():
+    from datetime import datetime, timezone as tz
+    now = datetime(2026, 8, 3, 10, 0, tzinfo=tz.utc)
+    joined = {"zoe@x.com": "t", "amy@x.com": "t", "bob@x.com": "t"}
+    presence = _presence({"zoe@x.com": now.isoformat()})
+    rows = lp.shape_attendees(joined, {}, _session(), presence, now)
+    assert [r["email"] for r in rows] == [TRAINER, "zoe@x.com", "amy@x.com", "bob@x.com"]
+    assert rows[1]["present"] is True and rows[2]["present"] is False
+
+
+def test_shape_attendees_carries_the_joining_tenant_and_join_time():
+    rows = lp.shape_attendees({"amy@x.com": "2026-08-03T09:00:00+00:00"},
+                              {"amy@x.com": "https://sro97894.apps.dynatrace.com"},
+                              _session(), {})
+    amy = [r for r in rows if r["email"] == "amy@x.com"][0]
+    assert amy["tenant"] == "https://sro97894.apps.dynatrace.com"
+    assert amy["joinedAt"] == "2026-08-03T09:00:00+00:00"
+    assert amy["role"] == "learner"
+
+
+def test_shape_attendees_includes_someone_present_who_never_joined():
+    """Code-join workshops (WS-2) put people in the room without a roster
+    entry — the rail must still show them."""
+    from datetime import datetime, timezone as tz
+    now = datetime(2026, 8, 3, 10, 0, tzinfo=tz.utc)
+    rows = lp.shape_attendees({}, {}, _session(), _presence({"walkin@x.com": now.isoformat()}), now)
+    assert "walkin@x.com" in [r["email"] for r in rows]
+
+
+def test_shape_attendees_normalizes_case_so_one_person_is_one_row():
+    rows = lp.shape_attendees({"AMY@X.com": "t"}, {}, _session(),
+                              _presence({"amy@x.com": ""}))
+    assert len([r for r in rows if r["email"] == "amy@x.com"]) == 1
+
+
+def test_shape_attendees_tolerates_a_bare_iso_presence_value():
+    """Heartbeats written by an older build were plain ISO strings."""
+    from datetime import datetime, timezone as tz
+    now = datetime(2026, 8, 3, 10, 0, tzinfo=tz.utc)
+    rows = lp.shape_attendees({"amy@x.com": "t"}, {}, _session(),
+                              {"amy@x.com": now.isoformat()}, now)
+    assert [r for r in rows if r["email"] == "amy@x.com"][0]["present"] is True
+
+
+def test_render_export_includes_the_chat_transcript_and_escapes_it():
+    html_doc = lp.render_export(
+        _session(), {}, [],
+        [{"mid": "1-0", "name": "<img src=x>", "email": "l@x.com",
+          "text": "<script>alert(1)</script>", "ts": "2026-08-03T10:00", "pinned": True}])
+    assert "<h2>Chat</h2>" in html_doc
+    assert "<script>alert(1)</script>" not in html_doc
+    assert "&lt;script&gt;" in html_doc
+    assert "pinned" in html_doc
+
+
+def test_render_export_says_so_when_the_chat_is_empty():
+    assert "No chat messages." in lp.render_export(_session(), {}, [], [])
+    # Callers that predate chat (positional 3-arg) must still work.
+    assert "No chat messages." in lp.render_export(_session(), {}, [])

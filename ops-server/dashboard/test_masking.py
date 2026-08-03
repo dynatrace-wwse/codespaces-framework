@@ -148,3 +148,53 @@ if __name__ == "__main__":
             fn()
             print(f"ok {name}")
     print("all masking tests passed")
+
+
+# ── RFE-C: Virtual Room rail + chat ───────────────────────────────────────────
+
+def _rows():
+    return [{"email": "amy@x.com", "name": "Amy", "role": "learner",
+             "tenant": "https://sro97894.apps.dynatrace.com", "present": True},
+            {"email": "bob@y.com", "name": "Bob", "role": "trainer",
+             "tenant": "https://geu80787.apps.dynatrace.com", "present": False}]
+
+
+def test_mask_attendees_hides_addresses_and_tenants_but_keeps_the_rail_useful():
+    masked = m.mask_attendees(_rows())
+    assert masked[0]["email"] == "am***@x***"
+    assert masked[0]["tenant"] == "https://sro***"
+    # The point of the rail survives masking.
+    assert masked[0]["name"] == "Amy"
+    assert masked[0]["present"] is True
+    assert masked[1]["role"] == "trainer"
+
+
+def test_mask_attendees_keeps_the_callers_own_row_readable():
+    masked = m.mask_attendees(_rows(), keep="AMY@X.com")
+    assert masked[0]["email"] == "amy@x.com"
+    assert masked[0]["tenant"] == "https://sro97894.apps.dynatrace.com"
+    assert masked[1]["email"] == "bo***@y***"
+
+
+def test_mask_attendees_empty_keep_masks_everyone():
+    assert all("***" in r["email"] for r in m.mask_attendees(_rows(), keep=""))
+    assert m.mask_attendees([]) == []
+    assert m.mask_attendees(None) == []
+
+
+def _msgs():
+    return [{"mid": "1-0", "email": "amy@x.com", "name": "Amy",
+             "role": "learner", "text": "hello", "ts": "t", "pinned": False}]
+
+
+def test_mask_chat_masks_the_sender_but_never_the_message():
+    masked = m.mask_chat(_msgs())
+    assert masked[0]["email"] == "am***@x***"
+    assert masked[0]["text"] == "hello"
+    assert masked[0]["name"] == "Amy"
+    assert masked[0]["mid"] == "1-0"
+
+
+def test_mask_chat_keeps_the_callers_own_address():
+    assert m.mask_chat(_msgs(), keep="amy@x.com")[0]["email"] == "amy@x.com"
+    assert m.mask_chat([], keep="amy@x.com") == []

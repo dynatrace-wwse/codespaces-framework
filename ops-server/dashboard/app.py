@@ -5702,28 +5702,54 @@ def _pad_keys(session_id: str) -> tuple[str, str, str]:
     return f"{base}:sections", f"{base}:qa", f"{base}:export"
 
 
+def _room_keys(session_id: str) -> tuple[str, str, str, str]:
+    """The Virtual Room's live keys (RFE-C): (chat stream, pinned-message set,
+    clear watermark, presence hash).
+
+    Chat is a stream, not pub/sub, for the same reason the Q&A is: a learner
+    who opens the room late must see the backscroll. The clear watermark holds
+    the id of the last message a trainer cleared — the entries stay in the
+    stream, so "clear the room" hides without destroying."""
+    base = f"live:session:{session_id}"
+    return (f"{base}:chat", f"{base}:chatpins",
+            f"{base}:chatclear", f"{base}:presence")
+
+
 async def _expire_live_session_keys(session_id: str, session: dict):
     """Apply the ended/cancelled 7-day TTL to every key of a session — the
-    session hash/roster/joined, the join-code pointer, and the raw pad keys
-    (the pad export carries its own 30-day TTL). expire on a missing key is
-    a no-op, so this is safe for sessions without a pad or join code."""
+    session hash/roster/joined, the join-code pointer, the raw pad keys and
+    the room's chat/presence keys (the pad export carries its own 30-day
+    TTL). expire on a missing key is a no-op, so this is safe for sessions
+    without a pad, chat or join code."""
     sections_key, qa_key, _ = _pad_keys(session_id)
     keys = [*_live_keys(session_id), _live_tenants_key(session_id),
-            sections_key, qa_key]
+            sections_key, qa_key, *_room_keys(session_id)]
     if session.get("joinCode"):
         keys.append(f"live:joincode:{session['joinCode']}")
     for key in keys:
         await pool.expire(key, live_sessions.SESSION_TTL_SECONDS)
 
 
+async def _read_chat(session_id: str) -> list[dict]:
+    """The room's visible chat transcript: the stream minus anything a
+    trainer cleared, with pins marked."""
+    chat_key, pins_key, clear_key, _ = _room_keys(session_id)
+    entries = await pool.xrange(chat_key)
+    pins = await pool.smembers(pins_key)
+    cleared = await pool.get(clear_key) or ""
+    return live_pad.assemble_chat(entries, pins, cleared)
+
+
 async def _store_pad_export(session_id: str, session: dict):
-    """Freeze the pad into a standalone HTML snapshot (live:pad:{id}:export,
-    30-day TTL) — called on the end/cancel transition."""
+    """Freeze the room into a standalone HTML snapshot (live:pad:{id}:export,
+    30-day TTL) — called on the end/cancel transition. Sections, Q&A AND the
+    chat transcript, so the export is the whole room."""
     sections_key, qa_key, export_key = _pad_keys(session_id)
     sections = await pool.hgetall(sections_key)
     entries = await pool.xrange(qa_key)
     html_doc = live_pad.render_export(
-        session, sections, live_pad.assemble_qa(entries))
+        session, sections, live_pad.assemble_qa(entries),
+        await _read_chat(session_id))
     await pool.set(export_key, html_doc, ex=live_pad.EXPORT_TTL_SECONDS)
 
 
@@ -5786,34 +5812,145 @@ async def _pad_set_section(session_id: str, session: dict, email: str,
     return {"key": key, "saved": True}
 
 
-async def _pad_event_stream(session_id: str):
-    """SSE generator: one full snapshot event, then incremental qa events via
-    blocking XREAD (15 s block, keepalive comment between). Section edits
-    have no stream — change detection piggybacks on each wake (≤15 s lag)."""
+async def _room_add_chat(session_id: str, session: dict, identity: dict) -> dict:
+    """Append one chat message, attributed from the CLAIMED pad session.
+
+    Nothing here is client-supplied but the text: the sender's address, name
+    and role come from the pad session record, so a message can never claim to
+    be from the trainer. Rate limited per sender (INCR on a windowed key —
+    the counter expires itself, so there is nothing to sweep)."""
+    _pad_frozen_guard(session)
+    try:
+        text = live_pad.clean_chat(identity.get("text", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    email = identity.get("email", "")
+    rl_key = f"live:session:{session_id}:rl:{email}"
+    count = await pool.incr(rl_key)
+    if count == 1:
+        await pool.expire(rl_key, live_pad.CHAT_RATE_WINDOW_SECONDS)
+    limited = live_pad.rate_limit_error(count)
+    if limited:
+        raise HTTPException(status_code=limited[0], detail=limited[1])
+    chat_key, _, _, _ = _room_keys(session_id)
+    ts = datetime.now(timezone.utc).isoformat()
+    mid = await pool.xadd(chat_key, {
+        "email": email, "name": identity.get("name", ""),
+        "role": identity.get("role", ""), "text": text, "ts": ts})
+    return {"mid": mid, "ts": ts}
+
+
+async def _room_heartbeat(session_id: str, identity: dict):
+    """Stamp the caller as present in the room. Called on every SSE wake, so
+    presence decays on its own once the room is closed."""
+    _, _, _, presence_key = _room_keys(session_id)
+    await pool.hset(presence_key, identity.get("email", ""), json.dumps({
+        "name": identity.get("name", ""), "role": identity.get("role", ""),
+        "ts": datetime.now(timezone.utc).isoformat()}))
+    await pool.expire(presence_key, live_pad.PRESENCE_WINDOW_SECONDS * 2)
+
+
+async def _room_attendees(session_id: str, session: dict) -> list[dict]:
+    _, _, joined_key = _live_keys(session_id)
+    return live_pad.shape_attendees(
+        await pool.hgetall(joined_key),
+        await pool.hgetall(_live_tenants_key(session_id)),
+        session,
+        await pool.hgetall(_room_keys(session_id)[3]))
+
+
+def _room_view(chat, attendees, identity):
+    """What this viewer is allowed to see. The trainer (and the service/writer
+    variant of the stream, which has no per-user identity) sees the room raw;
+    a learner sees every address but their own masked."""
+    if not identity or identity.get("role") == "trainer":
+        return chat, attendees
+    keep = identity.get("email", "")
+    return (masking.mask_chat(chat, keep),
+            masking.mask_attendees(attendees, keep))
+
+
+async def _pad_event_stream(session_id: str, identity: dict | None = None):
+    """SSE generator for the Virtual Room: a full snapshot (pad + chat +
+    attendees), then incremental events via one blocking XREAD across BOTH
+    streams (15 s block, keepalive comment between).
+
+    Section edits, pins, clears and presence have no stream of their own —
+    change detection piggybacks on each wake, so they land within ~15 s. Pins
+    and clears rewrite history rather than append, so they resend the whole
+    transcript instead of one message."""
     sections_key, qa_key, _ = _pad_keys(session_id)
-    sections = await pool.hgetall(sections_key)
-    entries = await pool.xrange(qa_key)
-    last_id = entries[-1][0] if entries else "0-0"
-    yield ("event: snapshot\ndata: "
-           + json.dumps(live_pad.shape_pad(sections, entries)) + "\n\n")
-    known = {k: sections.get(k, "") for k in live_pad.SECTION_KEYS}
-    while True:
-        result = await pool.xread({qa_key: last_id}, block=15000, count=100)
-        if result:
-            for _stream, new_entries in result:
-                for entry_id, fields in new_entries:
-                    last_id = entry_id
-                    event = dict(fields)
-                    if event.get("type") == "question":
-                        event["qid"] = entry_id
-                    yield "event: qa\ndata: " + json.dumps(event) + "\n\n"
-        else:
-            yield ": keepalive\n\n"
+    chat_key, pins_key, clear_key, _ = _room_keys(session_id)
+
+    async def room_state():
+        chat = await _read_chat(session_id)
+        session = await pool.hgetall(f"live:session:{session_id}") or {}
+        attendees = await _room_attendees(session_id, session)
+        return _room_view(chat, attendees, identity)
+
+    try:
+        if identity:
+            await _room_heartbeat(session_id, identity)
         sections = await pool.hgetall(sections_key)
-        current = {k: sections.get(k, "") for k in live_pad.SECTION_KEYS}
-        if current != known:
-            known = current
-            yield "event: sections\ndata: " + json.dumps(current) + "\n\n"
+        entries = await pool.xrange(qa_key)
+        last_qa = entries[-1][0] if entries else "0-0"
+        chat_entries = await pool.xrange(chat_key)
+        last_chat = chat_entries[-1][0] if chat_entries else "0-0"
+        chat, attendees = await room_state()
+        yield ("event: snapshot\ndata: "
+               + json.dumps(live_pad.shape_pad(sections, entries)) + "\n\n")
+        yield "event: chat\ndata: " + json.dumps(chat) + "\n\n"
+        yield "event: attendees\ndata: " + json.dumps(attendees) + "\n\n"
+
+        known = {k: sections.get(k, "") for k in live_pad.SECTION_KEYS}
+        known_moderation = (await pool.smembers(pins_key),
+                            await pool.get(clear_key) or "")
+        known_attendees = attendees
+        while True:
+            result = await pool.xread({qa_key: last_qa, chat_key: last_chat},
+                                      block=15000, count=100)
+            if result:
+                for stream, new_entries in result:
+                    for entry_id, fields in new_entries:
+                        if stream == chat_key:
+                            last_chat = entry_id
+                            message = live_pad.assemble_chat([(entry_id, fields)])[0]
+                            message, _ = _room_view([message], [], identity)
+                            yield ("event: chatmsg\ndata: "
+                                   + json.dumps(message[0]) + "\n\n")
+                            continue
+                        last_qa = entry_id
+                        event = dict(fields)
+                        if event.get("type") == "question":
+                            event["qid"] = entry_id
+                        yield "event: qa\ndata: " + json.dumps(event) + "\n\n"
+            else:
+                yield ": keepalive\n\n"
+
+            if identity:
+                await _room_heartbeat(session_id, identity)
+            sections = await pool.hgetall(sections_key)
+            current = {k: sections.get(k, "") for k in live_pad.SECTION_KEYS}
+            if current != known:
+                known = current
+                yield "event: sections\ndata: " + json.dumps(current) + "\n\n"
+
+            chat, attendees = await room_state()
+            moderation = (await pool.smembers(pins_key),
+                          await pool.get(clear_key) or "")
+            if moderation != known_moderation:
+                known_moderation = moderation
+                yield "event: chat\ndata: " + json.dumps(chat) + "\n\n"
+            if attendees != known_attendees:
+                known_attendees = attendees
+                yield ("event: attendees\ndata: "
+                       + json.dumps(attendees) + "\n\n")
+    finally:
+        # Leaving the room is immediate: drop the heartbeat rather than wait
+        # out the presence window, so the rail matches what people can see.
+        if identity:
+            await pool.hdel(_room_keys(session_id)[3],
+                            identity.get("email", ""))
 
 
 def _sse_response(generator) -> StreamingResponse:
@@ -5859,6 +5996,8 @@ class LivePadSessionBody(BaseModel):
     markdown: str = ""
     qid: str = ""
     text: str = ""
+    mid: str = ""                 # chat message id (pin/unpin, RFE-C)
+    pinned: bool = False
 
 
 async def _resolve_pad_session(pad_session: str) -> dict:
@@ -6031,13 +6170,64 @@ async def api_live_pad_answer_ps(body: LivePadSessionBody):
                                  identity.get("name", ""), body.qid, body.text)
 
 
+@app.post("/api/live/pad/chat")
+async def api_live_pad_chat_ps(body: LivePadSessionBody):
+    """padSession-authed chat message (RFE-C). Attribution is server-side —
+    only the text comes from the client."""
+    identity = await _resolve_pad_session(body.padSession)
+    session = await _require_live_session(identity["sessionId"])
+    return await _room_add_chat(identity["sessionId"], session,
+                                {**identity, "text": body.text})
+
+
+@app.post("/api/live/pad/chat/pin")
+async def api_live_pad_chat_pin_ps(body: LivePadSessionBody):
+    """Trainer pins/unpins a chat message so it stays visible in a busy room."""
+    identity = await _resolve_pad_session(body.padSession)
+    if identity.get("role") != "trainer":
+        raise HTTPException(status_code=403, detail="only the trainer can pin messages")
+    session = await _require_live_session(identity["sessionId"])
+    _pad_frozen_guard(session)
+    if not body.mid:
+        raise HTTPException(status_code=400, detail="mid is required")
+    _, pins_key, _, _ = _room_keys(identity["sessionId"])
+    if body.pinned:
+        await pool.sadd(pins_key, body.mid)
+    else:
+        await pool.srem(pins_key, body.mid)
+    return {"mid": body.mid, "pinned": body.pinned}
+
+
+@app.post("/api/live/pad/chat/clear")
+async def api_live_pad_chat_clear_ps(body: LivePadSessionBody):
+    """Trainer clears the room: everything sent so far drops out of the live
+    view and the export. A SOFT delete — the watermark hides the entries, the
+    stream keeps them until its 7-day TTL so the room can still be audited."""
+    identity = await _resolve_pad_session(body.padSession)
+    if identity.get("role") != "trainer":
+        raise HTTPException(status_code=403, detail="only the trainer can clear the chat")
+    session_id = identity["sessionId"]
+    session = await _require_live_session(session_id)
+    _pad_frozen_guard(session)
+    chat_key, pins_key, clear_key, _ = _room_keys(session_id)
+    entries = await pool.xrevrange(chat_key, count=1)
+    watermark = entries[0][0] if entries else ""
+    if watermark:
+        await pool.set(clear_key, watermark)
+        await pool.delete(pins_key)
+    log.info("live pad chat cleared session=%s by=%s watermark=%s",
+             session_id, identity.get("email", ""), watermark or "(empty)")
+    return {"cleared": bool(watermark), "watermark": watermark}
+
+
 @app.get("/api/live/pad/stream")
 async def api_live_pad_stream_ps(padSession: str = ""):
     """padSession-authed SSE pad feed (EventSource can't set headers, so the
-    pad session rides the query string)."""
+    pad session rides the query string). Identity is passed through so the
+    stream can stamp presence and mask other people's addresses."""
     identity = await _resolve_pad_session(padSession)
     await _require_live_session(identity["sessionId"])
-    return _sse_response(_pad_event_stream(identity["sessionId"]))
+    return _sse_response(_pad_event_stream(identity["sessionId"], identity))
 
 
 # Self-contained pad page (the /shell/{job_id} pattern: inline CSS/JS, no
@@ -6098,6 +6288,58 @@ button:disabled { opacity: .5; cursor: default; }
 #err { display: none; margin: 40px auto; max-width: 480px; text-align: center;
   color: #fc8181; font-size: 13px; line-height: 1.6; }
 .saved { color: #48bb78; font-size: 11px; margin-left: 8px; }
+
+/* ── Attendee rail + chat (RFE-C) ── */
+#stage { flex: 1; display: flex; min-height: 0; }
+#main { min-width: 0; }
+#rail { width: 320px; flex-shrink: 0; background: #131c33;
+  border-left: 1px solid #0d3460; display: flex; flex-direction: column;
+  min-height: 0; }
+.rail-h { color: #00b4d8; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .5px; padding: 9px 12px; border-bottom: 1px solid #0d3460;
+  display: flex; justify-content: space-between; align-items: center; }
+.rail-h .n { color: #718096; font-size: 11px; letter-spacing: 0; }
+#people { max-height: 38%; overflow-y: auto; padding: 6px 0; flex-shrink: 0; }
+#chatwrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#chatlog { flex: 1; overflow-y: auto; padding: 10px 12px; }
+#chatbox { border-top: 1px solid #0d3460; padding: 8px; display: flex; gap: 6px; }
+#chatbox input { flex: 1; min-width: 0; background: #0d1117; color: #e6edf3;
+  border: 1px solid #0d3460; border-radius: 4px; padding: 6px 8px; font-size: 12px; }
+.p { display: flex; align-items: center; gap: 7px; padding: 4px 12px; font-size: 12px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: #4a5568;
+  flex-shrink: 0; }
+.dot.on { background: #48bb78; }
+.p .nm { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.p .tag { color: #00b4d8; font-size: 10px; border: 1px solid #0d3460;
+  border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
+.p .tn { color: #718096; font-size: 10px; margin-left: auto; flex-shrink: 0; }
+.m { margin-bottom: 9px; font-size: 12px; line-height: 1.45; }
+.m .who { color: #e2e8f0; font-weight: 600; }
+.m.trainer .who { color: #00b4d8; }
+.m .ts { color: #718096; font-size: 10px; margin-left: 6px; }
+.m .text { color: #c9d1d9; white-space: pre-wrap; word-break: break-word; }
+.m.pin { border-left: 2px solid #f6c343; padding-left: 7px; }
+.m .pinbtn { float: right; background: none; color: #718096; padding: 0 3px;
+  font-size: 10px; }
+.m .pinbtn:hover { background: none; color: #f6c343; }
+#clearbtn { background: none; color: #718096; font-size: 10px; padding: 0 4px; }
+#clearbtn:hover { background: none; color: #fc8181; }
+#tabs { display: none; }
+/* Narrow (popup resized, or opened on a laptop beside a Codespace): the rail
+   stops being a rail and becomes two tabs beside the room. */
+@media (max-width: 900px) {
+  #stage { flex-direction: column; }
+  #rail { width: 100%; border-left: 0; border-top: 1px solid #0d3460; }
+  #tabs { display: flex; background: #16213e; border-bottom: 1px solid #0d3460;
+    flex-shrink: 0; }
+  #tabs button { flex: 1; background: none; border-radius: 0; color: #a0aec0;
+    padding: 9px; }
+  #tabs button.on { color: #00b4d8; box-shadow: inset 0 -2px 0 #00b4d8; }
+  body.v-room #rail, body.v-people #main, body.v-chat #main { display: none; }
+  body.v-people #chatwrap, body.v-chat #people, body.v-chat #h-people { display: none; }
+  body.v-people #people { max-height: none; flex: 1; }
+}
 </style>
 </head>
 <body>
@@ -6110,7 +6352,13 @@ button:disabled { opacity: .5; cursor: default; }
   <span id="who">Connecting…</span>
 </div>
 <div id="err"></div>
-<div id="main" style="display:none">
+<div id="tabs">
+  <button data-v="room" class="on">Room</button>
+  <button data-v="people">People</button>
+  <button data-v="chat">Chat</button>
+</div>
+<div id="stage" style="display:none">
+<div id="main">
   <div class="card" id="card-welcome">
     <h3>Welcome</h3>
     <div class="md" id="md-welcome"><span class="empty">Nothing here yet.</span></div>
@@ -6135,6 +6383,19 @@ button:disabled { opacity: .5; cursor: default; }
       <button onclick="ask()">Ask</button>
     </div>
   </div>
+</div>
+<div id="rail">
+  <div class="rail-h" id="h-people">Attendees <span class="n" id="pcount"></span></div>
+  <div id="people"><div class="p"><span class="empty">Nobody here yet.</span></div></div>
+  <div id="chatwrap">
+    <div class="rail-h">Chat <button id="clearbtn" style="display:none" onclick="clearChat()">clear room</button></div>
+    <div id="chatlog"><span class="empty">No messages yet.</span></div>
+    <div id="chatbox">
+      <input id="chatin" maxlength="1000" placeholder="Message the room…">
+      <button onclick="sendChat()">Send</button>
+    </div>
+  </div>
+</div>
 </div>
 <script>
 (async () => {
@@ -6182,16 +6443,26 @@ button:disabled { opacity: .5; cursor: default; }
   }
   if (!me) return fail('This Virtual Room link has expired — reopen the room from the app to get a fresh one.');
 
-  document.getElementById('main').style.display = 'block';
+  document.getElementById('stage').style.display = 'flex';
   document.getElementById('title').textContent = me.title ? '· ' + me.title : '';
   document.getElementById('who').textContent = (me.name || me.email) + ' (' + me.role + ')';
   const isTrainer = me.role === 'trainer';
   if (isTrainer) ['welcome', 'solutions'].forEach(k =>
     document.getElementById('edit-' + k).style.display = 'block');
+  if (isTrainer) document.getElementById('clearbtn').style.display = 'inline-block';
+
+  // Narrow-layout tabs. The class drives the CSS; on a wide window the media
+  // query never fires and every pane stays visible regardless of the class.
+  document.body.classList.add('v-room');
+  for (const b of document.querySelectorAll('#tabs button')) b.onclick = () => {
+    document.body.className = 'v-' + b.dataset.v;
+    for (const o of document.querySelectorAll('#tabs button')) o.classList.toggle('on', o === b);
+    if (b.dataset.v === 'chat') scrollChat(true);
+  };
 
   // ── State + rendering (SSE is the single source of truth — own posts
   // come back through the stream, no local echo). ──
-  let S = {sections: {}, qa: []};
+  let S = {sections: {}, qa: [], chat: [], people: []};
   function renderSections() {
     for (const k of ['welcome', 'solutions']) {
       document.getElementById('md-' + k).innerHTML = md(S.sections[k] || '');
@@ -6215,6 +6486,60 @@ button:disabled { opacity: .5; cursor: default; }
     }).join('');
   }
 
+  // ── Attendee rail + chat (RFE-C) ──
+  function renderPeople() {
+    const host = document.getElementById('people');
+    const here = S.people.filter(p => p.present).length;
+    document.getElementById('pcount').textContent = here + ' / ' + S.people.length;
+    if (!S.people.length) {
+      host.innerHTML = '<div class="p"><span class="empty">Nobody here yet.</span></div>'; return;
+    }
+    host.innerHTML = S.people.map(p =>
+      '<div class="p" title="' + esc(p.email) + '">' +
+      '<span class="dot' + (p.present ? ' on' : '') + '"></span>' +
+      '<span class="nm">' + esc(p.name || p.email) + '</span>' +
+      (p.role === 'trainer' ? '<span class="tag">trainer</span>' : '') +
+      (p.tenant ? '<span class="tn">' + esc(tenantLabel(p.tenant)) + '</span>' : '') +
+      '</div>').join('');
+  }
+  // The rail is narrow and a tenant URL is not — show the id only.
+  function tenantLabel(t) {
+    return String(t).replace('https://', '').replace('http://', '').split('.')[0].split('/')[0];
+  }
+  function nearBottom() {
+    const el = document.getElementById('chatlog');
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  }
+  function scrollChat(force) {
+    const el = document.getElementById('chatlog');
+    if (force || nearBottom()) el.scrollTop = el.scrollHeight;
+  }
+  function renderChat() {
+    // Sticky-bottom only when already at the bottom: someone reading
+    // backscroll during a busy room should not be yanked down by every
+    // incoming message.
+    const stick = nearBottom();
+    const host = document.getElementById('chatlog');
+    if (!S.chat.length) { host.innerHTML = '<span class="empty">No messages yet.</span>'; return; }
+    host.innerHTML = S.chat.map(m =>
+      '<div class="m' + (m.role === 'trainer' ? ' trainer' : '') + (m.pinned ? ' pin' : '') + '">' +
+      (isTrainer ? '<button class="pinbtn" onclick="pin(' + JSON.stringify(m.mid) + ',' +
+        (m.pinned ? 'false' : 'true') + ')">' + (m.pinned ? 'unpin' : 'pin') + '</button>' : '') +
+      '<span class="who">' + esc(m.name || m.email) + '</span>' +
+      '<span class="ts">' + esc((m.ts || '').replace('T', ' ').slice(11, 16)) + '</span>' +
+      '<div class="text">' + esc(m.text) + '</div></div>').join('');
+    if (stick) scrollChat(true);
+  }
+  window.sendChat = async () => {
+    const el = document.getElementById('chatin');
+    if (el.value.trim() && await post('/api/live/pad/chat', {text: el.value})) el.value = '';
+  };
+  window.pin = (mid, pinned) => post('/api/live/pad/chat/pin', {mid: mid, pinned: pinned});
+  window.clearChat = async () => {
+    if (confirm('Clear the chat for everyone? Messages disappear from the room and the export.'))
+      await post('/api/live/pad/chat/clear', {});
+  };
+
   async function post(path, body) {
     const r = await fetch(BASE + path, {method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -6237,10 +6562,30 @@ button:disabled { opacity: .5; cursor: default; }
     }
   };
 
+  document.getElementById('chatin').onkeydown = e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  };
+
   // ── Live updates (SSE; EventSource reconnects on its own) ──
   const es = new EventSource(BASE + '/api/live/pad/stream?padSession=' + encodeURIComponent(me.padSession));
   es.addEventListener('snapshot', e => {
-    S = JSON.parse(e.data); renderSections(); renderQa();
+    // The snapshot carries the pad only — chat and attendees arrive as their
+    // own events right behind it, so keep whatever is already rendered.
+    const pad = JSON.parse(e.data);
+    S = Object.assign({}, S, pad); renderSections(); renderQa();
+  });
+  es.addEventListener('chat', e => {
+    // Full transcript: the backscroll on connect, and a resend after a pin
+    // or a clear (both rewrite history rather than append).
+    S.chat = JSON.parse(e.data); renderChat();
+  });
+  es.addEventListener('chatmsg', e => {
+    const m = JSON.parse(e.data);
+    if (!S.chat.some(x => x.mid === m.mid)) S.chat.push(m);
+    renderChat();
+  });
+  es.addEventListener('attendees', e => {
+    S.people = JSON.parse(e.data); renderPeople();
   });
   es.addEventListener('sections', e => {
     S.sections = JSON.parse(e.data); renderSections();
