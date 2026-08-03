@@ -3815,6 +3815,26 @@ async def _fetch_arena_catalog() -> list[dict]:
     return trainings
 
 
+def arena_repo_for_training(training_id: str) -> tuple[str, str]:
+    """Resolve an Arena catalog id ("kubernetes-101") to (repoUrl, branch).
+
+    The catalog id and the GitHub repo name are DIFFERENT namespaces
+    ("kubernetes-101" vs "enablement-kubernetes-101"); the app used to reuse the
+    former as a repo name and fetched a repo that does not exist (WS-3). This map
+    is the single source of truth, and it is deliberately NOT profile-filtered:
+    a workshop learner must get the content even when their own tenant's profile
+    does not carry that training. Accepts the repo name too, so callers can pass
+    either namespace. Returns ("", "") for an unknown training.
+    """
+    wanted = (training_id or "").strip().lower()
+    if not wanted:
+        return "", ""
+    for repo, meta in _ARENA_REPOS.items():
+        if wanted in (repo.lower(), str(meta.get("id", "")).lower()):
+            return f"https://github.com/dynatrace-wwse/{repo}", "main"
+    return "", ""
+
+
 def _filter_trainings_by_profile(trainings: list[dict], tenant: str) -> list[dict]:
     """Keep only the hands-on trainings whose repo is in the tenant's content profile.
     The Arena catalog is the full set of hands-on repos; without this, every tenant
@@ -4992,6 +5012,9 @@ class LiveSessionCreate(BaseModel):
     ref: str = ""                 # optional content branch
     trainerEmail: str = ""
     roster: list[str] = []
+    # Trainer's own tenant URL — stamped SERVER-side by the app function. Becomes
+    # the workshop's ownerTenant and scopes the trainer's listing (WS-1).
+    tenant: str = ""
     # Workshop scheduling (EPIC-002) — all optional; absent fields keep the
     # pre-workshop behavior (immediate state=open, no seat cap).
     scheduledAt: str = ""         # ISO8601 UTC → initial state "scheduled"
@@ -5081,12 +5104,27 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
         "endedAt":      "",
         "joinCode":     join_code,
     }
+    # WS-3: freeze the content repo on the workshop at create time. The stored
+    # trainingId is the CATALOG id and is not a repo name; resolving here (not in
+    # the learner's browser) means a learner whose own tenant profile lacks this
+    # training still gets the right repo, and a later catalog change cannot
+    # orphan a running workshop.
+    repo_url, branch = arena_repo_for_training(fields["trainingId"])
+    if repo_url:
+        session["repoUrl"] = repo_url
+        session["branch"] = (body.ref or "").strip() or branch
+    # WS-1: the tenant this workshop was created from. Scopes the TRAINER's
+    # listing (learners are never tenant-filtered — see live_sessions.is_listed).
+    owner_tenant = live_sessions.normalize_tenant(body.tenant)
+    if owner_tenant:
+        session["ownerTenant"] = owner_tenant
     # Optional workshop fields — only written when present so pre-workshop
     # sessions (and their payloads) stay byte-identical.
     session.update({k: v for k, v in schedule.items() if v})
     sess_key, roster_key, _ = _live_keys(session_id)
     await pool.hset(sess_key, mapping=session)
-    await pool.sadd(roster_key, *fields["roster"])
+    if fields["roster"]:
+        await pool.sadd(roster_key, *fields["roster"])
     await pool.zadd("live:sessions:index", {session_id: now.timestamp()})
     log.info("Live session %s created by %s (%s, %d invited)", session_id,
              fields["trainerEmail"], fields["trainingId"], len(fields["roster"]))
@@ -5095,13 +5133,18 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
 
 
 @app.get("/api/live/sessions")
-async def api_live_sessions_list(request: Request, email: str = ""):
+async def api_live_sessions_list(request: Request, email: str = "", tenant: str = ""):
     """Active (state != ended) sessions visible to an email — as trainer or
     roster member. Index entries whose keys have TTL-expired are skipped.
 
     The email is caller-supplied (the app proxy authenticates with the
     service bearer, not per-user) — anonymous callers therefore get masked
-    trainer emails and never a joinCode."""
+    trainer emails and never a joinCode.
+
+    `tenant` (the caller's own tenant, stamped by the app function) scopes the
+    TRAINER-owned rows to workshops created from that tenant (WS-1). Learner
+    registrations are returned regardless of tenant — that is what makes a
+    workshop cross-tenant. Omitting it keeps the legacy unscoped behavior."""
     email = live_sessions.normalize_email(email)
     if not live_sessions.is_valid_email(email):
         raise HTTPException(status_code=400, detail="a valid email query parameter is required")
@@ -5113,7 +5156,7 @@ async def api_live_sessions_list(request: Request, email: str = ""):
         if not session:
             continue  # expired after `ended` — tolerate the stale index member
         roster = await pool.smembers(roster_key)
-        if not live_sessions.is_listed(session, roster, email):
+        if not live_sessions.is_listed(session, roster, email, tenant):
             continue
         joined = await pool.hgetall(joined_key)
         item = live_sessions.shape_summary(

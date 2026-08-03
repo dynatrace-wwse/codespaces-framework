@@ -121,7 +121,12 @@ def validate_create(title, training_id, trainer_email, roster) -> dict:
     """Validate + normalize a create request.
 
     Raises ValueError (→ HTTP 400) when title/trainingId/trainerEmail is
-    missing or the roster has no valid email after normalization.
+    missing.
+
+    The roster MAY be empty (WS-2): every session gets a join code
+    unconditionally and join-by-code APPENDS the joiner to the roster, so a
+    code-only workshop is fully supported by the data model. The old
+    "at least one valid email" rule rejected that legitimate case.
     """
     title = (title or "").strip()
     training_id = (training_id or "").strip()
@@ -132,11 +137,8 @@ def validate_create(title, training_id, trainer_email, roster) -> dict:
         raise ValueError("trainingId is required")
     if not is_valid_email(trainer):
         raise ValueError("a valid trainerEmail is required")
-    members = normalize_roster(roster)
-    if not members:
-        raise ValueError("roster must contain at least one valid email")
     return {"title": title, "trainingId": training_id,
-            "trainerEmail": trainer, "roster": members}
+            "trainerEmail": trainer, "roster": normalize_roster(roster)}
 
 
 # ── Workshop scheduling (EPIC-002) ────────────────────────────────────────────
@@ -284,18 +286,40 @@ def apply_transition(state, action) -> tuple[str, bool]:
 
 # ── Response shaping ──────────────────────────────────────────────────────────
 
-def is_listed(session, roster, email) -> bool:
+def is_listed(session, roster, email, tenant="") -> bool:
     """Listing filter: non-ended sessions where the email is the trainer or
-    on the roster."""
+    on the roster.
+
+    Tenant scoping (WS-1) applies to the TRAINER side only. A workshop belongs
+    to the tenant it was created from (`ownerTenant`), so a trainer signed into
+    another tenant no longer sees it under "your workshops" — that was the
+    reported "admin of tenant 1 sees a workshop created in tenant 2".
+
+    Learners are NEVER tenant-filtered: joining a workshop from whatever tenant
+    the learner runs is the whole point of a cross-tenant workshop.
+
+    Backward compatible in both directions: a session without `ownerTenant`
+    (created before this change) and a caller that sends no tenant (older app)
+    both keep the previous, unscoped behavior.
+    """
     if not session or session.get("state") == "ended":
         return False
-    return is_trainer(email, session) or on_roster(email, roster)
+    if on_roster(email, roster):
+        return True
+    if not is_trainer(email, session):
+        return False
+    owner = normalize_tenant(session.get("ownerTenant"))
+    caller = normalize_tenant(tenant)
+    return not (owner and caller) or owner == caller
 
 
 # Optional workshop fields echoed in payloads only when stored on the hash —
 # absent fields add no keys, keeping pre-workshop payloads byte-identical.
+# repoUrl/branch resolve the content namespace for learners (WS-3): the stored
+# trainingId is the Orbital CATALOG id, which is not a repo name. ownerTenant is
+# deliberately NOT echoed — it is an internal scoping field (see is_listed).
 _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
-                    "cancelledAt")
+                    "cancelledAt", "repoUrl", "branch")
 
 
 def workshop_fields(session, email) -> dict:

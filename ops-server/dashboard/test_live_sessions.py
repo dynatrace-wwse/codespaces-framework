@@ -78,13 +78,11 @@ def test_validate_create_missing_fields():
             pass
 
 
-def test_validate_create_empty_roster_rejected():
+def test_validate_create_empty_roster_allowed():
+    # Code-only workshops (WS-2): the trainer invites nobody up front and hands
+    # out the join code instead, so an empty roster is a valid create.
     for roster in ([], None, ["not-an-email"]):
-        try:
-            ls.validate_create("T", "t", TRAINER, roster)
-            raise AssertionError(f"expected ValueError for roster={roster}")
-        except ValueError as exc:
-            assert "roster" in str(exc)
+        assert ls.validate_create("T", "t", TRAINER, roster)["roster"] == []
 
 
 # ── State transitions ────────────────────────────────────────────────────────
@@ -155,6 +153,27 @@ def test_is_listed_roster_trainer_and_ended():
     assert not ls.is_listed(sess, roster, "other@x.com")
     assert not ls.is_listed(_session(state="ended"), roster, "alice@x.com")
     assert not ls.is_listed({}, roster, "alice@x.com")  # expired hash
+
+
+def test_is_listed_trainer_rows_scoped_to_owner_tenant():
+    # WS-1: a trainer's own workshops are listed only on the tenant they were
+    # created from, so the same person on another tenant doesn't see a board
+    # they can't drive. Learners are unaffected (next test).
+    sess = _session(state="open")
+    sess["ownerTenant"] = "https://abc12345.apps.dynatrace.com"
+    assert ls.is_listed(sess, set(), TRAINER, "https://abc12345.apps.dynatrace.com")
+    assert not ls.is_listed(sess, set(), TRAINER, "https://sro97894.apps.dynatrace.com")
+    # Legacy rows (no ownerTenant) and callers that send no tenant still list.
+    assert ls.is_listed(_session(state="open"), set(), TRAINER, "https://any.apps.dynatrace.com")
+    assert ls.is_listed(sess, set(), TRAINER, "")
+
+
+def test_is_listed_roster_member_crosses_tenants():
+    # The whole point of a cross-tenant workshop: an invited learner sees it
+    # from whichever tenant they happen to run.
+    sess = _session(state="open")
+    sess["ownerTenant"] = "https://abc12345.apps.dynatrace.com"
+    assert ls.is_listed(sess, {"alice@x.com"}, "alice@x.com", "https://sro97894.apps.dynatrace.com")
 
 
 # ── Response shaping ─────────────────────────────────────────────────────────
