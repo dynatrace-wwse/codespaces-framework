@@ -26,6 +26,8 @@ Event shape (app: api/ingestTrainingEvent.function.ts + ui/.../trainingEvents.ts
 
 from datetime import datetime, timedelta, timezone
 
+from .live_sessions import normalize_tenant
+
 STATES = ("not-started", "in-progress", "completed")
 
 STARTED = "com.dynatrace.enablement.training.started"
@@ -187,7 +189,9 @@ def shape_progress(records, roster=None) -> dict:
         if ts > r["lastEventAt"]:
             r["lastEventAt"] = ts
         if rec.get("sourceTenant"):
-            r["tenant"] = str(rec["sourceTenant"])
+            # Normalized so the board doesn't show sro97894-1 for a learner the
+            # roster/join records as sro97894 (TEN-1).
+            r["tenant"] = normalize_tenant(rec["sourceTenant"])
         if rec.get("workshopId"):
             r["workshopId"] = str(rec["workshopId"])
         if rec.get("workshopName"):

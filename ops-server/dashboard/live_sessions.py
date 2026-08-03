@@ -20,6 +20,7 @@ Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
   live:joincode:{code}      str   sessionId (join-by-code lookup, code UPPER)
 """
 
+import re
 import secrets
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -68,10 +69,21 @@ FOREIGN_TENANT_MESSAGE = "provisions on entry from their own tenant"
 NOT_JOINED_MESSAGE = "hasn't joined yet — will provision on entry"
 
 
+_TENANT_RUNTIME_SUFFIX = re.compile(r"^(https?://[a-z0-9]+)-\d{1,3}(\.)")
+
+
 def normalize_tenant(tenant) -> str:
     """Canonical tenant-URL form for equality checks: trimmed, lowercased,
-    no trailing slash (the app sends https://<env>.apps.dynatrace.com)."""
-    return (tenant or "").strip().rstrip("/").lower()
+    no trailing slash (the app sends https://<env>.apps.dynatrace.com).
+
+    The app-function runtime's getEnvironmentUrl() returns the environment with a
+    numeric suffix — https://sro97894-1.apps.dynatrace.com — while the browser
+    sends the bare id. Both name the same tenant, so the suffix is stripped;
+    without that, one side joining from the browser and the other from a function
+    compares unequal and provision-all reports a false "foreign-tenant" skip.
+    """
+    t = (tenant or "").strip().rstrip("/").lower()
+    return _TENANT_RUNTIME_SUFFIX.sub(r"\1\2", t)
 
 
 def provision_skip_status(has_joined, joined_tenant, workshop_tenant):

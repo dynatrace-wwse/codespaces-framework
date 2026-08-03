@@ -272,6 +272,24 @@ def test_normalize_tenant_trims_lowercases_and_strips_slash():
     assert ls.normalize_tenant(None) == ""
 
 
+def test_normalize_tenant_strips_the_runtime_suffix():
+    """TEN-1: app FUNCTIONS see https://sro97894-1.apps…, the browser sees
+    https://sro97894.apps… — same tenant, and they must compare equal or
+    provision-all reports a false foreign-tenant skip."""
+    assert ls.normalize_tenant("https://sro97894-1.apps.dynatrace.com") == SRO
+    assert ls.normalize_tenant("https://GEU80787-12.apps.dynatrace.com/") == COE
+    assert ls.normalize_tenant("https://sro97894-1.apps.dynatrace.com") == ls.normalize_tenant(SRO)
+    # only the host's numeric suffix goes — a hyphenated tenant name stays intact
+    assert ls.normalize_tenant("https://my-tenant.apps.dynatrace.com") == "https://my-tenant.apps.dynatrace.com"
+
+
+def test_provision_skip_tolerates_mixed_runtime_forms():
+    assert ls.provision_skip_status(True, "https://sro97894-1.apps.dynatrace.com", SRO) is None
+    assert ls.readiness_gap_state(True, "https://sro97894-1.apps.dynatrace.com", SRO) == "none"
+    # a genuinely different tenant is still foreign
+    assert ls.provision_skip_status(True, "https://sro97894-1.apps.dynatrace.com", COE) == "foreign-tenant"
+
+
 def test_provision_skip_same_tenant_provisions():
     assert ls.provision_skip_status(True, SRO, SRO) is None
     # trailing slash / case variance must not block provisioning
