@@ -6049,7 +6049,7 @@ _PAD_PAGE_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Workshop Pad</title>
+<title>Virtual Room</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; background: #1a1a2e; color: #d4d4d4;
@@ -6104,7 +6104,7 @@ button:disabled { opacity: .5; cursor: default; }
 <div id="topbar">
   <div id="brand">
     <span id="brand-logo">⬡</span>
-    <span id="brand-name">Workshop Pad</span>
+    <span id="brand-name">Virtual Room</span>
     <span id="title" style="color:#718096"></span>
   </div>
   <span id="who">Connecting…</span>
@@ -6180,7 +6180,7 @@ button:disabled { opacity: .5; cursor: default; }
     } catch (e) {}
     try { history.replaceState(null, '', location.pathname); } catch (e) {}
   }
-  if (!me) return fail('This pad link has expired — reopen the pad from the app to get a fresh one.');
+  if (!me) return fail('This Virtual Room link has expired — reopen the room from the app to get a fresh one.');
 
   document.getElementById('main').style.display = 'block';
   document.getElementById('title').textContent = me.title ? '· ' + me.title : '';

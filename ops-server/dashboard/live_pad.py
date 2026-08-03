@@ -130,7 +130,7 @@ def render_export(session, sections, qa) -> str:
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Workshop Pad · {_esc(title)}</title>
+<title>Virtual Room · {_esc(title)}</title>
 <style>
 body{{font-family:Georgia,'Times New Roman',serif;max-width:820px;margin:0 auto;
   padding:32px 24px;color:#1a1a2e;background:#fff;line-height:1.55}}
