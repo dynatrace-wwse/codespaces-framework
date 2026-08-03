@@ -982,61 +982,79 @@ class WorkerManager:
         → terminate. We just stream its stdout to the livelog and record the
         verdict; the heavy lifting happens in the session on the AMD worker.
         """
+        # Shared, dependency-free helper — single source of truth for the
+        # enqueue-dedupe lock key (SET NX in dashboard/app.py's training-test
+        # trigger, DEL here). Lazy import mirrors the codespace_service import
+        # style below and keeps the dashboard package off the module-load path.
+        from dashboard.training_dedupe import training_lock_key
+
         repo = job["repo"]
         job_id = job["job_id"]
         ref = job.get("ref") or job.get("branch") or ""
         run_tag = job.get("nightly_run_id") or job.get("trigger") or "manual"
+        # Release the enqueue-dedupe lock (set at trigger time in app.py) on
+        # EVERY exit path — success, runner failure, timeout, or exception —
+        # so a fresh trigger for this repo+ref is accepted once this run ends.
+        # (EX auto-expires it too; this just frees it immediately.) The key
+        # MUST match the one app.py set — hence the shared helper.
+        lock_key = training_lock_key(repo, ref)
 
-        livelog_key = f"job:livelog:{job_id}"
-        header = (f"=== ACTION: training-test (end-to-end learner flow via the app path) ===\n"
-                  f"=== training-test for {repo} @ {ref or 'catalog branch'} ===\n")
-        await self.pool.set(livelog_key, header, ex=7200)
-
-        log_file = LOGS_DIR / f"{job_id}.log"
-        start_time = time.time()
-
-        runner = Path(__file__).resolve().parent.parent / "tools" / "training_test_runner.py"
-        cmd = [sys.executable, "-u", str(runner), "--repo", repo, "--run-tag", run_tag]
-        if ref:
-            cmd += ["--ref", ref]
-
-        env = dict(os.environ)
-        # Talk to the local dashboard directly — no nginx/oauth2-proxy hop.
-        env.setdefault("ORBITAL_API", "http://127.0.0.1:8080")
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-        )
-
-        # Provisioning alone can take ~15 min; full k8s labs with operator
-        # deploys run ~30-45 min through the exec API. Hard cap at 90 min.
-        timeout_s = int(os.environ.get("TRAINING_TEST_TIMEOUT_S", "5400"))
-        timed_out = False
         try:
-            output = await self._stream_to_redis(proc, livelog_key, timeout_s)
-        except asyncio.TimeoutError:
-            timed_out = True
-            output = f"(training-test timed out after {timeout_s}s — killing runner)"
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-        await proc.wait()
+            livelog_key = f"job:livelog:{job_id}"
+            header = (f"=== ACTION: training-test (end-to-end learner flow via the app path) ===\n"
+                      f"=== training-test for {repo} @ {ref or 'catalog branch'} ===\n")
+            await self.pool.set(livelog_key, header, ex=7200)
 
-        log_file.write_text(self._mask_secrets(header + output + "\n"))
-        passed = (not timed_out) and proc.returncode == 0 \
-            and "TRAINING_TEST: SUCCESS" in output
-        return {
-            "job_type":         "training-test",
-            "exit_code":        proc.returncode if not timed_out else -1,
-            "duration_seconds": int(time.time() - start_time),
-            "passed":           passed,
-            "arch":             "amd64",
-            "log_file":         str(log_file),
-        }
+            log_file = LOGS_DIR / f"{job_id}.log"
+            start_time = time.time()
+
+            runner = Path(__file__).resolve().parent.parent / "tools" / "training_test_runner.py"
+            cmd = [sys.executable, "-u", str(runner), "--repo", repo, "--run-tag", run_tag]
+            if ref:
+                cmd += ["--ref", ref]
+
+            env = dict(os.environ)
+            # Talk to the local dashboard directly — no nginx/oauth2-proxy hop.
+            env.setdefault("ORBITAL_API", "http://127.0.0.1:8080")
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+
+            # Provisioning alone can take ~15 min; full k8s labs with operator
+            # deploys run ~30-45 min through the exec API. Hard cap at 90 min.
+            timeout_s = int(os.environ.get("TRAINING_TEST_TIMEOUT_S", "5400"))
+            timed_out = False
+            try:
+                output = await self._stream_to_redis(proc, livelog_key, timeout_s)
+            except asyncio.TimeoutError:
+                timed_out = True
+                output = f"(training-test timed out after {timeout_s}s — killing runner)"
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await proc.wait()
+
+            log_file.write_text(self._mask_secrets(header + output + "\n"))
+            passed = (not timed_out) and proc.returncode == 0 \
+                and "TRAINING_TEST: SUCCESS" in output
+            return {
+                "job_type":         "training-test",
+                "exit_code":        proc.returncode if not timed_out else -1,
+                "duration_seconds": int(time.time() - start_time),
+                "passed":           passed,
+                "arch":             "amd64",
+                "log_file":         str(log_file),
+            }
+        finally:
+            try:
+                await self.pool.delete(lock_key)
+            except Exception as e:
+                log.warning("Could not release training lock %s: %s", lock_key, e)
 
     async def _run_deploy_ghpages(self, job: dict) -> dict:
         """Trigger deploy-ghpages.yaml via workflow_dispatch and stream progress.

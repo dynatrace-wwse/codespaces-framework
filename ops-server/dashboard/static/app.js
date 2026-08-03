@@ -567,11 +567,29 @@ async function triggerBuildFromRow(repo, safeRepo, btn) {
                 window.location.href = '/oauth2/start?rd=' + encodeURIComponent(window.location.pathname);
                 return;
             }
-            if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            const repoShort = repo.split('/').pop();
+            if (res.status === 409 || data.status === 'already-queued') {
+                // Dedupe: a training-test for this repo+ref is already queued
+                // or running (it may be waiting behind the training semaphore
+                // with no running row yet). No duplicate was enqueued.
+                showToast(`⏳ Already queued/running: ${repoShort} @ ${branch} — not duplicated.`, 5000);
+                btn.textContent = '⏳ Queued';
+                setTimeout(() => { btn.textContent = 'Trigger'; }, 2500);
+            } else if (!res.ok) {
                 alert('Trigger failed: HTTP ' + res.status);
+                btn.textContent = 'Trigger';
+            } else {
+                // The trigger response already says status:queued — surface it
+                // so the click never looks dead (esp. for training-test, which
+                // shows no running row until it clears the semaphore).
+                showToast(`✓ Queued ${formatJobType(action)} · ${repoShort} @ ${branch}`, 4000);
+                btn.textContent = '✓ Queued';
+                setTimeout(() => { btn.textContent = 'Trigger'; }, 2500);
             }
         } finally {
-            btn.disabled = false; btn.textContent = 'Trigger';
+            btn.disabled = false;
+            if (btn.textContent === '…') btn.textContent = 'Trigger';  // e.g. network error
             await loadRunning();
         }
     }
