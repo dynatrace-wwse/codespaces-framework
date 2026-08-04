@@ -553,3 +553,60 @@ def test_scope_warnings_flags_unseeded_orbital_config():
     # seeded / pre-existing → silent
     assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "token seeded") == []
     assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "already configured") == []
+
+
+# --- deploy ref pinning -------------------------------------------------------
+# "Update now" is public and tokenless: an unpinned Orbital ships whatever last
+# landed on master to every tenant that clicks it. APP_DEPLOY_REF decouples
+# "merged" from "publicly deployable".
+
+def _with_ref(value, fn):
+    saved = dep.APP_DEPLOY_REF
+    dep.APP_DEPLOY_REF = value
+    try:
+        return fn()
+    finally:
+        dep.APP_DEPLOY_REF = saved
+
+
+def test_deploy_ref_unpinned_follows_branch_tip():
+    assert _with_ref("", dep.deploy_ref) == f"origin/{dep.APP_DEPLOY_BRANCH}"
+
+
+def test_deploy_ref_pinned_returns_the_exact_ref():
+    assert _with_ref("1.0.271", dep.deploy_ref) == "1.0.271"
+
+
+def test_fetch_pulls_tags_only_when_pinned():
+    # A plain branch fetch does not bring tags down, so a tag pin is unresolvable
+    # without --tags — and the deploy would silently fall back to "local".
+    calls = []
+
+    async def fake_git(*args):
+        calls.append(args)
+        return 0, ""
+
+    _with_ref("", lambda: asyncio.run(dep._fetch_deploy_ref(fake_git)))
+    assert "--tags" not in calls[-1]
+
+    _with_ref("1.0.271", lambda: asyncio.run(dep._fetch_deploy_ref(fake_git)))
+    assert "--tags" in calls[-1]
+    assert calls[-1][-1] == dep.APP_DEPLOY_BRANCH
+
+
+def test_latest_version_reports_the_pin_to_admins():
+    # The app's "Check for updates" shows this; an admin must be able to tell a
+    # released version from the moving tip of the branch.
+    saved = dep._latest_repo_version
+
+    async def fake_latest():
+        return "1.0.271", dep.deploy_ref()
+
+    dep._latest_repo_version = fake_latest
+    try:
+        pinned = _with_ref("1.0.271", lambda: asyncio.run(dep.latest_version()))
+        loose = _with_ref("", lambda: asyncio.run(dep.latest_version()))
+    finally:
+        dep._latest_repo_version = saved
+    assert pinned["pinned"] is True and pinned["ref"] == "1.0.271"
+    assert loose["pinned"] is False and loose["ref"] == f"origin/{dep.APP_DEPLOY_BRANCH}"

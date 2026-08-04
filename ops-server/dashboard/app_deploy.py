@@ -77,7 +77,28 @@ DEPLOY_TIMEOUT = int(os.environ.get("DEPLOY_TIMEOUT", "600"))
 # Branch the deploy checkout is fast-forwarded to before every build, so a `git push`
 # is enough to ship — no manual rsync to the ops checkout. See _sync_repo().
 APP_DEPLOY_BRANCH = os.environ.get("APP_DEPLOY_BRANCH", "master")
+# Pin public deploys to an exact ref (tag or commit) instead of the branch tip.
+# Empty = follow origin/<APP_DEPLOY_BRANCH>, the historical behaviour.
+#
+# "Update now" in the app is public and tokenless, so an unpinned Orbital ships
+# whatever last landed on master to every tenant that clicks it — including a
+# build that has not been through QA. Setting this to a released tag decouples
+# "merged" from "publicly deployable"; move it when a version is signed off.
+APP_DEPLOY_REF = os.environ.get("APP_DEPLOY_REF", "").strip()
 REPO_SYNC_TIMEOUT = int(os.environ.get("REPO_SYNC_TIMEOUT", "90"))
+
+
+def deploy_ref() -> str:
+    """The git ref both the version check and the build resolve to."""
+    return APP_DEPLOY_REF or f"origin/{APP_DEPLOY_BRANCH}"
+
+
+async def _fetch_deploy_ref(git) -> tuple[int, str]:
+    """Fetch whatever `deploy_ref()` names. A plain branch fetch does not bring
+    tags down, so a pinned ref additionally needs --tags to be resolvable."""
+    if APP_DEPLOY_REF:
+        return await git("fetch", "--quiet", "--tags", "origin", APP_DEPLOY_BRANCH)
+    return await git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
 
 # Auto-deploy tenants — tenants whose client credentials Orbital holds, so a deploy to them
 # needs NO pasted token (auto). Every other tenant requires a token. Each is one env group:
@@ -226,21 +247,25 @@ async def _latest_repo_version() -> tuple[str, str]:
             return 124, "timed out"
         return proc.returncode or 0, out.decode(errors="replace").strip()
 
-    rc, _ = await _git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
+    ref = deploy_ref()
+    rc, _ = await _fetch_deploy_ref(_git)
     if rc != 0:
         return _app_version(), "local"
-    rc, out = await _git("show", f"origin/{APP_DEPLOY_BRANCH}:app.config.json")
+    rc, out = await _git("show", f"{ref}:app.config.json")
     if rc != 0:
         return _app_version(), "local"
     try:
         cfg = json.loads(out)
-        return (cfg.get("app", {}).get("version") or cfg.get("version") or "?"), f"origin/{APP_DEPLOY_BRANCH}"
+        return (cfg.get("app", {}).get("version") or cfg.get("version") or "?"), ref
     except Exception:
         return _app_version(), "local"
 
 
 async def _sync_repo() -> tuple[bool, str]:
-    """Fast-forward the deploy checkout to origin/<APP_DEPLOY_BRANCH> before building.
+    """Move the deploy checkout to `deploy_ref()` before building.
+
+    That is origin/<APP_DEPLOY_BRANCH> by default, or the exact ref in APP_DEPLOY_REF
+    when public deploys are pinned to a released version.
 
     This makes `git push` the only step needed to ship the app — no manual rsync into the
     ops checkout. Best-effort: on any failure we log and let the deploy proceed with whatever
@@ -266,17 +291,18 @@ async def _sync_repo() -> tuple[bool, str]:
             return 124, "timed out"
         return proc.returncode or 0, out.decode(errors="replace").strip()
 
-    rc, msg = await _git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
+    ref = deploy_ref()
+    rc, msg = await _fetch_deploy_ref(_git)
     if rc != 0:
         return False, f"fetch failed: {msg[-300:]}"
     # Note whether dependencies changed so the operator knows to `npm ci` if a build fails.
-    _, lock_diff = await _git("diff", "--name-only", f"HEAD..origin/{APP_DEPLOY_BRANCH}", "--", "package-lock.json")
-    rc, msg = await _git("reset", "--hard", f"origin/{APP_DEPLOY_BRANCH}")
+    _, lock_diff = await _git("diff", "--name-only", f"HEAD..{ref}", "--", "package-lock.json")
+    rc, msg = await _git("reset", "--hard", ref)
     if rc != 0:
         return False, f"reset failed: {msg[-300:]}"
     _, head = await _git("rev-parse", "--short", "HEAD")
     suffix = " (package-lock changed — run `npm ci` if build fails)" if lock_diff else ""
-    return True, f"{APP_DEPLOY_BRANCH}@{head}{suffix}"
+    return True, f"{ref}@{head}{suffix}"
 
 
 async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
@@ -853,11 +879,15 @@ async def deploy_callback(request: Request):
 
 @router.get("/api/deploy/latest-version")
 async def latest_version():
-    """The app version Orbital would deploy (origin/<branch> app.config.json). Tokenless — just a
+    """The app version Orbital would deploy (app.config.json at `deploy_ref()`). Tokenless — just a
     version string, no tenant credential involved. The app's Admin "Check for updates" compares
-    this against its own baked-in installed version (no platform token needed for the check)."""
+    this against its own baked-in installed version (no platform token needed for the check).
+
+    `pinned` tells an admin whether they are being offered a released version or
+    the moving tip of the branch."""
     version, source = await _latest_repo_version()
-    return {"version": version, "branch": APP_DEPLOY_BRANCH, "source": source}
+    return {"version": version, "branch": APP_DEPLOY_BRANCH, "source": source,
+            "ref": deploy_ref(), "pinned": bool(APP_DEPLOY_REF)}
 
 
 @router.post("/api/deploy/token")
