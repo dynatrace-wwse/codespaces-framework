@@ -112,13 +112,18 @@ def build_progress_query(workshop_id, key_or_id, emails, since_iso) -> str:
     """
     wid = escape_dql_string(workshop_id)
     key = escape_dql_string(training_key(key_or_id))
-    roster = [escape_dql_string(e) for e in (emails or []) if e]
+    # Roster emails are already lowercase (live_sessions normalizes on join), but
+    # events carry whatever casing the tenant's IdP returned, so the comparison is
+    # lowered on BOTH sides. Without this a learner stamped
+    # "Rodrigo.Pascoal@dynatrace.com" is never fetched and reads "not-started"
+    # forever — _email() below can only normalize rows the query already returned.
+    roster = [escape_dql_string(_email(e)) for e in (emails or []) if e]
     since = escape_dql_string(since_iso)
 
     match = f'workshopId == "{wid}"'
     if key and roster:
         addrs = ", ".join(f'"{e}"' for e in sorted(set(roster)))
-        match = f'{match} or (trainingKey == "{key}" and in(userEmail, {{{addrs}}}))'
+        match = f'{match} or (trainingKey == "{key}" and in(lower(userEmail), {{{addrs}}}))'
 
     return (
         f'fetch bizevents, from: toTimestamp("{since}")\n'

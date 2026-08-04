@@ -94,9 +94,24 @@ def test_build_query_matches_workshop_id_and_roster_fallback():
     assert 'workshopId == "ws-1"' in q
     # Roster arm catches events fired before the learner joined the workshop.
     assert 'trainingKey == "kubernetes-101"' in q
-    assert 'in(userEmail, {"a@x.com", "b@x.com"})' in q  # sorted + deduped
+    assert 'in(lower(userEmail), {"a@x.com", "b@x.com"})' in q  # sorted + deduped
     assert f'from: toTimestamp("{SINCE}")' in q
     assert f"limit {lp.MAX_RECORDS}" in q
+
+
+def test_build_query_matches_roster_case_insensitively():
+    """A learner stamped with the IdP's casing must still be fetched.
+
+    Events carry whatever casing the tenant's IdP returned
+    ("Rodrigo.Pascoal@dynatrace.com"), rosters are stored lowercase. Comparing
+    raw dropped those rows from the result set entirely, so the board showed the
+    learner as "not-started" forever — _aggregate's _email() only normalizes rows
+    the query already returned.
+    """
+    q = lp.build_progress_query("ws-1", "kubernetes-101", ["Rodrigo.Pascoal@Dynatrace.com"], SINCE)
+    assert "lower(userEmail)" in q
+    assert '"rodrigo.pascoal@dynatrace.com"' in q
+    assert "Rodrigo" not in q
 
 
 def test_build_query_without_roster_is_workshop_only():
