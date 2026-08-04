@@ -5369,6 +5369,7 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, 
         await pool.hset(sess_key, mapping={
             "state": new_state, "endedAt": session["endedAt"]})
         await _store_pad_export(session_id, session)
+        await _store_completion_record(session_id, session)
         log.info("Live session %s ended by %s", session_id, body.trainerEmail)
     await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
@@ -5401,6 +5402,7 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
         await pool.hset(sess_key, mapping={
             "state": new_state, "cancelledAt": session["cancelledAt"]})
         await _store_pad_export(session_id, session)
+        await _store_completion_record(session_id, session)
         log.info("Live session %s cancelled by %s", session_id, body.trainerEmail)
     await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
@@ -6006,7 +6008,10 @@ async def _delete_live_session_keys(session_id: str, session: dict):
     from every list. delete on a missing key is a no-op."""
     sections_key, qa_key, export_key = _pad_keys(session_id)
     keys = [*_live_keys(session_id), _live_tenants_key(session_id),
-            sections_key, qa_key, export_key, *_room_keys(session_id)]
+            sections_key, qa_key, export_key, *_room_keys(session_id),
+            # Delete is pre-start only, so a completion record should not exist
+            # yet — but leaving one behind would outlive its workshop by 30 days.
+            f"live:session:{session_id}:completion"]
     if session.get("joinCode"):
         keys.append(f"live:joincode:{session['joinCode']}")
     for key in keys:
@@ -6035,6 +6040,60 @@ async def _store_pad_export(session_id: str, session: dict):
         session, sections, live_pad.assemble_qa(entries),
         await _read_chat(session_id))
     await pool.set(export_key, html_doc, ex=live_pad.EXPORT_TTL_SECONDS)
+
+
+async def _store_completion_record(session_id: str, session: dict):
+    """Freeze the cohort's final results into a durable record.
+
+    The board is live-only: `live:progress:{id}` is a 15-second cache over a DQL
+    against COE, so the moment a workshop ends the trainer's view of who
+    finished evaporates. Delivery at 100+ seats needs an answer to "who actually
+    completed this" that outlives the room.
+
+    Stored alongside the pad export and given the same 30-day TTL, so both
+    artefacts of a finished workshop expire together. Best-effort: a workshop
+    must always be allowed to end, so a failure here is logged and swallowed
+    rather than turned into a 500 on the trainer's End button.
+    """
+    try:
+        roster = await pool.smembers(f"live:session:{session_id}:roster")
+        query = live_progress.build_progress_query(
+            session_id, session.get("trainingId", ""), sorted(roster),
+            live_progress.since_timestamp(session))
+        rows = await _query_coe_grail(query)
+        shaped = live_progress.shape_progress(rows, sorted(roster))
+        record = {
+            "sessionId": session_id,
+            "title": session.get("title", ""),
+            "trainingId": session.get("trainingId", ""),
+            "trainerEmail": session.get("trainerEmail", ""),
+            "startedAt": session.get("startedAt", ""),
+            "endedAt": session.get("endedAt", ""),
+            "results": shaped.get("results", []),
+            "summary": shaped.get("summary", {}),
+        }
+        await pool.set(f"live:session:{session_id}:completion",
+                       json.dumps(record), ex=live_pad.EXPORT_TTL_SECONDS)
+        log.info("live: completion record stored for %s (%d learners)",
+                 session_id, len(record["results"]))
+    except Exception as exc:
+        log.warning("live: could not store completion record for %s: %s", session_id, exc)
+
+
+@app.get("/api/live/sessions/{session_id}/completion")
+async def api_live_completion(session_id: str, trainerEmail: str = ""):
+    """The frozen results of a finished workshop. Trainer-only.
+
+    404 when the workshop never ended, or once the 30-day retention lapses.
+    """
+    sess_key, _, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if session and not live_sessions.is_trainer(trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    raw = await pool.get(f"live:session:{session_id}:completion")
+    if not raw:
+        raise HTTPException(status_code=404, detail="no completion record for this session")
+    return json.loads(raw)
 
 
 async def _require_live_session(session_id: str) -> dict:

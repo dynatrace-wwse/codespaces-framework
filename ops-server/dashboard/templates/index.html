@@ -769,37 +769,34 @@
         </section>
 
         <section id="view-register" class="view">
-            <p class="content-hint"><strong>Bootstrap install only.</strong> Paste an account-level OAuth client <em>once</em> to land the app on a new tenant. Orbital uses it for this single deploy and <strong>discards it — nothing is stored on Orbital</strong>. After the app is installed, configure the same client <em>inside the app</em> (Admin → Token minting); from then on the app self-mints per-user tokens and self-updates on its own tenant, and Orbital never holds a tenant credential.</p>
-
             <div class="content-card">
-                <h3 style="margin:0 0 8px">Account OAuth client <span style="font-size:0.72rem;background:#1f6feb;color:#fff;border-radius:10px;padding:2px 8px;vertical-align:middle">bootstrap install — not stored</span></h3>
-                <p class="content-hint" style="margin:0 0 6px">Create <strong>one OAuth client</strong> in the tenant's account (<a href="https://myaccount.dynatrace.com" target="_blank">myaccount.dynatrace.com</a> → Identity &amp; access management → OAuth clients) with these <strong>least-privilege</strong> permissions:</p>
-                <ul style="margin:0;padding-left:18px;font-size:0.83rem">
-                    <li><strong>Environment</strong> — deploy &amp; configure the app:
-                        <code>app-engine:apps:install</code>, <code>app-engine:apps:run</code>,
-                        <code>settings:objects:read</code>, <code>settings:objects:write</code>
-                        <span class="content-hint">(settings:* configures analytics forwarding + outbound allowlist; add <code>app-engine:apps:delete</code> only if you want Undeploy)</span></li>
-                    <li><strong>Environment</strong> — mint DynaKube's ActiveGate token per K8s session:
-                        <code>environment-api:activegate-tokens:write</code> (+ <code>:create</code>)
-                        <span class="content-hint">(required — without it every training with an operator fails at ActiveGate)</span></li>
-                    <li><strong>Account</strong> — so the app (once configured) can mint platform tokens for your users:
-                        <code>platform-token:tokens:write</code>, <code>platform-token:tokens:manage</code>
-                        <span class="content-hint">(the ONLY identity type Dynatrace accepts for platform-token creation — platform tokens themselves cannot mint tokens)</span></li>
-                </ul>
-                <p class="content-hint" style="margin:0 0 6px">You can safely OMIT these even if an older client has them: <code>environment-api:api-tokens:read/write</code> (the app self-mints classic tokens with its own identity, not the client), <code>environment-api:activegate-tokens:read</code>, <code>settings:objects:admin</code> — they widen exposure for no functional gain.</p>
-                <p class="content-hint" style="margin:6px 0 8px">The <strong>app</strong> — not Orbital — then mints short-lived, least-scoped platform tokens per session (operator/ingest, from the repo's <code>dt-tokens.yaml</code>) with the client held in the app's own app-state, and revokes them at session end. Full reference: <code>ops-server/docs/tenant-credentials.md</code>.</p>
-                <p class="content-hint" style="margin:0 0 8px"><strong>What install changes on your tenant:</strong> if your tenant enforces an app-function outbound allowlist (sprint/dev do), these hosts are <em>added</em> so training content can be delivered and analytics forwarded: <code>autonomous-enablements.whydevslovedynatrace.com</code> (Orbital — content &amp; sessions), <code>raw.githubusercontent.com</code> + <code>api.github.com</code> (training content), <code>wwse.apps.dynatrace.com</code> (central enablement analytics), plus the account SSO + API hosts so the app can mint. Nothing is ever removed. <strong>Kill switch:</strong> deleting the OAuth client in myaccount instantly revokes everything the app and Orbital can do on your account.</p>
+                <h3 style="margin:0 0 8px">Account OAuth client <span style="font-size:0.72rem;background:#1f6feb;color:#fff;border-radius:10px;padding:2px 8px;vertical-align:middle">bootstrap install only</span></h3>
+                <p class="content-hint" style="margin:0 0 8px"><strong>Bootstrap installed, Node stored.</strong> Orbital uses the OAuth client once to deploy the app, then discards it. After install, configure the same client inside the app (Admin → Token minting); the app then mints per-user platform tokens and self-updates — Orbital never holds credentials.</p>
+
+                <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">How to create the OAuth client</h4>
+                <p class="content-hint" style="margin:0 0 6px">In your tenant's account: <a href="https://myaccount.dynatrace.com" target="_blank">myaccount.dynatrace.com</a> → Identity &amp; access management → OAuth clients → New. Add these scopes:</p>
+                <div style="background:var(--surface);border:1px solid var(--border-soft);border-radius:8px;padding:10px 12px;margin:0 0 8px;font-size:0.78rem;font-family:ui-monospace,monospace">
+                    <div style="margin-bottom:6px"><strong style="color:var(--accent)">Environment</strong><br>app-engine:apps:install, app-engine:apps:run, settings:objects:read, settings:objects:write, environment-api:activegate-tokens:write</div>
+                    <div><strong style="color:var(--accent)">Account</strong><br>platform-token:tokens:write, platform-token:tokens:manage</div>
+                </div>
+
+                <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">Outbound allowlist (if your tenant enforces it)</h4>
+                <p class="content-hint" style="margin:0 0 6px">These hosts are added to your app-function allowlist during install:</p>
+                <div style="background:var(--surface);border:1px solid var(--border-soft);border-radius:8px;padding:10px 12px;margin:0 0 8px;font-size:0.78rem;font-family:ui-monospace,monospace">
+                    <div>autonomous-enablements.whydevslovedynatrace.com</div>
+                    <div>raw.githubusercontent.com, api.github.com</div>
+                    <div>wwse.apps.dynatrace.com</div>
+                </div>
+
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
                     <input type="text" id="reg-oa-tenant" placeholder="https://abc12345.apps.dynatrace.com" style="width:300px">
                     <input type="text" id="reg-oa-cid" placeholder="client id (dt0s02.…)" style="width:180px">
                     <input type="password" id="reg-oa-secret" placeholder="client secret" style="width:220px">
                     <input type="text" id="reg-oa-urn" placeholder="urn:dtaccount:<uuid>" style="width:280px">
-                    <input type="email" id="reg-oa-email" placeholder="your email (optional — install attribution)" style="width:260px" title="Recorded in the tenant registry so the CoE knows who owns this install. Optional.">
-                    <input type="text" id="reg-oa-name" placeholder="tenant name (friendly, optional)" style="width:220px" title="A human-readable name for this tenant (e.g. the account/customer name) — the account name is not retrievable via API, so you supply it. Shown in the CoE tenant registry. Optional.">
+                    <input type="text" id="reg-oa-email" placeholder="your email (optional)" style="width:220px" title="For install attribution in registry.">
+                    <input type="text" id="reg-oa-name" placeholder="tenant name (optional)" style="width:180px" title="Friendly name shown in registry.">
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                    <!-- No data-action: the OAuth client is the account's authority — stays
-                         clickable for guests/anonymous (nginx allows signed-out oauth deploys). -->
                     <button class="btn btn-small" id="reg-oa-deploy">Bootstrap install / Upgrade</button>
                     <button class="btn btn-small btn-secondary" id="reg-oa-undeploy">Undeploy</button>
                     <span id="reg-oa-msg" class="content-msg"></span>
