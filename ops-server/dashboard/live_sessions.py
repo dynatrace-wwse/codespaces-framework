@@ -194,10 +194,15 @@ def validate_schedule(scheduled_at, timezone_name, duration_minutes,
     return out
 
 
-def initial_state(scheduled_at) -> str:
-    """Create WITH scheduledAt → 'scheduled'; without → 'open' (the
-    pre-workshop behavior, so existing callers are unaffected)."""
-    return "scheduled" if (scheduled_at or "").strip() else "open"
+def initial_state(scheduled_at=None) -> str:
+    """Always 'open' — a workshop is joinable by code the moment it exists.
+
+    The separate "open registration" step (scheduled → open) was removed: it
+    was redundant, since a created workshop is already joinable by its code.
+    `scheduledAt`, if given, is now purely a display time and does NOT gate
+    joining. `scheduled` remains a valid stored state only for sessions created
+    before this change (back-compat); no new session is created in it."""
+    return "open"
 
 
 # ── Join codes ────────────────────────────────────────────────────────────────
@@ -281,6 +286,11 @@ _TRANSITIONS = {
               "ended": ("ended", False)},
     "cancel": {"scheduled": ("cancelled", True), "open": ("cancelled", True),
                "cancelled": ("cancelled", False)},
+    # delete = hard-remove, allowed ONLY before a workshop has started. The
+    # target "deleted" is not a stored state (the entity + index are removed by
+    # the endpoint); apply_transition only validates legality. running/ended/
+    # cancelled are absent → apply_transition raises → endpoint returns 409.
+    "delete": {"scheduled": ("deleted", True), "open": ("deleted", True)},
 }
 
 
@@ -299,8 +309,8 @@ def apply_transition(state, action) -> tuple[str, bool]:
 # ── Response shaping ──────────────────────────────────────────────────────────
 
 def is_listed(session, roster, email, tenant="") -> bool:
-    """Listing filter: non-ended sessions where the email is the trainer or
-    on the roster.
+    """Listing filter: non-ended, non-cancelled sessions where the email is the
+    trainer or on the roster.
 
     Tenant scoping (WS-1) applies to the TRAINER side only. A workshop belongs
     to the tenant it was created from (`ownerTenant`), so a trainer signed into
@@ -314,7 +324,10 @@ def is_listed(session, roster, email, tenant="") -> bool:
     (created before this change) and a caller that sends no tenant (older app)
     both keep the previous, unscoped behavior.
     """
-    if not session or session.get("state") == "ended":
+    # Cancelled workshops are hidden alongside ended ones (RFE): a learner
+    # should never see a cancelled workshop in their list. The trainer manages
+    # cancellation from the board, not the list.
+    if not session or session.get("state") in ("ended", "cancelled"):
         return False
     if on_roster(email, roster):
         return True

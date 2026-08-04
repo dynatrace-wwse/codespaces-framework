@@ -528,6 +528,32 @@ def _has_full_access(request: Request) -> bool:
     return bool(request.headers.get("x-auth-user", "")) or _is_service_caller(request)
 
 
+def _sees_full_identities(request: Request, caller: str = "") -> bool:
+    """Masking decision for the learner-facing WORKSHOP reads (progress board,
+    session detail/summary), which every cohort member can call.
+
+    Unlike _has_full_access, a service bearer on its own is NOT enough here.
+    The app proxies EVERY learner call with the service bearer, so trusting it
+    blindly (BUG-MASK-1) handed every learner the whole cohort's raw emails and
+    tenant URLs. The bearer only authenticates the app->Orbital transport; it
+    does not entitle the learner it is acting for to everyone else's identity.
+
+    Full identities therefore only for:
+      - a signed-in Orbital org member (x-auth-user, set by nginx after
+        oauth2-proxy) — the internal admin console, or
+      - a service call with NO learner `caller` (internal automation reads).
+    A service call carrying a learner `caller` is masked (keep=caller). The
+    session trainer is handled separately by each caller via is_trainer, since
+    that identity is caller-supplied per endpoint. This mirrors the pad-get /
+    _room_view rule, which already masks by per-user identity rather than by
+    the presence of the bearer."""
+    if request.headers.get("x-auth-user", ""):
+        return True
+    if _is_service_caller(request):
+        return not caller
+    return False
+
+
 async def _require_service_or_writer(request: Request) -> None:
     """Auth gate for live-session write endpoints: the app's service bearer
     OR a signed-in writer. 401 otherwise (403 for a signed-in non-member)."""
@@ -5185,7 +5211,10 @@ async def api_live_sessions_list(request: Request, email: str = "", tenant: str 
     email = live_sessions.normalize_email(email)
     if not live_sessions.is_valid_email(email):
         raise HTTPException(status_code=400, detail="a valid email query parameter is required")
-    full = _has_full_access(request)
+    # Service bearer alone must not unmask (BUG-MASK-1). Mask per item unless
+    # the caller is that session's trainer (their own workshop) or a real org
+    # member / no-caller automation.
+    full_admin = _sees_full_identities(request, email)
     sessions = []
     for session_id in await pool.zrevrange("live:sessions:index", 0, -1):
         sess_key, roster_key, joined_key = _live_keys(session_id)
@@ -5198,6 +5227,7 @@ async def api_live_sessions_list(request: Request, email: str = "", tenant: str 
         joined = await pool.hgetall(joined_key)
         item = live_sessions.shape_summary(
             session_id, session, roster, joined, email)
+        full = full_admin or live_sessions.is_trainer(email, session)
         sessions.append(item if full else masking.mask_live_summary(item))
     return {"sessions": sessions, "count": len(sessions)}
 
@@ -5217,7 +5247,13 @@ async def api_live_session_detail(session_id: str, request: Request, email: str 
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     detail = live_sessions.shape_detail(session_id, session, roster, joined, email)
-    return detail if _has_full_access(request) else masking.mask_live_detail(detail)
+    # Service bearer alone must not unmask (BUG-MASK-1); the session trainer
+    # (caller email == trainerEmail) or a real org member does.
+    caller = live_sessions.normalize_email(email)
+    is_trainer = live_sessions.is_trainer(email, session)
+    if is_trainer or _sees_full_identities(request, caller):
+        return detail
+    return masking.mask_live_detail(detail)
 
 
 @app.post("/api/live/sessions/{session_id}/join")
@@ -5331,6 +5367,30 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
+@app.delete("/api/live/sessions/{session_id}")
+async def api_live_session_delete(session_id: str, request: Request, trainerEmail: str = ""):
+    """Trainer hard-deletes a workshop that has NOT started — allowed only in
+    scheduled/open. 409 once running/ended/cancelled (a started or finished
+    workshop is history, not deletable; cancel/end + the 7-day TTL cover those).
+    403 on trainerEmail mismatch, 404 if already gone. Removes every key AND the
+    index entry, so the workshop vanishes for the whole cohort.
+    Auth: service bearer or signed-in writer."""
+    await _require_service_or_writer(request)
+    sess_key, _, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    try:
+        live_sessions.apply_transition(session.get("state", ""), "delete")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    await _delete_live_session_keys(session_id, session)
+    log.info("Live session %s deleted by %s", session_id, trainerEmail)
+    return {"ok": True, "deleted": session_id}
 
 
 @app.post("/api/live/sessions/{session_id}/open-registration")
@@ -5677,11 +5737,11 @@ async def api_live_session_progress(session_id: str, request: Request,
         })
         await pool.setex(cache_key, PROGRESS_CACHE_TTL, json.dumps(payload))
 
-    # trainerEmail/email are caller-supplied and unverified (the app function
-    # sends no X-Auth headers) — only a verified org member or the matching
-    # trainer sees raw addresses; everyone else gets the board with identities
-    # masked apart from their own row.
-    if is_trainer or _has_full_access(request):
+    # The app proxies learner calls with the service bearer, so the bearer
+    # alone must NOT unmask the cohort (BUG-MASK-1). Only the matching trainer,
+    # or a real signed-in org member / no-caller automation, sees raw addresses;
+    # every learner gets the board with identities masked apart from their own row.
+    if is_trainer or _sees_full_identities(request, caller):
         return payload
     return masking.mask_progress(payload, keep=caller)
 
@@ -5752,6 +5812,21 @@ async def _expire_live_session_keys(session_id: str, session: dict):
         keys.append(f"live:joincode:{session['joinCode']}")
     for key in keys:
         await pool.expire(key, live_sessions.SESSION_TTL_SECONDS)
+
+
+async def _delete_live_session_keys(session_id: str, session: dict):
+    """Hard-remove every key of a session AND its index entry — the delete-if-
+    not-started counterpart to _expire_live_session_keys. Same key set plus the
+    pad export, then zrem from live:sessions:index so the workshop disappears
+    from every list. delete on a missing key is a no-op."""
+    sections_key, qa_key, export_key = _pad_keys(session_id)
+    keys = [*_live_keys(session_id), _live_tenants_key(session_id),
+            sections_key, qa_key, export_key, *_room_keys(session_id)]
+    if session.get("joinCode"):
+        keys.append(f"live:joincode:{session['joinCode']}")
+    for key in keys:
+        await pool.delete(key)
+    await pool.zrem("live:sessions:index", session_id)
 
 
 async def _read_chat(session_id: str) -> list[dict]:

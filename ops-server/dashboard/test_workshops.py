@@ -40,11 +40,14 @@ def _raises_value_error(fn, *args, **kwargs) -> str:
 
 # ── Schedule-create: initial state + field validation ────────────────────────
 
-def test_initial_state_scheduled_vs_open():
-    assert ls.initial_state("2026-09-01T09:00:00+00:00") == "scheduled"
-    assert ls.initial_state("") == "open"       # today's behavior preserved
+def test_initial_state_always_open():
+    """Open-registration removed: a workshop is joinable by code the moment it
+    exists, so initial_state is 'open' regardless of scheduledAt (which is now
+    only a display time)."""
+    assert ls.initial_state("2026-09-01T09:00:00+00:00") == "open"
+    assert ls.initial_state("") == "open"
     assert ls.initial_state(None) == "open"
-    assert ls.initial_state("   ") == "open"
+    assert ls.initial_state() == "open"
 
 
 def test_validate_schedule_normalizes_and_stringifies():
@@ -155,17 +158,30 @@ def test_open_registration_and_start_from_scheduled():
         pass
 
 
-def test_cancelled_session_still_listed_for_learners():
-    """Cancelled keeps entity + index — learners must SEE the cancellation
-    (only ended sessions drop out of the list)."""
+def test_cancelled_and_ended_sessions_hidden_from_learners():
+    """RFE: cancelled workshops are HIDDEN alongside ended ones — a learner
+    should never see a cancelled workshop in their list."""
     roster = {"alice@x.com"}
     cancelled = _session(state="cancelled",
                          cancelledAt="2026-07-14T11:00:00+00:00")
-    assert ls.is_listed(cancelled, roster, "alice@x.com")
-    item = ls.shape_summary("sid-1", cancelled, roster, {}, "alice@x.com")
-    assert item["state"] == "cancelled"
-    assert item["cancelledAt"] == "2026-07-14T11:00:00+00:00"
+    assert not ls.is_listed(cancelled, roster, "alice@x.com")
     assert not ls.is_listed(_session(state="ended"), roster, "alice@x.com")
+    # open/running still listed
+    assert ls.is_listed(_session(state="open"), roster, "alice@x.com")
+    assert ls.is_listed(_session(state="running"), roster, "alice@x.com")
+
+
+def test_delete_only_before_started():
+    """delete is legal ONLY in scheduled/open (not started); running/ended/
+    cancelled raise → endpoint returns 409."""
+    assert ls.apply_transition("scheduled", "delete") == ("deleted", True)
+    assert ls.apply_transition("open", "delete") == ("deleted", True)
+    for state in ("running", "ended", "cancelled"):
+        try:
+            ls.apply_transition(state, "delete")
+            raise AssertionError(f"expected ValueError for delete from {state}")
+        except ValueError:
+            pass
 
 
 # ── joinCode / workshop-field payload gating ─────────────────────────────────

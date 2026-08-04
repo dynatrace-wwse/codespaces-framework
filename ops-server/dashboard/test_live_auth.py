@@ -74,3 +74,46 @@ def test_spoofed_x_auth_user_is_ignored_when_nginx_cleared_it():
     r = client.post("/api/live/sessions", json={},
                     headers={"X-Auth-User": ""})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# BUG-MASK-1 regression: the app proxies EVERY learner-facing workshop read
+# (progress board, session detail/summary) with the service bearer. The bearer
+# authenticates the app->Orbital transport; it must NOT, on its own, unmask the
+# whole cohort's emails+tenants to the learner it is acting for. _sees_full_identities
+# encodes that rule; is_trainer (per endpoint) still grants the trainer full view.
+# ---------------------------------------------------------------------------
+
+def _req(headers):
+    """Minimal Request stub: only .headers.get(lowercased) is used by the gate."""
+    class _H(dict):
+        def get(self, k, default=""):
+            return dict.get(self, k.lower(), default)
+    hdr = _H({k.lower(): v for k, v in headers.items()})
+    return type("_R", (), {"headers": hdr})()
+
+
+def test_sees_full_identities_service_bearer_with_learner_caller_is_masked():
+    r = _req({"Authorization": "Bearer test-service-token"})
+    assert a._sees_full_identities(r, "learner@example.com") is False
+
+
+def test_sees_full_identities_service_bearer_no_caller_is_full():
+    # internal automation reads (no learner acting-for) keep the full view
+    r = _req({"Authorization": "Bearer test-service-token"})
+    assert a._sees_full_identities(r, "") is True
+
+
+def test_sees_full_identities_signed_in_org_member_is_full():
+    # nginx sets X-Auth-User only after oauth2-proxy validated the session
+    r = _req({"X-Auth-User": "sergio"})
+    assert a._sees_full_identities(r, "learner@example.com") is True
+
+
+def test_sees_full_identities_anonymous_is_masked():
+    assert a._sees_full_identities(_req({}), "") is False
+
+
+def test_sees_full_identities_wrong_bearer_is_masked():
+    r = _req({"Authorization": "Bearer wrong"})
+    assert a._sees_full_identities(r, "") is False
