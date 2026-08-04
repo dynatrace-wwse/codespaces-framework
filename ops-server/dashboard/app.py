@@ -5837,12 +5837,13 @@ async def _pad_set_section(session_id: str, session: dict, email: str,
 
 
 async def _room_add_chat(session_id: str, session: dict, identity: dict) -> dict:
-    """Append one chat message, attributed from the CLAIMED pad session.
+    """Append one chat message with an identity the CALLER did not choose.
 
-    Nothing here is client-supplied but the text: the sender's address, name
-    and role come from the pad session record, so a message can never claim to
-    be from the trainer. Rate limited per sender (INCR on a windowed key —
-    the counter expires itself, so there is nothing to sweep)."""
+    From the popup that identity is the claimed pad-session record; from the
+    in-app tab it is the bearer-proxied email with the role resolved against
+    the stored trainerEmail. Either way the role is decided here, so a message
+    can never claim to be from the trainer. Rate limited per sender (INCR on a
+    windowed key — the counter expires itself, so there is nothing to sweep)."""
     _pad_frozen_guard(session)
     try:
         text = live_pad.clean_chat(identity.get("text", ""))
@@ -5868,8 +5869,17 @@ async def _room_heartbeat(session_id: str, identity: dict):
     """Stamp the caller as present in the room. Called on every SSE wake, so
     presence decays on its own once the room is closed."""
     _, _, _, presence_key = _room_keys(session_id)
-    await pool.hset(presence_key, identity.get("email", ""), json.dumps({
-        "name": identity.get("name", ""), "role": identity.get("role", ""),
+    email = identity.get("email", "")
+    name = (identity.get("name") or "").strip()
+    if not name:
+        # The in-app tab heartbeats without a display name (it has no pad-token
+        # claim). Don't let that blank a name the popup already established.
+        try:
+            name = json.loads(await pool.hget(presence_key, email) or "{}").get("name", "")
+        except (ValueError, TypeError):
+            name = ""
+    await pool.hset(presence_key, email, json.dumps({
+        "name": name, "role": identity.get("role", ""),
         "ts": datetime.now(timezone.utc).isoformat()}))
     await pool.expire(presence_key, live_pad.PRESENCE_WINDOW_SECONDS * 2)
 
@@ -6032,17 +6042,43 @@ async def _resolve_pad_session(pad_session: str) -> dict:
 
 
 @app.get("/api/live/sessions/{session_id}/pad")
-async def api_live_pad_get(session_id: str, request: Request):
-    """Full pad state: the two structured sections + Q&A with answers
-    assembled under their questions. Poll-friendly (the in-app tab reads
-    this via the orbital proxy); the popup page uses the SSE stream.
-    Anonymous callers get question authors' emails masked."""
-    await _require_live_session(session_id)
+async def api_live_pad_get(session_id: str, request: Request, email: str = ""):
+    """Full room state: the two structured sections, Q&A with answers assembled
+    under their questions, the chat transcript and the attendee rail.
+    Poll-friendly (the in-app tab reads this via the orbital proxy); the popup
+    page uses the SSE stream.
+
+    Chat and attendees are here — not only on the stream — because the in-app
+    Virtual Room tab cannot open an EventSource to Orbital (CSP blocks in-frame
+    fetch, so every call goes through the app's orbital function proxy). Without
+    them the tab rendered a room with no people and no chat in it.
+
+    `email` is the caller's own address: it decides the view. Through the app's
+    bearer proxy the trainer sees the room raw and a learner sees every address
+    but their own masked; an anonymous caller gets everything masked regardless
+    of the email it supplies.
+    """
+    session = await _require_live_session(session_id)
     sections_key, qa_key, _ = _pad_keys(session_id)
     sections = await pool.hgetall(sections_key)
     entries = await pool.xrange(qa_key)
     pad = live_pad.shape_pad(sections, entries)
-    return pad if _has_full_access(request) else masking.mask_pad(pad)
+    full = _has_full_access(request)
+    caller = live_sessions.normalize_email(email) if full else ""
+    is_trainer = bool(caller) and live_sessions.is_trainer(caller, session)
+    if caller and session.get("state") not in ("ended", "cancelled"):
+        # Polling the tab is being in the room, exactly as holding the SSE
+        # stream open is: without this the rail would only ever show the people
+        # who opened the popup.
+        await _room_heartbeat(session_id, {
+            "email": caller, "name": "",
+            "role": "trainer" if is_trainer else "learner"})
+    identity = None if is_trainer else {"email": caller, "role": "learner"}
+    chat, attendees = _room_view(await _read_chat(session_id),
+                                 await _room_attendees(session_id, session),
+                                 identity)
+    pad = pad if full else masking.mask_pad(pad)
+    return {**pad, "chat": chat, "attendees": attendees}
 
 
 @app.post("/api/live/sessions/{session_id}/pad/section")
@@ -6063,6 +6099,25 @@ async def api_live_pad_question(session_id: str, body: LivePadQuestion):
         raise HTTPException(status_code=400, detail="a valid email is required")
     return await _pad_add_question(session_id, session, email,
                                    (body.name or "").strip(), body.text)
+
+
+@app.post("/api/live/sessions/{session_id}/pad/chat")
+async def api_live_pad_chat(session_id: str, body: LivePadQuestion):
+    """Chat message from the in-app Virtual Room tab (RFE-C).
+
+    The popup posts to /api/live/pad/chat with a padSession, which carries its
+    own identity; the in-app tab has no pad-token claim, so it goes through the
+    app's bearer proxy and states its email here — the same trust model as
+    /pad/question above, and the same one every other /api/live/* route uses.
+    """
+    session = await _require_live_session(session_id)
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    role = "trainer" if live_sessions.is_trainer(email, session) else "learner"
+    return await _room_add_chat(session_id, session, {
+        "email": email, "name": (body.name or "").strip(),
+        "role": role, "text": body.text})
 
 
 @app.post("/api/live/sessions/{session_id}/pad/answer")
