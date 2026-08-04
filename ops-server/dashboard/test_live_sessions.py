@@ -300,3 +300,87 @@ if __name__ == "__main__":
             fn()
             print(f"ok {name}")
     print("all live-sessions tests passed")
+
+
+def test_join_error_allows_trainer_into_own_workshop():
+    """The trainer is never on their own roster but must be able to enter.
+
+    Regression: trainer could start a workshop and then get 403 joining it.
+    """
+    sess = {"trainerEmail": "trainer@dynatrace.com"}
+    assert ls.join_error("running", "trainer@dynatrace.com", set(), sess) is None
+    assert ls.join_error("open", "trainer@dynatrace.com", {"learner@x.com"}, sess) is None
+
+
+def test_join_error_still_blocks_strangers():
+    """Allowing the trainer must not open the room to everyone."""
+    sess = {"trainerEmail": "trainer@dynatrace.com"}
+    assert ls.join_error("running", "stranger@x.com", set(), sess) == (
+        403, "email is not on the session roster")
+
+
+def test_join_error_trainer_still_blocked_after_end():
+    """Trainer bypass is roster-only — lifecycle rules still apply."""
+    sess = {"trainerEmail": "trainer@dynatrace.com"}
+    assert ls.join_error("ended", "trainer@dynatrace.com", set(), sess)[0] == 409
+    assert ls.join_error("cancelled", "trainer@dynatrace.com", set(), sess)[0] == 409
+
+
+def test_join_error_without_session_keeps_roster_rule():
+    """Callers that pass no session (older call sites) behave exactly as before."""
+    assert ls.join_error("running", "someone@x.com", set()) == (
+        403, "email is not on the session roster")
+
+
+# ── Pacing gate: "unlock path with mine" ─────────────────────────────────────
+
+def test_pacing_state_defaults_to_locked():
+    assert ls.pacing_state({}) == {"trainerStep": 0, "unlockPath": False}
+    assert ls.pacing_state(None) == {"trainerStep": 0, "unlockPath": False}
+
+
+def test_pacing_state_reads_stored_strings():
+    # Redis hash values are always strings.
+    assert ls.pacing_state({"trainerStep": "4", "unlockPath": "1"}) == {
+        "trainerStep": 4, "unlockPath": True}
+
+
+def test_trainer_always_sees_every_solution():
+    """Trainers are not always experts on the content — and Run solution is how
+    they recover a broken demo in front of a room."""
+    sealed = {"trainerStep": "0", "unlockPath": "0"}
+    assert ls.solution_visible(1, sealed, is_trainer=True) is True
+    assert ls.solution_visible(99, sealed, is_trainer=True) is True
+
+
+def test_learner_sees_nothing_while_toggle_is_off():
+    """A training that should never reveal answers leaves the toggle off."""
+    s = {"trainerStep": "9", "unlockPath": "0"}
+    assert ls.solution_visible(1, s) is False
+
+
+def test_learner_sees_only_steps_the_trainer_moved_PAST():
+    # Trainer on 4 → 1,2,3 released; 4 still sealed (they are teaching it now).
+    s = {"trainerStep": "4", "unlockPath": "1"}
+    assert [ls.solution_visible(n, s) for n in (1, 2, 3)] == [True, True, True]
+    assert ls.solution_visible(4, s) is False
+    assert ls.solution_visible(5, s) is False
+
+
+def test_moving_on_releases_exactly_one_more_step():
+    on4 = {"trainerStep": "4", "unlockPath": "1"}
+    on5 = {"trainerStep": "5", "unlockPath": "1"}
+    assert ls.solution_visible(4, on4) is False
+    assert ls.solution_visible(4, on5) is True
+    assert ls.solution_visible(5, on5) is False
+
+
+def test_trainer_on_first_step_releases_nothing():
+    s = {"trainerStep": "1", "unlockPath": "1"}
+    assert ls.solution_visible(1, s) is False
+
+
+def test_unparseable_step_is_treated_as_sealed():
+    s = {"trainerStep": "3", "unlockPath": "1"}
+    assert ls.solution_visible("not-a-number", s) is True  # -1 < 3
+    assert ls.solution_visible(None, s) is True

@@ -266,3 +266,24 @@ if __name__ == "__main__":
             fn()
             print(f"ok {name}")
     print("all live-progress tests passed")
+
+
+def test_since_timestamp_future_scheduled_at_clamps_to_floor():
+    """A scheduled-but-not-started workshop must not produce a FUTURE lower bound.
+
+    Regression for TIMEFRAME_END_BEFORE_START: the query has no explicit `to:`,
+    so Grail ends it at now. A `from:` after now made Grail reject the whole
+    query and the cohort board 502'd.
+    """
+    now = datetime(2026, 8, 4, 16, 51, tzinfo=timezone.utc)
+    session = {"scheduledAt": "2026-08-12T17:50:00Z", "startedAt": "", "createdAt": "2026-08-04T10:00:00Z"}
+    since = lp.since_timestamp(session, now=now)
+    assert since == "2026-08-01T16:51:00Z", since
+    assert since < now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_since_timestamp_started_workshop_uses_started_at():
+    """A running workshop still anchors on startedAt minus the grace window."""
+    now = datetime(2026, 8, 4, 16, 51, tzinfo=timezone.utc)
+    session = {"startedAt": "2026-08-04T14:00:00Z", "scheduledAt": "2026-08-04T14:00:00Z"}
+    assert lp.since_timestamp(session, now=now) == "2026-08-04T12:00:00Z"

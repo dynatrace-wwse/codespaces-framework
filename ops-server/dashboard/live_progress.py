@@ -80,6 +80,15 @@ def since_timestamp(session, now=None, grace_hours=2, max_lookback_hours=72) -> 
     max_lookback_hours so an old, long-running workshop can never turn into an
     unbounded Grail scan; falls back to the same clamp when no usable
     timestamp is on the session.
+
+    The clamp is two-sided. `scheduledAt` is a PLANNED time, so on a workshop
+    that has not started yet it is in the FUTURE — and the query has no explicit
+    `to:`, so Grail ends it at now. A future lower bound therefore produced
+    end-before-start and Grail rejected the whole query with
+    TIMEFRAME_END_BEFORE_START, surfacing as a 502 on the cohort board. Anything
+    at or after `now` is pulled back to the floor: before a workshop starts there
+    is by definition no activity to find, so the widest sane window is correct
+    and costs nothing.
     """
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(hours=max_lookback_hours)
@@ -96,7 +105,7 @@ def since_timestamp(session, now=None, grace_hours=2, max_lookback_hours=72) -> 
             parsed = parsed.replace(tzinfo=timezone.utc)
         anchor = parsed - timedelta(hours=grace_hours)
         break
-    if anchor is None or anchor < floor:
+    if anchor is None or anchor < floor or anchor >= now:
         anchor = floor
     return anchor.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

@@ -346,3 +346,91 @@ pre{{white-space:pre-wrap;word-break:break-word;background:#f6f6f4;
 
     parts.append("</body>\n</html>")
     return "\n".join(parts)
+
+
+# ── Raise hand (live teaching) ───────────────────────────────────────────────
+#
+# Modelled on presence, not on chat: a raised hand is STATE ("this person is
+# stuck right now"), not an event. A hash keyed by email means raising twice is
+# idempotent, lowering is a delete, and the trainer's board always shows the
+# current set rather than a log to reconcile. Same 2-minute-style staleness
+# rule does NOT apply — a hand stays up until it is lowered, because a learner
+# who is stuck stays stuck whether or not their laptop is awake.
+
+HAND_NOTE_MAX_CHARS = 280
+
+
+def hand_entry(name, step="", note="", now=None):
+    """The stored value for one raised hand."""
+    now = now or datetime.now(timezone.utc)
+    return json.dumps({
+        "name": strip_html(name).strip()[:80],
+        "step": strip_html(str(step)).strip()[:80],
+        "note": strip_html(note).strip()[:HAND_NOTE_MAX_CHARS],
+        "ts": now.astimezone(timezone.utc).isoformat(),
+    })
+
+
+def shape_hands(raw):
+    """Redis hash (email -> JSON) -> list, oldest raised first.
+
+    Oldest first is deliberate: it is a queue. The person who has been stuck
+    longest is the one the trainer should reach next.
+    """
+    out = []
+    for email, value in (raw or {}).items():
+        try:
+            data = json.loads(value)
+        except (ValueError, TypeError):
+            data = {}
+        out.append({
+            "email": email,
+            "name": data.get("name") or "",
+            "step": data.get("step") or "",
+            "note": data.get("note") or "",
+            "ts": data.get("ts") or "",
+        })
+    out.sort(key=lambda h: h["ts"])
+    return out
+
+
+# ── Broadcast ────────────────────────────────────────────────────────────────
+#
+# A stream, like chat: a broadcast is an event with a history the trainer may
+# want in the export, and late joiners should be able to see what was already
+# announced. Only the LATEST is pushed at learners as a modal — replaying every
+# announcement at someone who joins at minute 50 would be a wall of dialogs.
+
+BROADCAST_MAX_CHARS = 500
+
+
+def broadcast_fields(text, name="", now=None):
+    """XADD field dict for one broadcast."""
+    now = now or datetime.now(timezone.utc)
+    return {
+        "text": strip_html(text).strip()[:BROADCAST_MAX_CHARS],
+        "name": strip_html(name).strip()[:80],
+        "ts": now.astimezone(timezone.utc).isoformat(),
+    }
+
+
+def shape_broadcasts(entries):
+    """Stream entries -> list, newest LAST (chronological, like chat)."""
+    out = []
+    for entry_id, fields in (entries or ()):
+        text = (fields or {}).get("text") or ""
+        if not text:
+            continue
+        out.append({
+            "mid": entry_id,
+            "text": text,
+            "name": (fields or {}).get("name") or "",
+            "ts": (fields or {}).get("ts") or "",
+        })
+    return out
+
+
+def latest_broadcast(entries):
+    """The one broadcast a learner should be shown, or None."""
+    shaped = shape_broadcasts(entries)
+    return shaped[-1] if shaped else None

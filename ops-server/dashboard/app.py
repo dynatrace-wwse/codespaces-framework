@@ -3935,6 +3935,31 @@ async def api_arena_trainings(tenant: str = ""):
     return trainings
 
 
+# Ceiling on any caller-supplied session lifetime. A full-day workshop plus
+# overrun still fits; nothing can ask for a daemon that outlives a working day.
+MAX_SESSION_HOURS = 12
+
+# Slack added to a workshop's scheduled duration when sizing its environments.
+# Workshops start late, run over, and learners finish the last step after the
+# room closes — an environment that dies on the scheduled minute is a support
+# ticket, so it outlives the plan by an hour on each side.
+WORKSHOP_ENV_GRACE_HOURS = 2
+
+
+def workshop_session_hours(session) -> int:
+    """Environment lifetime for a workshop, in hours (0 = use the default).
+
+    durationMinutes is optional; without it the default applies.
+    """
+    try:
+        minutes = int(str((session or {}).get("durationMinutes") or "").strip() or 0)
+    except (TypeError, ValueError):
+        return 0
+    if minutes <= 0:
+        return 0
+    return min(MAX_SESSION_HOURS, -(-minutes // 60) + WORKSHOP_ENV_GRACE_HOURS)
+
+
 class ArenaProvisionRequest(BaseModel):
     trainingId: str
     userId: str
@@ -3953,6 +3978,12 @@ class ArenaProvisionRequest(BaseModel):
     # Branch to check the training repo out from (the app passes the branch its
     # lab content was imported from). Empty → the catalog's branch (main).
     ref: str = ""
+    # Lifetime override in hours (0 = use ORBITAL_SESSION_HOURS, default 2).
+    # A workshop sets this from its scheduled duration plus a grace window: at
+    # the 2h default a 120-minute workshop killed every learner's environment
+    # exactly as the session ended, and earlier still if it started late.
+    # Clamped server-side — this is caller-supplied.
+    sessionHours: int = 0
 
 
 def _gen3_platform_provisioner(tenant_url: str):
@@ -4052,8 +4083,12 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     job_id = f"enablement-{_uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     # Cap Orbital-hosted training sessions at 2h so no daemon runs unbounded; the
-    # expiry reaper force-kills it at expires_at. Overridable via env.
+    # expiry reaper force-kills it at expires_at. Overridable via env, and per
+    # request by a workshop that knows it runs longer than the default (clamped
+    # to MAX_SESSION_HOURS so a caller can never ask for an unbounded daemon).
     session_hours = int(os.environ.get("ORBITAL_SESSION_HOURS", "2"))
+    if getattr(req, "sessionHours", 0):
+        session_hours = max(session_hours, min(int(req.sessionHours), MAX_SESSION_HOURS))
     expires_at = (now.replace(microsecond=0) + timedelta(hours=session_hours)).isoformat()
 
     # Environment follows the content: a lab imported from a branch runs its
@@ -5078,6 +5113,7 @@ class LiveSessionCreate(BaseModel):
     timezone: str = ""            # IANA zone name
     durationMinutes: int = 0
     maxSeats: int = 0             # 0 = unlimited
+    description: str = ""         # ≤250 chars, shown to learners before start
 
 
 class LiveSessionJoin(BaseModel):
@@ -5184,6 +5220,9 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
     # Optional workshop fields — only written when present so pre-workshop
     # sessions (and their payloads) stay byte-identical.
     session.update({k: v for k, v in schedule.items() if v})
+    description = live_sessions.clean_description(body.description)
+    if description:
+        session["description"] = description
     sess_key, roster_key, _ = _live_keys(session_id)
     await pool.hset(sess_key, mapping=session)
     if fields["roster"]:
@@ -5268,7 +5307,7 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     roster = await pool.smembers(roster_key)
-    err = live_sessions.join_error(session.get("state", ""), email, roster)
+    err = live_sessions.join_error(session.get("state", ""), email, roster, session)
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
     await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
@@ -5376,8 +5415,21 @@ async def api_live_session_delete(session_id: str, request: Request, trainerEmai
     workshop is history, not deletable; cancel/end + the 7-day TTL cover those).
     403 on trainerEmail mismatch, 404 if already gone. Removes every key AND the
     index entry, so the workshop vanishes for the whole cohort.
-    Auth: service bearer or signed-in writer."""
+    Auth: service bearer or signed-in writer.
+
+    Accepts trainerEmail as a QUERY param or in the BODY. Its three sibling
+    transitions (end/cancel/open-registration) all take it in the body, so
+    sending it that way here used to fall through to an empty string and 403 —
+    a caller doing the obvious thing got "not the trainer" on their own
+    workshop, with nothing to indicate the shape was the problem.
+    """
     await _require_service_or_writer(request)
+    if not trainerEmail:
+        try:
+            body = await request.json()
+            trainerEmail = (body or {}).get("trainerEmail", "") or ""
+        except Exception:
+            trainerEmail = ""
     sess_key, _, _ = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -5520,6 +5572,10 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                 ref=session.get("ref", ""),
                 dtEnv=per.get("dtEnv") or {},
                 dtTokenIds=per.get("dtTokenIds") or [],
+                # Size the environment to the workshop, not to the 2h default —
+                # otherwise a 120-minute workshop reaps every learner's
+                # environment exactly as the session ends.
+                sessionHours=workshop_session_hours(session),
             ), request)
             results.append({
                 "email":  email,
@@ -5542,6 +5598,135 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
              sum(1 for r in results if r["status"] == "not-joined"),
              sum(1 for r in results if r["status"] == "error"))
     return {"results": results}
+
+
+class LiveSessionUpdate(BaseModel):
+    """Editable fields of a workshop that has not started."""
+    trainerEmail: str = ""
+    title: str | None = None
+    description: str | None = None
+    roster: list[str] | None = None
+    scheduledAt: str | None = None
+    timezone: str | None = None
+    durationMinutes: int | None = None
+    maxSeats: int | None = None
+
+
+@app.patch("/api/live/sessions/{session_id}")
+async def api_live_session_update(session_id: str, body: LiveSessionUpdate, request: Request):
+    """Trainer edits a workshop before it starts.
+
+    Creating a workshop was one-shot: a typo in the title, a wrong start time or
+    a missing attendee meant deleting it and rebuilding the roster by hand. Only
+    scheduled/open are editable — once it is running the cohort has already acted
+    on the details, and changing the training under them is not an edit.
+
+    Every field is optional and only supplied fields are touched. The roster is
+    REPLACED when supplied (that is what the editor sends), but emails already
+    joined are preserved even if dropped from the list — someone who is in the
+    room does not silently lose their seat because the trainer retyped the list.
+    """
+    await _require_service_or_writer(request)
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    state = session.get("state", "")
+    if state not in ("scheduled", "open"):
+        raise HTTPException(status_code=409, detail=f"a {state} workshop cannot be edited")
+
+    updates: dict[str, str] = {}
+    if body.title is not None:
+        title = (body.title or "").strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be empty")
+        updates["title"] = title
+    if body.description is not None:
+        updates["description"] = live_sessions.clean_description(body.description)
+    try:
+        sched = live_sessions.validate_schedule(
+            body.scheduledAt if body.scheduledAt is not None else session.get("scheduledAt", ""),
+            body.timezone if body.timezone is not None else session.get("timezone", ""),
+            body.durationMinutes if body.durationMinutes is not None else session.get("durationMinutes", ""),
+            body.maxSeats if body.maxSeats is not None else session.get("maxSeats", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    for field, value in sched.items():
+        if value != "":
+            updates[field] = value
+
+    if updates:
+        await pool.hset(sess_key, mapping=updates)
+
+    if body.roster is not None:
+        wanted = set(live_sessions.normalize_roster(body.roster))
+        joined = {live_sessions.normalize_email(e) for e in (await pool.hgetall(joined_key)) or {}}
+        # Never evict someone who is already in the room.
+        keep = wanted | joined
+        current = {live_sessions.normalize_email(e) for e in await pool.smembers(roster_key)}
+        removed = current - keep
+        added = keep - current
+        if removed:
+            await pool.srem(roster_key, *removed)
+        if added:
+            await pool.sadd(roster_key, *added)
+
+    session = await pool.hgetall(sess_key)
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    log.info("Live session %s edited by %s (%s)", session_id, body.trainerEmail,
+             ", ".join(sorted(updates)) or "roster only")
+    return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
+@app.post("/api/live/sessions/{session_id}/terminate-all")
+async def api_live_session_terminate_all(session_id: str, body: LiveSessionTrainerAction):
+    """Terminate every environment provisioned for this workshop.
+
+    Ending a workshop deliberately does NOT kill environments — a learner may
+    still be finishing, and the room closing should not delete their work. That
+    leaves the trainer holding the cleanup, and at 100+ seats a forgotten
+    cleanup is 100+ live Codespaces burning capacity. This is that one button.
+
+    Matches on the arena job's (arena_user, training_id) against this workshop's
+    roster + trainer, so it can only ever reach environments belonging to this
+    workshop's participants for this workshop's training. Terminating is
+    idempotent — an already-terminating job is counted, not retried.
+    """
+    sess_key, roster_key, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    trainer = live_sessions.normalize_email(body.trainerEmail)
+    if not live_sessions.is_trainer(trainer, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+
+    participants = {live_sessions.normalize_email(e) for e in await pool.smembers(roster_key)}
+    participants.add(trainer)
+    training_id = (session.get("trainingId") or "").strip()
+
+    terminated, skipped = [], 0
+    async for key in pool.scan_iter(match="job:running:enablement-*"):
+        meta = await pool.hgetall(key)
+        if not meta:
+            continue
+        if (meta.get("training_id") or "").strip() != training_id:
+            continue
+        if live_sessions.normalize_email(meta.get("arena_user")) not in participants:
+            continue
+        job_id = meta.get("job_id") or key.rsplit(":", 1)[-1]
+        if meta.get("terminating") == "1":
+            skipped += 1
+            continue
+        await pool.hset(key, "terminating", "1")
+        await pool.publish("ops:terminate", job_id)
+        terminated.append(job_id)
+    log.info("live: terminate-all %s → %d terminated, %d already terminating",
+             session_id, len(terminated), skipped)
+    return {"terminated": terminated, "count": len(terminated),
+            "alreadyTerminating": skipped}
 
 
 @app.get("/api/live/sessions/{session_id}/readiness")
@@ -6074,6 +6259,28 @@ class LivePadSection(BaseModel):
     markdown: str = ""
 
 
+class LiveHand(BaseModel):
+    """Raise or lower one learner's hand."""
+    email: str = ""
+    name: str = ""
+    step: str = ""
+    note: str = ""
+    raised: bool = True
+
+
+class LiveBroadcast(BaseModel):
+    """Trainer announcement pushed at every learner in the room."""
+    trainerEmail: str = ""
+    text: str = ""
+
+
+class LivePacing(BaseModel):
+    """Where the trainer is, and whether learners trail them into solutions."""
+    trainerEmail: str = ""
+    step: int = 0
+    unlockPath: bool | None = None
+
+
 class LivePadQuestion(BaseModel):
     email: str = ""
     name: str = ""
@@ -6153,7 +6360,117 @@ async def api_live_pad_get(session_id: str, request: Request, email: str = ""):
                                  await _room_attendees(session_id, session),
                                  identity)
     pad = pad if full else masking.mask_pad(pad)
-    return {**pad, "chat": chat, "attendees": attendees}
+    hands = live_pad.shape_hands(await pool.hgetall(_live_hands_key(session_id)))
+    if not is_trainer:
+        # A learner may see THEIR OWN hand (so the button reflects reality) and
+        # nothing about anyone else's — a raised hand is an admission of being
+        # stuck, and the cohort is not entitled to that.
+        hands = [h for h in hands if h["email"] == caller]
+    return {**pad, "chat": chat, "attendees": attendees,
+            "hands": hands,
+            "broadcast": live_pad.latest_broadcast(
+                await pool.xrange(_live_broadcast_key(session_id))),
+            "pacing": live_sessions.pacing_state(session)}
+
+
+# ── Live teaching: raise hand, broadcast, pacing ─────────────────────────────
+#
+# All three land in the /pad payload above rather than getting their own poll:
+# the Virtual Classroom tab already polls it every 15 s, and the popup already
+# streams it. Anything added to only one of those two surfaces is invisible on
+# the other — the in-app tab cannot open an EventSource to Orbital.
+
+
+def _live_hands_key(session_id: str) -> str:
+    """Hash email -> JSON {name, step, note, ts} of currently-raised hands."""
+    return f"live:session:{session_id}:hands"
+
+
+def _live_broadcast_key(session_id: str) -> str:
+    """Stream of trainer announcements."""
+    return f"live:session:{session_id}:broadcast"
+
+
+@app.post("/api/live/sessions/{session_id}/hand")
+async def api_live_hand(session_id: str, body: LiveHand):
+    """Learner raises or lowers their hand.
+
+    Idempotent in both directions: the hash is keyed by email, so raising twice
+    keeps one entry and lowering an already-lowered hand is a no-op. Deliberately
+    NOT expiring like presence — someone who is stuck stays stuck whether or not
+    their laptop went to sleep. Only the trainer lowering it, or the learner
+    themselves, takes it down.
+    """
+    session = await _require_live_session(session_id)
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    if session.get("state") != "running":
+        raise HTTPException(status_code=409, detail="workshop is not running")
+    key = _live_hands_key(session_id)
+    if body.raised:
+        await pool.hset(key, email, live_pad.hand_entry(body.name, body.step, body.note))
+    else:
+        await pool.hdel(key, email)
+    return {"raised": bool(body.raised),
+            "count": await pool.hlen(key)}
+
+
+@app.post("/api/live/sessions/{session_id}/hand/clear")
+async def api_live_hand_clear(session_id: str, body: LiveHand):
+    """Trainer lowers someone's hand — "I've got you" / "handled"."""
+    session = await _require_live_session(session_id)
+    trainer = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_trainer(trainer, session):
+        raise HTTPException(status_code=403, detail="only the trainer may clear hands")
+    target = live_sessions.normalize_email(body.note or "")
+    key = _live_hands_key(session_id)
+    if target:
+        await pool.hdel(key, target)
+    else:
+        await pool.delete(key)
+    return {"count": await pool.hlen(key)}
+
+
+@app.post("/api/live/sessions/{session_id}/broadcast")
+async def api_live_broadcast(session_id: str, body: LiveBroadcast):
+    """Trainer announcement to the whole room.
+
+    A stream, not a hash: announcements have a history worth keeping in the
+    export, and a late joiner should be able to read what was already said.
+    Only the LATEST is pushed at learners as a modal — replaying every
+    announcement at someone who joins at minute 50 would be a wall of dialogs.
+    """
+    session = await _require_live_session(session_id)
+    trainer = live_sessions.normalize_email(body.trainerEmail)
+    if not live_sessions.is_trainer(trainer, session):
+        raise HTTPException(status_code=403, detail="only the trainer may broadcast")
+    text = live_pad.strip_html(body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    fields = live_pad.broadcast_fields(text, session.get("trainerEmail", ""))
+    mid = await pool.xadd(_live_broadcast_key(session_id), fields)
+    return {"mid": mid, "ts": fields["ts"]}
+
+
+@app.post("/api/live/sessions/{session_id}/pacing")
+async def api_live_pacing(session_id: str, body: LivePacing):
+    """Trainer publishes where they are, and whether solutions trail them.
+
+    See live_sessions.solution_visible: with unlockPath on, a learner may see
+    the solution for any step the trainer has already moved PAST. Moving from
+    step 3 to 4 releases step 3; step 4 stays sealed until they reach 5.
+    """
+    session = await _require_live_session(session_id)
+    trainer = live_sessions.normalize_email(body.trainerEmail)
+    if not live_sessions.is_trainer(trainer, session):
+        raise HTTPException(status_code=403, detail="only the trainer may set pacing")
+    sess_key, _, _ = _live_keys(session_id)
+    updates = {"trainerStep": str(max(0, int(body.step or 0)))}
+    if body.unlockPath is not None:
+        updates["unlockPath"] = "1" if body.unlockPath else "0"
+    await pool.hset(sess_key, mapping=updates)
+    return live_sessions.pacing_state({**session, **updates})
 
 
 @app.post("/api/live/sessions/{session_id}/pad/section")

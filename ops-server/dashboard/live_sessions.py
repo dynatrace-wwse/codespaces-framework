@@ -241,11 +241,19 @@ def on_roster(email, roster) -> bool:
     return normalize_email(email) in set(roster or ())
 
 
-def join_error(state, email, roster):
+def join_error(state, email, roster, session=None):
     """Return (http_status, detail) blocking a join, or None when allowed.
 
-    Joining is allowed in scheduled/open/running (late joiners OK)."""
-    if not on_roster(email, roster):
+    Joining is allowed in scheduled/open/running (late joiners OK).
+
+    The trainer may always join their OWN workshop without being on the roster.
+    A trainer is never on their own roster (the roster is the invite list), so
+    the plain membership check 403'd them out of their own room — they could
+    start it but never enter it. The trainer legitimately needs a seat: they
+    provision their own environment (WS-4/RFE-D) and appear in the Virtual
+    Classroom as an attendee.
+    """
+    if not on_roster(email, roster) and not is_trainer(email, session or {}):
         return 403, "email is not on the session roster"
     if state == "ended":
         return 409, "session has ended"
@@ -344,7 +352,8 @@ def is_listed(session, roster, email, tenant="") -> bool:
 # trainingId is the Orbital CATALOG id, which is not a repo name. ownerTenant is
 # deliberately NOT echoed — it is an internal scoping field (see is_listed).
 _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
-                    "cancelledAt", "repoUrl", "branch")
+                    "cancelledAt", "repoUrl", "branch", "description",
+                    "trainerStep", "unlockPath")
 
 
 def workshop_fields(session, email) -> dict:
@@ -485,3 +494,74 @@ def capacity_summary(workers, active_counts, needed) -> dict:
     return {"capacity": total_capacity, "active": total_active,
             "available": available, "needed": needed,
             "sufficient": available >= needed, "workers": items}
+
+
+# ── Trainer pacing / "unlock path with mine" ─────────────────────────────────
+#
+# Solutions are trainer-only by default (RFE-E). That is right for the default
+# case but it makes the trainer the ONLY unblock path, which does not survive a
+# 100-seat room: one person cannot walk five stuck learners through five
+# different steps at once.
+#
+# The pacing model instead ties learner solution visibility to where the TRAINER
+# has got to. The trainer always sees every solution (trainers are not always
+# experts on the content they deliver, and "Run solution" is how they recover a
+# broken demo). When they turn "unlock path with mine" on, a learner may see the
+# solution for any step the trainer has already MOVED PAST — strictly before the
+# trainer's current step. So the trainer walking from 3 to 4 releases step 3, and
+# step 4 stays sealed until they move to 5.
+#
+# The effect is that the answers trail the teaching by exactly one step: nobody
+# can read ahead, and nobody is ever permanently stuck on something the room has
+# already covered. A training that should never reveal answers simply leaves the
+# toggle off.
+
+PACING_FIELDS = ("trainerStep", "unlockPath")
+
+
+def _as_int(value, default=0):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def pacing_state(session) -> dict:
+    """The pacing fields of a session, normalized."""
+    session = session or {}
+    return {
+        "trainerStep": _as_int(session.get("trainerStep"), 0),
+        "unlockPath": str(session.get("unlockPath") or "") == "1",
+    }
+
+
+def solution_visible(step, session, is_trainer=False) -> bool:
+    """May THIS viewer see the solution for `step` in this workshop?
+
+    step is the learner's 1-based step number. The trainer always may. A learner
+    may only when the toggle is on AND the trainer has moved strictly past that
+    step.
+    """
+    if is_trainer:
+        return True
+    state = pacing_state(session)
+    if not state["unlockPath"]:
+        return False
+    return _as_int(step, -1) < state["trainerStep"]
+
+
+# ── Description (workshop RFE) ───────────────────────────────────────────────
+
+# Long enough for "what you'll build and what you need to bring", short enough
+# that it stays a summary and renders in a card without truncation logic.
+DESCRIPTION_MAX_CHARS = 250
+
+
+def clean_description(text) -> str:
+    """Normalize a workshop description: collapse whitespace, hard cap.
+
+    Truncates rather than rejecting — a description is a nicety, and losing a
+    workshop create to a 251st character would be a poor trade.
+    """
+    collapsed = " ".join(str(text or "").split())
+    return collapsed[:DESCRIPTION_MAX_CHARS]
