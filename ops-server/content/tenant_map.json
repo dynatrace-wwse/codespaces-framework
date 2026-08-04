@@ -1,10 +1,12 @@
 {
   "defaults": {
+    "dev": "all",
     "prod": "core",
-    "sprint": "all",
-    "dev": "all"
+    "sprint": "all"
   },
   "tenants": {
-    "geu80787": "all"
+    "geu80787": "all",
+    "sro97894": "se_demo",
+    "scu37051": "all"
   }
 }
