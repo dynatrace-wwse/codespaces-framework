@@ -20,7 +20,9 @@ Redis model (streams, NOT pub/sub):
 """
 
 import html
+import json
 import re
+from datetime import datetime, timezone
 
 from dashboard import live_sessions
 
@@ -28,6 +30,23 @@ SECTION_KEYS = ("welcome", "solutions")
 ROLES = ("trainer", "learner")
 
 QUESTION_MAX_CHARS = 2000
+
+# Chat (RFE-C) is conversation, not the structured record — a chat line that
+# needs 2000 characters belongs in the Q&A panel, which keeps it, exports it
+# and gets it answered.
+CHAT_MAX_CHARS = 1000
+
+# A 100+ attendee bootcamp room needs a floor under a flood. 5 messages per
+# 10 s is faster than anyone types a real sentence, so only scripted or pasted
+# bursts reach it — a legitimate fast exchange never does.
+CHAT_RATE_LIMIT = 5
+CHAT_RATE_WINDOW_SECONDS = 10
+
+# Someone is "in the room" while their Virtual Room holds an SSE connection,
+# which re-stamps their heartbeat every ~15 s. Two minutes is eight missed
+# beats: long enough to survive a sleeping laptop or a reconnect, short enough
+# that the rail is not a list of ghosts.
+PRESENCE_WINDOW_SECONDS = 120
 
 # TTLs — the single-use handoff token mirrors shell:token (60 s); the claimed
 # pad session outlives a full workshop day; the export matches a month of
@@ -45,14 +64,14 @@ def strip_html(text) -> str:
     return html.unescape(_TAG_RE.sub("", text or ""))
 
 
-def clean_text(text, field="text") -> str:
-    """Normalize a question/answer body: strip HTML + whitespace, enforce the
-    2000-char cap. Raises ValueError (→ HTTP 400) when empty or too long."""
+def clean_text(text, field="text", limit=QUESTION_MAX_CHARS) -> str:
+    """Normalize a question/answer/chat body: strip HTML + whitespace, enforce
+    the cap. Raises ValueError (→ HTTP 400) when empty or too long."""
     cleaned = strip_html(text).strip()
     if not cleaned:
         raise ValueError(f"{field} is required")
-    if len(cleaned) > QUESTION_MAX_CHARS:
-        raise ValueError(f"{field} exceeds {QUESTION_MAX_CHARS} characters")
+    if len(cleaned) > limit:
+        raise ValueError(f"{field} exceeds {limit} characters")
     return cleaned
 
 
@@ -62,6 +81,140 @@ def validate_role(role) -> str:
     if role not in ROLES:
         raise ValueError("role must be 'trainer' or 'learner'")
     return role
+
+
+# ── Chat + attendee rail (RFE-C) ──────────────────────────────────────────────
+# Chat is deliberately a SEPARATE stream from Q&A. Q&A is the structured,
+# answered, exported record of the workshop; chat is the conversation around
+# it. Merging them would cost the export its shape.
+
+def _id_tuple(stream_id) -> tuple[int, int]:
+    """'1722700000123-4' -> (1722700000123, 4).
+
+    Redis stream ids order numerically per component, so they must never be
+    compared as strings — '10-0' sorts before '9-0' lexicographically."""
+    ms, _, seq = str(stream_id or "0-0").partition("-")
+    try:
+        return int(ms), int(seq or 0)
+    except ValueError:
+        return 0, 0
+
+
+def clean_chat(text) -> str:
+    """A chat line: same HTML stripping as Q&A, shorter cap."""
+    return clean_text(text, field="message", limit=CHAT_MAX_CHARS)
+
+
+def rate_limit_error(count):
+    """Return (429, detail) when the sender has spent their window, else None.
+
+    `count` is the value AFTER the incrementing INCR, so the Nth message of a
+    window is allowed and the N+1th is refused."""
+    if count > CHAT_RATE_LIMIT:
+        return 429, (f"you are sending messages too quickly — "
+                     f"{CHAT_RATE_LIMIT} per {CHAT_RATE_WINDOW_SECONDS}s")
+    return None
+
+
+def assemble_chat(entries, pins=(), cleared_before="") -> list[dict]:
+    """[(stream_entry_id, fields)] → chat messages in arrival order.
+
+    `pins` are the message ids the trainer pinned; `cleared_before` is the id
+    of the last message a "clear the room" covered. Cleared messages drop out
+    of the view but stay in the stream — the clear is a soft delete, so the
+    record survives its 7-day TTL for an audit even though the room, and the
+    export handed to the cohort, never show it again."""
+    watermark = _id_tuple(cleared_before) if cleared_before else None
+    pinned = set(pins or ())
+    out = []
+    for entry_id, fields in entries or []:
+        if watermark and _id_tuple(entry_id) <= watermark:
+            continue
+        out.append({
+            "mid": entry_id,
+            "email": fields.get("email", ""),
+            "name": fields.get("name", ""),
+            "role": fields.get("role", ""),
+            "text": fields.get("text", ""),
+            "ts": fields.get("ts", ""),
+            "pinned": entry_id in pinned,
+        })
+    return out
+
+
+def display_name(name, email) -> str:
+    """A name to show in the rail. Falls back to the local part of the email
+    so a row is never blank, and never to the full address — the rail is read
+    by learners whose view of everyone else is masked."""
+    name = (name or "").strip()
+    return name or str(email or "").partition("@")[0]
+
+
+def is_present(last_seen, now=None) -> bool:
+    """Was this heartbeat stamped inside the presence window?"""
+    if not last_seen:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(last_seen))
+    except ValueError:
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return 0 <= (now - seen).total_seconds() <= PRESENCE_WINDOW_SECONDS
+
+
+def _presence_record(raw) -> dict:
+    """Presence values are JSON ({name, role, ts}); tolerate a bare ISO string
+    so a heartbeat written by an older build still counts as presence."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"ts": str(raw)}
+    return parsed if isinstance(parsed, dict) else {"ts": str(raw)}
+
+
+def shape_attendees(joined, tenants, session, presence, now=None) -> list[dict]:
+    """The Virtual Room's right rail: everyone in this workshop, the tenant
+    they joined from, and whether they are in the room right now.
+
+    Presence here means ROOM presence — an open Virtual Room heartbeat — not
+    training activity. The two are different claims: a learner can be deep in
+    the lab with the room closed. The rail says "who is here", so it answers
+    exactly that and leaves lab progress to the Workshop Board.
+
+    The trainer is always a row even though trainers never "join" their own
+    session, and rows sort trainer → present → name so the useful half of a
+    100-person cohort stays above the fold."""
+    now = now or datetime.now(timezone.utc)
+    joined, tenants, presence = joined or {}, tenants or {}, presence or {}
+    trainer = live_sessions.normalize_email((session or {}).get("trainerEmail", ""))
+
+    emails = {live_sessions.normalize_email(e) for e in joined}
+    emails.update(live_sessions.normalize_email(e) for e in presence)
+    emails.discard("")
+    if trainer:
+        emails.add(trainer)
+
+    rows = []
+    for email in emails:
+        record = _presence_record(presence.get(email))
+        is_trainer = bool(trainer) and email == trainer
+        rows.append({
+            "email": email,
+            "name": display_name(record.get("name"), email),
+            "role": "trainer" if is_trainer else "learner",
+            "tenant": tenants.get(email, ""),
+            "present": is_present(record.get("ts"), now),
+            "joinedAt": joined.get(email, ""),
+        })
+    rows.sort(key=lambda r: (r["role"] != "trainer", not r["present"],
+                             r["name"].lower(), r["email"]))
+    return rows
 
 
 def section_error(key, email, session):
@@ -122,15 +275,16 @@ def _esc(text) -> str:
     return html.escape(text or "", quote=True)
 
 
-def render_export(session, sections, qa) -> str:
-    """Standalone, print-friendly HTML snapshot of the pad (sections + full
-    Q&A) — stored as live:pad:{id}:export on the end/cancel transition."""
+def render_export(session, sections, qa, chat=()) -> str:
+    """Standalone, print-friendly HTML snapshot of the Virtual Room (sections
+    + full Q&A + the chat transcript) — stored as live:pad:{id}:export on the
+    end/cancel transition."""
     title = session.get("title", "") or "Workshop"
     parts = [f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Workshop Pad · {_esc(title)}</title>
+<title>Virtual Room · {_esc(title)}</title>
 <style>
 body{{font-family:Georgia,'Times New Roman',serif;max-width:820px;margin:0 auto;
   padding:32px 24px;color:#1a1a2e;background:#fff;line-height:1.55}}
@@ -144,6 +298,11 @@ pre{{white-space:pre-wrap;word-break:break-word;background:#f6f6f4;
 .q .who{{font-weight:bold;font-size:13px}}
 .q .text{{margin:4px 0 0 0}}
 .a{{margin:8px 0 0 24px;padding-left:12px;border-left:3px solid #888}}
+.c{{margin:10px 0;page-break-inside:avoid}}
+.c .who{{font-weight:bold;font-size:13px}}
+.c .text{{margin:2px 0 0 0}}
+.pin{{font-size:11px;color:#7a5c00;background:#fdf3d0;border:1px solid #e6d08a;
+      border-radius:3px;padding:0 4px;margin-left:6px}}
 .ts{{color:#888;font-size:11px;font-weight:normal;margin-left:6px}}
 @media print{{body{{padding:0}}}}
 </style>
@@ -170,5 +329,20 @@ pre{{white-space:pre-wrap;word-break:break-word;background:#f6f6f4;
                       f'<span class="ts">{_esc(answer.get("ts", ""))}</span></div>'
                       f'<p class="text">{_esc(answer.get("text", ""))}</p></div>')
         parts.append(block + "</div>")
+
+    # The chat transcript is frozen alongside the Q&A so the export is the
+    # whole room, not half of it. Messages a trainer cleared are already gone
+    # from `chat` — a soft delete the cohort's copy must respect.
+    parts.append("<h2>Chat</h2>")
+    if not chat:
+        parts.append("<p>No chat messages.</p>")
+    for message in chat or []:
+        pin = ' <span class="pin">pinned</span>' if message.get("pinned") else ""
+        parts.append(
+            f'<div class="c"><span class="who">'
+            f'{_esc(message.get("name") or message.get("email", ""))}</span>{pin}'
+            f'<span class="ts">{_esc(message.get("ts", ""))}</span>'
+            f'<p class="text">{_esc(message.get("text", ""))}</p></div>')
+
     parts.append("</body>\n</html>")
     return "\n".join(parts)

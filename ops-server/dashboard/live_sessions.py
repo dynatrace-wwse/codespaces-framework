@@ -20,6 +20,7 @@ Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
   live:joincode:{code}      str   sessionId (join-by-code lookup, code UPPER)
 """
 
+import re
 import secrets
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -68,10 +69,21 @@ FOREIGN_TENANT_MESSAGE = "provisions on entry from their own tenant"
 NOT_JOINED_MESSAGE = "hasn't joined yet — will provision on entry"
 
 
+_TENANT_RUNTIME_SUFFIX = re.compile(r"^(https?://[a-z0-9]+)-\d{1,3}(\.)")
+
+
 def normalize_tenant(tenant) -> str:
     """Canonical tenant-URL form for equality checks: trimmed, lowercased,
-    no trailing slash (the app sends https://<env>.apps.dynatrace.com)."""
-    return (tenant or "").strip().rstrip("/").lower()
+    no trailing slash (the app sends https://<env>.apps.dynatrace.com).
+
+    The app-function runtime's getEnvironmentUrl() returns the environment with a
+    numeric suffix — https://sro97894-1.apps.dynatrace.com — while the browser
+    sends the bare id. Both name the same tenant, so the suffix is stripped;
+    without that, one side joining from the browser and the other from a function
+    compares unequal and provision-all reports a false "foreign-tenant" skip.
+    """
+    t = (tenant or "").strip().rstrip("/").lower()
+    return _TENANT_RUNTIME_SUFFIX.sub(r"\1\2", t)
 
 
 def provision_skip_status(has_joined, joined_tenant, workshop_tenant):
@@ -121,7 +133,12 @@ def validate_create(title, training_id, trainer_email, roster) -> dict:
     """Validate + normalize a create request.
 
     Raises ValueError (→ HTTP 400) when title/trainingId/trainerEmail is
-    missing or the roster has no valid email after normalization.
+    missing.
+
+    The roster MAY be empty (WS-2): every session gets a join code
+    unconditionally and join-by-code APPENDS the joiner to the roster, so a
+    code-only workshop is fully supported by the data model. The old
+    "at least one valid email" rule rejected that legitimate case.
     """
     title = (title or "").strip()
     training_id = (training_id or "").strip()
@@ -132,11 +149,8 @@ def validate_create(title, training_id, trainer_email, roster) -> dict:
         raise ValueError("trainingId is required")
     if not is_valid_email(trainer):
         raise ValueError("a valid trainerEmail is required")
-    members = normalize_roster(roster)
-    if not members:
-        raise ValueError("roster must contain at least one valid email")
     return {"title": title, "trainingId": training_id,
-            "trainerEmail": trainer, "roster": members}
+            "trainerEmail": trainer, "roster": normalize_roster(roster)}
 
 
 # ── Workshop scheduling (EPIC-002) ────────────────────────────────────────────
@@ -284,18 +298,40 @@ def apply_transition(state, action) -> tuple[str, bool]:
 
 # ── Response shaping ──────────────────────────────────────────────────────────
 
-def is_listed(session, roster, email) -> bool:
+def is_listed(session, roster, email, tenant="") -> bool:
     """Listing filter: non-ended sessions where the email is the trainer or
-    on the roster."""
+    on the roster.
+
+    Tenant scoping (WS-1) applies to the TRAINER side only. A workshop belongs
+    to the tenant it was created from (`ownerTenant`), so a trainer signed into
+    another tenant no longer sees it under "your workshops" — that was the
+    reported "admin of tenant 1 sees a workshop created in tenant 2".
+
+    Learners are NEVER tenant-filtered: joining a workshop from whatever tenant
+    the learner runs is the whole point of a cross-tenant workshop.
+
+    Backward compatible in both directions: a session without `ownerTenant`
+    (created before this change) and a caller that sends no tenant (older app)
+    both keep the previous, unscoped behavior.
+    """
     if not session or session.get("state") == "ended":
         return False
-    return is_trainer(email, session) or on_roster(email, roster)
+    if on_roster(email, roster):
+        return True
+    if not is_trainer(email, session):
+        return False
+    owner = normalize_tenant(session.get("ownerTenant"))
+    caller = normalize_tenant(tenant)
+    return not (owner and caller) or owner == caller
 
 
 # Optional workshop fields echoed in payloads only when stored on the hash —
 # absent fields add no keys, keeping pre-workshop payloads byte-identical.
+# repoUrl/branch resolve the content namespace for learners (WS-3): the stored
+# trainingId is the Orbital CATALOG id, which is not a repo name. ownerTenant is
+# deliberately NOT echoed — it is an internal scoping field (see is_listed).
 _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
-                    "cancelledAt")
+                    "cancelledAt", "repoUrl", "branch")
 
 
 def workshop_fields(session, email) -> dict:
@@ -371,6 +407,28 @@ def readiness_state(meta, livelog) -> str:
     if meta.get("worker_id") in ("queued", ""):
         return "queued"
     return "provisioning"
+
+
+TRAINER_ROLE = "trainer"
+LEARNER_ROLE = "learner"
+
+
+def roster_targets(roster, trainer_email, include_trainer) -> list[tuple[str, str]]:
+    """(email, role) pairs that provision-all and the readiness board walk.
+
+    WS-4: a trainer runs the lab alongside the cohort, so they get an
+    environment and a board row of their own. Appended only when asked for and
+    only when they are not already an invited learner — a trainer who put
+    themselves on the roster stays a single 'learner' row rather than
+    appearing twice.
+
+    Roster order is sorted for a stable board; the trainer is always last.
+    """
+    targets = [(e, LEARNER_ROLE) for e in sorted(roster or ())]
+    trainer = normalize_email(trainer_email)
+    if include_trainer and trainer and trainer not in set(roster or ()):
+        targets.append((trainer, TRAINER_ROLE))
+    return targets
 
 
 def failed_job_email(record, roster, training_id, since="") -> str | None:

@@ -77,7 +77,28 @@ DEPLOY_TIMEOUT = int(os.environ.get("DEPLOY_TIMEOUT", "600"))
 # Branch the deploy checkout is fast-forwarded to before every build, so a `git push`
 # is enough to ship — no manual rsync to the ops checkout. See _sync_repo().
 APP_DEPLOY_BRANCH = os.environ.get("APP_DEPLOY_BRANCH", "master")
+# Pin public deploys to an exact ref (tag or commit) instead of the branch tip.
+# Empty = follow origin/<APP_DEPLOY_BRANCH>, the historical behaviour.
+#
+# "Update now" in the app is public and tokenless, so an unpinned Orbital ships
+# whatever last landed on master to every tenant that clicks it — including a
+# build that has not been through QA. Setting this to a released tag decouples
+# "merged" from "publicly deployable"; move it when a version is signed off.
+APP_DEPLOY_REF = os.environ.get("APP_DEPLOY_REF", "").strip()
 REPO_SYNC_TIMEOUT = int(os.environ.get("REPO_SYNC_TIMEOUT", "90"))
+
+
+def deploy_ref() -> str:
+    """The git ref both the version check and the build resolve to."""
+    return APP_DEPLOY_REF or f"origin/{APP_DEPLOY_BRANCH}"
+
+
+async def _fetch_deploy_ref(git) -> tuple[int, str]:
+    """Fetch whatever `deploy_ref()` names. A plain branch fetch does not bring
+    tags down, so a pinned ref additionally needs --tags to be resolvable."""
+    if APP_DEPLOY_REF:
+        return await git("fetch", "--quiet", "--tags", "origin", APP_DEPLOY_BRANCH)
+    return await git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
 
 # Auto-deploy tenants — tenants whose client credentials Orbital holds, so a deploy to them
 # needs NO pasted token (auto). Every other tenant requires a token. Each is one env group:
@@ -165,7 +186,7 @@ def _missing_scopes(action: str, granted: str | None) -> list[str]:
     return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
 
 
-def _scope_warnings(allowlist: str, remote_grail: str) -> list[str]:
+def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "") -> list[str]:
     """Surface post-install steps that were SKIPPED because the deploy token lacked
     settings:objects:write. The deploy itself still succeeds (those steps are best-effort),
     but the operator must know cross-tenant forwarding wasn't configured — otherwise it
@@ -179,6 +200,14 @@ def _scope_warnings(allowlist: str, remote_grail: str) -> list[str]:
     if "token lacks settings" in (allowlist or ""):
         warnings.append(
             "outbound allowlist NOT updated: the deploy token is missing settings:objects:write.")
+    # An unseeded orbital-config is the loudest failure of the three: the app installs
+    # fine and then 401s on every provision, with nothing in the UI explaining why.
+    if (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or ""):
+        warnings.append(
+            f"Orbital token NOT configured ({orbital_config}): the app's functions will call "
+            f"Orbital unauthenticated and every environment action will fail with 401. Grant the "
+            f"deploy client app-settings:objects:write and re-deploy, or paste the token into the "
+            f"app's Orbital Server Configuration settings by hand.")
     return warnings
 
 
@@ -218,21 +247,25 @@ async def _latest_repo_version() -> tuple[str, str]:
             return 124, "timed out"
         return proc.returncode or 0, out.decode(errors="replace").strip()
 
-    rc, _ = await _git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
+    ref = deploy_ref()
+    rc, _ = await _fetch_deploy_ref(_git)
     if rc != 0:
         return _app_version(), "local"
-    rc, out = await _git("show", f"origin/{APP_DEPLOY_BRANCH}:app.config.json")
+    rc, out = await _git("show", f"{ref}:app.config.json")
     if rc != 0:
         return _app_version(), "local"
     try:
         cfg = json.loads(out)
-        return (cfg.get("app", {}).get("version") or cfg.get("version") or "?"), f"origin/{APP_DEPLOY_BRANCH}"
+        return (cfg.get("app", {}).get("version") or cfg.get("version") or "?"), ref
     except Exception:
         return _app_version(), "local"
 
 
 async def _sync_repo() -> tuple[bool, str]:
-    """Fast-forward the deploy checkout to origin/<APP_DEPLOY_BRANCH> before building.
+    """Move the deploy checkout to `deploy_ref()` before building.
+
+    That is origin/<APP_DEPLOY_BRANCH> by default, or the exact ref in APP_DEPLOY_REF
+    when public deploys are pinned to a released version.
 
     This makes `git push` the only step needed to ship the app — no manual rsync into the
     ops checkout. Best-effort: on any failure we log and let the deploy proceed with whatever
@@ -258,17 +291,18 @@ async def _sync_repo() -> tuple[bool, str]:
             return 124, "timed out"
         return proc.returncode or 0, out.decode(errors="replace").strip()
 
-    rc, msg = await _git("fetch", "--quiet", "origin", APP_DEPLOY_BRANCH)
+    ref = deploy_ref()
+    rc, msg = await _fetch_deploy_ref(_git)
     if rc != 0:
         return False, f"fetch failed: {msg[-300:]}"
     # Note whether dependencies changed so the operator knows to `npm ci` if a build fails.
-    _, lock_diff = await _git("diff", "--name-only", f"HEAD..origin/{APP_DEPLOY_BRANCH}", "--", "package-lock.json")
-    rc, msg = await _git("reset", "--hard", f"origin/{APP_DEPLOY_BRANCH}")
+    _, lock_diff = await _git("diff", "--name-only", f"HEAD..{ref}", "--", "package-lock.json")
+    rc, msg = await _git("reset", "--hard", ref)
     if rc != 0:
         return False, f"reset failed: {msg[-300:]}"
     _, head = await _git("rev-parse", "--short", "HEAD")
     suffix = " (package-lock changed — run `npm ci` if build fails)" if lock_diff else ""
-    return True, f"{APP_DEPLOY_BRANCH}@{head}{suffix}"
+    return True, f"{ref}@{head}{suffix}"
 
 
 async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
@@ -403,6 +437,10 @@ COE_TENANT_HOST = "wwse.apps.dynatrace.com"
 COE_TENANT_IDS = {"wwse", "geu80787"}
 REMOTE_GRAIL_SCHEMA = "app:my.dynatrace.enablements:remote-grail"
 REMOTE_GRAIL_SCHEMA_VERSION = "1.1"
+# App-settings (NOT classic settings) schema holding the Orbital service bearer —
+# settings/schemas/orbital-config.schema.json in the app repo. Unprefixed here because
+# the app-settings API resolves it within the Dt-App-Context app.
+ORBITAL_SCHEMA = "orbital-config"
 # Hosts the app's functions must reach for content delivery + manual GitHub imports
 # + forwarding training bizevents to the central tenant + (gen3 self-mint) the account SSO
 # and Account Management API so the app can mint per-user platform tokens with its own
@@ -530,6 +568,72 @@ async def _ensure_remote_grail(token: str, tenant_url: str) -> str:
         return f"remote-grail error: {exc}"
 
 
+def _orbital_service_token() -> str | None:
+    """The bearer the app's functions must present to Orbital.
+
+    Unlike the remote-grail token this is not a tenant credential — it is Orbital's
+    OWN service token (the same value `/api/arena/*` is gated with), so it lives in
+    plain `ORBITAL_TOKEN` rather than encrypted at rest. It is written into a
+    `secret`-typed app-settings property and is never logged or returned."""
+    return (os.environ.get("ORBITAL_TOKEN") or "").strip() or None
+
+
+async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
+    """Seed the app-settings object the app's functions read their Orbital bearer from.
+
+    Without it `getOrbitalToken()` (api/orbital.function.ts, api/codespace.function.ts)
+    finds nothing, calls Orbital unauthenticated, and every provision/terminate/exec on
+    that tenant fails with an opaque 401 that the admin has no way to diagnose from the
+    UI. Seeding it at deploy time is the difference between "the app works after
+    install" and "the app installs and then silently does nothing".
+
+    Idempotent and non-destructive: an object that already carries a token is left
+    alone — the tenant may legitimately hold a different valid one, and the API masks
+    secrets on read so we could not compare anyway. Only absent/empty is filled.
+
+    App-settings v2 is NOT the classic settings API: it needs the `Dt-App-Context` /
+    `Dt-App-Version` headers (which the platform injects for in-app callers but an
+    external caller must supply) and kebab-case query params. Best-effort — needs
+    app-settings:objects:write on the deploy token."""
+    orbital_token = _orbital_service_token()
+    if not orbital_token:
+        return "skipped (ORBITAL_TOKEN not configured)"
+    base = tenant_url.rstrip("/") + "/platform/app-settings/v2/objects"
+    h = {
+        "Authorization": f"Bearer {token}",
+        "Dt-App-Context": APP_ID,
+        "Dt-App-Version": _app_version(),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(base, headers=h, params={
+                "schema-id": ORBITAL_SCHEMA, "add-fields": "value"})
+            if r.status_code == 403:
+                return "skipped (token lacks app-settings:objects:write)"
+            if r.status_code != 200:
+                return f"skipped (app-settings read HTTP {r.status_code})"
+            items = r.json().get("items", [])
+            if items:
+                obj = items[0]
+                # Read-back is masked ("***…***"), so any non-empty value means the
+                # tenant already has one configured — don't clobber it.
+                if (obj.get("value") or {}).get("token"):
+                    return "already configured"
+                pr = await c.put(f"{base}/{obj['objectId']}",
+                                 headers={**h, "Content-Type": "application/json"},
+                                 json={"value": {"token": orbital_token}})
+                ok = pr.status_code in (200, 201, 204)
+                return "token seeded" if ok else f"seed failed (HTTP {pr.status_code})"
+            cr = await c.post(base, headers={**h, "Content-Type": "application/json"},
+                              json={"schemaId": ORBITAL_SCHEMA,
+                                    "value": {"token": orbital_token}})
+            ok = cr.status_code in (200, 201)
+            return "token seeded" if ok else f"seed failed (HTTP {cr.status_code}: {cr.text[:120]})"
+    except Exception as exc:
+        log.warning("orbital-config for %s: %s", tenant_url, exc)
+        return f"orbital-config error: {exc}"
+
+
 async def _register_in_content_service(user: str, tenant_url: str) -> dict | None:
     """Best-effort: add the tenant to the delivery table so its content can be managed."""
     try:
@@ -601,9 +705,11 @@ async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str
     # deploy — idempotent: skip if up-to-date, else install/upgrade
     res = await _deploy_with_status(token, tenant_url)
     remote_grail = ""
+    orbital_cfg = ""
     if res["status"] != "error":
         await _ensure_outbound_allowlist(token, tenant_url)
         remote_grail = await _ensure_remote_grail(token, tenant_url)  # auto-enable cross-tenant forwarding
+        orbital_cfg = await _ensure_orbital_config(token, tenant_url)  # so app functions can reach Orbital
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
         return HTMLResponse(_page(
@@ -616,7 +722,7 @@ async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str
                                         app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"],
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=app_url, profile=profile,
-                 remote_grail=remote_grail)
+                 remote_grail=remote_grail, orbital_config=orbital_cfg)
     if res["status"] == "up-to-date":
         head = f"App already up-to-date on <b>{tenant_id}</b> (v{res.get('to')}) — nothing to do."
     elif res["status"] == "upgraded":
@@ -773,11 +879,15 @@ async def deploy_callback(request: Request):
 
 @router.get("/api/deploy/latest-version")
 async def latest_version():
-    """The app version Orbital would deploy (origin/<branch> app.config.json). Tokenless — just a
+    """The app version Orbital would deploy (app.config.json at `deploy_ref()`). Tokenless — just a
     version string, no tenant credential involved. The app's Admin "Check for updates" compares
-    this against its own baked-in installed version (no platform token needed for the check)."""
+    this against its own baked-in installed version (no platform token needed for the check).
+
+    `pinned` tells an admin whether they are being offered a released version or
+    the moving tip of the branch."""
     version, source = await _latest_repo_version()
-    return {"version": version, "branch": APP_DEPLOY_BRANCH, "source": source}
+    return {"version": version, "branch": APP_DEPLOY_BRANCH, "source": source,
+            "ref": deploy_ref(), "pinned": bool(APP_DEPLOY_REF)}
 
 
 @router.post("/api/deploy/token")
@@ -828,9 +938,11 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     res = await _deploy_with_status(token, tenant)
     allowlist = ""
     remote_grail = ""
+    orbital_cfg = ""
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant)  # use token before discarding
         remote_grail = await _ensure_remote_grail(token, tenant)     # auto-enable cross-tenant forwarding
+        orbital_cfg = await _ensure_orbital_config(token, tenant)    # so app functions can reach Orbital
     del token
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"))
@@ -838,16 +950,17 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
-    warnings = _scope_warnings(allowlist, remote_grail)
+    warnings = _scope_warnings(allowlist, remote_grail, orbital_cfg)
     await tenant_registry.record_deploy(
         _pool(), tenant_id, "auto" if auto else "token",
         deployer=x_auth_user or "", app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
-                 allowlist=allowlist, remote_grail=remote_grail, warnings=warnings)
+                 allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
+                 warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
-            "remote_grail": remote_grail, "warnings": warnings}
+            "remote_grail": remote_grail, "orbital_config": orbital_cfg, "warnings": warnings}
 
 
 # ── Account-OAuth-client BOOTSTRAP deploy (transient — Orbital stores NOTHING) ───
@@ -966,9 +1079,11 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     res = await _deploy_with_status(token, tenant)
     allowlist = ""
     remote_grail = ""
+    orbital_cfg = ""
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant)
         remote_grail = await _ensure_remote_grail(token, tenant)
+        orbital_cfg = await _ensure_orbital_config(token, tenant)
     del token
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", via="oauth-bootstrap",
@@ -991,7 +1106,7 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
-    warnings = _scope_warnings(allowlist, remote_grail) + scope_warnings
+    warnings = _scope_warnings(allowlist, remote_grail, orbital_cfg) + scope_warnings
     # The bootstrap path is the ONE moment Orbital ever sees the account URN + client id —
     # record them (attribution only, never the secret) before they are discarded.
     await tenant_registry.record_deploy(
@@ -1000,10 +1115,12 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
-                 allowlist=allowlist, remote_grail=remote_grail, mint_ready=mint_ready, warnings=warnings)
+                 allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
+                 mint_ready=mint_ready, warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
-            "remote_grail": remote_grail, "mintReady": mint_ready, "warnings": warnings}
+            "remote_grail": remote_grail, "orbital_config": orbital_cfg,
+            "mintReady": mint_ready, "warnings": warnings}
 
 
 @router.get("/api/deploy/audit")

@@ -78,13 +78,11 @@ def test_validate_create_missing_fields():
             pass
 
 
-def test_validate_create_empty_roster_rejected():
+def test_validate_create_empty_roster_allowed():
+    # Code-only workshops (WS-2): the trainer invites nobody up front and hands
+    # out the join code instead, so an empty roster is a valid create.
     for roster in ([], None, ["not-an-email"]):
-        try:
-            ls.validate_create("T", "t", TRAINER, roster)
-            raise AssertionError(f"expected ValueError for roster={roster}")
-        except ValueError as exc:
-            assert "roster" in str(exc)
+        assert ls.validate_create("T", "t", TRAINER, roster)["roster"] == []
 
 
 # ── State transitions ────────────────────────────────────────────────────────
@@ -157,6 +155,27 @@ def test_is_listed_roster_trainer_and_ended():
     assert not ls.is_listed({}, roster, "alice@x.com")  # expired hash
 
 
+def test_is_listed_trainer_rows_scoped_to_owner_tenant():
+    # WS-1: a trainer's own workshops are listed only on the tenant they were
+    # created from, so the same person on another tenant doesn't see a board
+    # they can't drive. Learners are unaffected (next test).
+    sess = _session(state="open")
+    sess["ownerTenant"] = "https://abc12345.apps.dynatrace.com"
+    assert ls.is_listed(sess, set(), TRAINER, "https://abc12345.apps.dynatrace.com")
+    assert not ls.is_listed(sess, set(), TRAINER, "https://sro97894.apps.dynatrace.com")
+    # Legacy rows (no ownerTenant) and callers that send no tenant still list.
+    assert ls.is_listed(_session(state="open"), set(), TRAINER, "https://any.apps.dynatrace.com")
+    assert ls.is_listed(sess, set(), TRAINER, "")
+
+
+def test_is_listed_roster_member_crosses_tenants():
+    # The whole point of a cross-tenant workshop: an invited learner sees it
+    # from whichever tenant they happen to run.
+    sess = _session(state="open")
+    sess["ownerTenant"] = "https://abc12345.apps.dynatrace.com"
+    assert ls.is_listed(sess, {"alice@x.com"}, "alice@x.com", "https://sro97894.apps.dynatrace.com")
+
+
 # ── Response shaping ─────────────────────────────────────────────────────────
 
 def test_shape_summary_learner():
@@ -210,6 +229,69 @@ def test_shape_detail_includes_all_scalar_fields():
         assert field in out
     assert out["ref"] == "feat/x"
     assert out["state"] == "ended"
+
+
+# ── roster_targets (WS-4: trainer runs the lab too) ──────────────────────────
+
+ROSTER = {"bob@x.com", "alice@x.com"}
+TRAINER = "trainer@dynatrace.com"
+
+
+def test_roster_targets_learners_only_by_default():
+    assert ls.roster_targets(ROSTER, TRAINER, include_trainer=False) == [
+        ("alice@x.com", "learner"), ("bob@x.com", "learner")]
+
+
+def test_roster_targets_appends_trainer_last_when_asked():
+    assert ls.roster_targets(ROSTER, " Trainer@Dynatrace.com ", True) == [
+        ("alice@x.com", "learner"), ("bob@x.com", "learner"),
+        (TRAINER, "trainer")]
+
+
+def test_roster_targets_never_duplicates_a_trainer_on_the_roster():
+    # A trainer who invited themselves gets ONE row, as a learner — otherwise
+    # provision-all would queue two environments for the same person.
+    roster = ROSTER | {TRAINER}
+    out = ls.roster_targets(roster, TRAINER, include_trainer=True)
+    assert [e for e, _ in out].count(TRAINER) == 1
+    assert dict(out)[TRAINER] == "learner"
+
+
+def test_roster_targets_ignores_a_missing_trainer_email():
+    assert ls.roster_targets(ROSTER, "", True) == \
+        ls.roster_targets(ROSTER, None, True) == \
+        ls.roster_targets(ROSTER, TRAINER, False)
+
+
+def test_roster_targets_works_for_a_code_only_workshop():
+    # WS-2 workshops start with an empty roster; the trainer must still get one.
+    assert ls.roster_targets(set(), TRAINER, True) == [(TRAINER, "trainer")]
+    assert ls.roster_targets(None, TRAINER, True) == [(TRAINER, "trainer")]
+
+
+def test_trainer_is_exempt_from_the_learner_skips():
+    """The trainer calls provision-all FROM the workshop tenant and never joins
+    their own workshop, so neither skip may ever apply to them — the endpoint
+    enforces this by only consulting provision_skip_status for learners."""
+    import inspect
+    from dashboard import app as a
+    src = inspect.getsource(a.api_live_session_provision_all)
+    assert 'if role == "learner" else ""' in src, \
+        "provision-all must not run the joined/tenant skips against the trainer"
+    ready = inspect.getsource(a.api_live_session_readiness)
+    assert '"none" if role == "trainer"' in ready, \
+        "readiness must not report the trainer as not-joined/foreign"
+
+
+def test_chunk_filter_applies_to_learners_only():
+    """The app chunks big rosters, so `emails` is one slice of it. If the
+    trainer were subject to that filter, includeTrainer would silently no-op on
+    every chunk that doesn't happen to contain the trainer's own address."""
+    import inspect
+    from dashboard import app as a
+    src = inspect.getsource(a.api_live_session_provision_all)
+    assert "role == live_sessions.LEARNER_ROLE" in src, \
+        "the chunk filter must skip learners only"
 
 
 if __name__ == "__main__":

@@ -80,6 +80,50 @@ def mask_readiness(payload: dict) -> dict:
                         for row in payload.get("results", [])]}
 
 
+def mask_progress(payload: dict, keep: str = "") -> dict:
+    """Non-trainer view of GET /api/live/sessions/{id}/progress.
+
+    The board is meant to be visible to the cohort, so the states, percentages
+    and the summary all stay — only the identities are masked, including the
+    tenant (which is itself identifying in a cross-tenant workshop). `keep` is
+    the caller's own email: their own row stays readable so they can find
+    themselves on the board.
+    """
+    keep = str(keep or "").strip().lower()
+    return {**payload,
+            "results": [row if str(row.get("email", "")).lower() == keep and keep
+                        else {**row,
+                              "email": mask_email(row.get("email", "")),
+                              "tenant": mask_tenant(row.get("tenant", ""))}
+                        for row in payload.get("results", [])]}
+
+
+def mask_attendees(rows: list, keep: str = "") -> list:
+    """Non-trainer view of the Virtual Room's attendee rail (RFE-C).
+
+    The rail exists so a learner can see who is in the room, so the display
+    names, presence and role all stay — only the email and the tenant, which
+    is itself identifying in a cross-tenant workshop, are masked. `keep` is
+    the caller's own address so they can still find themselves.
+    """
+    keep = str(keep or "").strip().lower()
+    return [row if str(row.get("email", "")).lower() == keep and keep
+            else {**row,
+                  "email": mask_email(row.get("email", "")),
+                  "tenant": mask_tenant(row.get("tenant", ""))}
+            for row in rows or []]
+
+
+def mask_chat(messages: list, keep: str = "") -> list:
+    """Non-trainer view of the chat transcript: the message text and the
+    display name are the point of a chat and stay as sent; the sender's
+    address is masked, except the caller's own."""
+    keep = str(keep or "").strip().lower()
+    return [msg if str(msg.get("email", "")).lower() == keep and keep
+            else {**msg, "email": mask_email(msg.get("email", ""))}
+            for msg in messages or []]
+
+
 def mask_pad(payload: dict) -> dict:
     """Anonymous view of GET /api/live/sessions/{id}/pad — question authors'
     emails are masked (names stay: they are free-text display names)."""

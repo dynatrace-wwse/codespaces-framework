@@ -435,7 +435,15 @@ class WorkerManager:
         """
         while not self._shutdown:
             try:
-                async for key in self.pool.scan_iter(match="job:running:*"):
+                # count=500 is load-bearing, not a tuning nicety: redis-py's
+                # scan_iter defaults to COUNT 10, so one pass over a ~1.5k-key
+                # keyspace costs ~146 round trips. Four such loops on a 15 s
+                # timer (master x2, both worker agents) plus the dashboard's
+                # per-request scans measured ~119 SCAN/s sustained — 20.6M calls
+                # in two days, ~110x every other Redis command combined, and the
+                # same volume again as OTel spans. COUNT only bounds the work
+                # per call; cursor semantics are unchanged.
+                async for key in self.pool.scan_iter(match="job:running:*", count=500):
                     try:
                         rec = await self.pool.hgetall(key)
                     except Exception:
@@ -485,7 +493,7 @@ class WorkerManager:
         while not self._shutdown:
             try:
                 now = datetime.now(timezone.utc)
-                async for key in self.pool.scan_iter(match="job:running:*"):
+                async for key in self.pool.scan_iter(match="job:running:*", count=500):
                     try:
                         rec = await self.pool.hgetall(key)
                     except Exception:
@@ -614,7 +622,7 @@ class WorkerManager:
         whose lock is gone.
         """
         recovered = 0
-        async for key in self.pool.scan_iter(match="deferred:*"):
+        async for key in self.pool.scan_iter(match="deferred:*", count=500):
             triple = key.split(":", 1)[1]
             lock_key = f"running:lock:{triple}"
             if await self.pool.exists(lock_key):

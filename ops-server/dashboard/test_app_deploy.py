@@ -328,7 +328,9 @@ def test_register_buttons_have_no_guest_gate():
     import re
     here = os.path.dirname(os.path.abspath(__file__))
     html = open(os.path.join(here, "templates", "index.html"), encoding="utf-8").read()
-    for bid in ("reg-deploy", "reg-undeploy"):
+    # Renamed to reg-oa-* when the OAuth-client bootstrap deploy replaced the
+    # token-paste form (59e93ad) — the guest-gate rule is unchanged.
+    for bid in ("reg-oa-deploy", "reg-oa-undeploy"):
         m = re.search(r"<button[^>]*\bid=\"" + bid + r"\"[^>]*>", html)
         assert m, f"button #{bid} not found in index.html"
         assert "data-action" not in m.group(0), \
@@ -475,3 +477,136 @@ def test_scope_warnings_flags_missing_settings_scope():
     # clean results → no warnings
     assert dep._scope_warnings("added 1 host(s)", "enabled → wwse") == []
     assert dep._scope_warnings("", "skipped (central tenant — stores locally)") == []
+
+
+# ── _ensure_orbital_config (seed the app's Orbital service token) ───────────────
+
+def test_ensure_orbital_config_skips_without_orbital_token():
+    orig = dep._orbital_service_token
+    dep._orbital_service_token = lambda: None
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("tok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        dep._orbital_service_token = orig
+    assert "ORBITAL_TOKEN not configured" in msg
+
+
+def test_ensure_orbital_config_creates_when_absent():
+    import httpx
+    captured = {}
+    orig_tok = dep._orbital_service_token
+    dep._orbital_service_token = lambda: "ORB-SECRET"
+    orig_client = _grail_client(captured, existing_items=[])
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._orbital_service_token = orig_tok
+    assert msg == "token seeded"
+    # App-settings v2 takes ONE object (not a list) and kebab-case query params.
+    assert captured["post"]["schemaId"] == "orbital-config"
+    assert captured["post"]["value"]["token"] == "ORB-SECRET"
+    assert captured["get_params"]["schema-id"] == "orbital-config"
+
+
+def test_ensure_orbital_config_fills_empty_existing_object():
+    import httpx
+    captured = {}
+    orig_tok = dep._orbital_service_token
+    dep._orbital_service_token = lambda: "ORB-SECRET"
+    orig_client = _grail_client(captured, existing_items=[{"objectId": "obj-9", "value": {"token": ""}}])
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._orbital_service_token = orig_tok
+    assert msg == "token seeded"
+    assert captured["put_url"].endswith("/obj-9")
+    assert captured["put"]["value"]["token"] == "ORB-SECRET"
+
+
+def test_ensure_orbital_config_never_clobbers_configured_token():
+    """The API masks secrets on read, so a non-empty value can't be compared —
+    the only safe rule is to leave it alone."""
+    import httpx
+    captured = {}
+    orig_tok = dep._orbital_service_token
+    dep._orbital_service_token = lambda: "ORB-SECRET"
+    orig_client = _grail_client(
+        captured, existing_items=[{"objectId": "obj-9", "value": {"token": "***bb81c3df***"}}])
+    try:
+        msg = asyncio.run(dep._ensure_orbital_config("deploytok", "https://sro97894.apps.dynatrace.com"))
+    finally:
+        httpx.AsyncClient = orig_client
+        dep._orbital_service_token = orig_tok
+    assert msg == "already configured"
+    assert "put" not in captured and "post" not in captured
+
+
+def test_scope_warnings_flags_unseeded_orbital_config():
+    w = dep._scope_warnings("added 1 host(s)", "enabled → wwse",
+                            "skipped (token lacks app-settings:objects:write)")
+    assert len(w) == 1
+    assert "Orbital token NOT configured" in w[0]
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse",
+                               "seed failed (HTTP 500)") != []
+    # seeded / pre-existing → silent
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "token seeded") == []
+    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "already configured") == []
+
+
+# --- deploy ref pinning -------------------------------------------------------
+# "Update now" is public and tokenless: an unpinned Orbital ships whatever last
+# landed on master to every tenant that clicks it. APP_DEPLOY_REF decouples
+# "merged" from "publicly deployable".
+
+def _with_ref(value, fn):
+    saved = dep.APP_DEPLOY_REF
+    dep.APP_DEPLOY_REF = value
+    try:
+        return fn()
+    finally:
+        dep.APP_DEPLOY_REF = saved
+
+
+def test_deploy_ref_unpinned_follows_branch_tip():
+    assert _with_ref("", dep.deploy_ref) == f"origin/{dep.APP_DEPLOY_BRANCH}"
+
+
+def test_deploy_ref_pinned_returns_the_exact_ref():
+    assert _with_ref("1.0.271", dep.deploy_ref) == "1.0.271"
+
+
+def test_fetch_pulls_tags_only_when_pinned():
+    # A plain branch fetch does not bring tags down, so a tag pin is unresolvable
+    # without --tags — and the deploy would silently fall back to "local".
+    calls = []
+
+    async def fake_git(*args):
+        calls.append(args)
+        return 0, ""
+
+    _with_ref("", lambda: asyncio.run(dep._fetch_deploy_ref(fake_git)))
+    assert "--tags" not in calls[-1]
+
+    _with_ref("1.0.271", lambda: asyncio.run(dep._fetch_deploy_ref(fake_git)))
+    assert "--tags" in calls[-1]
+    assert calls[-1][-1] == dep.APP_DEPLOY_BRANCH
+
+
+def test_latest_version_reports_the_pin_to_admins():
+    # The app's "Check for updates" shows this; an admin must be able to tell a
+    # released version from the moving tip of the branch.
+    saved = dep._latest_repo_version
+
+    async def fake_latest():
+        return "1.0.271", dep.deploy_ref()
+
+    dep._latest_repo_version = fake_latest
+    try:
+        pinned = _with_ref("1.0.271", lambda: asyncio.run(dep.latest_version()))
+        loose = _with_ref("", lambda: asyncio.run(dep.latest_version()))
+    finally:
+        dep._latest_repo_version = saved
+    assert pinned["pinned"] is True and pinned["ref"] == "1.0.271"
+    assert loose["pinned"] is False and loose["ref"] == f"origin/{dep.APP_DEPLOY_BRANCH}"
