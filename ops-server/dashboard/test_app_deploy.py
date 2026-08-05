@@ -786,3 +786,186 @@ def test_permission_hint_stays_silent_on_unrelated_failures():
     assert dep._permission_hint("deploy", "TypeError: cannot read property of undefined") == ""
     assert dep._permission_hint("deploy", "ECONNREFUSED 127.0.0.1:443") == ""
     assert dep._permission_hint("deploy", "") == ""
+
+
+# ── Preflight: prove the credential can finish BEFORE installing ─────────────
+#
+# Installing is only part of a deploy. A credential holding just apps:install
+# produces a tenant where the app appears successfully and then 401s on every
+# environment action, because the Orbital bearer was never seeded. That is the
+# expensive kind of broken: it looks fine. So probe first, and refuse rather
+# than leave a half-configured install behind.
+
+class _FakeResp:
+    def __init__(self, code): self.status_code = code
+    def json(self): return {"items": []}
+
+
+def _fake_httpx(codes):
+    """AsyncClient stub returning the queued status codes in call order."""
+    seq = list(codes)
+
+    class C:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): return _FakeResp(seq.pop(0))
+        async def post(self, *a, **k): return _FakeResp(seq.pop(0))
+    return lambda *a, **k: C()
+
+
+def test_probe_reports_a_fully_capable_credential():
+    saved = dep.httpx.AsyncClient
+    dep.httpx.AsyncClient = _fake_httpx([200, 200, 200, 200])
+    try:
+        caps = _run(dep.probe_capabilities("tok", "https://t.apps.dynatrace.com"))
+        assert dep.missing_capabilities(caps) == []
+    finally:
+        dep.httpx.AsyncClient = saved
+
+
+def test_probe_names_exactly_what_a_403_denies():
+    # registry ok, settings read/write denied, app-settings denied.
+    saved = dep.httpx.AsyncClient
+    dep.httpx.AsyncClient = _fake_httpx([200, 403, 403, 403])
+    try:
+        caps = _run(dep.probe_capabilities("tok", "https://t.apps.dynatrace.com"))
+        assert dep.missing_capabilities(caps) == [
+            "settings_read", "settings_write", "app_settings"]
+    finally:
+        dep.httpx.AsyncClient = saved
+
+
+def test_probe_treats_non_403_failures_as_capable():
+    # A blip or an unfamiliar status must never silently block a deploy — the
+    # deploy itself stays the authority. Only an explicit 403 is a "no".
+    saved = dep.httpx.AsyncClient
+    dep.httpx.AsyncClient = _fake_httpx([500, 404, 400, 502])
+    try:
+        assert dep.missing_capabilities(
+            _run(dep.probe_capabilities("tok", "https://t.apps.dynatrace.com"))) == []
+    finally:
+        dep.httpx.AsyncClient = saved
+
+
+def test_describe_missing_names_the_scope_and_the_consequence():
+    msg = dep.describe_missing(["app_settings"])
+    assert "app-settings:objects:write" in msg
+    assert "401" in msg                      # says what actually breaks
+    msg2 = dep.describe_missing(["registry"])
+    assert "app-engine:apps:install" in msg2
+
+
+def test_choose_prefers_a_complete_credential_over_the_first_one():
+    """SRO holds two credentials and the OAuth one is the LESS capable today.
+
+    Order alone would pick OAuth and silently produce a half-configured tenant.
+    Evidence picks the platform token, which measurably carries the settings
+    scopes the OAuth client lacks.
+    """
+    saved = (dep._auto_candidates, dep.probe_capabilities)
+
+    async def cands(tenant_url, action):
+        return [("OAUTH", "oauth"), ("PLATFORM", "platform-token")], "SRO"
+
+    async def probe(token, tenant_url):
+        full = dict.fromkeys(dep.CAPABILITY_COST, True)
+        if token == "OAUTH":
+            return {**full, "settings_read": False, "settings_write": False,
+                    "app_settings": False}
+        return full
+
+    dep._auto_candidates, dep.probe_capabilities = cands, probe
+    try:
+        pick = _run(dep.choose_deploy_credential("https://sro97894.apps.dynatrace.com", "deploy"))
+        assert pick["source"] == "platform-token"
+        assert pick["missing"] == []
+    finally:
+        dep._auto_candidates, dep.probe_capabilities = saved
+
+
+def test_choose_returns_the_least_incomplete_when_none_are_complete():
+    saved = (dep._auto_candidates, dep.probe_capabilities)
+
+    async def cands(tenant_url, action):
+        return [("A", "oauth"), ("B", "platform-token")], "SRO"
+
+    async def probe(token, tenant_url):
+        full = dict.fromkeys(dep.CAPABILITY_COST, True)
+        if token == "A":
+            return {**full, "settings_read": False, "settings_write": False}
+        return {**full, "app_settings": False}
+
+    dep._auto_candidates, dep.probe_capabilities = cands, probe
+    try:
+        pick = _run(dep.choose_deploy_credential("https://sro97894.apps.dynatrace.com", "deploy"))
+        assert pick["source"] == "platform-token"      # one gap beats two
+        assert pick["missing"] == ["app_settings"]
+    finally:
+        dep._auto_candidates, dep.probe_capabilities = saved
+
+
+def test_undeploy_skips_the_probe():
+    # Undeploy only touches the registry; demanding settings scopes for it would
+    # block a legitimate removal for no reason.
+    saved = (dep._auto_candidates, dep.probe_capabilities)
+
+    async def cands(tenant_url, action):
+        return [("T", "oauth")], "COE"
+
+    async def probe(token, tenant_url):
+        raise AssertionError("undeploy must not probe")
+
+    dep._auto_candidates, dep.probe_capabilities = cands, probe
+    try:
+        pick = _run(dep.choose_deploy_credential("https://geu80787.apps.dynatrace.com", "undeploy"))
+        assert pick["token"] == "T" and pick["missing"] == []
+    finally:
+        dep._auto_candidates, dep.probe_capabilities = saved
+
+
+def test_deploy_is_refused_before_installing_when_scopes_are_missing():
+    saved = (dep._auto_candidates, dep.probe_capabilities, dep._deploy_with_status)
+
+    async def cands(tenant_url, action):
+        return [("T", "oauth")], "COE"
+
+    async def probe(token, tenant_url):
+        return {**dict.fromkeys(dep.CAPABILITY_COST, True), "app_settings": False}
+
+    async def never(*a, **k):
+        raise AssertionError("must not install when the credential is incomplete")
+
+    dep._auto_candidates, dep.probe_capabilities, dep._deploy_with_status = cands, probe, never
+    try:
+        _expect_http(412, dep.deploy_with_token(
+            {"tenant": "https://geu80787.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+    finally:
+        dep._auto_candidates, dep.probe_capabilities, dep._deploy_with_status = saved
+
+
+def test_allow_partial_is_an_explicit_opt_in():
+    # The escape hatch exists, but you have to ask for it by name.
+    saved = (dep._auto_candidates, dep.probe_capabilities)
+
+    async def cands(tenant_url, action):
+        return [("T", "oauth")], "COE"
+
+    async def probe(token, tenant_url):
+        return {**dict.fromkeys(dep.CAPABILITY_COST, True), "app_settings": False}
+
+    dep._auto_candidates, dep.probe_capabilities = cands, probe
+    try:
+        # Without the flag: refused. With it: gets past the gate (and fails later
+        # on the un-stubbed deploy, which is a different error, not a 412).
+        _expect_http(412, dep.deploy_with_token(
+            {"tenant": "https://geu80787.apps.dynatrace.com", "token": ""}, x_auth_user="a"))
+        try:
+            _run(dep.deploy_with_token(
+                {"tenant": "https://geu80787.apps.dynatrace.com", "token": "",
+                 "allowPartial": True}, x_auth_user="a"))
+        except HTTPException as e:
+            assert e.status_code != 412, "allowPartial must clear the scope gate"
+        except Exception:
+            pass  # any non-HTTP failure downstream is fine — the gate was passed
+    finally:
+        dep._auto_candidates, dep.probe_capabilities = saved

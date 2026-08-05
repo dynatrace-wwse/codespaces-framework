@@ -216,6 +216,83 @@ def _missing_scopes(action: str, granted: str | None) -> list[str]:
     return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
 
 
+# What a deploy credential must be able to do, and what breaks when it cannot.
+# Order matters: this is the order they are reported in.
+CAPABILITY_COST = {
+    "registry": "install or upgrade the app at all",
+    "settings_read": "read the JS-runtime outbound allowlist",
+    "settings_write": "enable cross-tenant telemetry forwarding and fix the outbound allowlist",
+    "app_settings": "seed the Orbital bearer — without it the app installs and then "
+                    "401s on every environment action",
+}
+CAPABILITY_SCOPE = {
+    "registry": "app-engine:apps:install, app-engine:apps:run",
+    "settings_read": "settings:objects:read",
+    "settings_write": "settings:objects:write",
+    "app_settings": "app-settings:objects:write",
+}
+
+
+async def probe_capabilities(token: str, tenant_url: str) -> dict[str, bool]:
+    """What this credential can actually do on this tenant, measured not assumed.
+
+    Platform tokens carry no introspectable scope claim — there is no working
+    introspection endpoint on the tenant — and even an OAuth `scope` response only
+    describes what was granted, not what the tenant will honour. So each capability
+    is probed with the cheapest harmless call that exercises the same permission the
+    deploy will need:
+
+      registry       GET the app in the registry
+      settings_read  GET the outbound-allowlist objects
+      settings_write POST them back with validateOnly=true — validates and returns,
+                     creating nothing
+      app_settings   GET the app-settings object (same permission as the write)
+
+    A 403 is the only "no". Any other failure is treated as "yes" so a transient
+    blip or an unfamiliar status can never silently block a deploy: the deploy
+    itself remains the authority, this is a pre-flight.
+    """
+    base = tenant_url.rstrip("/")
+    settings = f"{base}/platform/classic/environment-api/v2/settings/objects"
+    h = {"Authorization": f"Bearer {token}"}
+    caps = dict.fromkeys(CAPABILITY_COST, True)
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(_registry_url(tenant_url, APP_ID), headers=h)
+            caps["registry"] = r.status_code != 403
+
+            r = await c.get(settings, headers=h, params={
+                "schemaIds": OUTBOUND_SCHEMA, "scopes": "environment", "fields": "objectId"})
+            caps["settings_read"] = r.status_code != 403
+
+            r = await c.post(f"{settings}?validateOnly=true",
+                             headers={**h, "Content-Type": "application/json"}, json=[{
+                                 "schemaId": OUTBOUND_SCHEMA, "scope": "environment",
+                                 "value": {"allowedOutboundConnections": {
+                                     "enforced": True, "hostList": list(OUTBOUND_HOSTS)}},
+                             }])
+            caps["settings_write"] = r.status_code != 403
+
+            r = await c.get(f"{base}/platform/app-settings/v2/objects", headers={
+                **h, "Dt-App-Context": APP_ID, "Dt-App-Version": _app_version(),
+            }, params={"schema-id": ORBITAL_SCHEMA})
+            caps["app_settings"] = r.status_code != 403
+    except Exception as exc:
+        log.warning("capability probe failed for %s: %s", tenant_url, exc)
+    return caps
+
+
+def missing_capabilities(caps: dict[str, bool]) -> list[str]:
+    """Capability keys the credential lacks, in report order."""
+    return [k for k in CAPABILITY_COST if not caps.get(k, True)]
+
+
+def describe_missing(missing: list[str]) -> str:
+    """One actionable line per missing capability: the scope, and what it costs."""
+    return " ".join(
+        f"Missing {CAPABILITY_SCOPE[k]} — cannot {CAPABILITY_COST[k]}." for k in missing)
+
+
 def _permission_hint(action: str, output: str) -> str:
     """Name the missing permission when a deploy fails because the token lacks it.
 
@@ -521,20 +598,69 @@ async def _mint_sprint_token(action: str) -> str | None:
                                      SPRINT_RESOURCE, action, sso_url=SPRINT_SSO_URL)
 
 
-async def auto_deploy_token(tenant_url: str, action: str) -> tuple[str, str]:
-    """(token, label) for a tenant Orbital deploys itself, else ("", "").
+async def _auto_candidates(tenant_url: str, action: str) -> tuple[list[tuple[str, str]], str]:
+    """([(token, source)], label) — every credential Orbital holds for this tenant.
 
-    OAuth first for every tenant — that is the route we hand tenant admins, so it
-    is the one we must exercise. SRO's stored platform token stays as a fallback
-    behind it rather than in front of it.
+    OAuth first: it is the route we hand tenant admins, so it is the one that must
+    be exercised. SRO's stored platform token stays behind it as a fallback, but it
+    is not merely a fallback for *failure* — it is measurably more capable than the
+    OAuth client today (it carries the settings scopes the client lacks), so the
+    caller picks between them on evidence rather than on order alone.
     """
     if _is_coe(tenant_url):
-        return (await _mint_coe_token(action) or ""), "COE"
+        return [(await _mint_coe_token(action) or "", "oauth")], "COE"
     if _is_sro(tenant_url):
-        return (await _mint_sro_token(action) or SRO_PLATFORM_TOKEN), "SRO"
+        return [(await _mint_sro_token(action) or "", "oauth"),
+                (SRO_PLATFORM_TOKEN, "platform-token")], "SRO"
     if _is_sprint(tenant_url):
-        return (await _mint_sprint_token(action) or ""), "SPRINT"
-    return "", ""
+        return [(await _mint_sprint_token(action) or "", "oauth")], "SPRINT"
+    return [], ""
+
+
+async def auto_deploy_token(tenant_url: str, action: str) -> tuple[str, str]:
+    """(token, label) — first credential Orbital holds for this tenant. No probing."""
+    cands, label = await _auto_candidates(tenant_url, action)
+    return next((t for t, _ in cands if t), ""), label
+
+
+async def choose_deploy_credential(tenant_url: str, action: str) -> dict:
+    """Pick the credential that can actually complete the deploy, and prove it first.
+
+    Installing the app is only part of a deploy: the outbound allowlist, cross-tenant
+    forwarding and the seeded Orbital bearer all need scopes beyond apps:install. A
+    credential holding only the install scopes produces a tenant where the app appears
+    successfully and then fails every environment action with an opaque 401 — the
+    expensive kind of broken, because it looks fine.
+
+    So every candidate is probed against the real tenant BEFORE anything is installed,
+    and the first complete one wins. Undeploy skips this: it only needs the registry.
+
+    Returns {token, source, label, caps, missing} — `missing` empty means complete.
+    """
+    cands, label = await _auto_candidates(tenant_url, action)
+    cands = [(t, s) for t, s in cands if t]
+    if not cands:
+        return {"token": "", "source": "", "label": label, "caps": {}, "missing": []}
+    if action == "undeploy":
+        t, s = cands[0]
+        return {"token": t, "source": s, "label": label, "caps": {}, "missing": []}
+
+    best = None
+    for token, source in cands:
+        caps = await probe_capabilities(token, tenant_url)
+        missing = missing_capabilities(caps)
+        if not missing:
+            if source != cands[0][1]:
+                log.info("%s deploy: using %s — the %s credential lacks %s",
+                         label, source, cands[0][1], ", ".join(missing_capabilities(
+                             await probe_capabilities(cands[0][0], tenant_url))))
+            return {"token": token, "source": source, "label": label,
+                    "caps": caps, "missing": []}
+        if best is None or len(missing) < len(best["missing"]):
+            best = {"token": token, "source": source, "label": label,
+                    "caps": caps, "missing": missing}
+        log.warning("%s deploy: %s credential lacks %s", label, source, ", ".join(missing))
+    return best
 
 
 def _is_sro(tenant_url: str) -> bool:
@@ -1037,10 +1163,16 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     tenant = (body.get("tenant") or "").strip()
     token = (body.get("token") or "").strip()
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
+    # Proceed with a credential that cannot finish the job. Off by default: a
+    # half-configured install is worse than no install, because it looks like a
+    # success and fails later somewhere unrelated.
+    allow_partial = bool(body.get("allowPartial"))
     auto = ""  # which auto-deploy tenant matched (COE/SRO/SPRINT), or "" for token deploys
+    source = "pasted-token"
     if not token:
         # The tenants Orbital deploys on its own, because it holds their account clients.
-        token, auto = await auto_deploy_token(tenant, action)
+        pick = await choose_deploy_credential(tenant, action)
+        auto, token, source = pick["label"], pick["token"], pick["source"]
         if not auto:
             raise HTTPException(400, "A valid platform token is required for this tenant. "
                                      "Auto-deploy (no token) is only available for the COE, "
@@ -1048,6 +1180,26 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
         if not token:
             raise HTTPException(503, f"{auto} auto-deploy not configured "
                                      f"(set {auto}_CLIENT_ID/SECRET/RESOURCE).")
+        if pick["missing"] and not allow_partial:
+            await _audit(user, tenant_id, action, "insufficient-scopes",
+                         via=f"{auto.lower()}-auto", source=source, missing=pick["missing"])
+            raise HTTPException(412, f"{auto} deploy refused before installing anything: the "
+                                     f"{source} credential cannot complete it. "
+                                     f"{describe_missing(pick['missing'])} "
+                                     f"Grant the scopes to the account OAuth client and retry, "
+                                     f"or send allowPartial:true to install anyway.")
+    elif action == "deploy":
+        # A pasted platform token carries no readable scope claim, so probe it too —
+        # same guarantee for a customer admin as for our own tenants.
+        caps = await probe_capabilities(token, tenant)
+        missing = missing_capabilities(caps)
+        if missing and not allow_partial:
+            await _audit(user, tenant_id, action, "insufficient-scopes",
+                         via="token", source=source, missing=missing)
+            raise HTTPException(412, "Deploy refused before installing anything: this token "
+                                     f"cannot complete it. {describe_missing(missing)} "
+                                     "Create the token in the target tenant with those scopes "
+                                     "and retry, or send allowPartial:true to install anyway.")
 
     via = f"{auto.lower()}-auto" if auto else "token"
     if action == "undeploy":
@@ -1085,8 +1237,9 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
                  warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
-            "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
-            "remote_grail": remote_grail, "orbital_config": orbital_cfg, "warnings": warnings}
+            "version": res.get("to"), "url": url, "profile": profile, "credential": source,
+            "allowlist": allowlist, "remote_grail": remote_grail,
+            "orbital_config": orbital_cfg, "warnings": warnings}
 
 
 # ── Account-OAuth-client BOOTSTRAP deploy (transient — Orbital stores NOTHING) ───
