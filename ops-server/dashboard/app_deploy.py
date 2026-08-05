@@ -541,8 +541,40 @@ def _deploy_scopes(action: str) -> list[str]:
     if action == "undeploy":
         return ["app-engine:apps:delete"]
     install = "app-engine:apps:install app-engine:apps:run"
-    return [f"{install} app-settings:objects:write settings:objects:read settings:objects:write",
+    settings = "settings:objects:read settings:objects:write"
+    # A ladder, not a pair. Descending one capability at a time means the token we
+    # end up holding carries the most the client allows, and — because the grant is
+    # all-or-nothing — its granted scope is then an exact statement of what it can
+    # do. That is what capabilities_from_scope reads, so the rungs must stay
+    # ordered richest-first.
+    return [f"{install} {settings} app-settings:objects:write",
+            f"{install} {settings}",
+            f"{install} app-settings:objects:write",
             install]
+
+
+# Scope actually granted by the last successful mint, per tenant label. The token
+# itself is never kept — only what it was allowed to do, so the credential chooser
+# can reason about it without re-minting.
+_LAST_GRANT: dict[str, str] = {}
+
+
+def capabilities_from_scope(granted: str) -> dict[str, bool]:
+    """What a bearer with this granted scope can do. Exact, not probed.
+
+    Preferred over probe_capabilities wherever a scope claim exists, because a
+    probe can only ask "may I read this?" — and read is not write. The COE client
+    holds app-settings:objects:read but NOT :write, so a GET-based probe passes
+    while the deploy's actual write still fails. Reading the grant avoids that
+    whole class of false pass.
+    """
+    g = set((granted or "").split())
+    return {
+        "registry": {"app-engine:apps:install", "app-engine:apps:run"} <= g,
+        "settings_read": "settings:objects:read" in g,
+        "settings_write": "settings:objects:write" in g,
+        "app_settings": "app-settings:objects:write" in g,
+    }
 
 
 async def _mint_account_token(label: str, client_id: str, client_secret: str,
@@ -566,10 +598,12 @@ async def _mint_account_token(label: str, client_id: str, client_secret: str,
                     "scope": scope,
                 }, headers={"Content-Type": "application/x-www-form-urlencoded"})
             if r.status_code == 200:
+                j = r.json()
+                _LAST_GRANT[label] = j.get("scope", "") or scope
                 if i:
-                    log.info("%s deploy token: settings scopes unavailable, installing only "
-                             "(post-install configuration will be skipped)", label)
-                return r.json().get("access_token")
+                    log.info("%s deploy token: granted %s (rung %d/%d) — richer scope sets "
+                             "were refused", label, _LAST_GRANT[label], i + 1, len(scope_sets))
+                return j.get("access_token")
             # Body, not just status: a scope the client lacks and a wrong resource
             # are both 400, and only the body tells them apart.
             log.warning("%s token mint HTTP %s (scope set %d/%d): %s",
@@ -647,19 +681,22 @@ async def choose_deploy_credential(tenant_url: str, action: str) -> dict:
 
     best = None
     for token, source in cands:
-        caps = await probe_capabilities(token, tenant_url)
+        # An OAuth mint tells us exactly what it granted; a pasted platform token
+        # carries no such claim and has to be measured against the tenant.
+        granted = _LAST_GRANT.get(label, "") if source == "oauth" else ""
+        caps = (capabilities_from_scope(granted) if granted
+                else await probe_capabilities(token, tenant_url))
         missing = missing_capabilities(caps)
         if not missing:
-            if source != cands[0][1]:
-                log.info("%s deploy: using %s — the %s credential lacks %s",
-                         label, source, cands[0][1], ", ".join(missing_capabilities(
-                             await probe_capabilities(cands[0][0], tenant_url))))
+            if best is not None:
+                log.info("%s deploy: using the %s credential — %s lacks %s",
+                         label, source, best["source"], ", ".join(best["missing"]))
             return {"token": token, "source": source, "label": label,
                     "caps": caps, "missing": []}
+        log.warning("%s deploy: %s credential lacks %s", label, source, ", ".join(missing))
         if best is None or len(missing) < len(best["missing"]):
             best = {"token": token, "source": source, "label": label,
                     "caps": caps, "missing": missing}
-        log.warning("%s deploy: %s credential lacks %s", label, source, ", ".join(missing))
     return best
 
 

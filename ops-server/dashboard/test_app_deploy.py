@@ -662,11 +662,13 @@ def test_deploy_scopes_ask_for_settings_then_degrade():
     a tenant that installs and then never forwards a training event.
     """
     sets = dep._deploy_scopes("deploy")
-    assert len(sets) == 2
+    assert len(sets) >= 2
     for s in sets:
+        # Every rung must still install; that is the floor.
         assert "app-engine:apps:install" in s and "app-engine:apps:run" in s
-    assert "settings:objects:write" in sets[0]      # try the full configuration
-    assert "settings:objects:write" not in sets[1]  # fall back to install-only
+    assert "settings:objects:write" in sets[0]       # ask for the full configuration
+    assert "app-settings:objects:write" in sets[0]
+    assert sets[-1].split() == ["app-engine:apps:install", "app-engine:apps:run"]
     assert dep._deploy_scopes("undeploy") == ["app-engine:apps:delete"]
 
 
@@ -969,3 +971,45 @@ def test_allow_partial_is_an_explicit_opt_in():
             pass  # any non-HTTP failure downstream is fine — the gate was passed
     finally:
         dep._auto_candidates, dep.probe_capabilities = saved
+
+
+# ── Capability from the grant, not from a read probe ─────────────────────────
+#
+# The COE client holds app-settings:objects:read but NOT :write. A GET-based
+# probe answers "may I read this?" and passes — while the deploy's actual write
+# still fails. Reading the granted scope removes that class of false pass.
+
+def test_capabilities_from_scope_is_exact():
+    caps = dep.capabilities_from_scope(
+        "app-engine:apps:install app-engine:apps:run "
+        "settings:objects:read settings:objects:write app-settings:objects:write")
+    assert dep.missing_capabilities(caps) == []
+
+
+def test_read_access_is_not_write_access():
+    # Exactly the COE client's shape.
+    caps = dep.capabilities_from_scope(
+        "app-engine:apps:install app-engine:apps:run app-settings:objects:read "
+        "settings:objects:read settings:objects:write")
+    assert dep.missing_capabilities(caps) == ["app_settings"]
+
+
+def test_install_scopes_are_both_required_for_registry():
+    assert not dep.capabilities_from_scope("app-engine:apps:install")["registry"]
+    assert dep.capabilities_from_scope(
+        "app-engine:apps:install app-engine:apps:run")["registry"]
+
+
+def test_empty_grant_can_do_nothing():
+    assert dep.missing_capabilities(dep.capabilities_from_scope("")) == \
+        ["registry", "settings_read", "settings_write", "app_settings"]
+
+
+def test_scope_ladder_descends_one_capability_at_a_time():
+    rungs = dep._deploy_scopes("deploy")
+    # Richest first — capabilities_from_scope reads whichever rung succeeded, so a
+    # mis-ordered ladder would understate what the token can do.
+    assert len(rungs) >= 2
+    counts = [len(dep.missing_capabilities(dep.capabilities_from_scope(r))) for r in rungs]
+    assert counts == sorted(counts), f"ladder not richest-first: {counts}"
+    assert dep.missing_capabilities(dep.capabilities_from_scope(rungs[0])) == []
