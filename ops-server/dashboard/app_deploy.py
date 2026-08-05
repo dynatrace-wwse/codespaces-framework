@@ -371,14 +371,24 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
             f"definite. If this tenant is new, set the token once in the app → "
             f"Admin → Orbital Server Configuration; {_ORBITAL_TOKEN_CONSEQUENCE} "
             "An already-configured tenant needs nothing.")
-    elif (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or ""):
+    elif (orbital_config or "").startswith("seed refused"):
+        # The app answered, and said no. That is a server-side problem, not the
+        # admin's: Orbital handed out a token its own /api/service/verify rejects.
+        warnings.append(
+            f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). This one is on "
+            f"this server, not the tenant: ORBITAL_TOKEN in /home/ops/.env is not a value "
+            f"Orbital itself accepts. Fix it there and re-deploy. "
+            f"{_ORBITAL_TOKEN_CONSEQUENCE}")
+    elif (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or "") \
+            or "error" in (orbital_config or ""):
         warnings.append(
             f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). "
-            f"{_ORBITAL_TOKEN_CONSEQUENCE} Granting a scope will not fix this — app-settings "
-            f"permissions belong to the app, not to an OAuth client, and "
-            f"app-settings:objects:write is not offered in the client scope catalog. Open the "
-            f"app → Admin → Orbital Server Configuration and paste the Orbital token once. "
-            f"A tenant that already has one needs nothing.")
+            f"{_ORBITAL_TOKEN_CONSEQUENCE} Seeding normally happens by itself: the app writes "
+            f"its own orbital-config when the deploy invokes seedOrbitalConfig, because "
+            f"app-settings:objects:write belongs to the app and cannot be granted to an OAuth "
+            f"client. If that did not happen here, the installed version may predate the "
+            f"function — re-deploy a current version. Failing that, open the app → "
+            f"Admin → Orbital Server Configuration and paste the Orbital token once.")
     return warnings
 
 
@@ -925,6 +935,49 @@ def _orbital_service_token() -> str | None:
     return (os.environ.get("ORBITAL_TOKEN") or "").strip() or None
 
 
+async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
+    """Ask the app to seed its own orbital-config, and report what it said.
+
+    This is the only route that can actually work. Writing app-settings needs
+    `app-settings:objects:write`, which is not in the account OAuth client scope
+    catalog — measured on all three tenants including the COE master client with
+    full account rights: requesting it answers `400 invalid_request`, and a direct
+    PUT with the richest grantable token answers
+    `403 {"missingScopes":["app-settings:objects:write"]}`.
+
+    The app declares that scope itself, and `app-engine:apps:install/run` — which
+    the deploy token does hold — is enough to invoke an app function from outside.
+    So the deploy hands the token to the app and the app writes its own settings.
+
+    Returns None when the function is not present (older app version installed),
+    so the caller can fall back to the legacy direct write and its message.
+    """
+    fn = (f"{tenant_url.rstrip('/')}/platform/app-engine/app-functions/v1/apps/"
+          f"{APP_ID}/api/seedOrbitalConfig")
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(fn, headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"},
+                             json={"token": _orbital_service_token()})
+        if r.status_code == 404:
+            return None  # function not in the installed version yet
+        if r.status_code != 200:
+            return f"seed via app function failed (HTTP {r.status_code})"
+        body = r.json() if r.content else {}
+        status = (body or {}).get("status", "")
+        return {
+            "seeded": "token seeded (via app function)",
+            "already-configured": "already configured",
+            "rejected": "seed refused: Orbital did not accept the token Orbital sent "
+                        "— check ORBITAL_TOKEN on this server",
+            "missing-token": "skipped (ORBITAL_TOKEN not configured)",
+        }.get(status, f"seed via app function: {status or 'unknown'} "
+                      f"{(body or {}).get('detail', '')}".strip())
+    except Exception as exc:
+        log.warning("seedOrbitalConfig on %s: %s", tenant_url, exc)
+        return f"seed via app function error: {exc}"
+
+
 async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
     """Seed the app-settings object the app's functions read their Orbital bearer from.
 
@@ -945,6 +998,13 @@ async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
     orbital_token = _orbital_service_token()
     if not orbital_token:
         return "skipped (ORBITAL_TOKEN not configured)"
+
+    # Preferred route: let the app write its own settings. Only falls through to
+    # the direct write below when the installed version predates the function.
+    via_fn = await _seed_via_app_function(token, tenant_url)
+    if via_fn is not None:
+        return via_fn
+
     base = tenant_url.rstrip("/") + "/platform/app-settings/v2/objects"
     h = {
         "Authorization": f"Bearer {token}",

@@ -386,6 +386,15 @@ async def startup():
         except Exception as exc:  # telemetry must never block operations
             log.warning("ops snapshot start failed (continuing without): %s", exc)
 
+    # Content reconciliation used to ride on learner page loads. It is Orbital's
+    # job now (E6b) — see dashboard/content_sync.py for why, and for the tenants
+    # it cannot reach.
+    try:
+        from dashboard import content_sync
+        asyncio.get_running_loop().create_task(content_sync.sync_loop())
+    except Exception as exc:
+        log.warning("content sync start failed (continuing without): %s", exc)
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -7578,6 +7587,44 @@ async def api_nightly_run_summary(run_id: str):
         "failed_jobs": len(failed_jobs),
         "patterns": [{"line": k, "count": v} for k, v in top],
     }
+
+
+@app.post("/api/content/sync")
+async def api_content_sync(request: Request, tenant: str = ""):
+    """Reconcile tenant content now, instead of waiting for the six-hour loop.
+
+    Writer-gated: it drives imports on every tenant Orbital can reach, so it is
+    an operator action, not a public one. `?tenant=` limits it to one.
+    """
+    await _require_writer(request)
+    from dashboard import content_sync
+    results = await content_sync.sync_all([tenant] if tenant else None)
+    return {"results": results}
+
+
+@app.get("/api/service/verify")
+async def api_service_verify(request: Request):
+    """Is the presented bearer a valid Orbital service token? 200 or 401.
+
+    Exists for the app's `seedOrbitalConfig` function, which will only store a
+    candidate token on a fresh tenant after Orbital confirms it. Without that
+    check, anyone able to run the app could seed a junk token on a not-yet-
+    configured tenant and leave it 401ing against Orbital until an admin fixed
+    it by hand.
+
+    Deliberately NOT `_require_arena_auth`: that helper still lets anonymous
+    callers through during the compat window, which would make this answer
+    "valid" to everyone. Strict `_is_service_caller` only — no x-auth-user
+    fallback either, since an org member's session says nothing about whether
+    the *token in the body of the question* is good.
+
+    Returns no payload beyond `ok`: this is an oracle, and the less it says the
+    better. The token itself is high-entropy, so confirm/deny is not a useful
+    brute-force channel.
+    """
+    if not _is_service_caller(request):
+        raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+    return {"ok": True}
 
 
 @app.get("/api/health")

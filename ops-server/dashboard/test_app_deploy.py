@@ -486,6 +486,23 @@ def test_scope_warnings_flags_missing_settings_scope():
 
 
 # ── _ensure_orbital_config (seed the app's Orbital service token) ───────────────
+#
+# NOTE: since E6b the PRIMARY route is `_seed_via_app_function` — the app writes
+# its own settings, because `app-settings:objects:write` cannot be granted to an
+# OAuth client (measured: 400 on the scope request, 403 on the write, on all
+# three tenants including the COE master). The direct writes below are the
+# FALLBACK for a tenant still running a version without that function, so these
+# tests pin it there by saying the function is absent.
+
+def _no_app_function():
+    """Stand in for a tenant whose installed app predates seedOrbitalConfig."""
+    saved = dep._seed_via_app_function
+
+    async def absent(_token, _tenant):
+        return None
+
+    dep._seed_via_app_function = absent
+    return saved
 
 def test_ensure_orbital_config_skips_without_orbital_token():
     orig = dep._orbital_service_token
@@ -500,6 +517,7 @@ def test_ensure_orbital_config_skips_without_orbital_token():
 def test_ensure_orbital_config_creates_when_absent():
     import httpx
     captured = {}
+    orig_fn = _no_app_function()
     orig_tok = dep._orbital_service_token
     dep._orbital_service_token = lambda: "ORB-SECRET"
     orig_client = _grail_client(captured, existing_items=[])
@@ -508,6 +526,7 @@ def test_ensure_orbital_config_creates_when_absent():
     finally:
         httpx.AsyncClient = orig_client
         dep._orbital_service_token = orig_tok
+        dep._seed_via_app_function = orig_fn
     assert msg == "token seeded"
     # App-settings v2 takes ONE object (not a list) and kebab-case query params.
     assert captured["post"]["schemaId"] == "orbital-config"
@@ -518,6 +537,7 @@ def test_ensure_orbital_config_creates_when_absent():
 def test_ensure_orbital_config_fills_empty_existing_object():
     import httpx
     captured = {}
+    orig_fn = _no_app_function()
     orig_tok = dep._orbital_service_token
     dep._orbital_service_token = lambda: "ORB-SECRET"
     orig_client = _grail_client(captured, existing_items=[{"objectId": "obj-9", "value": {"token": ""}}])
@@ -526,6 +546,7 @@ def test_ensure_orbital_config_fills_empty_existing_object():
     finally:
         httpx.AsyncClient = orig_client
         dep._orbital_service_token = orig_tok
+        dep._seed_via_app_function = orig_fn
     assert msg == "token seeded"
     assert captured["put_url"].endswith("/obj-9")
     assert captured["put"]["value"]["token"] == "ORB-SECRET"
@@ -536,6 +557,7 @@ def test_ensure_orbital_config_never_clobbers_configured_token():
     the only safe rule is to leave it alone."""
     import httpx
     captured = {}
+    orig_fn = _no_app_function()
     orig_tok = dep._orbital_service_token
     dep._orbital_service_token = lambda: "ORB-SECRET"
     orig_client = _grail_client(
@@ -545,6 +567,7 @@ def test_ensure_orbital_config_never_clobbers_configured_token():
     finally:
         httpx.AsyncClient = orig_client
         dep._orbital_service_token = orig_tok
+        dep._seed_via_app_function = orig_fn
     assert msg == "already configured"
     assert "put" not in captured and "post" not in captured
 
@@ -1051,14 +1074,17 @@ def test_a_client_with_the_documented_scopes_deploys():
     assert dep.blocking_missing(caps) == []
 
 
-def test_the_unseeded_orbital_token_warning_names_the_manual_step():
+def test_the_unseeded_orbital_token_warning_leads_with_the_automatic_route():
     w = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
     assert len(w) == 1
-    # It must not tell the admin to grant a scope that cannot be granted.
-    assert "Admin" in w[0] and "Orbital Server Configuration" in w[0]
     assert "workshops and live sessions fail immediately" in w[0]
-    # It must not send the admin off to grant a scope that cannot be granted.
-    assert "Granting a scope will not fix this" in w[0]
+    # It must not send the admin off to grant a scope that cannot be granted...
+    assert "cannot be granted to an OAuth client" in w[0]
+    # ...and, since E6b, must not lead with the manual paste either: seeding is
+    # automatic now, so "re-deploy a current version" is the first thing to try
+    # and the paste is the last resort.
+    assert "Admin" in w[0] and "Orbital Server Configuration" in w[0]
+    assert w[0].index("re-deploy a current version") < w[0].index("paste the Orbital token")
 
 
 def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
