@@ -4166,8 +4166,10 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     # request by a workshop that knows it runs longer than the default (clamped
     # to MAX_SESSION_HOURS so a caller can never ask for an unbounded daemon).
     session_hours = int(os.environ.get("ORBITAL_SESSION_HOURS", "2"))
-    if getattr(req, "sessionHours", 0):
-        session_hours = max(session_hours, min(int(req.sessionHours), MAX_SESSION_HOURS))
+    # `body` is the request model — an earlier edit named it `req`, which raised
+    # NameError on EVERY provision and so blocked all environment starts.
+    if getattr(body, "sessionHours", 0):
+        session_hours = max(session_hours, min(int(body.sessionHours), MAX_SESSION_HOURS))
     expires_at = (now.replace(microsecond=0) + timedelta(hours=session_hours)).isoformat()
 
     # Environment follows the content: a lab imported from a branch runs its
