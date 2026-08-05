@@ -1074,17 +1074,17 @@ def test_a_client_with_the_documented_scopes_deploys():
     assert dep.blocking_missing(caps) == []
 
 
-def test_the_unseeded_orbital_token_warning_leads_with_the_automatic_route():
+def test_the_unseeded_orbital_token_warning_names_the_manual_step():
     w = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
     assert len(w) == 1
     assert "workshops and live sessions fail immediately" in w[0]
-    # It must not send the admin off to grant a scope that cannot be granted...
-    assert "cannot be granted to an OAuth client" in w[0]
-    # ...and, since E6b, must not lead with the manual paste either: seeding is
-    # automatic now, so "re-deploy a current version" is the first thing to try
-    # and the paste is the last resort.
-    assert "Admin" in w[0] and "Orbital Server Configuration" in w[0]
-    assert w[0].index("re-deploy a current version") < w[0].index("paste the Orbital token")
+    assert "Orbital Server Configuration" in w[0]
+    # It must not send the admin off to grant a scope that cannot be granted,
+    # and must not imply the install could have handled it — routing the write
+    # through an app function fails the same way, because such a function runs
+    # with the caller's permissions.
+    assert "not offered in the OAuth client scope catalog" in w[0]
+    assert "CALLER's permissions" in w[0]
 
 
 def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():

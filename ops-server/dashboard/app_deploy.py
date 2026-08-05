@@ -383,12 +383,13 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
             or "error" in (orbital_config or ""):
         warnings.append(
             f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). "
-            f"{_ORBITAL_TOKEN_CONSEQUENCE} Seeding normally happens by itself: the app writes "
-            f"its own orbital-config when the deploy invokes seedOrbitalConfig, because "
-            f"app-settings:objects:write belongs to the app and cannot be granted to an OAuth "
-            f"client. If that did not happen here, the installed version may predate the "
-            f"function — re-deploy a current version. Failing that, open the app → "
-            f"Admin → Orbital Server Configuration and paste the Orbital token once.")
+            f"{_ORBITAL_TOKEN_CONSEQUENCE} This is a ONE-TIME manual step on a new tenant: "
+            f"open the app → Settings → Orbital Server Configuration and paste the Orbital "
+            f"token. A tenant that already has one needs nothing. It cannot be automated — "
+            f"app-settings:objects:write is not offered in the OAuth client scope catalog "
+            f"(400 invalid_request even for a client with full account rights), and routing "
+            f"the write through an app function does not help: an app function invoked by an "
+            f"external bearer runs with the CALLER's permissions, not the app's.")
     return warnings
 
 
@@ -645,16 +646,18 @@ def capabilities_from_scope(granted: str) -> dict[str, bool]:
 
 async def _mint_account_token(label: str, client_id: str, client_secret: str,
                               resource: str, action: str,
-                              sso_url: str = f"{DEFAULT_SSO}/sso/oauth2/token") -> str | None:
+                              sso_url: str = f"{DEFAULT_SSO}/sso/oauth2/token",
+                              scope_sets: list[str] | None = None) -> str | None:
     """Mint a deploy bearer from a tenant's account OAuth client (server-side).
 
     One implementation for every tenant Orbital deploys to itself. sso_url is a
     parameter because the labs tenants (sprint) authenticate against their own
-    SSO host, not sso.dynatrace.com.
+    SSO host, not sso.dynatrace.com. `scope_sets` overrides the deploy ladder for
+    callers that need different powers — content sync, notably.
     """
     if not (client_id and client_secret):
         return None
-    scope_sets = _deploy_scopes(action)
+    scope_sets = scope_sets if scope_sets is not None else _deploy_scopes(action)
     for i, scope in enumerate(scope_sets):
         try:
             async with httpx.AsyncClient(timeout=15) as c:
@@ -684,6 +687,53 @@ async def _mint_coe_token(action: str) -> str | None:
     """Mint a bearer for the COE tenant from Orbital's COE client credentials."""
     return await _mint_account_token("COE", COE_CLIENT_ID, COE_CLIENT_SECRET,
                                      COE_RESOURCE, action)
+
+
+# What a content-sync caller needs, and WHY each one — this list was arrived at
+# empirically, and the reasoning is easy to lose.
+#
+# The decisive fact: an app function invoked by an external OAuth bearer runs
+# with the CALLER's permissions, not the app's. Measured — `POST .../api/boot`
+# with a deploy bearer returns `labs: 0, canWrite: false` on a tenant holding 42
+# lab documents, because the caller has no document scope. So every permission
+# the import needs has to be on the token Orbital presents.
+#
+#   state:app-states:read  — `loadMintClient` reads the mint OAuth client out of
+#       app state. Without it `isServiceIdentityAvailable()` answers false, the
+#       import silently falls back to caller-context document writes, and every
+#       source fails `[storeLabDocument] Forbidden`. This is the load-bearing
+#       one: WITH it the app mints its own token and documents are written by
+#       the service principal, which is what keeps ownership uniform.
+#   document:* — the fallback path, for a tenant with no mint client configured.
+#       Documents then belong to this client rather than the service principal,
+#       which is worse than the mint path but far better than no content.
+#   settings/app-settings reads — the import reads content-service config.
+CONTENT_SYNC_SCOPES = [
+    "app-engine:apps:run state:app-states:read app-settings:objects:read "
+    "settings:objects:read document:documents:read document:documents:write "
+    "document:documents:delete",
+    # Degrade in the same spirit as the deploy ladder: keep the mint path even if
+    # the client cannot hold document scopes, since the mint path is the good one.
+    "app-engine:apps:run state:app-states:read app-settings:objects:read",
+    "app-engine:apps:run state:app-states:read",
+]
+
+
+async def content_sync_token(tenant_url: str) -> tuple[str, str]:
+    """(token, label) — a bearer able to drive an import on this tenant."""
+    if _is_coe(tenant_url):
+        return (await _mint_account_token("COE-content", COE_CLIENT_ID, COE_CLIENT_SECRET,
+                                          COE_RESOURCE, "deploy",
+                                          scope_sets=CONTENT_SYNC_SCOPES) or ""), "COE"
+    if _is_sro(tenant_url):
+        return (await _mint_account_token("SRO-content", SRO_CLIENT_ID, SRO_CLIENT_SECRET,
+                                          SRO_RESOURCE, "deploy",
+                                          scope_sets=CONTENT_SYNC_SCOPES) or ""), "SRO"
+    if _is_sprint(tenant_url):
+        return (await _mint_account_token("SPRINT-content", SPRINT_CLIENT_ID, SPRINT_CLIENT_SECRET,
+                                          SPRINT_RESOURCE, "deploy", sso_url=SPRINT_SSO_URL,
+                                          scope_sets=CONTENT_SYNC_SCOPES) or ""), "SPRINT"
+    return "", ""
 
 
 def _is_sprint(tenant_url: str) -> bool:
@@ -936,21 +986,29 @@ def _orbital_service_token() -> str | None:
 
 
 async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
-    """Ask the app to seed its own orbital-config, and report what it said.
+    """Ask the app about its orbital-config, and report what it said.
 
-    This is the only route that can actually work. Writing app-settings needs
-    `app-settings:objects:write`, which is not in the account OAuth client scope
-    catalog — measured on all three tenants including the COE master client with
-    full account rights: requesting it answers `400 invalid_request`, and a direct
-    PUT with the richest grantable token answers
-    `403 {"missingScopes":["app-settings:objects:write"]}`.
+    THIS CANNOT SEED A FRESH TENANT, and the reason is worth keeping written down
+    because it looks like it should.
 
-    The app declares that scope itself, and `app-engine:apps:install/run` — which
-    the deploy token does hold — is enough to invoke an app function from outside.
-    So the deploy hands the token to the app and the app writes its own settings.
+    Writing app-settings needs `app-settings:objects:write`, which is not offered
+    in the account OAuth client scope catalog — measured on all three tenants,
+    including the COE master client with full account rights: requesting it
+    answers `400 invalid_request`, and a direct PUT with the richest grantable
+    token answers `403 {"missingScopes":["app-settings:objects:write"]}`.
 
-    Returns None when the function is not present (older app version installed),
-    so the caller can fall back to the legacy direct write and its message.
+    The app declares that scope itself, so routing the write through an app
+    function is the obvious idea. It does not work: an app function invoked by an
+    external bearer runs with the CALLER's permissions, not the app's. Measured —
+    `POST .../api/boot` with a deploy bearer returns `labs: 0, canWrite: false` on
+    a tenant holding 42 lab documents. The function would hit the same 403.
+
+    What it IS good for: an honest, definite answer about whether this tenant is
+    already configured, which the read-only probe below can only guess at when the
+    credential cannot read app settings. `already-configured` from here is a fact.
+
+    Returns None when the function is absent (older app version), so the caller
+    falls back to the legacy direct write and its message.
     """
     fn = (f"{tenant_url.rstrip('/')}/platform/app-engine/app-functions/v1/apps/"
           f"{APP_ID}/api/seedOrbitalConfig")

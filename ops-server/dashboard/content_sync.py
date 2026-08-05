@@ -59,6 +59,21 @@ DEFAULT_INTERVAL_S = 6 * 3600
 # under the loop interval, so a slow tenant can never overlap its own next run.
 IMPORT_TIMEOUT_S = 300
 
+# Don't reconcile the instant the service starts. A restart during an incident
+# would otherwise add a full import sweep across every tenant to whatever else is
+# going wrong, and a deploy restarts this process.
+STARTUP_DELAY_S = 120
+
+# How many identical failures before we call it a credential problem and stop.
+SYSTEMATIC_FAILURE_THRESHOLD = 3
+
+
+def _signature(error: str) -> str:
+    """Collapse an error to its shape, so per-repo noise (names, errorRefs) does
+    not make three instances of one problem look like three problems."""
+    import re
+    return re.sub(r'"[^"]*"|[0-9a-f]{8}-[0-9a-f-]{27}|^[^:]+: ', "", error).strip()
+
 
 def orbital_token() -> str:
     """The service token the app will verify us by. Empty disables the sync."""
@@ -131,7 +146,12 @@ async def sync_tenant(tenant_url: str, *, invoke=invoke_import,
     try:
         if credential is None:
             from dashboard import app_deploy as dep
-            credential = await dep.choose_deploy_credential(tenant_url, "deploy")
+            # NOT the deploy credential. An app function invoked from outside runs
+            # with the CALLER's permissions, so an import driven from here needs
+            # document + app-state scopes that a deploy bearer has no reason to
+            # hold. See CONTENT_SYNC_SCOPES for what each one buys.
+            token, label = await dep.content_sync_token(tenant_url)
+            credential = {"token": token, "source": f"{label}-content"}
     except Exception as exc:
         return {"tenant": tenant_url, "status": "error", "detail": f"credential: {exc}"}
 
@@ -142,7 +162,7 @@ async def sync_tenant(tenant_url: str, *, invoke=invoke_import,
         return {"tenant": tenant_url, "status": "no-credential", "sources": len(sources)}
 
     imported, failed, errors = 0, 0, []
-    for src in sources:
+    for i, src in enumerate(sources):
         repo = src.get("repo", "?")
         try:
             res = await invoke(tenant_url, bearer, import_payload(src, token))
@@ -152,6 +172,17 @@ async def sync_tenant(tenant_url: str, *, invoke=invoke_import,
             failed += 1
             errors.append(f"{repo}: {res['error']}")
             log.warning("content sync %s: %s failed — %s", tenant_url, repo, res["error"])
+            # A permission problem is not 22 problems. When the first few sources
+            # fail the same way, the cause is the credential, not the content, and
+            # grinding through the rest only buys an identical error per repo and
+            # a log nobody reads. Stop and say so.
+            if i + 1 == SYSTEMATIC_FAILURE_THRESHOLD and imported == 0 \
+                    and len({_signature(e) for e in errors}) == 1:
+                return {"tenant": tenant_url, "status": "blocked",
+                        "sources": len(sources), "imported": 0, "failed": failed,
+                        "detail": f"first {failed} sources failed identically — "
+                                  f"treating as a credential problem, not content",
+                        "errors": errors}
         else:
             imported += 1
     return {"tenant": tenant_url, "status": "ok" if not failed else "partial",
@@ -179,6 +210,7 @@ async def sync_loop(interval_s: int = DEFAULT_INTERVAL_S) -> None:
     if not orbital_token():
         log.info("content sync disabled (no ORBITAL_TOKEN)")
         return
+    await asyncio.sleep(STARTUP_DELAY_S)
     while True:
         started = time.monotonic()
         try:

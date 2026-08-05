@@ -113,13 +113,18 @@ def test_no_orbital_token_configured_skips_before_any_call(monkeypatch):
     assert called["n"] == 0
 
 
-def test_seed_warning_no_longer_tells_admins_to_paste_first(monkeypatch):
-    # The paste is now the last resort, not the instruction. A warning that
-    # leads with it would send every new tenant through a manual step that the
-    # install already did for them.
+def test_the_seed_warning_states_the_manual_step_and_why_it_is_manual():
+    # An earlier version of this claimed seeding was automatic. It is not: an app
+    # function invoked by an external bearer runs with the CALLER's permissions,
+    # so routing the write through the app hits the same ungrantable scope.
+    # Telling an admin the install handled it would leave them with a tenant that
+    # 401s and no reason to look at settings.
     w = dep._scope_warnings("", "", "skipped (something)")[0]
-    assert "writes its own orbital-config" in w
-    assert w.index("re-deploy a current version") < w.index("paste the Orbital token")
+    assert "ONE-TIME manual step" in w
+    assert "Orbital Server Configuration" in w
+    assert "cannot be automated" in w
+    assert "CALLER's permissions" in w
+
 
 
 # ── /api/service/verify — the oracle seedOrbitalConfig trusts ────────────────
