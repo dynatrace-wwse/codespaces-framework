@@ -231,6 +231,19 @@ CAPABILITY_SCOPE = {
     "settings_write": "settings:objects:write",
     "app_settings": "app-settings:objects:write",
 }
+# Capabilities an account OAuth client can actually be granted, and therefore the
+# only ones it is fair to refuse a deploy over.
+#
+# app-settings:objects:write is deliberately NOT here. App-settings permissions are
+# declared by an app and held by the app; they are not offered in the OAuth client
+# scope catalog, so no admin can grant it however carefully they follow the
+# instructions. The audit bears that out — across every deploy this server has ever
+# run, that write was skipped 7 times and succeeded 0. Blocking on an ungrantable
+# scope would make deployment impossible rather than safe.
+#
+# The consequence it guards against is still real, so it is reported as a warning
+# with the one manual step that fixes it (see _scope_warnings).
+BLOCKING_CAPABILITIES = ("registry", "settings_read", "settings_write")
 
 
 async def probe_capabilities(token: str, tenant_url: str) -> dict[str, bool]:
@@ -287,6 +300,11 @@ def missing_capabilities(caps: dict[str, bool]) -> list[str]:
     return [k for k in CAPABILITY_COST if not caps.get(k, True)]
 
 
+def blocking_missing(caps: dict[str, bool]) -> list[str]:
+    """Missing capabilities that should stop a deploy — the grantable ones only."""
+    return [k for k in missing_capabilities(caps) if k in BLOCKING_CAPABILITIES]
+
+
 def describe_missing(missing: list[str]) -> str:
     """One actionable line per missing capability: the scope, and what it costs."""
     return " ".join(
@@ -330,10 +348,13 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
     # fine and then 401s on every provision, with nothing in the UI explaining why.
     if (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or ""):
         warnings.append(
-            f"Orbital token NOT configured ({orbital_config}): the app's functions will call "
-            f"Orbital unauthenticated and every environment action will fail with 401. Grant the "
-            f"deploy client app-settings:objects:write and re-deploy, or paste the token into the "
-            f"app's Orbital Server Configuration settings by hand.")
+            f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). Until it is, the "
+            f"app's functions call Orbital unauthenticated and every environment action fails "
+            f"with 401: no lab starts, and the UI gives no reason. Granting a scope will not fix "
+            f"this — app-settings permissions belong to the app, not to an OAuth client, and "
+            f"app-settings:objects:write is not offered in the client scope catalog. Open the "
+            f"app → Admin → Orbital Server Configuration and paste the Orbital token once. "
+            f"A tenant that already has one needs nothing.")
     return warnings
 
 
@@ -686,7 +707,8 @@ async def choose_deploy_credential(tenant_url: str, action: str) -> dict:
         granted = _LAST_GRANT.get(label, "") if source == "oauth" else ""
         caps = (capabilities_from_scope(granted) if granted
                 else await probe_capabilities(token, tenant_url))
-        missing = missing_capabilities(caps)
+        # Rank on what an admin can actually fix; report everything.
+        missing = blocking_missing(caps)
         if not missing:
             if best is not None:
                 log.info("%s deploy: using the %s credential — %s lacks %s",
@@ -1229,7 +1251,7 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
         # A pasted platform token carries no readable scope claim, so probe it too —
         # same guarantee for a customer admin as for our own tenants.
         caps = await probe_capabilities(token, tenant)
-        missing = missing_capabilities(caps)
+        missing = blocking_missing(caps)
         if missing and not allow_partial:
             await _audit(user, tenant_id, action, "insufficient-scopes",
                          via="token", source=source, missing=missing)

@@ -553,7 +553,7 @@ def test_scope_warnings_flags_unseeded_orbital_config():
     w = dep._scope_warnings("added 1 host(s)", "enabled → wwse",
                             "skipped (token lacks app-settings:objects:write)")
     assert len(w) == 1
-    assert "Orbital token NOT configured" in w[0]
+    assert "Orbital token not seeded" in w[0]
     assert dep._scope_warnings("added 1 host(s)", "enabled → wwse",
                                "seed failed (HTTP 500)") != []
     # seeded / pre-existing → silent
@@ -895,13 +895,13 @@ def test_choose_returns_the_least_incomplete_when_none_are_complete():
         full = dict.fromkeys(dep.CAPABILITY_COST, True)
         if token == "A":
             return {**full, "settings_read": False, "settings_write": False}
-        return {**full, "app_settings": False}
+        return {**full, "settings_write": False}
 
     dep._auto_candidates, dep.probe_capabilities = cands, probe
     try:
         pick = _run(dep.choose_deploy_credential("https://sro97894.apps.dynatrace.com", "deploy"))
         assert pick["source"] == "platform-token"      # one gap beats two
-        assert pick["missing"] == ["app_settings"]
+        assert pick["missing"] == ["settings_write"]
     finally:
         dep._auto_candidates, dep.probe_capabilities = saved
 
@@ -932,7 +932,7 @@ def test_deploy_is_refused_before_installing_when_scopes_are_missing():
         return [("T", "oauth")], "COE"
 
     async def probe(token, tenant_url):
-        return {**dict.fromkeys(dep.CAPABILITY_COST, True), "app_settings": False}
+        return {**dict.fromkeys(dep.CAPABILITY_COST, True), "settings_write": False}
 
     async def never(*a, **k):
         raise AssertionError("must not install when the credential is incomplete")
@@ -953,7 +953,7 @@ def test_allow_partial_is_an_explicit_opt_in():
         return [("T", "oauth")], "COE"
 
     async def probe(token, tenant_url):
-        return {**dict.fromkeys(dep.CAPABILITY_COST, True), "app_settings": False}
+        return {**dict.fromkeys(dep.CAPABILITY_COST, True), "settings_write": False}
 
     dep._auto_candidates, dep.probe_capabilities = cands, probe
     try:
@@ -992,6 +992,8 @@ def test_read_access_is_not_write_access():
         "app-engine:apps:install app-engine:apps:run app-settings:objects:read "
         "settings:objects:read settings:objects:write")
     assert dep.missing_capabilities(caps) == ["app_settings"]
+    # ...but it must not BLOCK: see test_ungrantable_scope_does_not_block_a_deploy.
+    assert dep.blocking_missing(caps) == []
 
 
 def test_install_scopes_are_both_required_for_registry():
@@ -1013,3 +1015,46 @@ def test_scope_ladder_descends_one_capability_at_a_time():
     counts = [len(dep.missing_capabilities(dep.capabilities_from_scope(r))) for r in rungs]
     assert counts == sorted(counts), f"ladder not richest-first: {counts}"
     assert dep.missing_capabilities(dep.capabilities_from_scope(rungs[0])) == []
+
+
+# ── An ungrantable scope must not block a deploy ─────────────────────────────
+#
+# app-settings permissions are declared and held by an APP; they are not in the
+# OAuth client scope catalog, so no admin can grant app-settings:objects:write
+# however carefully they follow the instructions. Refusing a deploy over it makes
+# deployment impossible rather than safe. The audit on this server records that
+# write skipped 7 times and succeeded 0 across every deploy ever run.
+
+def test_blocking_set_covers_only_grantable_capabilities():
+    assert "app_settings" not in dep.BLOCKING_CAPABILITIES
+    for k in dep.BLOCKING_CAPABILITIES:
+        assert k in dep.CAPABILITY_COST
+
+
+def test_ungrantable_scope_does_not_block_a_deploy():
+    caps = {**dict.fromkeys(dep.CAPABILITY_COST, True), "app_settings": False}
+    assert dep.missing_capabilities(caps) == ["app_settings"]   # still reported
+    assert dep.blocking_missing(caps) == []                     # but never blocks
+
+
+def test_grantable_gaps_still_block():
+    for cap in ("registry", "settings_read", "settings_write"):
+        caps = {**dict.fromkeys(dep.CAPABILITY_COST, True), cap: False}
+        assert dep.blocking_missing(caps) == [cap], cap
+
+
+def test_a_client_with_the_documented_scopes_deploys():
+    # Exactly what the register page now asks for.
+    caps = dep.capabilities_from_scope(
+        "app-engine:apps:install app-engine:apps:run app-engine:apps:delete "
+        "settings:objects:read settings:objects:write")
+    assert dep.blocking_missing(caps) == []
+
+
+def test_the_unseeded_orbital_token_warning_names_the_manual_step():
+    w = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
+    assert len(w) == 1
+    # It must not tell the admin to grant a scope that cannot be granted.
+    assert "Admin" in w[0] and "Orbital Server Configuration" in w[0]
+    assert "401" in w[0]
+    assert "grant" not in w[0].lower().split("granting")[0][-40:]
