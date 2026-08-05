@@ -5443,6 +5443,47 @@ async def api_live_sessions_list(request: Request, email: str = "", tenant: str 
     return {"sessions": sessions, "count": len(sessions)}
 
 
+@app.get("/api/live/sessions/past")
+async def api_live_sessions_past(request: Request, email: str = "", tenant: str = "",
+                                 limit: int = 25):
+    """Finished workshops this email attended or hosted, newest first.
+
+    A separate view rather than a flag on the live listing, because "listed" is
+    what the home banner, the upcoming card and the classroom router all treat as
+    "go here now" — an ended workshop must never re-enter those. But it must stop
+    disappearing from the people who were in it: pressing End used to remove the
+    workshop, its cohort, its scores and its questions from the trainer as well as
+    the learners, with no way back to any of it.
+
+    Same membership rule as the live listing (live_sessions.is_member), and the
+    same masking: only the trainer of a given workshop — or a real org member —
+    sees unmasked identities.
+    """
+    email = live_sessions.normalize_email(email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email query parameter is required")
+    full_admin = _sees_full_identities(request, email)
+    sessions = []
+    for session_id in await pool.zrevrange("live:sessions:index", 0, -1):
+        if len(sessions) >= max(1, min(limit, 100)):
+            break
+        sess_key, roster_key, joined_key = _live_keys(session_id)
+        session = await pool.hgetall(sess_key)
+        if not session:
+            continue  # TTL-expired: the index tolerates stale members
+        roster = await pool.smembers(roster_key)
+        if not live_sessions.is_past(session, roster, email, tenant):
+            continue
+        joined = await pool.hgetall(joined_key)
+        item = live_sessions.shape_summary(session_id, session, roster, joined, email)
+        # Tell the caller whether a frozen result set exists, so the UI can offer
+        # the report without a second round trip per row.
+        item["hasReport"] = bool(await pool.exists(f"live:session:{session_id}:completion"))
+        full = full_admin or live_sessions.is_trainer(email, session)
+        sessions.append(item if full else masking.mask_live_summary(item))
+    return {"sessions": sessions, "count": len(sessions)}
+
+
 @app.get("/api/live/sessions/{session_id}")
 async def api_live_session_detail(session_id: str, request: Request, email: str = ""):
     """Full session state. The roster and per-learner joined list are only
@@ -6082,8 +6123,11 @@ async def api_live_session_progress(session_id: str, request: Request,
         # members with zero events still get a row (see shape_progress).
         cohort = sorted(set(roster) | set(joined.keys()))
         training_id = session.get("trainingId", "")
+        # The roster arm of the query matches ordinary self-paced work, so it is
+        # only correct once the workshop is actually running.
         query = live_progress.build_progress_query(
-            session_id, training_id, cohort, live_progress.since_timestamp(session))
+            session_id, training_id, cohort, live_progress.since_timestamp(session),
+            started=live_progress.has_started(session))
         records = await _query_coe_grail(query)
         payload = live_progress.shape_progress(records, cohort)
         payload.update({
@@ -6231,7 +6275,8 @@ async def _store_completion_record(session_id: str, session: dict):
         roster = await pool.smembers(f"live:session:{session_id}:roster")
         query = live_progress.build_progress_query(
             session_id, session.get("trainingId", ""), sorted(roster),
-            live_progress.since_timestamp(session))
+            live_progress.since_timestamp(session),
+            started=live_progress.has_started(session))
         rows = await _query_coe_grail(query)
         shaped = live_progress.shape_progress(rows, sorted(roster))
         record = {
@@ -6253,19 +6298,44 @@ async def _store_completion_record(session_id: str, session: dict):
 
 
 @app.get("/api/live/sessions/{session_id}/completion")
-async def api_live_completion(session_id: str, trainerEmail: str = ""):
-    """The frozen results of a finished workshop. Trainer-only.
+async def api_live_completion(session_id: str, request: Request,
+                              trainerEmail: str = "", email: str = ""):
+    """The frozen results of a finished workshop.
+
+    Open to everyone who was in it, not just the trainer: a learner should be
+    able to see how they did and where they came in the room. The two views
+    differ in what they may see about OTHER people —
+
+      trainer (or a real org member): the full cohort, identities intact;
+      learner: their own row in full, everyone else's identity masked.
+
+    Masking is the same helper the live board uses, so the two cannot drift
+    apart into a disclosure bug. The service bearer alone never unmasks
+    (BUG-MASK-1): the app proxies every learner call with it.
 
     404 when the workshop never ended, or once the 30-day retention lapses.
     """
-    sess_key, _, _ = _live_keys(session_id)
+    caller = live_sessions.normalize_email(email or trainerEmail)
+    sess_key, roster_key, _ = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
-    if session and not live_sessions.is_trainer(trainerEmail, session):
-        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    roster = await pool.smembers(roster_key) if session else set()
+    if session and not live_sessions.is_member(session, roster, caller):
+        raise HTTPException(status_code=403, detail="not a member of this workshop")
     raw = await pool.get(f"live:session:{session_id}:completion")
     if not raw:
         raise HTTPException(status_code=404, detail="no completion record for this session")
-    return json.loads(raw)
+    record = json.loads(raw)
+    full = _sees_full_identities(request, caller) or \
+        (session and live_sessions.is_trainer(caller, session))
+    if not full:
+        # Same helper as the live board — keeping the caller's own row readable
+        # so they can find themselves — so the frozen view and the live one can
+        # never disagree about what a learner may see.
+        record = {**record, **masking.mask_progress(record, keep=caller),
+                  "trainerEmail": masking.mask_email(record.get("trainerEmail", ""))}
+    record["viewerEmail"] = caller
+    record["isTrainer"] = bool(full)
+    return record
 
 
 async def _require_live_session(session_id: str) -> dict:

@@ -384,3 +384,70 @@ def test_unparseable_step_is_treated_as_sealed():
     s = {"trainerStep": "3", "unlockPath": "1"}
     assert ls.solution_visible("not-a-number", s) is True  # -1 < 3
     assert ls.solution_visible(None, s) is True
+
+
+# ── Past workshops (D1) ──────────────────────────────────────────────────────
+#
+# Pressing End used to remove the workshop from EVERYONE, trainer included:
+# is_listed returned False on state before it ever reached the trainer check.
+# The cohort, the scores and the questions all became unreachable, and the
+# completion record written at that moment had no surface that could show it.
+
+_ENDED = {"trainerEmail": "trainer@dynatrace.com", "state": "ended",
+          "ownerTenant": "https://geu80787.apps.dynatrace.com"}
+_ROSTER = {"learner@dynatrace.com"}
+
+
+def test_ended_workshops_stay_out_of_the_live_listing():
+    # The home banner and classroom router treat "listed" as "go here now".
+    assert not ls.is_listed(_ENDED, _ROSTER, "trainer@dynatrace.com")
+    assert not ls.is_listed(_ENDED, _ROSTER, "learner@dynatrace.com")
+
+
+def test_the_trainer_can_still_reach_a_finished_workshop():
+    assert ls.is_past(_ENDED, _ROSTER, "trainer@dynatrace.com")
+
+
+def test_a_learner_can_still_reach_a_workshop_they_attended():
+    assert ls.is_past(_ENDED, _ROSTER, "learner@dynatrace.com")
+
+
+def test_a_stranger_cannot():
+    assert not ls.is_past(_ENDED, _ROSTER, "someone@else.com")
+
+
+def test_a_cancelled_workshop_is_also_past_not_listed():
+    cancelled = {**_ENDED, "state": "cancelled"}
+    assert ls.is_past(cancelled, _ROSTER, "learner@dynatrace.com")
+    assert not ls.is_listed(cancelled, _ROSTER, "learner@dynatrace.com")
+
+
+def test_a_running_workshop_is_not_past():
+    for state in ("scheduled", "open", "running"):
+        assert not ls.is_past({**_ENDED, "state": state}, _ROSTER, "trainer@dynatrace.com")
+
+
+def test_past_and_listed_agree_on_who_belongs():
+    """The two views must never disagree about membership — that is a disclosure
+    bug. Both delegate to is_member for exactly that reason."""
+    running = {**_ENDED, "state": "running"}
+    for email in ("trainer@dynatrace.com", "learner@dynatrace.com", "someone@else.com"):
+        assert ls.is_listed(running, _ROSTER, email) == ls.is_past(_ENDED, _ROSTER, email), email
+
+
+def test_a_trainer_on_another_tenant_is_still_scoped_out_of_past():
+    # WS-1 tenant scoping applies to the trainer side in both views.
+    assert not ls.is_past(_ENDED, set(), "trainer@dynatrace.com",
+                          tenant="https://sro97894.apps.dynatrace.com")
+    assert ls.is_past(_ENDED, set(), "trainer@dynatrace.com",
+                      tenant="https://geu80787.apps.dynatrace.com")
+
+
+def test_finished_workshop_artefacts_outlive_nothing():
+    """The session hash must not expire before the results it is listed against.
+
+    At 7 days the frozen record (30 days) outlived the session hash, so a
+    three-week-old cohort was unreachable for its remaining 23 days.
+    """
+    import dashboard.live_pad as lp
+    assert ls.SESSION_TTL_SECONDS >= lp.EXPORT_TTL_SECONDS

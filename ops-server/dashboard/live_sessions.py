@@ -27,10 +27,16 @@ from zoneinfo import ZoneInfo
 
 STATES = ("scheduled", "open", "running", "ended", "cancelled")
 
-# TTL applied to the three session keys when a session ends — matches the
-# job:final 7-day retention. The index entry is kept; listing tolerates
-# expired members (hgetall returns {} → skip).
-SESSION_TTL_SECONDS = 7 * 24 * 3600
+# TTL applied to the session keys when a session ends. The index entry is kept;
+# listing tolerates expired members (hgetall returns {} → skip).
+#
+# 30 days, to match the completion record and the pad export (live_pad's
+# EXPORT_TTL_SECONDS). It used to be 7, which meant the artefacts of a finished
+# workshop outlived the workshop itself: the frozen results survived for a month
+# while the session hash they are listed against disappeared after a week, so a
+# trainer looking for a three-week-old cohort found nothing and the record was
+# unreachable for its remaining 23 days.
+SESSION_TTL_SECONDS = 30 * 24 * 3600
 
 
 # ── Emails ────────────────────────────────────────────────────────────────────
@@ -337,6 +343,18 @@ def is_listed(session, roster, email, tenant="") -> bool:
     # cancellation from the board, not the list.
     if not session or session.get("state") in ("ended", "cancelled"):
         return False
+    return is_member(session, roster, email, tenant)
+
+
+def is_member(session, roster, email, tenant="") -> bool:
+    """Whether this email belongs to this workshop at all, ignoring its state.
+
+    The membership half of is_listed, split out so the past-workshop listing can
+    reuse exactly the same rule. Duplicating it would let the two views disagree
+    about who may see a workshop, which is a disclosure bug waiting to happen.
+    """
+    if not session:
+        return False
     if on_roster(email, roster):
         return True
     if not is_trainer(email, session):
@@ -344,6 +362,20 @@ def is_listed(session, roster, email, tenant="") -> bool:
     owner = normalize_tenant(session.get("ownerTenant"))
     caller = normalize_tenant(tenant)
     return not (owner and caller) or owner == caller
+
+
+def is_past(session, roster, email, tenant="") -> bool:
+    """A finished workshop this email attended or hosted.
+
+    Deliberately a SEPARATE view rather than a relaxation of is_listed. Ended
+    workshops must stay out of the live surfaces — the home banner, the upcoming
+    card, the classroom router all treat "listed" as "go here now" — but they
+    must stop vanishing from the people who were in them, which is what
+    is_listed's early return caused: a trainer pressed End and the workshop, its
+    cohort, its scores and its questions were simply gone.
+    """
+    return bool(session) and session.get("state") in ("ended", "cancelled") \
+        and is_member(session, roster, email, tenant)
 
 
 # Optional workshop fields echoed in payloads only when stored on the hash —

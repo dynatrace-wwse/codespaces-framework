@@ -71,53 +71,74 @@ def training_key(id_or_repo) -> str:
     return s
 
 
+def _parse_ts(session, field):
+    """A timezone-aware datetime from an ISO8601 session field, or None."""
+    raw = str((session or {}).get(field) or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def has_started(session) -> bool:
+    """Whether the trainer has actually started this workshop."""
+    return _parse_ts(session, "startedAt") is not None
+
+
 def since_timestamp(session, now=None, grace_hours=2, max_lookback_hours=72) -> str:
     """Lower time bound for the DQL, as an ISO8601 UTC string.
 
-    Anchored on when the workshop began (startedAt, else scheduledAt, else
-    createdAt) minus a grace window, because learners routinely open the
-    training a little before the trainer hits start. Clamped to
-    max_lookback_hours so an old, long-running workshop can never turn into an
-    unbounded Grail scan; falls back to the same clamp when no usable
-    timestamp is on the session.
+    Anchored on when the workshop actually began — `startedAt` minus a grace
+    window, because learners routinely open the training a little before the
+    trainer hits start. Before it starts, on `createdAt`: a workshop cannot have
+    activity older than itself.
 
-    The clamp is two-sided. `scheduledAt` is a PLANNED time, so on a workshop
-    that has not started yet it is in the FUTURE — and the query has no explicit
-    `to:`, so Grail ends it at now. A future lower bound therefore produced
-    end-before-start and Grail rejected the whole query with
-    TIMEFRAME_END_BEFORE_START, surfacing as a 502 on the cohort board. Anything
-    at or after `now` is pulled back to the floor: before a workshop starts there
-    is by definition no activity to find, so the widest sane window is correct
-    and costs nothing.
+    `scheduledAt` is deliberately NOT an anchor. It is a PLANNED time, so on a
+    workshop that has not started it lies in the future; the old code detected
+    that and fell back to the 72-hour floor, reasoning that "before a workshop
+    starts there is by definition no activity to find, so the widest window costs
+    nothing". That reasoning was wrong, and it is the 50%-before-the-workshop bug:
+    the roster arm of the query (see build_progress_query) matches a learner's
+    ORDINARY self-paced work on the same training, so a three-day window swept in
+    three days of it and reported it as workshop progress. The window was never
+    free — it was the leak.
+
+    Clamped into [now - max_lookback_hours, now] so an old workshop cannot become
+    an unbounded Grail scan, and so a future timestamp (clock skew) can never
+    produce the end-before-start that Grail rejects with
+    TIMEFRAME_END_BEFORE_START.
     """
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(hours=max_lookback_hours)
-    anchor = None
-    for field in ("startedAt", "scheduledAt", "createdAt"):
-        raw = str((session or {}).get(field) or "").strip()
-        if not raw:
-            continue
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        anchor = parsed - timedelta(hours=grace_hours)
-        break
-    if anchor is None or anchor < floor or anchor >= now:
+    started = _parse_ts(session, "startedAt")
+    anchor = (started - timedelta(hours=grace_hours)) if started \
+        else _parse_ts(session, "createdAt")
+    if anchor is None:
         anchor = floor
+    anchor = min(max(anchor, floor), now)
     return anchor.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_progress_query(workshop_id, key_or_id, emails, since_iso) -> str:
+def build_progress_query(workshop_id, key_or_id, emails, since_iso, started=True) -> str:
     """DQL for one workshop's training events on COE.
 
-    Matches on the stamped `workshopId` OR on (trainingKey + a roster email)
-    since `since_iso`. The second arm is not redundant: a learner who opened the
-    training before joining the workshop — or who is running an app version that
-    predates the stamp — still shows up on the board, and the workshop's own
-    start time bounds it so unrelated self-paced runs are not swept in.
+    Matches on the stamped `workshopId`, and — once the workshop is running — also
+    on (trainingKey + a roster email). That second arm is not redundant: a learner
+    who opened the training before joining, or who runs an app build predating the
+    stamp, would otherwise read "not started" all session.
+
+    But it matches ORDINARY self-paced work too, so it is only safe inside the
+    workshop's own window. `started=False` drops it entirely, which is what a
+    workshop that has not begun requires: nobody can have made progress in a
+    workshop that has not started, so the only honest answer is the stamped arm —
+    which matches nothing, and every learner correctly reads "not started".
+
+    Leaving it on before the start is what showed a learner at 50% on a workshop
+    the trainer had not opened yet: their own self-paced run of the same training,
+    counted as cohort progress.
     """
     wid = escape_dql_string(workshop_id)
     key = escape_dql_string(training_key(key_or_id))
@@ -130,7 +151,7 @@ def build_progress_query(workshop_id, key_or_id, emails, since_iso) -> str:
     since = escape_dql_string(since_iso)
 
     match = f'workshopId == "{wid}"'
-    if key and roster:
+    if started and key and roster:
         addrs = ", ".join(f'"{e}"' for e in sorted(set(roster)))
         match = f'{match} or (trainingKey == "{key}" and in(lower(userEmail), {{{addrs}}}))'
 

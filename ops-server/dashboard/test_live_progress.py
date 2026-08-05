@@ -48,12 +48,22 @@ def test_since_anchors_on_start_minus_grace():
     assert out == "2026-08-03T08:00:00Z"
 
 
-def test_since_falls_back_through_scheduled_then_created():
+def test_since_falls_back_to_creation_not_to_the_schedule():
+    """An unstarted workshop anchors on when it was CREATED.
+
+    scheduledAt is a plan, not evidence of activity, and using it was the root of
+    the 50%-before-the-start bug: on a not-yet-started workshop it is in the
+    future, the old code detected that and fell back to a 72-hour window, and the
+    roster arm of the query then swept three days of ordinary self-paced work.
+    A workshop cannot have activity older than itself, so creation is the bound.
+    """
     now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
-    assert lp.since_timestamp({"scheduledAt": "2026-08-03T11:00:00Z"}, now=now) \
-        == "2026-08-03T09:00:00Z"
+    # No grace window before creation — there is nothing to be early for yet.
     assert lp.since_timestamp({"createdAt": "2026-08-03T09:30:00+00:00"}, now=now) \
-        == "2026-08-03T07:30:00Z"
+        == "2026-08-03T09:30:00Z"
+    # A schedule alone tells us nothing about activity; fall to the safety floor.
+    assert lp.since_timestamp({"scheduledAt": "2026-08-03T11:00:00Z"}, now=now) \
+        == "2026-07-31T12:00:00Z"
 
 
 def test_since_is_clamped_and_never_unbounded():
@@ -278,7 +288,9 @@ def test_since_timestamp_future_scheduled_at_clamps_to_floor():
     now = datetime(2026, 8, 4, 16, 51, tzinfo=timezone.utc)
     session = {"scheduledAt": "2026-08-12T17:50:00Z", "startedAt": "", "createdAt": "2026-08-04T10:00:00Z"}
     since = lp.since_timestamp(session, now=now)
-    assert since == "2026-08-01T16:51:00Z", since
+    # Creation, NOT the 72-hour floor: the old floor is what leaked self-paced
+    # work into a workshop that had not started.
+    assert since == "2026-08-04T10:00:00Z", since
     assert since < now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -287,3 +299,65 @@ def test_since_timestamp_started_workshop_uses_started_at():
     now = datetime(2026, 8, 4, 16, 51, tzinfo=timezone.utc)
     session = {"startedAt": "2026-08-04T14:00:00Z", "scheduledAt": "2026-08-04T14:00:00Z"}
     assert lp.since_timestamp(session, now=now) == "2026-08-04T12:00:00Z"
+
+
+# ── The 50%-before-the-workshop-started leak (C1) ────────────────────────────
+#
+# Reported 2026-08-05: a trainer opened the cohort board of a workshop they had
+# not started and saw a rostered learner at 50%. Nobody had done anything in that
+# workshop. What the board showed was that learner's own earlier self-paced run of
+# the same training, swept in by two faults acting together:
+#   1. scheduledAt is in the FUTURE before a workshop starts, so the lower bound
+#      collapsed to the 72-hour safety floor; and
+#   2. the roster arm matches (trainingKey + email) with no workshop predicate,
+#      so everything in that window counted as cohort progress.
+
+def _unstarted(**over):
+    return {"createdAt": "2026-08-05T09:00:00Z", "scheduledAt": "2026-08-05T15:00:00Z",
+            "startedAt": "", **over}
+
+
+def test_an_unstarted_workshop_does_not_match_self_paced_work():
+    q = lp.build_progress_query("ws-1", "kubernetes-101", ["devlove@googlemail.com"],
+                                SINCE, started=lp.has_started(_unstarted()))
+    assert 'workshopId == "ws-1"' in q
+    # No roster arm at all: the only events that can count are stamped with THIS
+    # workshop, and before it starts there are none. (trainingKey still appears in
+    # the field projection — it is the FILTER that must not mention it.)
+    filter_line = next(l for l in q.splitlines() if l.startswith("| filter workshopId"))
+    assert "trainingKey" not in filter_line
+    assert "devlove@googlemail.com" not in q
+
+
+def test_a_running_workshop_still_matches_its_roster():
+    session = _unstarted(startedAt="2026-08-05T15:02:00Z")
+    q = lp.build_progress_query("ws-1", "kubernetes-101", ["devlove@googlemail.com"],
+                                SINCE, started=lp.has_started(session))
+    assert 'workshopId == "ws-1"' in q
+    assert 'trainingKey == "kubernetes-101"' in q
+    assert "devlove@googlemail.com" in q
+
+
+def test_has_started_reads_only_a_real_start():
+    assert not lp.has_started(_unstarted())
+    assert not lp.has_started({})
+    assert not lp.has_started({"startedAt": ""})
+    assert not lp.has_started({"scheduledAt": "2026-08-05T15:00:00Z"})   # a plan is not a start
+    assert lp.has_started({"startedAt": "2026-08-05T15:02:00Z"})
+
+
+def test_the_window_of_an_unstarted_workshop_cannot_predate_it():
+    # The specific arithmetic that produced the bug: a workshop created this
+    # morning, scheduled for this afternoon, read at midday.
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    since = lp.since_timestamp(_unstarted(), now=now)
+    assert since == "2026-08-05T09:00:00Z"          # creation
+    assert since != "2026-08-02T12:00:00Z"          # NOT now - 72h, the old answer
+
+
+def test_a_started_workshop_keeps_its_grace_window():
+    # Learners routinely open the training a few minutes before the trainer
+    # starts; that work is genuinely theirs and must still count.
+    now = datetime(2026, 8, 5, 16, 0, tzinfo=timezone.utc)
+    session = _unstarted(startedAt="2026-08-05T15:00:00Z")
+    assert lp.since_timestamp(session, now=now) == "2026-08-05T13:00:00Z"
