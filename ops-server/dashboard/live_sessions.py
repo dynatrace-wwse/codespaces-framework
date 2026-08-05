@@ -385,7 +385,10 @@ def is_past(session, roster, email, tenant="") -> bool:
 # deliberately NOT echoed — it is an internal scoping field (see is_listed).
 _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
                     "cancelledAt", "repoUrl", "branch", "description",
-                    "trainerStep", "unlockPath")
+                    "trainerStep", "unlockPath",
+                    # Only set once a workshop has finished, so it costs live
+                    # payloads nothing and dates the row in the past listing.
+                    "endedAt")
 
 
 def workshop_fields(session, email) -> dict:

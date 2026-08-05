@@ -7013,101 +7013,129 @@ _PAD_PAGE_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Virtual Room</title>
 <style>
+/* Theme tokens. The popup is a SEPARATE top-level window on Orbital's origin, so
+   it cannot read the Dynatrace app's data-theme — different document, different
+   origin. The theme has to be passed in (?theme=), and is stamped on <html>
+   before first paint so there is no flash of the wrong one. */
+:root, :root[data-theme="dark"] {
+  --bg: #1a1a2e; --surface: #16213e; --border: #0d3460;
+  --text: #d4d4d4; --text-dim: #718096; --text-strong: #e2e8f0;
+  --accent: #00b4d8; --code-bg: #0d1117;
+  --code-text: #c9d1d9; --code-text-strong: #e6edf3; --link: #79c0ff;
+  --btn: #0e639c; --btn-hover: #1177bb; --on-accent: #ffffff;
+  --surface-2: #131c33; --border-soft: #4a5568;
+  --danger: #fc8181; --success: #48bb78; --warning: #f6c343;
+}
+:root[data-theme="light"] {
+  --bg: #f5f6f7; --surface: #ffffff; --border: #d8dde3;
+  --text: #1a1d21; --text-dim: #5a6672; --text-strong: #0e1114;
+  --accent: #0e7c9b; --code-bg: #f3f5f7;
+  --code-text: #24292f; --code-text-strong: #0e1114; --link: #0969da;
+  --btn: #0969da; --btn-hover: #0860ca; --on-accent: #ffffff;
+  --surface-2: #eef1f4; --border-soft: #c3cad2;
+  --danger: #b42318; --success: #067647; --warning: #b54708;
+}
+</style>
+<script>
+/* Before first paint, deliberately: a theme applied after render is a flash. */
+document.documentElement.dataset.theme = __THEME__;
+</script>
+<style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { height: 100%; background: #1a1a2e; color: #d4d4d4;
+html, body { height: 100%; background: var(--bg); color: var(--text);
   font-family: -apple-system, 'Segoe UI', sans-serif; }
 body { display: flex; flex-direction: column; }
-#topbar { background: #16213e; color: #a0aec0; font-size: 12px; line-height: 38px;
+#topbar { background: var(--surface); color: var(--text-dim); font-size: 12px; line-height: 38px;
   padding: 0 16px; display: flex; align-items: center; justify-content: space-between;
-  flex-shrink: 0; border-bottom: 1px solid #0d3460; gap: 16px; }
+  flex-shrink: 0; border-bottom: 1px solid var(--border); gap: 16px; }
 #brand { display: flex; align-items: center; gap: 8px; }
-#brand-logo { color: #00b4d8; font-size: 18px; }
-#brand-name { color: #e2e8f0; font-weight: 600; font-size: 13px; letter-spacing: .3px; }
-#who { font-size: 11px; color: #718096; white-space: nowrap; }
+#brand-logo { color: var(--accent); font-size: 18px; }
+#brand-name { color: var(--text-strong); font-weight: 600; font-size: 13px; letter-spacing: .3px; }
+#who { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 #main { flex: 1; overflow-y: auto; padding: 20px; max-width: 860px; width: 100%;
   margin: 0 auto; }
-.card { background: #16213e; border: 1px solid #0d3460; border-radius: 6px;
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
   padding: 14px 16px; margin-bottom: 14px; }
-.card h3 { color: #00b4d8; font-size: 13px; margin-bottom: 10px;
+.card h3 { color: var(--accent); font-size: 13px; margin-bottom: 10px;
   text-transform: uppercase; letter-spacing: .5px; }
-.md { font-size: 13px; line-height: 1.55; color: #c9d1d9; word-break: break-word; }
-.md h1, .md h2, .md h3 { color: #e2e8f0; margin: 10px 0 6px; }
+.md { font-size: 13px; line-height: 1.55; color: var(--code-text); word-break: break-word; }
+.md h1, .md h2, .md h3 { color: var(--text-strong); margin: 10px 0 6px; }
 .md h1 { font-size: 16px; } .md h2 { font-size: 14px; } .md h3 { font-size: 13px; }
-.md code { background: #0d1117; border: 1px solid #0d3460; border-radius: 3px;
-  padding: 1px 5px; font: 12px ui-monospace, Menlo, monospace; color: #79c0ff; }
-.md pre { background: #0d1117; border: 1px solid #0d3460; border-radius: 4px;
+.md code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 3px;
+  padding: 1px 5px; font: 12px ui-monospace, Menlo, monospace; color: var(--link); }
+.md pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px;
   padding: 10px; overflow-x: auto; margin: 8px 0; }
 .md pre code { background: none; border: 0; padding: 0; }
-.md a { color: #58a6ff; }
-.empty { color: #718096; font-size: 12px; font-style: italic; }
-textarea { width: 100%; background: #0d1117; color: #e6edf3;
-  border: 1px solid #0d3460; border-radius: 4px; padding: 8px;
+.md a { color: var(--link); }
+.empty { color: var(--text-dim); font-size: 12px; font-style: italic; }
+textarea { width: 100%; background: var(--code-bg); color: var(--code-text-strong);
+  border: 1px solid var(--border); border-radius: 4px; padding: 8px;
   font: 12px ui-monospace, Menlo, monospace; resize: vertical; min-height: 70px; }
-textarea:focus, input:focus { outline: 1px solid #00b4d8; }
-button { background: #0e639c; color: #fff; border: 0; border-radius: 4px;
+textarea:focus, input:focus { outline: 1px solid var(--accent); }
+button { background: var(--btn); color: var(--on-accent); border: 0; border-radius: 4px;
   padding: 6px 14px; font-size: 12px; cursor: pointer; }
-button:hover { background: #1177bb; }
+button:hover { background: var(--btn-hover); }
 button:disabled { opacity: .5; cursor: default; }
 .row { display: flex; gap: 8px; margin-top: 8px; align-items: flex-start; }
-.q { border-top: 1px solid #0d3460; padding: 10px 0; }
+.q { border-top: 1px solid var(--border); padding: 10px 0; }
 .q:first-child { border-top: 0; }
-.q .who { color: #e2e8f0; font-size: 12px; font-weight: 600; }
-.q .ts { color: #718096; font-size: 10px; font-weight: 400; margin-left: 6px; }
+.q .who { color: var(--text-strong); font-size: 12px; font-weight: 600; }
+.q .ts { color: var(--text-dim); font-size: 10px; font-weight: 400; margin-left: 6px; }
 .q .text { font-size: 13px; margin-top: 4px; white-space: pre-wrap;
   word-break: break-word; }
-.a { margin: 8px 0 0 18px; padding-left: 10px; border-left: 2px solid #00b4d8; }
-.a .who { color: #00b4d8; }
+.a { margin: 8px 0 0 18px; padding-left: 10px; border-left: 2px solid var(--accent); }
+.a .who { color: var(--accent); }
 #err { display: none; margin: 40px auto; max-width: 480px; text-align: center;
-  color: #fc8181; font-size: 13px; line-height: 1.6; }
-.saved { color: #48bb78; font-size: 11px; margin-left: 8px; }
+  color: var(--danger); font-size: 13px; line-height: 1.6; }
+.saved { color: var(--success); font-size: 11px; margin-left: 8px; }
 
 /* ── Attendee rail + chat (RFE-C) ── */
 #stage { flex: 1; display: flex; min-height: 0; }
 #main { min-width: 0; }
-#rail { width: 320px; flex-shrink: 0; background: #131c33;
-  border-left: 1px solid #0d3460; display: flex; flex-direction: column;
+#rail { width: 320px; flex-shrink: 0; background: var(--surface-2);
+  border-left: 1px solid var(--border); display: flex; flex-direction: column;
   min-height: 0; }
-.rail-h { color: #00b4d8; font-size: 11px; text-transform: uppercase;
-  letter-spacing: .5px; padding: 9px 12px; border-bottom: 1px solid #0d3460;
+.rail-h { color: var(--accent); font-size: 11px; text-transform: uppercase;
+  letter-spacing: .5px; padding: 9px 12px; border-bottom: 1px solid var(--border);
   display: flex; justify-content: space-between; align-items: center; }
-.rail-h .n { color: #718096; font-size: 11px; letter-spacing: 0; }
+.rail-h .n { color: var(--text-dim); font-size: 11px; letter-spacing: 0; }
 #people { max-height: 38%; overflow-y: auto; padding: 6px 0; flex-shrink: 0; }
 #chatwrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #chatlog { flex: 1; overflow-y: auto; padding: 10px 12px; }
-#chatbox { border-top: 1px solid #0d3460; padding: 8px; display: flex; gap: 6px; }
-#chatbox input { flex: 1; min-width: 0; background: #0d1117; color: #e6edf3;
-  border: 1px solid #0d3460; border-radius: 4px; padding: 6px 8px; font-size: 12px; }
+#chatbox { border-top: 1px solid var(--border); padding: 8px; display: flex; gap: 6px; }
+#chatbox input { flex: 1; min-width: 0; background: var(--code-bg); color: var(--code-text-strong);
+  border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-size: 12px; }
 .p { display: flex; align-items: center; gap: 7px; padding: 4px 12px; font-size: 12px; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: #4a5568;
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-soft);
   flex-shrink: 0; }
-.dot.on { background: #48bb78; }
-.p .nm { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis;
+.dot.on { background: var(--success); }
+.p .nm { color: var(--code-text); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
-.p .tag { color: #00b4d8; font-size: 10px; border: 1px solid #0d3460;
+.p .tag { color: var(--accent); font-size: 10px; border: 1px solid var(--border);
   border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
-.p .tn { color: #718096; font-size: 10px; margin-left: auto; flex-shrink: 0; }
+.p .tn { color: var(--text-dim); font-size: 10px; margin-left: auto; flex-shrink: 0; }
 .m { margin-bottom: 9px; font-size: 12px; line-height: 1.45; }
-.m .who { color: #e2e8f0; font-weight: 600; }
-.m.trainer .who { color: #00b4d8; }
-.m .ts { color: #718096; font-size: 10px; margin-left: 6px; }
-.m .text { color: #c9d1d9; white-space: pre-wrap; word-break: break-word; }
-.m.pin { border-left: 2px solid #f6c343; padding-left: 7px; }
-.m .pinbtn { float: right; background: none; color: #718096; padding: 0 3px;
+.m .who { color: var(--text-strong); font-weight: 600; }
+.m.trainer .who { color: var(--accent); }
+.m .ts { color: var(--text-dim); font-size: 10px; margin-left: 6px; }
+.m .text { color: var(--code-text); white-space: pre-wrap; word-break: break-word; }
+.m.pin { border-left: 2px solid var(--warning); padding-left: 7px; }
+.m .pinbtn { float: right; background: none; color: var(--text-dim); padding: 0 3px;
   font-size: 10px; }
-.m .pinbtn:hover { background: none; color: #f6c343; }
-#clearbtn { background: none; color: #718096; font-size: 10px; padding: 0 4px; }
-#clearbtn:hover { background: none; color: #fc8181; }
+.m .pinbtn:hover { background: none; color: var(--warning); }
+#clearbtn { background: none; color: var(--text-dim); font-size: 10px; padding: 0 4px; }
+#clearbtn:hover { background: none; color: var(--danger); }
 #tabs { display: none; }
 /* Narrow (popup resized, or opened on a laptop beside a Codespace): the rail
    stops being a rail and becomes two tabs beside the room. */
 @media (max-width: 900px) {
   #stage { flex-direction: column; }
-  #rail { width: 100%; border-left: 0; border-top: 1px solid #0d3460; }
-  #tabs { display: flex; background: #16213e; border-bottom: 1px solid #0d3460;
+  #rail { width: 100%; border-left: 0; border-top: 1px solid var(--border); }
+  #tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border);
     flex-shrink: 0; }
-  #tabs button { flex: 1; background: none; border-radius: 0; color: #a0aec0;
+  #tabs button { flex: 1; background: none; border-radius: 0; color: var(--text-dim);
     padding: 9px; }
-  #tabs button.on { color: #00b4d8; box-shadow: inset 0 -2px 0 #00b4d8; }
+  #tabs button.on { color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
   body.v-room #rail, body.v-people #main, body.v-chat #main { display: none; }
   body.v-people #chatwrap, body.v-chat #people, body.v-chat #h-people { display: none; }
   body.v-people #people { max-height: none; flex: 1; }
@@ -7119,7 +7147,7 @@ button:disabled { opacity: .5; cursor: default; }
   <div id="brand">
     <span id="brand-logo">⬡</span>
     <span id="brand-name">Virtual Room</span>
-    <span id="title" style="color:#718096"></span>
+    <span id="title" style="color:var(--text-dim)"></span>
   </div>
   <span id="who">Connecting…</span>
 </div>
@@ -7382,7 +7410,7 @@ button:disabled { opacity: .5; cursor: default; }
 
 
 @app.get("/pad/{session_id}", response_class=HTMLResponse)
-async def live_pad_page(session_id: str, token: str = ""):
+async def live_pad_page(session_id: str, token: str = "", theme: str = "dark"):
     """Standalone workshop pad page (Welcome/Solutions + Q&A, live via SSE).
 
     Same handoff as /shell/{job_id}: opened from the app with a single-use
@@ -7390,8 +7418,13 @@ async def live_pad_page(session_id: str, token: str = ""):
     for an 8h pad session. Self-contained — inline CSS/JS, no external deps.
     """
     base_url = "https://autonomous-enablements.whydevslovedynatrace.com"
+    # Whitelisted, not interpolated: `theme` is caller-supplied and lands inside
+    # the document. Anything but "light" is dark, which is also the right default
+    # for an older app build that sends no theme at all.
+    safe_theme = "light" if theme == "light" else "dark"
     return HTMLResponse(_PAD_PAGE_HTML
                         .replace("__SESSION_ID__", json.dumps(session_id))
+                        .replace("__THEME__", json.dumps(safe_theme))
                         .replace("__BASE__", json.dumps(base_url)))
 
 
