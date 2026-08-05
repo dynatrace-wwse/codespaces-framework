@@ -775,11 +775,25 @@
                 <p class="content-hint" style="margin:0 0 8px"><strong>Bootstrap installed, Node stored.</strong> Orbital uses the OAuth client once to deploy the app, then discards it. After install, configure the same client inside the app (Admin → Token minting); the app then mints per-user platform tokens and self-updates — Orbital never holds credentials.</p>
 
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">How to create the OAuth client</h4>
-                <p class="content-hint" style="margin:0 0 6px">In your tenant's account: <a href="https://myaccount.dynatrace.com" target="_blank">myaccount.dynatrace.com</a> → Identity &amp; access management → OAuth clients → New. Add these scopes:</p>
-                <div style="background:var(--surface);border:1px solid var(--border-soft);border-radius:8px;padding:10px 12px;margin:0 0 8px;font-size:0.78rem;font-family:ui-monospace,monospace">
-                    <div style="margin-bottom:6px"><strong style="color:var(--accent)">Environment</strong><br>app-engine:apps:install, app-engine:apps:run, settings:objects:read, settings:objects:write, environment-api:activegate-tokens:write</div>
-                    <div><strong style="color:var(--accent)">Account</strong><br>platform-token:tokens:write, platform-token:tokens:manage</div>
-                </div>
+                <p class="content-hint" style="margin:0 0 6px">In your tenant's account: <a href="https://myaccount.dynatrace.com" target="_blank">myaccount.dynatrace.com</a> → Identity &amp; access management → OAuth clients → New. Add <strong>every</strong> scope below — the install is refused if any is missing, because a partly-scoped client produces an app that installs and then fails at runtime.</p>
+                <table style="width:100%;margin:0 0 8px;font-size:0.78rem">
+                    <thead><tr><th style="width:36%">Scope</th><th>Why it is needed</th></tr></thead>
+                    <tbody>
+                        <tr><td colspan="2" style="padding-top:8px"><strong style="color:var(--accent)">Environment</strong></td></tr>
+                        <tr><td><code>app-engine:apps:install</code></td><td>install and upgrade the app</td></tr>
+                        <tr><td><code>app-engine:apps:run</code></td><td>activate the installed version</td></tr>
+                        <tr><td><code>app-engine:apps:delete</code></td><td>uninstall — needed for the <em>Undeploy</em> button below</td></tr>
+                        <tr><td><code>app-settings:objects:read</code></td><td>check whether this tenant already has an Orbital token</td></tr>
+                        <tr><td><code>app-settings:objects:write</code></td><td><strong>Seeds the app's Orbital token.</strong> Without it the app installs successfully and then fails every environment action with an opaque 401 — no lab can start, and nothing in the UI explains why.</td></tr>
+                        <tr><td><code>settings:objects:read</code></td><td>read the outbound allowlist before changing it</td></tr>
+                        <tr><td><code>settings:objects:write</code></td><td>enable training-telemetry forwarding, and add the hosts below to the outbound allowlist if your tenant enforces one</td></tr>
+                        <tr><td><code>environment-api:activegate-tokens:write</code></td><td>mint the per-session tokens a lab environment needs</td></tr>
+                        <tr><td colspan="2" style="padding-top:8px"><strong style="color:var(--accent)">Account</strong></td></tr>
+                        <tr><td><code>platform-token:tokens:write</code></td><td>mint per-user platform tokens after install</td></tr>
+                        <tr><td><code>platform-token:tokens:manage</code></td><td>revoke them when a session ends</td></tr>
+                    </tbody>
+                </table>
+                <p class="content-hint" style="margin:0 0 8px">Orbital checks the client against your tenant <em>before</em> installing anything and names any scope that is missing, so a wrong client costs you a message rather than a broken install.</p>
 
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">Outbound allowlist (if your tenant enforces it)</h4>
                 <p class="content-hint" style="margin:0 0 6px">These hosts are added to your app-function allowlist during install:</p>

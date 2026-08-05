@@ -53,6 +53,8 @@ stored in the app.</p>
     <tr><td><code>app-engine:apps:install</code></td><td>install the new app version</td></tr>
     <tr><td><code>app-engine:apps:run</code></td><td>activate the installed version</td></tr>
     <tr><td><code>app-engine:apps:delete</code></td><td>replace the previous version</td></tr>
+    <tr><td><code>app-settings:objects:read</code></td><td>check whether this tenant already has an Orbital token</td></tr>
+    <tr><td><code>app-settings:objects:write</code></td><td><strong>Seeds the app&rsquo;s Orbital token.</strong> Without it the app updates successfully and then fails every environment action with an opaque 401 &mdash; no lab can start.</td></tr>
     <tr><td><code>settings:objects:read</code></td><td>read the environment settings the install checks</td></tr>
     <tr><td><code>settings:objects:write</code></td><td>apply the app&rsquo;s post-install settings (e.g. network allow-list)</td></tr>
   </tbody>
@@ -65,7 +67,9 @@ stored in the app.</p>
 
 <div class="note">You need permission to create tokens and to install apps in your tenant. If the
 button later reports a missing permission, your token is missing one of the scopes above — recreate
-it with all five.</div>
+it with all of them. The update is checked against your tenant before anything is installed, and
+any missing scope is named, so an under-scoped token costs you a message rather than a half-working
+app.</div>
 
 <h2>2. Paste it into the app</h2>
 <ol>
