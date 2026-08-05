@@ -1083,3 +1083,22 @@ def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
         assert "Orbital Server Configuration" in w
     # The soft one points at the scope that turns a shrug into an answer.
     assert "app-settings:objects:read" in soft[0]
+
+
+def test_every_rung_that_can_carry_app_settings_read_does():
+    """The read scope must be requested, not merely granted.
+
+    Granting app-settings:objects:read to the client does nothing if the minted
+    token never asks for it: the install still cannot read the app's own settings
+    and still reports "unverified". The two richest rungs — and the install-only
+    tail's neighbour — carry it so the common case (a client with read but not
+    write) still produces a token that can check.
+    """
+    rungs = dep._deploy_scopes("deploy")
+    assert "app-settings:objects:read" in rungs[0]
+    assert "app-settings:objects:read" in rungs[1]
+    # The realistic best today: settings r/w + app-settings read, no write.
+    assert any("app-settings:objects:read" in r and "app-settings:objects:write" not in r
+               and "settings:objects:write" in r for r in rungs)
+    # Still degrades all the way to install-only.
+    assert rungs[-1].split() == ["app-engine:apps:install", "app-engine:apps:run"]

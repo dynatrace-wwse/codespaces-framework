@@ -592,9 +592,20 @@ def _deploy_scopes(action: str) -> list[str]:
     # all-or-nothing — its granted scope is then an exact statement of what it can
     # do. That is what capabilities_from_scope reads, so the rungs must stay
     # ordered richest-first.
-    return [f"{install} {settings} app-settings:objects:write",
+    # app-settings READ rides along on every rung that can carry it. It grants no
+    # power the deploy needs, but without it in the request the minted token cannot
+    # read the app's own settings — so the install cannot tell whether this tenant
+    # already has its Orbital token and reports "unverified" even when the client
+    # was granted the scope. That was the whole point of granting it.
+    aps_r, aps_w = "app-settings:objects:read", "app-settings:objects:write"
+    # Strictly descending: each rung is a subset of the one above, so the first that
+    # succeeds is the most the client allows. (A client holding app-settings WRITE
+    # but not READ would drop to rung 3 and lose the write — not a real shape, and
+    # the write is ungrantable today regardless.)
+    return [f"{install} {settings} {aps_r} {aps_w}",
+            f"{install} {settings} {aps_r}",
             f"{install} {settings}",
-            f"{install} app-settings:objects:write",
+            f"{install} {aps_r}",
             install]
 
 
