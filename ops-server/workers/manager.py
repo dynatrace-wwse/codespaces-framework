@@ -1050,6 +1050,7 @@ class WorkerManager:
             log_file.write_text(self._mask_secrets(header + output + "\n"))
             passed = (not timed_out) and proc.returncode == 0 \
                 and "TRAINING_TEST: SUCCESS" in output
+            await self._record_training_coverage(job.get("repo", ""), output, passed)
             return {
                 "job_type":         "training-test",
                 "exit_code":        proc.returncode if not timed_out else -1,
@@ -1063,6 +1064,48 @@ class WorkerManager:
                 await self.pool.delete(lock_key)
             except Exception as e:
                 log.warning("Could not release training lock %s: %s", lock_key, e)
+
+    async def _record_training_coverage(self, repo: str, output: str, passed: bool) -> None:
+        """Promote a training's automation grade from a training-test run.
+
+        The static scan can only say "every page that owes a solution has one"
+        (`complete`). Only an end-to-end run that provisioned the environment,
+        executed every solution and passed every check earns `verified` — which
+        is also the bar for "a learner can safely resume this training", since
+        resume replays exactly those solutions.
+        """
+        marker = "TRAINING_TEST: COVERAGE "
+        line = next((ln for ln in output.splitlines() if marker in ln), "")
+        if not line:
+            return
+        try:
+            data = json.loads(line.split(marker, 1)[1].strip())
+        except (ValueError, IndexError):
+            log.warning("Could not parse coverage line for %s", repo)
+            return
+
+        name = repo.split("/")[-1]
+        grade = data.get("grade", "none")
+        if passed and grade == "complete":
+            grade = "verified"
+        try:
+            key = f"training:coverage:{name}"
+            await self.pool.hset(key, mapping={
+                "grade": grade,
+                "owed": str(data.get("owed", 0)),
+                "covered": str(data.get("covered", 0)),
+                "exempt": str(data.get("exempt", 0)),
+                "gaps": json.dumps(data.get("gaps", [])),
+                "repo": repo,
+                "verifiedAt": datetime.now(timezone.utc).isoformat() if grade == "verified" else "",
+                "scannedAt": datetime.now(timezone.utc).isoformat(),
+            })
+            await self.pool.expire(key, 30 * 24 * 3600)
+            await self.pool.sadd("training:coverage:index", name)
+            log.info("Coverage for %s: %s (%s/%s)", name, grade,
+                     data.get("covered", 0), data.get("owed", 0))
+        except Exception as exc:
+            log.warning("Could not record coverage for %s: %s", name, exc)
 
     async def _run_deploy_ghpages(self, job: dict) -> dict:
         """Trigger deploy-ghpages.yaml via workflow_dispatch and stream progress.

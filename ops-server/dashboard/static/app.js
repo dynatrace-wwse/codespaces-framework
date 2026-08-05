@@ -1727,20 +1727,49 @@ async function loadSyncHistory() {
 
 // ── Synchronizer: Status sub-tab ─────────────────────────────────────────────
 
+// Automation grade per repo, keyed by short repo name. Fetched alongside the
+// drift table because "which version is pinned" and "can this training actually
+// run itself" are the two things you want to see about a repo at the same time.
+async function fetchCoverage() {
+    try {
+        const res = await fetch(`${API}/api/fleet/coverage`);
+        const data = await res.json();
+        return data.trainings || {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function automationBadge(cov) {
+    if (!cov) return '<span class="auto-badge auto-unknown" title="Never scanned">—</span>';
+    const ratio = cov.owed ? `${cov.covered}/${cov.owed} sections` : 'no hands-on sections';
+    const gaps = (cov.gaps && cov.gaps.length) ? ` · missing: ${cov.gaps.join(', ')}` : '';
+    const when = cov.verifiedAt || cov.scannedAt || '';
+    const tip = escapeHtml(`${ratio}${cov.exempt ? ` · ${cov.exempt} exempt` : ''}${gaps}${when ? ` · ${when}` : ''}`);
+    const map = {
+        verified: ['auto-verified', 'E2E verified'],
+        complete: ['auto-complete', 'complete'],
+        partial:  ['auto-partial',  'partial'],
+        none:     ['auto-none',     'no automation'],
+    };
+    const [cls, label] = map[cov.grade] || ['auto-unknown', 'unknown'];
+    return `<span class="auto-badge ${cls}" title="${tip}">${label}</span>`;
+}
+
 async function loadSyncStatus(force = false) {
     const tbody = document.getElementById('sync-status-body');
-    tbody.innerHTML = '<tr><td colspan="5" class="loading">Running sync status…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="loading">Running sync status…</td></tr>';
     try {
         const url = force ? `${API}/api/sync/status-summary?bust=${Date.now()}` : `${API}/api/sync/status-summary`;
-        const res = await fetch(url);
+        const [res, coverage] = await Promise.all([fetch(url), fetchCoverage()]);
         const data = await res.json();
         if (data.error) {
-            tbody.innerHTML = `<tr><td colspan="5" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="6" class="loading" style="color:var(--red)">Error: ${escapeHtml(data.error)}</td></tr>`;
             return;
         }
         const rows = Array.isArray(data.rows) ? data.rows : [];
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="5" class="loading">No status data returned.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">No status data returned.</td></tr>';
             return;
         }
         tbody.innerHTML = rows.map(r => {
@@ -1769,10 +1798,11 @@ async function loadSyncStatus(force = false) {
                 <td style="font-family:ui-monospace,monospace">${latest}</td>
                 <td>${drift}</td>
                 <td>${ci}</td>
+                <td>${automationBadge(coverage[(r.repo || r.name || '').split('/').pop()])}</td>
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="5" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" class="loading">Error: ${escapeHtml(String(e))}</td></tr>`;
     }
 }
 

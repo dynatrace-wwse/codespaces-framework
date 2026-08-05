@@ -887,6 +887,29 @@ async def api_repos():
     return {"repos": repos_out, "total": len(repos_out)}
 
 
+@app.get("/api/jobs/{job_id}/restore-log")
+async def api_job_restore_log(job_id: str, request: Request):
+    """Operator-only transcript of a resume replay.
+
+    Separate from job:log / job:livelog on purpose. Replaying a learner's
+    progress runs that training's LAB_SOLUTION commands — the answers the UI
+    hides behind `canSeeSolutions` — so their text and output must never reach
+    the two log surfaces the app shows learners. Those get sanitized progress
+    lines; the full transcript lands here, behind the writer gate.
+    """
+    from fastapi.responses import PlainTextResponse
+    await _require_writer(request)
+    content = await pool.get(f"job:restore:{job_id}")
+    if content is None:
+        return PlainTextResponse(
+            f"No restore transcript for job {job_id}.\n"
+            "Either the session was a cold start (no resumeStep), or the "
+            "24-hour Redis copy has expired.",
+            status_code=404,
+        )
+    return PlainTextResponse(content)
+
+
 @app.get("/api/jobs/{job_id}/log")
 async def api_job_log(job_id: str):
     """Plain-text log for a completed job. Redis (7-day TTL) first, then the
@@ -3855,9 +3878,14 @@ async def _fetch_arena_catalog() -> list[dict]:
     # All repos concurrently — serial fetching put ~21 × ~250ms GitHub round-trips
     # on the app-boot critical path whenever the cache was cold.
     titles = await asyncio.gather(*[_get_mkdocs_title(repo) for repo in _ARENA_REPOS])
+    coverage = await _coverage_map(list(_ARENA_REPOS))
     trainings = []
     for (repo, meta), (title, desc) in zip(_ARENA_REPOS.items(), titles):
         trainings.append({
+            # How much of this training a machine can drive — which is also how
+            # much of it a learner can resume, since resume replays the same
+            # LAB_SOLUTION blocks nightly training-test executes.
+            "automation": coverage.get(repo, {"grade": "unknown", "covered": 0, "owed": 0}),
             "id": meta["id"],
             "title": title,
             "description": desc or f"Hands-on {title} lab in a live Kubernetes environment.",
@@ -3870,6 +3898,48 @@ async def _fetch_arena_catalog() -> list[dict]:
             "source": "orbital",
         })
     return trainings
+
+
+async def _coverage_map(repos: list[str]) -> dict[str, dict]:
+    """Read automation grades written by coverage_scan / training-test.
+
+    Missing entries mean "never scanned", not "no automation" — reporting
+    `unknown` keeps a stale or unrun scanner from silently telling learners a
+    training cannot be resumed when it can.
+    """
+    out: dict[str, dict] = {}
+    for repo in repos:
+        try:
+            meta = await pool.hgetall(f"training:coverage:{repo}")
+        except Exception:
+            return out
+        if not meta:
+            continue
+        try:
+            gaps = json.loads(meta.get("gaps") or "[]")
+        except ValueError:
+            gaps = []
+        out[repo] = {
+            "grade": meta.get("grade", "unknown"),
+            "covered": int(meta.get("covered") or 0),
+            "owed": int(meta.get("owed") or 0),
+            "exempt": int(meta.get("exempt") or 0),
+            "gaps": gaps if isinstance(gaps, list) else [],
+            "scannedAt": meta.get("scannedAt", ""),
+            "verifiedAt": meta.get("verifiedAt", ""),
+        }
+    return out
+
+
+@app.get("/api/fleet/coverage")
+async def api_fleet_coverage():
+    """Automation grades for the whole fleet — powers the badge next to the version.
+
+    Read-only and non-sensitive (grades and page counts, no credentials), and it
+    rides the same nginx gate as the rest of ``/api/fleet``.
+    """
+    names = sorted(await pool.smembers("training:coverage:index") or [])
+    return {"trainings": await _coverage_map(list(names))}
 
 
 def arena_repo_for_training(training_id: str) -> tuple[str, str]:
@@ -3984,6 +4054,15 @@ class ArenaProvisionRequest(BaseModel):
     # exactly as the session ended, and earlier still if it started late.
     # Clamped server-side — this is caller-supplied.
     sessionHours: int = 0
+    # Resume: how many steps the learner had already completed. The worker
+    # replays those steps' LAB_SOLUTION blocks inside the fresh container before
+    # the environment is announced ready, so the learner comes back to where
+    # they stopped. 0 = a normal cold start. The app owns progress (it lives in
+    # Dynatrace user app-state), so Orbital stores nothing between sessions.
+    resumeStep: int = 0
+    # Multi-training repos pack several trainings into one mkdocs nav; this
+    # selects which one's step ordinals to replay against.
+    trainingKey: str = ""
 
 
 def _gen3_platform_provisioner(tenant_url: str):
@@ -4179,6 +4258,13 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     }
     if dt_env:
         job["dt_env"] = dt_env
+    # Resume. Clamped: this is caller-supplied and each replayed step costs real
+    # provisioning time, so a bad value must not be able to stall a worker slot.
+    resume_step = max(0, min(int(body.resumeStep or 0), 50))
+    if resume_step:
+        job["resume_step"] = resume_step
+        if body.trainingKey:
+            job["training_key"] = body.trainingKey
     # Tenant the worker should bind to — drives the multi-tenancy guard in
     # _write_env_file (CoE → static creds; non-CoE → minted only, never CoE).
     if tenant_url:
@@ -4204,6 +4290,9 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
         "token_provisioned": "1" if token_provisioned else "0",
         "dt_hostgroup": dt_hostgroup,
     }
+    if resume_step:
+        redis_meta["resume_step"] = str(resume_step)
+        redis_meta["restore_status"] = "pending"
     if provisioned_token_ids:
         redis_meta["dt_token_ids"] = json.dumps(provisioned_token_ids)
     if tenant_url:
@@ -4296,6 +4385,22 @@ async def api_arena_session_status(job_id: str, request: Request):
     # signed-in members get full values — the app needs them for the UI + DQL
     # session-id substitution).
     full = _has_full_access(request)
+
+    # Resume outcome. Section TITLES only — never the commands that were
+    # replayed; those are the lab's answers and live in job:restore:{id}.
+    resume_fields: dict = {}
+    if meta.get("resume_step"):
+        try:
+            unrestored = json.loads(meta.get("restore_unrestored") or "[]")
+        except ValueError:
+            unrestored = []
+        resume_fields = {
+            "resumeStep":    int(meta.get("resume_step") or 0),
+            "restoreStatus": meta.get("restore_status", "pending"),
+            "restoredTo":    int(meta.get("restored_to") or 0),
+            "unrestoredSections": unrestored if isinstance(unrestored, list) else [],
+        }
+
     return {
         "jobId":      job_id,
         "status":     status,
@@ -4306,6 +4411,7 @@ async def api_arena_session_status(job_id: str, request: Request):
         "expiresAt":  meta.get("expires_at", ""),
         "dtSessionId": meta.get("dt_hostgroup", "") if full
                        else masking.mask_email(meta.get("dt_hostgroup", "")),
+        **resume_fields,
     }
 
 
