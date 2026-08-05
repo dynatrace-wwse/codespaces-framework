@@ -7,6 +7,7 @@ Run: /home/ops/ops-venv/bin/python -m dashboard.test_app_deploy
 import asyncio
 import base64
 import hashlib
+import os
 
 from fastapi import HTTPException
 
@@ -20,6 +21,11 @@ def _expect_http(status, coro):
         assert e.status_code == status, f"expected {status}, got {e.status_code}"
         return
     raise AssertionError(f"expected HTTPException {status}, none raised")
+
+
+def _run(coro):
+    """Await a coroutine in a sync test."""
+    return asyncio.run(coro)
 
 
 def test_pkce_challenge_is_s256_of_verifier():
@@ -610,3 +616,105 @@ def test_latest_version_reports_the_pin_to_admins():
         dep._latest_repo_version = saved
     assert pinned["pinned"] is True and pinned["ref"] == "1.0.271"
     assert loose["pinned"] is False and loose["ref"] == f"origin/{dep.APP_DEPLOY_BRANCH}"
+
+
+# ── Auto-deploy tenants: OAuth first, for all three ──────────────────────────
+#
+# The bug these pin: SRO's account client was configured as SRO_OAUTH_CLIENT_ID /
+# SRO_ACCOUNT_URN but read as SRO_CLIENT_ID / SRO_RESOURCE. Nothing raised — the
+# mint just returned None on every call and SRO silently deployed with the stored
+# platform token instead. The OAuth route is the one we hand tenant admins, so it
+# is the one that must be exercised, and a silent fallback hid that it never was.
+
+def test_env_first_prefers_the_canonical_name():
+    os.environ["ZZ_CANON"] = "canonical"
+    os.environ["ZZ_ALIAS"] = "alias"
+    try:
+        assert dep._env_first("ZZ_CANON", "ZZ_ALIAS") == "canonical"
+    finally:
+        del os.environ["ZZ_CANON"], os.environ["ZZ_ALIAS"]
+
+
+def test_env_first_falls_back_to_the_alias():
+    os.environ["ZZ_ALIAS"] = "alias"
+    try:
+        assert dep._env_first("ZZ_CANON", "ZZ_ALIAS") == "alias"
+    finally:
+        del os.environ["ZZ_ALIAS"]
+
+
+def test_env_first_ignores_empty_and_whitespace():
+    os.environ["ZZ_CANON"] = "   "
+    os.environ["ZZ_ALIAS"] = "alias"
+    try:
+        assert dep._env_first("ZZ_CANON", "ZZ_ALIAS") == "alias"
+        assert dep._env_first("ZZ_NOPE", default="fallback") == "fallback"
+    finally:
+        del os.environ["ZZ_CANON"], os.environ["ZZ_ALIAS"]
+
+
+def test_deploy_scope_stays_narrow():
+    # Asking for settings scopes on top returns 400 invalid_request with an empty
+    # error_description, which reads as a broken client rather than a bad request.
+    assert dep._deploy_scope("deploy") == "app-engine:apps:install app-engine:apps:run"
+    assert dep._deploy_scope("undeploy") == "app-engine:apps:delete"
+
+
+def test_is_sprint():
+    saved = dep.SPRINT_TENANT_URL
+    dep.SPRINT_TENANT_URL = "https://ydi9582h.sprint.apps.dynatracelabs.com"
+    try:
+        assert dep._is_sprint("https://ydi9582h.sprint.apps.dynatracelabs.com")
+        assert dep._is_sprint("https://ydi9582h.sprint.apps.dynatracelabs.com/ui/apps")
+        # The sprint tenant is NOT reachable at the production apps domain.
+        assert not dep._is_sprint("https://ydi9582h.apps.dynatrace.com")
+    finally:
+        dep.SPRINT_TENANT_URL = saved
+
+
+def test_auto_deploy_token_prefers_oauth_over_the_stored_sro_token():
+    saved = (dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_PLATFORM_TOKEN,
+             dep.SRO_TENANT_URL, dep._mint_account_token)
+    dep.SRO_TENANT_URL = "https://sro97894.apps.dynatrace.com"
+    dep.SRO_CLIENT_ID = "cid"; dep.SRO_CLIENT_SECRET = "sec"
+    dep.SRO_PLATFORM_TOKEN = "dt0s16.STORED"
+
+    async def fake_mint(label, cid, csec, resource, action, sso_url=""):
+        return "MINTED"
+    dep._mint_account_token = fake_mint
+    try:
+        token, auto = _run(dep.auto_deploy_token("https://sro97894.apps.dynatrace.com", "deploy"))
+        assert auto == "SRO"
+        assert token == "MINTED"          # not the stored platform token
+    finally:
+        (dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_PLATFORM_TOKEN,
+         dep.SRO_TENANT_URL, dep._mint_account_token) = saved
+
+
+def test_auto_deploy_token_falls_back_to_the_stored_sro_token():
+    saved = (dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET, dep.SRO_PLATFORM_TOKEN, dep.SRO_TENANT_URL)
+    dep.SRO_TENANT_URL = "https://sro97894.apps.dynatrace.com"
+    dep.SRO_CLIENT_ID = ""; dep.SRO_CLIENT_SECRET = ""     # no client → no mint
+    dep.SRO_PLATFORM_TOKEN = "dt0s16.STORED"
+    try:
+        token, auto = _run(dep.auto_deploy_token("https://sro97894.apps.dynatrace.com", "deploy"))
+        assert (token, auto) == ("dt0s16.STORED", "SRO")
+    finally:
+        (dep.SRO_CLIENT_ID, dep.SRO_CLIENT_SECRET,
+         dep.SRO_PLATFORM_TOKEN, dep.SRO_TENANT_URL) = saved
+
+
+def test_auto_deploy_token_ignores_an_unknown_tenant():
+    assert _run(dep.auto_deploy_token("https://other.apps.dynatrace.com", "deploy")) == ("", "")
+
+
+def test_sprint_auto_without_creds_503():
+    saved = (dep.SPRINT_CLIENT_ID, dep.SPRINT_CLIENT_SECRET, dep.SPRINT_TENANT_URL)
+    dep.SPRINT_CLIENT_ID = ""; dep.SPRINT_CLIENT_SECRET = ""
+    dep.SPRINT_TENANT_URL = "https://ydi9582h.sprint.apps.dynatracelabs.com"
+    try:
+        _expect_http(503, dep.deploy_with_token(
+            {"tenant": "https://ydi9582h.sprint.apps.dynatracelabs.com", "token": ""},
+            x_auth_user="a"))
+    finally:
+        (dep.SPRINT_CLIENT_ID, dep.SPRINT_CLIENT_SECRET, dep.SPRINT_TENANT_URL) = saved

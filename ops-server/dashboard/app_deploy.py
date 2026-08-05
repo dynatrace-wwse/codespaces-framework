@@ -105,19 +105,49 @@ async def _fetch_deploy_ref(git) -> tuple[int, str]:
 # <PREFIX>_TENANT_URL / _CLIENT_ID / _CLIENT_SECRET / _RESOURCE (urn:dtaccount:...).
 #   COE — the COE account tenant (geu80787, vanity alias wwse).
 #   SRO — the SRO (QA) tenant; same wiring as COE.
-COE_TENANT_URL = os.environ.get("COE_TENANT_URL", "https://geu80787.apps.dynatrace.com")
-COE_CLIENT_ID = os.environ.get("COE_CLIENT_ID", "")
-COE_CLIENT_SECRET = os.environ.get("COE_CLIENT_SECRET", "")
-COE_RESOURCE = os.environ.get("COE_RESOURCE", "")  # urn:dtaccount:...
-SRO_TENANT_URL = os.environ.get("SRO_TENANT_URL", "https://sro97894.apps.dynatrace.com")
-SRO_CLIENT_ID = os.environ.get("SRO_CLIENT_ID", "")
-SRO_CLIENT_SECRET = os.environ.get("SRO_CLIENT_SECRET", "")
-SRO_RESOURCE = os.environ.get("SRO_RESOURCE", "")  # urn:dtaccount:...
-# SRO has no account OAuth client (yet), so unlike COE it can't mint a token via
-# client_credentials. Instead Orbital holds a long-lived platform token (dt0s16…) created in
-# the SRO tenant with apps:install/run/delete. Used directly as the bearer. If an SRO OAuth
-# client is created later, set SRO_CLIENT_ID/SECRET/RESOURCE and minting takes precedence.
+def _env_first(*names: str, default: str = "") -> str:
+    """First non-empty value among several env names.
+
+    The SRO deploy client was configured as SRO_OAUTH_CLIENT_ID/SECRET and
+    SRO_ACCOUNT_URN but read here as SRO_CLIENT_ID/SECRET/RESOURCE. Nothing
+    errored: the mint simply returned None every time and every SRO deploy fell
+    through to the platform-token branch, so the OAuth path we ask tenant admins
+    to use was the one path we never exercised ourselves. Accepting both
+    spellings costs nothing and removes a failure that is invisible until
+    someone goes looking.
+    """
+    for n in names:
+        v = os.environ.get(n, "").strip()
+        if v:
+            return v
+    return default
+
+
+COE_TENANT_URL = _env_first("COE_TENANT_URL", default="https://geu80787.apps.dynatrace.com")
+COE_CLIENT_ID = _env_first("COE_CLIENT_ID", "COE_OAUTH_CLIENT_ID")
+COE_CLIENT_SECRET = _env_first("COE_CLIENT_SECRET", "COE_OAUTH_CLIENT_SECRET")
+COE_RESOURCE = _env_first("COE_RESOURCE", "COE_ACCOUNT_URN")  # urn:dtaccount:...
+SRO_TENANT_URL = _env_first("SRO_TENANT_URL", default="https://sro97894.apps.dynatrace.com")
+SRO_CLIENT_ID = _env_first("SRO_CLIENT_ID", "SRO_OAUTH_CLIENT_ID")
+SRO_CLIENT_SECRET = _env_first("SRO_CLIENT_SECRET", "SRO_OAUTH_CLIENT_SECRET")
+SRO_RESOURCE = _env_first("SRO_RESOURCE", "SRO_ACCOUNT_URN")  # urn:dtaccount:...
+# Legacy fallback for SRO only: a long-lived platform token (dt0s16…) created in the
+# tenant with apps:install/run/delete, used directly as the bearer. It predates the
+# SRO OAuth client and stays as a safety net — minting takes precedence. Prefer the
+# OAuth client: it is the path tenant admins are given, so it is the path that must work.
 SRO_PLATFORM_TOKEN = os.environ.get("SRO_PLATFORM_TOKEN", "")
+
+# Sprint (ydi9582h) lives on the labs domain with its own SSO host, so unlike COE/SRO
+# it cannot use the default sso.dynatrace.com. Its account client is the same one used
+# for token minting there — it already carries apps:install/run.
+SPRINT_TENANT_URL = _env_first(
+    "SPRINT_TENANT_URL", default="https://ydi9582h.sprint.apps.dynatracelabs.com")
+SPRINT_CLIENT_ID = _env_first("SPRINT_CLIENT_ID", "MINT_CLIENT_ID_SPRINT")
+SPRINT_CLIENT_SECRET = _env_first("SPRINT_CLIENT_SECRET", "MINT_CLIENT_SECRET_SPRINT")
+SPRINT_RESOURCE = _env_first("SPRINT_RESOURCE", "MINT_RESOURCE_SPRINT")
+SPRINT_SSO_URL = _env_first(
+    "SPRINT_SSO_URL", "MINT_SSO_SPRINT",
+    default="https://sso-sprint.dynatracelabs.com/sso/oauth2/token")
 
 router = APIRouter(tags=["deploy"])
 _redis: redis.Redis | None = None
@@ -382,24 +412,78 @@ def _is_coe(tenant_url: str) -> bool:
     return bool(h2) and h1 == h2
 
 
-async def _mint_coe_token(action: str) -> str | None:
-    """Mint a bearer for the COE tenant from Orbital's COE client credentials (server-side).
-    Scope by action so we never request a scope the client lacks."""
-    if not (COE_CLIENT_ID and COE_CLIENT_SECRET):
+def _deploy_scope(action: str) -> str:
+    """Scope by action, so we never request one the client lacks.
+
+    Keep this narrow. A deploy client holds exactly apps:install + apps:run;
+    asking for settings scopes on top returns 400 invalid_request with an empty
+    error_description, which reads as a broken client rather than an over-broad
+    request.
+    """
+    return ("app-engine:apps:delete" if action == "undeploy"
+            else "app-engine:apps:install app-engine:apps:run")
+
+
+async def _mint_account_token(label: str, client_id: str, client_secret: str,
+                              resource: str, action: str,
+                              sso_url: str = f"{DEFAULT_SSO}/sso/oauth2/token") -> str | None:
+    """Mint a deploy bearer from a tenant's account OAuth client (server-side).
+
+    One implementation for every tenant Orbital deploys to itself. sso_url is a
+    parameter because the labs tenants (sprint) authenticate against their own
+    SSO host, not sso.dynatrace.com.
+    """
+    if not (client_id and client_secret):
         return None
-    scope = "app-engine:apps:delete" if action == "undeploy" else "app-engine:apps:install app-engine:apps:run"
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post("https://sso.dynatrace.com/sso/oauth2/token", data={
-                "grant_type": "client_credentials", "client_id": COE_CLIENT_ID,
-                "client_secret": COE_CLIENT_SECRET, "resource": COE_RESOURCE, "scope": scope,
+            r = await c.post(sso_url, data={
+                "grant_type": "client_credentials", "client_id": client_id,
+                "client_secret": client_secret, "resource": resource,
+                "scope": _deploy_scope(action),
             }, headers={"Content-Type": "application/x-www-form-urlencoded"})
         if r.status_code == 200:
             return r.json().get("access_token")
-        log.warning("COE token mint HTTP %s", r.status_code)
+        # Body, not just status: a scope the client lacks and a wrong resource
+        # are both 400, and only the body tells them apart.
+        log.warning("%s token mint HTTP %s: %s", label, r.status_code, r.text[:200])
     except Exception as exc:
-        log.warning("COE token mint failed: %s", exc)
+        log.warning("%s token mint failed: %s", label, exc)
     return None
+
+
+async def _mint_coe_token(action: str) -> str | None:
+    """Mint a bearer for the COE tenant from Orbital's COE client credentials."""
+    return await _mint_account_token("COE", COE_CLIENT_ID, COE_CLIENT_SECRET,
+                                     COE_RESOURCE, action)
+
+
+def _is_sprint(tenant_url: str) -> bool:
+    h1 = (urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}").hostname or "").lower()
+    h2 = (urlparse(SPRINT_TENANT_URL).hostname or "").lower()
+    return bool(h2) and h1 == h2
+
+
+async def _mint_sprint_token(action: str) -> str | None:
+    """Mint a bearer for the sprint tenant. Its own SSO host, its own account."""
+    return await _mint_account_token("SPRINT", SPRINT_CLIENT_ID, SPRINT_CLIENT_SECRET,
+                                     SPRINT_RESOURCE, action, sso_url=SPRINT_SSO_URL)
+
+
+async def auto_deploy_token(tenant_url: str, action: str) -> tuple[str, str]:
+    """(token, label) for a tenant Orbital deploys itself, else ("", "").
+
+    OAuth first for every tenant — that is the route we hand tenant admins, so it
+    is the one we must exercise. SRO's stored platform token stays as a fallback
+    behind it rather than in front of it.
+    """
+    if _is_coe(tenant_url):
+        return (await _mint_coe_token(action) or ""), "COE"
+    if _is_sro(tenant_url):
+        return (await _mint_sro_token(action) or SRO_PLATFORM_TOKEN), "SRO"
+    if _is_sprint(tenant_url):
+        return (await _mint_sprint_token(action) or ""), "SPRINT"
+    return "", ""
 
 
 def _is_sro(tenant_url: str) -> bool:
@@ -409,23 +493,9 @@ def _is_sro(tenant_url: str) -> bool:
 
 
 async def _mint_sro_token(action: str) -> str | None:
-    """Mint a bearer for the SRO (QA) tenant from Orbital's SRO client credentials (server-side).
-    Scope by action so we never request a scope the client lacks."""
-    if not (SRO_CLIENT_ID and SRO_CLIENT_SECRET):
-        return None
-    scope = "app-engine:apps:delete" if action == "undeploy" else "app-engine:apps:install app-engine:apps:run"
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post("https://sso.dynatrace.com/sso/oauth2/token", data={
-                "grant_type": "client_credentials", "client_id": SRO_CLIENT_ID,
-                "client_secret": SRO_CLIENT_SECRET, "resource": SRO_RESOURCE, "scope": scope,
-            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        if r.status_code == 200:
-            return r.json().get("access_token")
-        log.warning("SRO token mint HTTP %s", r.status_code)
-    except Exception as exc:
-        log.warning("SRO token mint failed: %s", exc)
-    return None
+    """Mint a bearer for the SRO (QA) tenant from Orbital's SRO client credentials."""
+    return await _mint_account_token("SRO", SRO_CLIENT_ID, SRO_CLIENT_SECRET,
+                                     SRO_RESOURCE, action)
 
 
 OUTBOUND_SCHEMA = "builtin:dt-javascript-runtime.allowed-outbound-connections"
@@ -773,9 +843,8 @@ async def deploy_app_start(tenant: str, action: str = "deploy", nonce: str = "")
         raise HTTPException(400, "action must be deploy or undeploy.")
     tenant_id, _ = classify_tenant(tenant)  # 403 if not a Dynatrace domain
 
-    if _is_coe(tenant) or _is_sro(tenant):
-        auto = "COE" if _is_coe(tenant) else "SRO"
-        token = (await _mint_coe_token(action)) if auto == "COE" else (await _mint_sro_token(action) or SRO_PLATFORM_TOKEN)
+    token, auto = await auto_deploy_token(tenant, action)
+    if auto:
         if not token:
             return HTMLResponse(_page(f"{auto} auto-deploy not configured.", ok=False), status_code=503)
         try:
@@ -908,23 +977,17 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     tenant = (body.get("tenant") or "").strip()
     token = (body.get("token") or "").strip()
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
-    auto = ""  # which auto-deploy tenant matched (COE/SRO), or "" for token deploys
+    auto = ""  # which auto-deploy tenant matched (COE/SRO/SPRINT), or "" for token deploys
     if not token:
-        # COE and SRO are the tenants Orbital can deploy on its own (it holds their credentials).
-        if _is_coe(tenant):
-            auto = "COE"
-            token = await _mint_coe_token(action) or ""
-        elif _is_sro(tenant):
-            auto = "SRO"
-            # Prefer minting (if an SRO OAuth client is ever configured); else the stored token.
-            token = await _mint_sro_token(action) or SRO_PLATFORM_TOKEN
-        else:
+        # The tenants Orbital deploys on its own, because it holds their account clients.
+        token, auto = await auto_deploy_token(tenant, action)
+        if not auto:
             raise HTTPException(400, "A valid platform token is required for this tenant. "
-                                     "Auto-deploy (no token) is only available for the COE and SRO tenants.")
+                                     "Auto-deploy (no token) is only available for the COE, "
+                                     "SRO and sprint tenants.")
         if not token:
-            hint = ("set SRO_PLATFORM_TOKEN (or SRO_CLIENT_ID/SECRET/RESOURCE)"
-                    if auto == "SRO" else f"set {auto}_CLIENT_ID/SECRET/RESOURCE")
-            raise HTTPException(503, f"{auto} auto-deploy not configured ({hint}).")
+            raise HTTPException(503, f"{auto} auto-deploy not configured "
+                                     f"(set {auto}_CLIENT_ID/SECRET/RESOURCE).")
 
     via = f"{auto.lower()}-auto" if auto else "token"
     if action == "undeploy":
