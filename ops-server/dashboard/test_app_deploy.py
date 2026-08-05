@@ -1056,8 +1056,9 @@ def test_the_unseeded_orbital_token_warning_names_the_manual_step():
     assert len(w) == 1
     # It must not tell the admin to grant a scope that cannot be granted.
     assert "Admin" in w[0] and "Orbital Server Configuration" in w[0]
-    assert "401" in w[0]
-    assert "grant" not in w[0].lower().split("granting")[0][-40:]
+    assert "workshops and live sessions fail immediately" in w[0]
+    # It must not send the admin off to grant a scope that cannot be granted.
+    assert "Granting a scope will not fix this" in w[0]
 
 
 def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
@@ -1074,6 +1075,11 @@ def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
     assert "Could not verify" in soft[0]
     assert "ACTION REQUIRED" not in soft[0]
     assert "ACTION REQUIRED" in hard[0]
-    # Both still say what breaks and where to fix it.
+    # Both still say what breaks and where to fix it — precisely. "Every
+    # environment action fails" was wrong while the arena compat window is open;
+    # workshops break now, labs break when it closes.
     for w in (soft[0], hard[0]):
-        assert "401" in w and "Orbital Server Configuration" in w
+        assert "workshops and live sessions fail immediately" in w
+        assert "Orbital Server Configuration" in w
+    # The soft one points at the scope that turns a shrug into an answer.
+    assert "app-settings:objects:read" in soft[0]

@@ -330,6 +330,21 @@ def _permission_hint(action: str, output: str) -> str:
             f"Create the token in the TARGET tenant with those scopes and retry. ")
 
 
+# What an unseeded Orbital token actually costs, today.
+#
+# Stated precisely rather than dramatically. Workshops break immediately: the
+# /api/live/* endpoints require the service bearer with no exception. Hands-on
+# labs keep working for now only because /api/arena/* is still inside its
+# compatibility window (_require_arena_auth allows anonymous callers while
+# ARENA_AUTH_ENFORCE != "1") — when that flips, they stop too. Saying "every
+# environment action fails" is wrong today and would be right later; saying which
+# breaks now and which breaks next is right in both.
+_ORBITAL_TOKEN_CONSEQUENCE = (
+    "Without it, workshops and live sessions fail immediately (those endpoints always "
+    "require the token), and hands-on labs keep working only while Orbital's arena "
+    "compatibility window is open — they fail too once it closes.")
+
+
 def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "") -> list[str]:
     """Surface post-install steps that were SKIPPED because the deploy token lacked
     settings:objects:write. The deploy itself still succeeds (those steps are best-effort),
@@ -348,17 +363,19 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
     # fine and then 401s on every provision, with nothing in the UI explaining why.
     if (orbital_config or "").startswith("unverified"):
         # Weaker claim, weaker warning: this is "check it", not "it is broken".
+        # Add app-settings:objects:read to the deploy client and this becomes a
+        # definite answer instead of a shrug.
         warnings.append(
             "Could not verify the app's Orbital token — the deploy credential cannot read app "
-            "settings. If this tenant is new, set it once in the app → Admin → Orbital Server "
-            "Configuration; without it every environment action fails with 401. An "
-            "already-configured tenant needs nothing.")
+            "settings. Add app-settings:objects:read to the client and this check becomes "
+            f"definite. If this tenant is new, set the token once in the app → "
+            f"Admin → Orbital Server Configuration; {_ORBITAL_TOKEN_CONSEQUENCE} "
+            "An already-configured tenant needs nothing.")
     elif (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or ""):
         warnings.append(
-            f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). Until it is, the "
-            f"app's functions call Orbital unauthenticated and every environment action fails "
-            f"with 401: no lab starts, and the UI gives no reason. Granting a scope will not fix "
-            f"this — app-settings permissions belong to the app, not to an OAuth client, and "
+            f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). "
+            f"{_ORBITAL_TOKEN_CONSEQUENCE} Granting a scope will not fix this — app-settings "
+            f"permissions belong to the app, not to an OAuth client, and "
             f"app-settings:objects:write is not offered in the client scope catalog. Open the "
             f"app → Admin → Orbital Server Configuration and paste the Orbital token once. "
             f"A tenant that already has one needs nothing.")

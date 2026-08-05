@@ -783,6 +783,7 @@
                         <tr><td><code>app-engine:apps:install</code></td><td>install and upgrade the app</td></tr>
                         <tr><td><code>app-engine:apps:run</code></td><td>activate the installed version</td></tr>
                         <tr><td><code>app-engine:apps:delete</code></td><td>uninstall — needed for the <em>Undeploy</em> button below</td></tr>
+                        <tr><td><code>app-settings:objects:read</code></td><td>check whether this tenant already has its Orbital token, so the install can tell you whether the manual step below is still outstanding. Optional — without it that check reports “could not verify” instead of a definite answer.</td></tr>
                         <tr><td><code>settings:objects:read</code></td><td>read the outbound allowlist before changing it</td></tr>
                         <tr><td><code>settings:objects:write</code></td><td>enable training-telemetry forwarding, and add the hosts below to the outbound allowlist if your tenant enforces one</td></tr>
                         <tr><td><code>environment-api:activegate-tokens:write</code></td><td>mint the per-session tokens a lab environment needs</td></tr>
@@ -794,7 +795,8 @@
                 <p class="content-hint" style="margin:0 0 8px">Orbital checks the client against your tenant <em>before</em> installing anything and names any scope that is missing, so a wrong client costs you a message rather than a broken install.</p>
 
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">One manual step after install</h4>
-                <p class="content-hint" style="margin:0 0 8px">Open the app → <strong>Admin → Orbital Server Configuration</strong> and paste your Orbital token once. This cannot be automated: the app's own settings are written with an <em>app</em> permission (<code>app-settings:objects:write</code>), which is held by the app and is not offered in the OAuth client scope list — so no client can be created that seeds it for you. <strong>Until it is set, the app installs correctly and then fails every environment action with a 401</strong> — no lab starts, and the UI gives no reason. The deploy result says so too if the step is still outstanding.</p>
+                <p class="content-hint" style="margin:0 0 8px">Open the app → <strong>Admin → Orbital Server Configuration</strong> and paste your Orbital token. <strong>Once per tenant</strong> — it is stored in the app's own settings and survives every later upgrade, so you never repeat it.</p>
+                <p class="content-hint" style="margin:0 0 8px">This one step cannot be automated: the app's settings are written with an <em>app</em> permission (<code>app-settings:objects:write</code>), which is held by the app itself and is not offered in the OAuth client scope list — so no client can be created that seeds it for you. Until it is set, <strong>workshops and live sessions fail immediately</strong>, and hands-on labs keep working only while Orbital's compatibility window is open. The deploy result tells you if the step is still outstanding.</p>
 
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">Outbound allowlist (if your tenant enforces it)</h4>
                 <p class="content-hint" style="margin:0 0 6px">These hosts are added to your app-function allowlist during install:</p>
