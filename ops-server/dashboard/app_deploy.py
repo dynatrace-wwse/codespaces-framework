@@ -346,7 +346,14 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
             "outbound allowlist NOT updated: the deploy token is missing settings:objects:write.")
     # An unseeded orbital-config is the loudest failure of the three: the app installs
     # fine and then 401s on every provision, with nothing in the UI explaining why.
-    if (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or ""):
+    if (orbital_config or "").startswith("unverified"):
+        # Weaker claim, weaker warning: this is "check it", not "it is broken".
+        warnings.append(
+            "Could not verify the app's Orbital token — the deploy credential cannot read app "
+            "settings. If this tenant is new, set it once in the app → Admin → Orbital Server "
+            "Configuration; without it every environment action fails with 401. An "
+            "already-configured tenant needs nothing.")
+    elif (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or ""):
         warnings.append(
             f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). Until it is, the "
             f"app's functions call Orbital unauthenticated and every environment action fails "
@@ -921,7 +928,10 @@ async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
             r = await c.get(base, headers=h, params={
                 "schema-id": ORBITAL_SCHEMA, "add-fields": "value"})
             if r.status_code == 403:
-                return "skipped (token lacks app-settings:objects:write)"
+                # Cannot even READ, so we do not know whether a token is already
+                # there. Reporting this as "not seeded" cried wolf on every
+                # already-configured tenant; say what is actually true instead.
+                return "unverified (credential cannot read app settings)"
             if r.status_code != 200:
                 return f"skipped (app-settings read HTTP {r.status_code})"
             items = r.json().get("items", [])

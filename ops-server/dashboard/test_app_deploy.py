@@ -1058,3 +1058,22 @@ def test_the_unseeded_orbital_token_warning_names_the_manual_step():
     assert "Admin" in w[0] and "Orbital Server Configuration" in w[0]
     assert "401" in w[0]
     assert "grant" not in w[0].lower().split("granting")[0][-40:]
+
+
+def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
+    """"Cannot read" is not "not configured".
+
+    The deploy credential may lack app-settings READ, in which case we simply do
+    not know whether a token is already there. Reporting that as "not seeded"
+    cried wolf on every already-configured tenant, which is how a real warning
+    stops being read.
+    """
+    soft = dep._scope_warnings("", "", "unverified (credential cannot read app settings)")
+    hard = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
+    assert len(soft) == 1 and len(hard) == 1
+    assert "Could not verify" in soft[0]
+    assert "ACTION REQUIRED" not in soft[0]
+    assert "ACTION REQUIRED" in hard[0]
+    # Both still say what breaks and where to fix it.
+    for w in (soft[0], hard[0]):
+        assert "401" in w and "Orbital Server Configuration" in w
