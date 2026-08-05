@@ -12,6 +12,7 @@ Run:  python3 -m pytest tools/test_training_test_runner.py
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -237,9 +238,21 @@ def test_e2e_success_against_stub():
     assert any(p.endswith("/terminate") for _m, p in StubOrbital.log_requests)
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text):
+    """Strip ANSI colour so assertions test the words, not the escape codes.
+
+    The runner colours its output (PASS green, FAIL red), which splits literals
+    like "[check] FAIL" with escape sequences mid-string.
+    """
+    return _ANSI_RE.sub("", text)
+
+
 def test_e2e_failure_still_terminates():
     proc = _run_against_stub(check_ever_passes=False)
-    out = proc.stdout
+    out = _plain(proc.stdout)
     assert "TRAINING_TEST: FAILURE" in out, out + proc.stderr
     assert proc.returncode == 1
     # Section-ordered engine: the failing check is reported inside its section
