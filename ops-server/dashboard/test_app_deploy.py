@@ -755,3 +755,34 @@ def test_central_forwarding_target_is_separate_from_the_deploy_target():
     assert dep.CENTRAL_TENANT_HOST in dep.OUTBOUND_HOSTS
     assert dep.CENTRAL_TENANT_URL == "https://wwse.apps.dynatrace.com"
     assert "geu80787" in dep.COE_TENANT_URL
+
+
+# ── Telling an operator WHICH permission is missing ──────────────────────────
+#
+# The delegated SSO flow checks scopes before deploying, because the token
+# response says what was granted (test above: 403 naming the missing scopes). A
+# pasted platform token carries no such claim, so an under-scoped one only fails
+# at the registry — and reached the operator as "exit 1" plus 1500 characters of
+# build log, with nothing in it saying "add app-engine:apps:install".
+
+def test_permission_hint_names_the_scopes_a_deploy_needs():
+    hint = dep._permission_hint("deploy", "HTTP 403 Forbidden from registry")
+    assert "app-engine:apps:install" in hint and "app-engine:apps:run" in hint
+    assert "TARGET tenant" in hint
+
+
+def test_permission_hint_names_the_scope_an_undeploy_needs():
+    assert "app-engine:apps:delete" in dep._permission_hint("undeploy", "403 forbidden")
+
+
+def test_permission_hint_recognises_the_shapes_a_refusal_arrives_in():
+    for out in ("HTTP 401", "Unauthorized", "insufficient permissions",
+                "Access denied", "not permitted", "status 403"):
+        assert dep._permission_hint("deploy", out), f"missed: {out}"
+
+
+def test_permission_hint_stays_silent_on_unrelated_failures():
+    # A build break or a network blip must not be reported as a permissions problem.
+    assert dep._permission_hint("deploy", "TypeError: cannot read property of undefined") == ""
+    assert dep._permission_hint("deploy", "ECONNREFUSED 127.0.0.1:443") == ""
+    assert dep._permission_hint("deploy", "") == ""

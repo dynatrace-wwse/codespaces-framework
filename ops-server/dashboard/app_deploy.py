@@ -216,6 +216,25 @@ def _missing_scopes(action: str, granted: str | None) -> list[str]:
     return sorted(REQUIRED_SCOPES.get(action, set()) - set((granted or "").split()))
 
 
+def _permission_hint(action: str, output: str) -> str:
+    """Name the missing permission when a deploy fails because the token lacks it.
+
+    The delegated SSO flow can check scopes up front, because the token response
+    tells us what was granted. A pasted platform token carries no such claim, so
+    the first sign of an under-scoped token is the registry refusing the install
+    — which reaches the operator as "exit 1" plus 1500 characters of build log.
+    That is technically the truth and practically unreadable; nothing in it says
+    "add app-engine:apps:install".
+    """
+    low = (output or "").lower()
+    if not any(s in low for s in ("403", "401", "forbidden", "unauthorized",
+                                  "insufficient", "not permitted", "access denied")):
+        return ""
+    needed = ", ".join(sorted(REQUIRED_SCOPES.get(action, set())))
+    return (f"The token was refused. A token used to {action} this app must carry: {needed}. "
+            f"Create the token in the TARGET tenant with those scopes and retry. ")
+
+
 def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "") -> list[str]:
     """Surface post-install steps that were SKIPPED because the deploy token lacked
     settings:objects:write. The deploy itself still succeeds (those steps are best-effort),
@@ -819,10 +838,13 @@ async def _finish_deploy(user: str, tenant_id: str, tenant_url: str, action: str
         remote_grail = await _ensure_remote_grail(token, tenant_url)  # auto-enable cross-tenant forwarding
         orbital_cfg = await _ensure_orbital_config(token, tenant_url)  # so app functions can reach Orbital
     if res["status"] == "error":
-        await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"))
+        hint = _permission_hint(action, res.get("output", ""))
+        await _audit(user, tenant_id, "deploy", "deploy-error", rc=res.get("rc"),
+                     permission_hint=bool(hint))
         return HTMLResponse(_page(
             f"Deploy to <b>{tenant_id}</b> failed (exit {res.get('rc')}).<br><br>"
-            f"<pre style='white-space:pre-wrap;color:#f0c674'>{res.get('output','')}</pre>", ok=False), status_code=502)
+            + (f"<b>{hint}</b><br><br>" if hint else "")
+            + f"<pre style='white-space:pre-wrap;color:#f0c674'>{res.get('output','')}</pre>", ok=False), status_code=502)
 
     reg = await _register_in_content_service(user, tenant_url)
     profile = (reg or {}).get("profile")
@@ -1046,8 +1068,11 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
         orbital_cfg = await _ensure_orbital_config(token, tenant)    # so app functions can reach Orbital
     del token
     if res["status"] == "error":
-        await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"))
-        raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
+        hint = _permission_hint(action, res.get("output", ""))
+        await _audit(user, tenant_id, "deploy", "deploy-error", via=via, rc=res.get("rc"),
+                     permission_hint=bool(hint))
+        raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}). "
+                                 f"{hint}{res.get('output','')}")
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
