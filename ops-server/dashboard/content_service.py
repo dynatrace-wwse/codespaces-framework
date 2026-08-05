@@ -63,12 +63,21 @@ def _load_domain_suffixes() -> dict:
     return out or dict(_DEFAULT_DOMAINS)
 DOMAIN_SUFFIXES = _load_domain_suffixes()
 
-PROFILES_DIR = Path(__file__).parent.parent / "content" / "profiles"
-TENANT_MAP_FILE = Path(__file__).parent.parent / "content" / "tenant_map.json"
+# Where the *mutable* content state lives. The admin endpoints below write
+# profiles, the tenant map and the source catalog at runtime, so this directory
+# must NOT sit inside the git checkout: deployment is `git pull --ff-only`, and
+# a tracked file the running service has rewritten aborts the pull. Point
+# CONTENT_STATE_DIR at a directory outside the repo (the ops boxes use
+# /home/ops/content); the in-repo copy then serves only as seed defaults.
+_CONTENT_DIR = Path(os.environ.get("CONTENT_STATE_DIR")
+                    or Path(__file__).parent.parent / "content")
+
+PROFILES_DIR = _CONTENT_DIR / "profiles"
+TENANT_MAP_FILE = _CONTENT_DIR / "tenant_map.json"
 # Managed training-source catalog: repos Orbital delivers (incl. private ones added for
 # customer workshops). Distinct from profiles — this is the master list you add/validate/
 # remove in the Trainings tab; profiles reference these repos.
-SOURCES_FILE = Path(__file__).parent.parent / "content" / "sources.json"
+SOURCES_FILE = _CONTENT_DIR / "sources.json"
 
 router = APIRouter(prefix="/api/content", tags=["content"])
 

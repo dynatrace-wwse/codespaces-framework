@@ -3838,6 +3838,31 @@ _ARENA_REPOS = {
     },
 }
 
+def _assert_arena_ids_unambiguous(repos: dict) -> None:
+    """A training must be addressable by exactly one training.
+
+    Provisioning accepts a catalog id OR a repo name (arena_training_for_id), so
+    the two namespaces share one lookup space. Two entries with the same id, or
+    an entry whose id equals a DIFFERENT entry's repo name, would silently route
+    a learner into someone else's training. The resolver's ordering makes that
+    deterministic rather than random; this makes it impossible. Import-time so a
+    bad table fails the service start, not a workshop.
+    """
+    ids = [str(m.get("id", "")).lower() for m in repos.values()]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        raise AssertionError(f"_ARENA_REPOS: duplicate catalog ids {dupes}")
+    for repo, meta in repos.items():
+        collides = [r for r in repos
+                    if r.lower() == str(meta.get("id", "")).lower() and r != repo]
+        if collides:
+            raise AssertionError(
+                f"_ARENA_REPOS: id {meta.get('id')!r} of {repo!r} is also the repo "
+                f"name of {collides[0]!r}")
+
+
+_assert_arena_ids_unambiguous(_ARENA_REPOS)
+
 _ARENA_CATALOG_CACHE_KEY = "arena:catalog"
 _ARENA_BUILD_LOCK = asyncio.Lock()
 # Titles/descriptions change only when a repo's mkdocs site_name changes — cache long.
@@ -3962,15 +3987,46 @@ def arena_repo_for_training(training_id: str) -> tuple[str, str]:
     return "", ""
 
 
+def arena_training_for_id(catalog: list[dict], training_id: str) -> dict | None:
+    """Catalog entry for a training addressed by EITHER namespace.
+
+    A training has two names: the catalog id ("kubernetes-101") and the GitHub
+    repo name ("enablement-kubernetes-101"). Content is addressed by repo — the
+    lab document, the import, the Codespace — so the classroom URL carries the
+    repo name, and a learner whose tenant catalog cannot translate it back sends
+    the repo name to provisioning. Accepting only one of the two names is what
+    made a cross-tenant workshop 404 on "Start environment".
+
+    Two ordered passes rather than one combined match, so precedence is
+    deterministic: a catalog id always wins. Should a future entry's repo tail
+    ever equal another entry's id, that id keeps resolving to its own training
+    instead of being shadowed by scan order.
+    """
+    wanted = (training_id or "").strip().lower()
+    if not wanted:
+        return None
+    return (next((t for t in catalog if str(t.get("id", "")).lower() == wanted), None)
+            or next((t for t in catalog
+                     if (t.get("repoUrl") or "").rstrip("/").split("/")[-1].lower() == wanted),
+                    None))
+
+
 def _filter_trainings_by_profile(trainings: list[dict], tenant: str) -> list[dict]:
     """Keep only the hands-on trainings whose repo is in the tenant's content profile.
     The Arena catalog is the full set of hands-on repos; without this, every tenant
-    sees all of them regardless of its profile. Unknown/invalid tenant → no filter."""
+    sees all of them regardless of its profile. Unknown/invalid tenant → no filter.
+
+    An unresolvable profile is treated the same way. _load_profile raises 404 when
+    the tenant map names a profile that is not on disk, and that used to propagate
+    out of GET /api/arena/trainings and empty the WHOLE catalog for that tenant —
+    the app then had nothing to translate a training id against and fell back to
+    the repo name, which provisioning rejected. Curation must never be able to
+    take delivery down, so a bad mapping degrades to "unfiltered", not "nothing"."""
     try:
         tenant_id, domain = classify_tenant(tenant)
+        profile = _load_profile(resolve_profile(tenant_id, domain))
     except Exception:
         return trainings
-    profile = _load_profile(resolve_profile(tenant_id, domain))
     allowed = {(s.get("repo") or "").lower() for s in profile.get("sources", [])}
     if not allowed:
         return trainings
@@ -4110,9 +4166,17 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
 
     cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
     catalog = json.loads(cached) if cached else await _fetch_arena_catalog()
-    training = next((t for t in catalog if t["id"] == body.trainingId), None)
+    training = arena_training_for_id(catalog, body.trainingId)
     if training is None:
         raise HTTPException(status_code=404, detail=f"Training '{body.trainingId}' not found")
+    # Canonicalize before the id is used for anything else. Accepting the repo
+    # name only removes the 404; STORING it would leave four consumers that
+    # compare this value by equality against the catalog id quietly broken —
+    # the dedupe guard below (a learner would double-provision on refresh),
+    # nightly_run_id, terminate-all (the env would survive the trainer's
+    # cleanup) and the readiness/progress matchers (the learner would read as
+    # "not ready" forever). One name goes into Redis: the catalog id.
+    body.trainingId = training["id"]
 
     repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
 
