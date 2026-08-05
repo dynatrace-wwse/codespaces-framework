@@ -406,22 +406,47 @@ async def _run_undeploy(token: str, tenant_url: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _tenant_host(tenant_url: str) -> str:
+    return (urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}").hostname or "").lower()
+
+
 def _is_coe(tenant_url: str) -> bool:
-    h1 = (urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}").hostname or "").lower()
-    h2 = (urlparse(COE_TENANT_URL).hostname or "").lower()
-    return bool(h2) and h1 == h2
+    """COE, addressed by either of its two names.
 
-
-def _deploy_scope(action: str) -> str:
-    """Scope by action, so we never request one the client lacks.
-
-    Keep this narrow. A deploy client holds exactly apps:install + apps:run;
-    asking for settings scopes on top returns 400 invalid_request with an empty
-    error_description, which reads as a broken client rather than an over-broad
-    request.
+    COE answers to both geu80787.apps.dynatrace.com and the vanity alias
+    wwse.apps.dynatrace.com, and which one arrives depends on what
+    getEnvironmentUrl() returns in the app. Matching a single configured host
+    meant one of the two silently failed to be recognised as COE.
     """
-    return ("app-engine:apps:delete" if action == "undeploy"
-            else "app-engine:apps:install app-engine:apps:run")
+    h1 = _tenant_host(tenant_url)
+    if not h1:
+        return False
+    if h1.split(".")[0] in COE_TENANT_IDS:
+        return True
+    return h1 == _tenant_host(COE_TENANT_URL)
+
+
+def _deploy_scopes(action: str) -> list[str]:
+    """Scope sets to try for an action, richest first.
+
+    Installing the app is only half a deploy. The post-install steps — the
+    JS-runtime outbound allowlist, remote-grail forwarding to the central tenant,
+    and the stored Orbital bearer — need settings scopes, and a token without
+    them skips all three silently. A tenant deployed that way installs fine and
+    then never forwards a single training event.
+
+    But the grant is all-or-nothing: asking for a scope the client lacks returns
+    400 invalid_request with an empty error_description, which fails the deploy
+    outright rather than degrading. So ask for everything, and fall back to the
+    minimum that still installs. A fully-provisioned client gets a fully
+    configured tenant; a minimal one still deploys, and _finish_deploy already
+    reports which steps it had to skip.
+    """
+    if action == "undeploy":
+        return ["app-engine:apps:delete"]
+    install = "app-engine:apps:install app-engine:apps:run"
+    return [f"{install} app-settings:objects:write settings:objects:read settings:objects:write",
+            install]
 
 
 async def _mint_account_token(label: str, client_id: str, client_secret: str,
@@ -435,20 +460,27 @@ async def _mint_account_token(label: str, client_id: str, client_secret: str,
     """
     if not (client_id and client_secret):
         return None
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(sso_url, data={
-                "grant_type": "client_credentials", "client_id": client_id,
-                "client_secret": client_secret, "resource": resource,
-                "scope": _deploy_scope(action),
-            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        if r.status_code == 200:
-            return r.json().get("access_token")
-        # Body, not just status: a scope the client lacks and a wrong resource
-        # are both 400, and only the body tells them apart.
-        log.warning("%s token mint HTTP %s: %s", label, r.status_code, r.text[:200])
-    except Exception as exc:
-        log.warning("%s token mint failed: %s", label, exc)
+    scope_sets = _deploy_scopes(action)
+    for i, scope in enumerate(scope_sets):
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post(sso_url, data={
+                    "grant_type": "client_credentials", "client_id": client_id,
+                    "client_secret": client_secret, "resource": resource,
+                    "scope": scope,
+                }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            if r.status_code == 200:
+                if i:
+                    log.info("%s deploy token: settings scopes unavailable, installing only "
+                             "(post-install configuration will be skipped)", label)
+                return r.json().get("access_token")
+            # Body, not just status: a scope the client lacks and a wrong resource
+            # are both 400, and only the body tells them apart.
+            log.warning("%s token mint HTTP %s (scope set %d/%d): %s",
+                        label, r.status_code, i + 1, len(scope_sets), r.text[:200])
+        except Exception as exc:
+            log.warning("%s token mint failed: %s", label, exc)
+            return None
     return None
 
 
@@ -499,10 +531,16 @@ async def _mint_sro_token(action: str) -> str | None:
 
 
 OUTBOUND_SCHEMA = "builtin:dt-javascript-runtime.allowed-outbound-connections"
-# The central (COE) tenant that non-COE installs forward training telemetry to.
+# The central tenant that non-COE installs forward training telemetry TO.
 # wwse.apps.dynatrace.com is a vanity alias for geu80787.apps.dynatrace.com.
-COE_TENANT_URL = "https://wwse.apps.dynatrace.com"
-COE_TENANT_HOST = "wwse.apps.dynatrace.com"
+#
+# Deliberately NOT named COE_TENANT_URL. It used to be, and being declared here —
+# 400 lines below the identically-named deploy-target constant — it silently
+# overwrote it, so `_is_coe` compared incoming tenants against the vanity alias
+# and never matched the canonical geu80787 host the app actually sends. COE
+# auto-deploy was dead for exactly as long as that shadowing existed.
+CENTRAL_TENANT_URL = "https://wwse.apps.dynatrace.com"
+CENTRAL_TENANT_HOST = "wwse.apps.dynatrace.com"
 # Tenants that ARE the central tenant — never forward to themselves (store locally).
 COE_TENANT_IDS = {"wwse", "geu80787"}
 REMOTE_GRAIL_SCHEMA = "app:my.dynatrace.enablements:remote-grail"
@@ -520,7 +558,7 @@ OUTBOUND_HOSTS = [
     "autonomous-enablements.whydevslovedynatrace.com",
     "raw.githubusercontent.com",
     "api.github.com",
-    COE_TENANT_HOST,
+    CENTRAL_TENANT_HOST,
     "sso.dynatrace.com",
     "api.dynatrace.com",
 ]
@@ -611,7 +649,7 @@ async def _ensure_remote_grail(token: str, tenant_url: str) -> str:
         return "skipped (REMOTE_GRAIL_COE_TOKEN_ENC not configured)"
     base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
     h = {"Authorization": f"Bearer {token}"}
-    value = {"enabled": True, "tenantUrl": COE_TENANT_URL, "apiToken": coe_token}
+    value = {"enabled": True, "tenantUrl": CENTRAL_TENANT_URL, "apiToken": coe_token}
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get(base, headers=h, params={

@@ -653,11 +653,21 @@ def test_env_first_ignores_empty_and_whitespace():
         del os.environ["ZZ_CANON"], os.environ["ZZ_ALIAS"]
 
 
-def test_deploy_scope_stays_narrow():
-    # Asking for settings scopes on top returns 400 invalid_request with an empty
-    # error_description, which reads as a broken client rather than a bad request.
-    assert dep._deploy_scope("deploy") == "app-engine:apps:install app-engine:apps:run"
-    assert dep._deploy_scope("undeploy") == "app-engine:apps:delete"
+def test_deploy_scopes_ask_for_settings_then_degrade():
+    """Richest first, then the minimum that still installs.
+
+    The grant is all-or-nothing: a scope the client lacks 400s the whole request.
+    Asking only for apps:install/run always succeeds but silently skips the
+    outbound allowlist, remote-grail forwarding and the stored Orbital bearer —
+    a tenant that installs and then never forwards a training event.
+    """
+    sets = dep._deploy_scopes("deploy")
+    assert len(sets) == 2
+    for s in sets:
+        assert "app-engine:apps:install" in s and "app-engine:apps:run" in s
+    assert "settings:objects:write" in sets[0]      # try the full configuration
+    assert "settings:objects:write" not in sets[1]  # fall back to install-only
+    assert dep._deploy_scopes("undeploy") == ["app-engine:apps:delete"]
 
 
 def test_is_sprint():
@@ -718,3 +728,30 @@ def test_sprint_auto_without_creds_503():
             x_auth_user="a"))
     finally:
         (dep.SPRINT_CLIENT_ID, dep.SPRINT_CLIENT_SECRET, dep.SPRINT_TENANT_URL) = saved
+
+
+def test_is_coe_matches_both_of_its_names():
+    """COE answers to geu80787 AND the wwse vanity alias.
+
+    The shadowing bug: CENTRAL_TENANT_URL was declared as COE_TENANT_URL 400
+    lines below the deploy-target constant of the same name, so _is_coe compared
+    against wwse and never recognised the canonical geu80787 host the app sends.
+    COE auto-deploy returned "a platform token is required for this tenant".
+    """
+    saved = dep.COE_TENANT_URL
+    dep.COE_TENANT_URL = "https://geu80787.apps.dynatrace.com"
+    try:
+        assert dep._is_coe("https://geu80787.apps.dynatrace.com")
+        assert dep._is_coe("https://wwse.apps.dynatrace.com")
+        assert dep._is_coe("https://wwse.apps.dynatrace.com/ui/apps/my.dynatrace.enablements")
+        assert not dep._is_coe("https://sro97894.apps.dynatrace.com")
+        assert not dep._is_coe("")
+    finally:
+        dep.COE_TENANT_URL = saved
+
+
+def test_central_forwarding_target_is_separate_from_the_deploy_target():
+    # Two different jobs, two different names. Collapsing them is what broke COE.
+    assert dep.CENTRAL_TENANT_HOST in dep.OUTBOUND_HOSTS
+    assert dep.CENTRAL_TENANT_URL == "https://wwse.apps.dynatrace.com"
+    assert "geu80787" in dep.COE_TENANT_URL
