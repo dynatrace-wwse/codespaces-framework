@@ -21,6 +21,25 @@ logging.basicConfig(
 log = logging.getLogger("ops-nightly")
 
 
+async def _scan_coverage() -> None:
+    """Run the automation-coverage scan out of process, best-effort.
+
+    Never allowed to hold up the nightly: a GitHub hiccup should cost the fleet
+    a stale grade, not a skipped test run.
+    """
+    script = Path(__file__).resolve().parent.parent / "tools" / "coverage_scan.py"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-u", str(script),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        tail = (out or b"").decode("utf-8", "replace").strip().splitlines()[-1:]
+        log.info("Coverage scan finished rc=%s %s", proc.returncode, tail[0] if tail else "")
+    except Exception as exc:
+        log.warning("Coverage scan skipped: %s", exc)
+
+
 def load_testable_repos() -> list[dict]:
     """Load repos from repos.yaml that have CI enabled."""
     repos_path = FRAMEWORK_DIR / "repos.yaml"
@@ -119,6 +138,12 @@ async def run_nightly(
         "parallel": parallel,
     }
     await pool.set(f"nightly:{run_id}:meta", json.dumps(run_meta))
+
+    # Grade every training's automation coverage before the tests run. Static
+    # (reads mkdocs.yaml + docs/*.md from GitHub — no clone, no container), so
+    # it costs seconds and covers all 27 repos, not just the 4 that get a
+    # training-test. A green training-test later upgrades its repo to `verified`.
+    await _scan_coverage()
 
     # Queue jobs with staggered delays — route to arch-specific queues
     for i, entry in enumerate(schedule):

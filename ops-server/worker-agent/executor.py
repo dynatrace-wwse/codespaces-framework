@@ -26,6 +26,8 @@ and returns the slot to the queue for the next job.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
 import re
@@ -452,6 +454,113 @@ def daemon_provisioned(exit_code: int) -> bool:
     return exit_code == 0
 
 
+RESTORE_DIR = ".orbital-restore"
+# Whole-restore ceiling on the worker side. resume_replay enforces its own
+# per-section and total budgets; this is the outer backstop so a wedged solution
+# can never hold a provision open indefinitely.
+RESUME_TOTAL_TIMEOUT_S = int(os.environ.get("RESUME_TOTAL_TIMEOUT_S", "960"))
+
+
+async def _replay_progress(
+    *,
+    job_id: str,
+    resume_step: int,
+    training_key: str,
+    repo_dir: Path,
+    sb_name: str,
+    inner_name: str,
+    workspace: str,
+    redis_pool,
+    livelog_key: str | None,
+    sections: list,
+) -> dict:
+    """Rebuild the learner's environment to the step they stopped at.
+
+    Replays `LAB_SOLUTION` blocks for nav steps 0..resume_step-1 inside the fresh
+    container. Runs *before* the readiness marker so the learner never sees a
+    half-restored environment, and so the app's existing provisioning poll covers
+    it without a new status.
+
+    Stream discipline is the point: the replayed commands ARE the answers to the
+    lab (the UI hides them behind `canSeeSolutions`), so only sanitized progress
+    goes to `job:livelog` / the returned log. Command text and output go to
+    `job:restore:{job_id}`, which is operator-only.
+    """
+    summary: dict = {"status": "failed", "restoredTo": 0, "unrestored": []}
+    restore_key = f"job:restore:{job_id}" if redis_pool is not None else None
+    tools_src = Path(__file__).resolve().parent.parent / "tools"
+    dest = repo_dir / RESTORE_DIR
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in ("resume_replay.py", "lab_nav.py", "app_layer_driver.py"):
+            shutil.copy(tools_src / name, dest / name)
+        await _make_world_writable(dest)
+    except Exception as exc:
+        log.warning("Daemon %s: could not stage restore tools: %s", job_id, exc)
+        return summary
+
+    header = f"\n=== Restoring your previous progress ({resume_step} step(s)) ===\n"
+    sections.append(header)
+    if livelog_key:
+        await redis_pool.append(livelog_key, header)
+    if restore_key:
+        await redis_pool.set(restore_key, f"restore start job={job_id} until={resume_step}\n", ex=86400)
+
+    summary_inside = f"{workspace}/{RESTORE_DIR}/summary.json"
+    cmd = (
+        f"python3 {RESTORE_DIR}/resume_replay.py --docs docs --until {int(resume_step)} "
+        f"--summary-json {summary_inside}"
+    )
+    if training_key:
+        cmd += f" --training {training_key}"
+
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", sb_name,
+        "docker", "exec", "-w", workspace, inner_name,
+        "bash", "-lc", cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def pump_learner():
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace")
+            sections.append(line)
+            if livelog_key:
+                await redis_pool.append(livelog_key, line)
+
+    async def pump_operator():
+        assert proc.stderr is not None
+        async for raw in proc.stderr:
+            if restore_key:
+                await redis_pool.append(restore_key, raw.decode("utf-8", "replace"))
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(pump_learner(), pump_operator(), proc.wait()),
+            timeout=RESUME_TOTAL_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        log.warning("Daemon %s: restore exceeded %ss — continuing", job_id, RESUME_TOTAL_TIMEOUT_S)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+    try:
+        with open(dest / "summary.json", encoding="utf-8") as fh:
+            summary = json.load(fh)
+    except Exception:
+        log.warning("Daemon %s: no restore summary produced", job_id)
+
+    if restore_key:
+        await redis_pool.append(restore_key, f"\nrestore end status={summary.get('status')}\n")
+        await redis_pool.expire(restore_key, 86400)
+    # The staged tools are not secret, but leaving a directory named for the
+    # restore machinery in the learner's workspace invites confusion.
+    shutil.rmtree(dest, ignore_errors=True)
+    return summary
+
+
 async def execute_daemon(
     job: dict,
     redis_pool=None,
@@ -619,6 +728,31 @@ async def execute_daemon(
                 if livelog_key:
                     await redis_pool.append(livelog_key, msg)
                 break
+
+        # Resume: replay the learner's completed steps before announcing ready.
+        # Deliberately inside the provisioning window — the app already polls and
+        # shows a progress bar here, and a learner who can click into a
+        # half-restored cluster will fail a verification check that should pass.
+        resume_step = int(job.get("resume_step") or 0)
+        if daemon_provisioned(rc) and resume_step > 0:
+            restore_summary = await _replay_progress(
+                job_id=job_id,
+                resume_step=resume_step,
+                training_key=job.get("training_key") or "",
+                repo_dir=repo_dir,
+                sb_name=sb_name,
+                inner_name=inner_name,
+                workspace=workspace,
+                redis_pool=redis_pool,
+                livelog_key=livelog_key,
+                sections=sections,
+            )
+            if redis_pool is not None:
+                await redis_pool.hset(f"job:running:{job_id}", mapping={
+                    "restore_status": str(restore_summary.get("status", "failed")),
+                    "restored_to": str(restore_summary.get("restoredTo", 0)),
+                    "restore_unrestored": json.dumps(restore_summary.get("unrestored", [])),
+                })
 
         # Only a clean setup brings the environment up. On failure do NOT emit the
         # readiness marker (session-status keys on it) and do NOT block on docker

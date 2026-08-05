@@ -57,6 +57,7 @@ import urllib.request
 # driver — one grammar, two transports (kept in one place on purpose).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app_layer_driver import BLOCK_RE, evaluate, parse_block  # noqa: E402
+from lab_nav import build_training_groups, page_is_exempt  # noqa: E402
 
 DEFAULT_ORBITAL = "http://127.0.0.1:8080"
 READY_TIMEOUT_S = int(os.environ.get("TRAINING_TEST_READY_TIMEOUT_S", "1500"))
@@ -300,6 +301,61 @@ def split_doc_dump(stdout):
     return files
 
 
+MKDOCS_MARK = "mkdocs.yaml"
+
+
+def order_by_nav(files, mkdocs_text):
+    """Reorder `[(fname, text)]` into mkdocs `nav:` order — the app's step order.
+
+    The shell dump arrives in glob (lexical) order, which is not the order the
+    learner walks: log-ingest's nav opens with `index.md` while lexical sort
+    buries it last. Section numbering in this log, and the ordinals the resume
+    feature replays against, both have to match the app. Pages absent from the
+    nav keep their relative order at the end rather than disappearing.
+    """
+    if not mkdocs_text:
+        return files, ""
+    try:
+        groups = build_training_groups(mkdocs_text)
+    except Exception:
+        return files, ""
+    if not groups:
+        return files, ""
+    order = [os.path.basename(e.filename) for e in groups[0].entries]
+    rank = {name: i for i, name in enumerate(order)}
+    known = [f for f in files if f[0] in rank]
+    unknown = [f for f in files if f[0] not in rank]
+    known.sort(key=lambda f: rank[f[0]])
+    return known + unknown, groups[0].key
+
+
+def coverage_report(sections):
+    """Which sections owe a LAB_SOLUTION and which have one.
+
+    A page owes a solution when it asks the learner to *do* something — it has a
+    STEP_SETUP or a shell-verification check. Pages that are prose, or that carry
+    an explicit `<!-- LAB_NO_SOLUTION: … -->` marker (provisioning sanity probes
+    like "did the container start?", or the "reproduce the bug" half of a
+    reproduce/fix pair) owe nothing and are not counted as gaps.
+    """
+    owed, covered, exempt, gaps = 0, 0, 0, []
+    for sec in sections:
+        is_exempt, _reason = page_is_exempt(sec.get("text", ""))
+        hands_on = bool(sec["setups"] or sec["checks"])
+        if is_exempt:
+            exempt += 1
+            continue
+        if not hands_on:
+            continue
+        owed += 1
+        if sec["solutions"]:
+            covered += 1
+        else:
+            gaps.append(sec["fname"])
+    grade = "none" if owed == 0 and covered == 0 else ("complete" if not gaps else "partial")
+    return {"owed": owed, "covered": covered, "exempt": exempt, "gaps": gaps, "grade": grade}
+
+
 def with_wait(cmd):
     return f"export LAB_WAIT=1; {cmd}"
 
@@ -428,6 +484,7 @@ def main():
         #    the environment was provisioned from.
         dump = orbital.exec(
             job_id,
+            f'echo "{FILE_MARK}{MKDOCS_MARK}"; cat mkdocs.yaml 2>/dev/null || cat mkdocs.yml 2>/dev/null; '
             f'for f in docs/*.md; do echo "{FILE_MARK}$f"; cat "$f"; done',
             interactive=False, timeout_s=60,
         )
@@ -436,6 +493,9 @@ def main():
             log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
             return 1
         files = split_doc_dump(dump.get("stdout", ""))
+        mkdocs_text = next((t for n, t in files if n == MKDOCS_MARK), "")
+        files = [(n, t) for n, t in files if n != MKDOCS_MARK]
+        files, training_key = order_by_nav(files, mkdocs_text)
         setups, solutions, checks, quizzes = extract_from_docs(files)
         titles = {fname: doc_title(content) for fname, content in files}
         step(4, f"docs: {len(files)} files -> {len(setups)} setup cmds, "
@@ -453,11 +513,13 @@ def main():
             sections.append({
                 "fname": fname,
                 "title": titles.get(fname, ""),
+                "text": text,
                 "setups": f_setups,
                 "solutions": f_solutions,
                 "checks": f_checks,
                 "quizzes": f_quizzes,
             })
+        coverage = coverage_report(sections)
         header("== LEARNER PATH ==")
         for i, sec in enumerate(sections, 1):
             log(f"  {i}. {sec['fname']}{' — ' + sec['title'] if sec['title'] else ''}"
@@ -465,6 +527,23 @@ def main():
                 f" checks:{len(sec['checks'])} quizzes:{len(sec['quizzes'])})")
         if not any(sec["checks"] or sec["solutions"] for sec in sections):
             failures.append("no shell-verification checks and no solutions found — nothing to test")
+
+        # Automation coverage — how much of this training a machine can drive,
+        # which is also how much of it the app can restore on resume. Reported,
+        # never fatal: a training with gaps is still worth testing, it just
+        # cannot claim end-to-end automation.
+        log("")
+        log(f"  coverage: {coverage['covered']}/{coverage['owed']} hands-on sections have solutions"
+            f" ({coverage['exempt']} exempt) -> {coverage['grade']}")
+        if coverage["gaps"]:
+            log(f"  {YELLOW}no LAB_SOLUTION (and no LAB_NO_SOLUTION marker): "
+                f"{', '.join(coverage['gaps'])}{RESET}")
+            log(f"{YELLOW}{BOLD}TRAINING_TEST: COVERAGE_PARTIAL{RESET}")
+        log("TRAINING_TEST: COVERAGE " + json.dumps({
+            "grade": coverage["grade"], "covered": coverage["covered"],
+            "owed": coverage["owed"], "exempt": coverage["exempt"],
+            "gaps": coverage["gaps"], "trainingKey": training_key,
+        }))
 
         # 5. Walk every section in order.
         section_results = []

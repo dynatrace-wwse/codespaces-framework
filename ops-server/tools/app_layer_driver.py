@@ -81,11 +81,21 @@ def parse_block(body):
 
 
 def _md_files(docs_dir):
-    return [os.path.join(docs_dir, f) for f in sorted(os.listdir(docs_dir)) if f.endswith(".md")]
+    """Pages in mkdocs `nav:` order — the same order the app numbers steps by.
+
+    Falls back to filename sort when lab_nav is absent (this file is also copied
+    into containers standalone) or the repo has no readable mkdocs config.
+    """
+    try:
+        from lab_nav import nav_entries
+    except ImportError:
+        return [os.path.join(docs_dir, f) for f in sorted(os.listdir(docs_dir)) if f.endswith(".md")]
+    paths = [os.path.join(docs_dir, e.filename) for e in nav_entries(docs_dir)]
+    return [p for p in paths if os.path.isfile(p)]
 
 
 def extract(docs_dir):
-    """Return (setups, solutions, checks) in nav-ish (filename-sorted) order."""
+    """Return (setups, solutions, checks) in mkdocs nav order."""
     setups, solutions, checks = [], [], []
     for path in _md_files(docs_dir):
         fname = os.path.basename(path)

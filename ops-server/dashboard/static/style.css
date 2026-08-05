@@ -1492,3 +1492,18 @@ body.role-writer .tab-writer-only { display: inline-block; }
 .reg-bar { height: 4px; background: var(--border-soft); border-radius: 3px; overflow: hidden; margin-top: 10px; }
 .reg-bar > i { display: block; height: 100%; width: 30%; background: var(--accent); border-radius: 3px; animation: reg-slide 1.4s ease-in-out infinite; }
 @keyframes reg-slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+
+/* ── Automation coverage badge (Synchronizer → Status) ──────────────────────
+   How much of a training a machine can drive end to end. Sits beside the
+   version columns because the two questions belong together: which framework a
+   repo pins, and whether that repo can actually test — and resume — itself. */
+.auto-badge {
+    display: inline-block; padding: 1px 7px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; letter-spacing: .02em; white-space: nowrap;
+    border: 1px solid transparent; cursor: help;
+}
+.auto-verified { color: var(--green);  border-color: color-mix(in srgb, var(--green) 45%, transparent); background: color-mix(in srgb, var(--green) 12%, transparent); }
+.auto-complete { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.auto-partial  { color: var(--amber);  border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 12%, transparent); }
+.auto-none     { color: var(--text-3); border-color: var(--border-soft); }
+.auto-unknown  { color: var(--text-3); border-color: transparent; }
