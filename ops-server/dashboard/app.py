@@ -547,19 +547,29 @@ def _sees_full_identities(request: Request, caller: str = "") -> bool:
     tenant URLs. The bearer only authenticates the app->Orbital transport; it
     does not entitle the learner it is acting for to everyone else's identity.
 
-    Full identities therefore only for:
-      - a signed-in Orbital org member (x-auth-user, set by nginx after
-        oauth2-proxy) — the internal admin console, or
-      - a service call with NO learner `caller` (internal automation reads).
-    A service call carrying a learner `caller` is masked (keep=caller). The
+    Full identities therefore only for a signed-in Orbital org member
+    (x-auth-user, set by nginx after oauth2-proxy) — the internal admin console.
+    A service call is masked whether or not it carries a learner `caller`. The
     session trainer is handled separately by each caller via is_trainer, since
     that identity is caller-supplied per endpoint. This mirrors the pad-get /
     _room_view rule, which already masks by per-user identity rather than by
-    the presence of the bearer."""
+    the presence of the bearer.
+
+    The bearer used to be enough on its own when no `caller` was supplied
+    ("internal automation reads"). That exception is gone, because the token is
+    now compiled into the app bundle and therefore readable by anyone who can
+    load the app: treating it as proof of anything would hand every learner a
+    switch that turns cohort masking off. A bearer with no caller is now the
+    LEAST trusted shape, not the most.
+
+    NOTE the asymmetry with `_has_full_access`, which still trusts the bearer.
+    It has to — the app proxies its own reads with it and would otherwise get
+    masked job records. So a leaked token can still read job listings with real
+    emails and tenant URLs. Closing that needs per-tenant credentials or a
+    Dynatrace-signed tenant claim, neither of which exists yet; it is tracked
+    with the arena-auth work rather than pretended away here."""
     if request.headers.get("x-auth-user", ""):
         return True
-    if _is_service_caller(request):
-        return not caller
     return False
 
 

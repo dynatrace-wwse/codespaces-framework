@@ -98,10 +98,21 @@ def test_sees_full_identities_service_bearer_with_learner_caller_is_masked():
     assert a._sees_full_identities(r, "learner@example.com") is False
 
 
-def test_sees_full_identities_service_bearer_no_caller_is_full():
-    # internal automation reads (no learner acting-for) keep the full view
+def test_sees_full_identities_service_bearer_no_caller_is_masked():
+    # Reversed deliberately (2026-08-06). This used to be True: a bearer with no
+    # learner acting-for was read as "internal automation" and got the full view.
+    # The token is now compiled into the app bundle, so anyone who can load the
+    # app can present it — and omitting the caller was the whole trick. A bearer
+    # with no caller is now the LEAST trusted shape, not the most.
     r = _req({"Authorization": "Bearer test-service-token"})
-    assert a._sees_full_identities(r, "") is True
+    assert a._sees_full_identities(r, "") is False
+
+
+def test_a_leaked_bearer_cannot_unmask_a_cohort_by_dropping_the_caller():
+    # The concrete attack the reversal above closes.
+    r = _req({"Authorization": "Bearer test-service-token"})
+    assert a._sees_full_identities(r, "learner@example.com") is False
+    assert a._sees_full_identities(r, "") is False
 
 
 def test_sees_full_identities_signed_in_org_member_is_full():
