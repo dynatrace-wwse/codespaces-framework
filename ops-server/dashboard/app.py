@@ -5293,7 +5293,11 @@ class LiveSessionCreate(BaseModel):
     title: str = ""
     trainingId: str = ""
     ref: str = ""                 # optional content branch
-    trainerEmail: str = ""
+    trainerEmail: str = ""         # the creator; always becomes trainers[0]
+    # Co-trainers (EPIC-007). The full desired team may be sent — the creator is
+    # forced to index 0 either way, so a trainer cannot drop themselves. Capped
+    # at live_sessions.MAX_TRAINERS; 400 above that.
+    trainers: list[str] = []
     roster: list[str] = []
     # Trainer's own tenant URL — stamped SERVER-side by the app function. Becomes
     # the workshop's ownerTenant and scopes the trainer's listing (WS-1).
@@ -5374,21 +5378,28 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
     await _require_service_or_writer(request)
     try:
         fields = live_sessions.validate_create(
-            body.title, body.trainingId, body.trainerEmail, body.roster)
+            body.title, body.trainingId, body.trainerEmail, body.roster,
+            body.trainers)
         schedule = live_sessions.validate_schedule(
             body.scheduledAt, body.timezone, body.durationMinutes, body.maxSeats)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    session_id = _new_job_id()
+    session_id = live_sessions.new_workshop_id()
     join_code = await _reserve_join_code(session_id)
     now = datetime.now(timezone.utc)
     session = {
         "title":        fields["title"],
         "trainingId":   fields["trainingId"],
         "ref":          (body.ref or "").strip(),
-        "trainerEmail": fields["trainerEmail"],
+        # The trainer TEAM is the stored truth (up to MAX_TRAINERS). There is no
+        # stored `trainerEmail` — payloads derive it as trainers[0] so there is
+        # exactly one place a trainer can be added or removed.
+        "trainers":     live_sessions.encode_trainers(fields["trainers"]),
         "state":        live_sessions.initial_state(schedule["scheduledAt"]),
+        # The room is closed until the trainer opens it: a learner may always
+        # enter the lobby, but walks into a prepared room or none at all.
+        "roomOpen":     "0",
         "createdAt":    now.isoformat(),
         "startedAt":    "",
         "endedAt":      "",
@@ -5419,8 +5430,9 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
     if fields["roster"]:
         await pool.sadd(roster_key, *fields["roster"])
     await pool.zadd("live:sessions:index", {session_id: now.timestamp()})
-    log.info("Live session %s created by %s (%s, %d invited)", session_id,
-             fields["trainerEmail"], fields["trainingId"], len(fields["roster"]))
+    log.info("Live session %s created by %s (%s, %d invited, %d trainers)",
+             session_id, fields["trainerEmail"], fields["trainingId"],
+             len(fields["roster"]), len(fields["trainers"]))
     return live_sessions.shape_detail(
         session_id, session, fields["roster"], {}, fields["trainerEmail"])
 
@@ -5778,7 +5790,7 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     # joined/tenant skips — they are calling from body.tenant, so their tenant is
     # known by construction and they never "join" their own workshop.
     targets = live_sessions.roster_targets(
-        roster, session.get("trainerEmail"), body.includeTrainer)
+        roster, live_sessions.trainers_of(session), body.includeTrainer)
     for email, role in targets:
         # `emails` is the caller's chunk of the roster, so it filters LEARNERS
         # only — includeTrainer is explicit intent and must not be cancelled out
@@ -5839,6 +5851,10 @@ class LiveSessionUpdate(BaseModel):
     trainerEmail: str = ""
     title: str | None = None
     description: str | None = None
+    # The trainer team (EPIC-007). REPLACED when supplied. The workshop's LEAD
+    # (trainers[0]) is always kept, so no edit can leave a workshop with no
+    # trainer and no co-trainer can remove the creator.
+    trainers: list[str] | None = None
     roster: list[str] | None = None
     scheduledAt: str | None = None
     timezone: str | None = None
@@ -5879,6 +5895,13 @@ async def api_live_session_update(session_id: str, body: LiveSessionUpdate, requ
         updates["title"] = title
     if body.description is not None:
         updates["description"] = live_sessions.clean_description(body.description)
+    if body.trainers is not None:
+        try:
+            team = live_sessions.validate_trainers(
+                live_sessions.lead_trainer(session), body.trainers)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        updates["trainers"] = live_sessions.encode_trainers(team)
     try:
         sched = live_sessions.validate_schedule(
             body.scheduledAt if body.scheduledAt is not None else session.get("scheduledAt", ""),
@@ -5988,11 +6011,11 @@ async def api_live_session_readiness(session_id: str, request: Request,
     joined = await pool.hgetall(joined_key)
     joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
     training_id = session.get("trainingId", "")
-    # WS-4: the trainer gets a row of their own so their environment is visible
+    # WS-4: every trainer gets a row of their own so their environment is visible
     # on the same board (they run the lab too, with solutions unlocked). Kept
     # separate from the roster so learner counts and masking are unaffected.
-    trainer_email = live_sessions.normalize_email(session.get("trainerEmail"))
-    watched = set(roster) | ({trainer_email} if trainer_email else set())
+    trainer_emails = live_sessions.trainers_of(session)
+    watched = set(roster) | set(trainer_emails)
 
     # One scan of the running arena jobs → email -> meta for this training.
     running_by_email: dict[str, dict] = {}
@@ -6022,7 +6045,7 @@ async def api_live_session_readiness(session_id: str, request: Request,
         if user and user not in running_by_email:
             failed_by_email[user] = record.get("job_id", "")
 
-    rows = live_sessions.roster_targets(roster, trainer_email, include_trainer=True)
+    rows = live_sessions.roster_targets(roster, trainer_emails, include_trainer=True)
     results = []
     for email, role in rows:
         meta = running_by_email.get(email)

@@ -15,15 +15,192 @@ from dashboard import live_sessions as ls
 TRAINER = "trainer@dynatrace.com"
 
 
-def _session(state="open", trainer=TRAINER, **extra) -> dict:
-    """A live:session:{id} hash as stored in Redis (all-string values)."""
+def _session(state="open", trainer=TRAINER, trainers=None, **extra) -> dict:
+    """A live:session:{id} hash as stored in Redis (all-string values).
+
+    `trainers` is the stored truth (JSON list); there is no stored trainerEmail.
+    Pass `trainers=[...]` for a co-taught workshop.
+    """
     sess = {
         "title": "K8s 101 — EMEA Bootcamp", "trainingId": "kubernetes-101",
-        "ref": "", "trainerEmail": trainer, "state": state,
+        "ref": "", "state": state,
+        "trainers": ls.encode_trainers(trainers or [trainer]),
         "createdAt": "2026-07-14T09:00:00+00:00", "startedAt": "", "endedAt": "",
     }
     sess.update(extra)
     return sess
+
+
+# ── Workshop identity (EPIC-007) ─────────────────────────────────────────────
+
+def test_workshop_id_is_prefixed_and_shaped():
+    wid = ls.new_workshop_id(now_ms=1754485000000)
+    assert wid.startswith("ws_")
+    stamp, _, rand = wid[3:].partition("-")
+    assert stamp == "mdzz2i4g"          # base36(epoch-ms)
+    assert len(rand) == 6               # 3 bytes hex = 24 bits of entropy
+
+
+def test_workshop_ids_sort_chronologically():
+    # base36(epoch-ms) is fixed-width for every realistic timestamp, so string
+    # order IS creation order. Toy values are not fixed-width — use real ones.
+    ids = [ls.new_workshop_id(now_ms=t) for t in
+           (1754485000000, 1754485000001, 1754571400000)]
+    assert ids == sorted(ids)
+
+
+def test_workshop_id_is_recognisable():
+    assert ls.is_workshop_id(ls.new_workshop_id()) is True
+    # The old generator's shape, and a worker job id, must NOT pass.
+    assert ls.is_workshop_id("mshioahd-6059") is False
+    assert ls.is_workshop_id("enablement-ade7b1f16803") is False
+    assert ls.is_workshop_id(None) is False
+
+
+def test_two_workshops_minted_in_the_same_millisecond_differ():
+    a = ls.new_workshop_id(now_ms=1754485000000)
+    b = ls.new_workshop_id(now_ms=1754485000000)
+    assert a != b
+
+
+# ── Trainer team (EPIC-007) ──────────────────────────────────────────────────
+
+def test_creator_is_always_the_lead():
+    assert ls.validate_trainers("Lead@X.com", ["b@x.com"]) == \
+        ["lead@x.com", "b@x.com"]
+    # …even when the caller lists themselves second, or not at all.
+    assert ls.validate_trainers("lead@x.com", ["b@x.com", "LEAD@x.com"]) == \
+        ["lead@x.com", "b@x.com"]
+    assert ls.validate_trainers("lead@x.com", None) == ["lead@x.com"]
+
+
+def test_trainer_team_is_capped():
+    five = ["b@x.com", "c@x.com", "d@x.com", "e@x.com"]
+    assert len(ls.validate_trainers("a@x.com", five)) == ls.MAX_TRAINERS
+    try:
+        ls.validate_trainers("a@x.com", five + ["f@x.com"])
+    except ValueError as exc:
+        assert "at most 5" in str(exc)
+    else:
+        raise AssertionError("a 6-trainer team must be rejected")
+
+
+def test_trainer_team_drops_invalid_and_dedupes():
+    assert ls.validate_trainers("a@x.com", ["bad", "B@x.com", "b@x.com"]) == \
+        ["a@x.com", "b@x.com"]
+
+
+def test_every_trainer_on_the_team_is_a_trainer():
+    sess = _session(trainers=["lead@x.com", "co@x.com"])
+    assert ls.is_trainer("lead@x.com", sess) is True
+    assert ls.is_trainer(" CO@X.com ", sess) is True     # case + whitespace
+    assert ls.is_trainer("learner@x.com", sess) is False
+    assert ls.is_trainer("", sess) is False
+
+
+def test_lead_trainer_is_the_first_of_the_team():
+    assert ls.lead_trainer(_session(trainers=["a@x.com", "b@x.com"])) == "a@x.com"
+    assert ls.lead_trainer({}) == ""
+
+
+def test_a_bare_trainerEmail_still_reads_as_a_team():
+    """Deploy-window guard: a record written by the previous build, or created
+    between the Redis wipe and the service restart, must not 500 every request
+    that touches it."""
+    assert ls.trainers_of({"trainerEmail": "Old@X.com"}) == ["old@x.com"]
+    assert ls.is_trainer("old@x.com", {"trainerEmail": "old@x.com"}) is True
+
+
+def test_unreadable_trainers_field_does_not_explode():
+    assert ls.trainers_of({"trainers": "{not json"}) == []
+    assert ls.trainers_of({"trainers": '"a string"'}) == []
+    assert ls.trainers_of(None) == []
+
+
+def test_shape_summary_exposes_the_whole_team():
+    item = ls.shape_summary("sid-1", _session(trainers=[TRAINER, "co@x.com"]),
+                            set(), {}, "co@x.com")
+    assert item["trainers"] == [TRAINER, "co@x.com"]
+    assert item["trainerEmail"] == TRAINER      # derived echo = the lead
+    assert item["isTrainer"] is True            # …and a co-trainer IS a trainer
+
+
+def test_shape_detail_carries_the_callers_own_role():
+    """The workshop route resolves role from ONE fetch — so the detail payload
+    has to say whether this caller is a trainer and whether they have joined."""
+    sess = _session(trainers=[TRAINER, "co@x.com"])
+    joined = {"learner@x.com": "2026-08-06T10:00:00+00:00"}
+    assert ls.shape_detail("sid-1", sess, {"learner@x.com"}, joined,
+                           "co@x.com")["isTrainer"] is True
+    learner = ls.shape_detail("sid-1", sess, {"learner@x.com"}, joined,
+                              "Learner@X.com")
+    assert learner["isTrainer"] is False
+    assert learner["hasJoined"] is True
+
+
+def test_multi_trainer_roster_targets_gives_every_trainer_a_row():
+    out = ls.roster_targets({"alice@x.com"},
+                            ["lead@x.com", "co@x.com"], include_trainer=True)
+    assert out == [("alice@x.com", "learner"),
+                   ("lead@x.com", "trainer"), ("co@x.com", "trainer")]
+
+
+def test_multi_trainer_roster_targets_never_duplicates():
+    """A co-trainer who is also on the roster stays ONE row — otherwise
+    provision-all queues two environments for the same person."""
+    out = ls.roster_targets({"co@x.com"}, ["lead@x.com", "co@x.com"], True)
+    assert [e for e, _ in out].count("co@x.com") == 1
+    assert dict(out)["co@x.com"] == "learner"
+
+
+# ── Seat bound (EPIC-007 §8: a bound, NOT a delivery guarantee) ───────────────
+
+def test_max_seats_bound_is_enforced():
+    assert ls.validate_schedule("", "", 0, ls.MAX_SEATS)["maxSeats"] == "200"
+    try:
+        ls.validate_schedule("", "", 0, ls.MAX_SEATS + 1)
+    except ValueError as exc:
+        assert "<= 200" in str(exc)
+    else:
+        raise AssertionError("201 seats must be rejected")
+
+
+def test_duration_has_no_seat_cap_applied_to_it():
+    # _FIELD_MAX is per-field; a long workshop is not a 201-seat workshop.
+    assert ls.validate_schedule("", "", 600, 0)["durationMinutes"] == "600"
+
+
+# ── The room gate (EPIC-007) ─────────────────────────────────────────────────
+
+def test_room_is_closed_until_the_trainer_opens_it():
+    assert ls.room_open(_session()) is False
+    assert ls.room_open(_session(roomOpen="1")) is True
+    assert ls.room_open({}) is False
+
+
+def test_an_ended_workshop_has_no_open_room():
+    """End is implicitly room-close: the flag stays set in Redis for the record,
+    but nothing may be written to a finished room."""
+    assert ls.room_open(_session(state="ended", roomOpen="1")) is False
+    assert ls.room_open(_session(state="cancelled", roomOpen="1")) is False
+
+
+def test_room_closed_reason_says_which_gate_is_shut():
+    assert ls.room_closed_reason(_session()) == \
+        "the trainer has not opened the room yet"
+    assert ls.room_closed_reason(_session(state="ended")) == \
+        "this workshop has ended"
+    assert ls.room_closed_reason(_session(state="cancelled")) == \
+        "this workshop was cancelled"
+    assert ls.room_closed_reason(_session(roomOpen="1")) == ""
+
+
+def test_the_room_gate_is_independent_of_the_start_gate():
+    """The two gates are separate on purpose: a learner can be chatting in the
+    room while still unable to start an environment."""
+    room_only = _session(state="open", roomOpen="1")
+    assert ls.room_open(room_only) is True
+    assert room_only["state"] != "running"
 
 
 # ── Email normalization ──────────────────────────────────────────────────────
@@ -59,6 +236,7 @@ def test_validate_create_normalizes_everything():
         "  K8s 101 ", " kubernetes-101 ", " Trainer@Dynatrace.COM ",
         ["Alice@X.com", "bad-entry", "alice@x.com"])
     assert fields == {"title": "K8s 101", "trainingId": "kubernetes-101",
+                      "trainers": ["trainer@dynatrace.com"],
                       "trainerEmail": "trainer@dynatrace.com",
                       "roster": ["alice@x.com"]}
 
@@ -185,9 +363,12 @@ def test_shape_summary_learner():
     assert item == {
         "sessionId": "sid-1", "title": "K8s 101 — EMEA Bootcamp",
         "trainingId": "kubernetes-101", "state": "open",
-        "trainerEmail": TRAINER, "joinedCount": 1, "rosterCount": 2,
+        "trainers": [TRAINER], "trainerEmail": TRAINER,
+        "joinedCount": 1, "rosterCount": 2,
         "createdAt": "2026-07-14T09:00:00+00:00", "startedAt": "",
         "isTrainer": False, "hasJoined": True,
+        # Always present, never inferred from absence (EPIC-007).
+        "roomOpen": False, "gateAhead": False,
     }
 
 
@@ -334,15 +515,30 @@ def test_join_error_without_session_keeps_roster_rule():
 
 # ── Pacing gate: "unlock path with mine" ─────────────────────────────────────
 
+_PACING_DEFAULT = {"trainerStep": 0, "unlockPath": False, "gateAhead": False,
+                   "pacingBy": "", "pacingAt": ""}
+
+
 def test_pacing_state_defaults_to_locked():
-    assert ls.pacing_state({}) == {"trainerStep": 0, "unlockPath": False}
-    assert ls.pacing_state(None) == {"trainerStep": 0, "unlockPath": False}
+    assert ls.pacing_state({}) == _PACING_DEFAULT
+    assert ls.pacing_state(None) == _PACING_DEFAULT
 
 
 def test_pacing_state_reads_stored_strings():
     # Redis hash values are always strings.
-    assert ls.pacing_state({"trainerStep": "4", "unlockPath": "1"}) == {
-        "trainerStep": 4, "unlockPath": True}
+    assert ls.pacing_state({"trainerStep": "4", "unlockPath": "1",
+                            "gateAhead": "1", "pacingBy": "co@x.com",
+                            "pacingAt": "2026-08-06T13:00:00+00:00"}) == {
+        "trainerStep": 4, "unlockPath": True, "gateAhead": True,
+        "pacingBy": "co@x.com", "pacingAt": "2026-08-06T13:00:00+00:00"}
+
+
+def test_both_pacing_toggles_are_independent_opt_ins():
+    """A trainer who touches nothing gets sequential-own-pace: no solutions
+    released, no ceiling on how far a learner may read."""
+    untouched = {"trainerStep": "2"}
+    assert ls.solution_visible(1, untouched) is False
+    assert ls.step_visible(99, untouched) is True
 
 
 def test_trainer_always_sees_every_solution():
@@ -359,25 +555,68 @@ def test_learner_sees_nothing_while_toggle_is_off():
     assert ls.solution_visible(1, s) is False
 
 
-def test_learner_sees_only_steps_the_trainer_moved_PAST():
-    # Trainer on 4 → 1,2,3 released; 4 still sealed (they are teaching it now).
+def test_learner_sees_steps_UP_TO_AND_INCLUDING_the_trainers():
+    """EPIC-007: the ceiling is the trainer's own step, not the one before it.
+
+    A straggler is stuck on the step the class is doing NOW, so that is the step
+    whose solution has to be reachable. The old rule (strictly past) released
+    everything except the one they actually needed.
+    """
     s = {"trainerStep": "4", "unlockPath": "1"}
-    assert [ls.solution_visible(n, s) for n in (1, 2, 3)] == [True, True, True]
-    assert ls.solution_visible(4, s) is False
+    assert [ls.solution_visible(n, s) for n in (1, 2, 3, 4)] == [True] * 4
     assert ls.solution_visible(5, s) is False
 
 
 def test_moving_on_releases_exactly_one_more_step():
     on4 = {"trainerStep": "4", "unlockPath": "1"}
     on5 = {"trainerStep": "5", "unlockPath": "1"}
-    assert ls.solution_visible(4, on4) is False
-    assert ls.solution_visible(4, on5) is True
-    assert ls.solution_visible(5, on5) is False
+    assert ls.solution_visible(5, on4) is False
+    assert ls.solution_visible(5, on5) is True
+    assert ls.solution_visible(6, on5) is False
 
 
-def test_trainer_on_first_step_releases_nothing():
+def test_trainer_on_first_step_releases_that_step():
     s = {"trainerStep": "1", "unlockPath": "1"}
+    assert ls.solution_visible(1, s) is True
+    assert ls.solution_visible(2, s) is False
+
+
+def test_unmoved_pointer_releases_nothing():
+    """A workshop nobody has paced yet has released no solutions — the pointer
+    is NOT floored here (unlike the gate-ahead ceiling)."""
+    s = {"trainerStep": "0", "unlockPath": "1"}
     assert ls.solution_visible(1, s) is False
+
+
+# ── Gate-ahead: hold the learners who race ───────────────────────────────────
+
+def test_gate_ahead_off_lets_a_learner_read_anything():
+    assert ls.step_visible(99, {"trainerStep": "2"}) is True
+
+
+def test_gate_ahead_caps_a_learner_at_the_class_pointer():
+    s = {"trainerStep": "3", "gateAhead": "1"}
+    assert [ls.step_visible(n, s) for n in (1, 2, 3)] == [True, True, True]
+    assert ls.step_visible(4, s) is False
+
+
+def test_gate_ahead_with_an_unmoved_pointer_still_allows_step_one():
+    """trainerStep is 0 until someone moves it. Read literally that locks a
+    gated learner out of the whole workshop, so the ceiling floors at step 1."""
+    s = {"gateAhead": "1"}
+    assert ls.step_visible(1, s) is True
+    assert ls.step_visible(2, s) is False
+
+
+def test_gate_ahead_never_applies_to_a_trainer():
+    s = {"trainerStep": "1", "gateAhead": "1"}
+    assert ls.step_visible(99, s, is_trainer=True) is True
+
+
+def test_unparseable_step_is_gated_not_opened():
+    """Unlike solution_visible (where garbage reads as 'behind' and is
+    harmless), an unreadable step number must not open a gated step."""
+    assert ls.step_visible("not-a-number", {"gateAhead": "1"}) is False
 
 
 def test_unparseable_step_is_treated_as_sealed():
