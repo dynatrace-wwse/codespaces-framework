@@ -51,8 +51,18 @@ class FakeRedis:
     async def hget(self, key, field):
         return self.h.get(key, {}).get(field)
 
-    async def hset(self, key, field, value):
-        self.h.setdefault(key, {})[field] = value
+    async def hset(self, key, field=None, value=None, mapping=None):
+        target = self.h.setdefault(key, {})
+        if mapping:
+            target.update(mapping)
+        else:
+            target[field] = value
+
+    async def hdel(self, key, field):
+        self.h.get(key, {}).pop(field, None)
+
+    async def hlen(self, key):
+        return len(self.h.get(key, {}))
 
     async def smembers(self, key):
         return set(self.s.get(key, set()))
@@ -92,14 +102,19 @@ def teardown_module(_module):
 
 
 def setup_function(_fn):
-    """One clean room per test: an open session with the trainer + one joined
-    learner, and no chat yet."""
+    """One clean room per test: a running session whose room the trainer has
+    OPENED, with one joined learner and no chat yet.
+
+    roomOpen matters — a learner cannot write to a room the trainer has not
+    opened (EPIC-007), so a fixture without it makes every chat test a test of
+    the gate. The gate has its own tests below."""
     _fn._saved_pool = a.pool
     fake = FakeRedis()
     a.pool = fake
     fake.h[f"live:session:{SID}"] = {
         "title": "Kubernetes 101", "trainingId": "kubernetes-101",
-        "trainerEmail": TRAINER, "state": "running",
+        "trainers": json.dumps([TRAINER]), "state": "running",
+        "roomOpen": "1",
         "ownerTenant": "https://geu80787.apps.dynatrace.com",
     }
     fake.h[f"live:session:{SID}:joined"] = {
@@ -162,8 +177,8 @@ def test_anonymous_snapshot_is_fully_masked():
 
 
 def test_chat_role_is_decided_server_side():
-    """A learner may claim any name; the role comes from the stored
-    trainerEmail, so a message can never impersonate the trainer."""
+    """A learner may claim any name; the role comes from the stored trainer
+    team, so a message can never impersonate the trainer."""
     _chat(LEARNER, "I am the trainer", name="Trainer")
     roles = {m["email"]: m["role"] for m in _pad(TRAINER).json()["chat"]}
     assert roles[LEARNER] == "learner"
@@ -215,3 +230,210 @@ def test_unknown_session_is_404_on_both_routes():
     assert client.get("/api/live/sessions/nope/pad").status_code == 404
     assert client.post("/api/live/sessions/nope/pad/chat", headers=BEARER,
                        json={"email": LEARNER, "text": "hi"}).status_code == 404
+
+
+# ── The room gate (EPIC-007) ─────────────────────────────────────────────────
+#
+# A learner can always ENTER a workshop, and everything in it is locked until
+# the trainer opens the room. That lets the trainer write the welcome note and
+# the pad first, so the cohort never walks into an empty room — and it is a
+# separate decision from starting the workshop, which is what unlocks the
+# environment and the lab steps.
+
+def _close_room():
+    a.pool.h[f"live:session:{SID}"]["roomOpen"] = "0"
+
+
+def _hand(email, raised=True, note="I need help"):
+    return client.post(f"/api/live/sessions/{SID}/hand", headers=BEARER,
+                       json={"email": email, "name": "", "step": "2",
+                             "note": note, "raised": raised})
+
+
+def _room(email, open_=True):
+    return client.post(f"/api/live/sessions/{SID}/room", headers=BEARER,
+                       json={"trainerEmail": email, "open": open_})
+
+
+def test_a_closed_room_refuses_a_learner():
+    _close_room()
+    r = _chat(LEARNER)
+    assert r.status_code == 409
+    assert "not opened the room" in r.json()["detail"]
+
+
+def test_a_closed_room_still_lets_the_TRAINER_prepare_it():
+    """The whole reason the gate exists: the welcome note and the pad get
+    written before anyone is let in."""
+    _close_room()
+    assert _chat(TRAINER, "setting up").status_code == 200
+    assert client.post(f"/api/live/sessions/{SID}/pad/section", headers=BEARER,
+                       json={"trainerEmail": TRAINER, "key": "welcome",
+                             "markdown": "# Welcome"}).status_code == 200
+
+
+def test_a_learner_cannot_raise_a_hand_before_the_room_opens():
+    _close_room()
+    assert _hand(LEARNER).status_code == 409
+
+
+def test_raising_a_hand_needs_the_room_not_a_started_workshop():
+    """Someone who cannot get their environment going is exactly who needs to
+    raise a hand, and that happens before the workshop formally starts."""
+    a.pool.h[f"live:session:{SID}"]["state"] = "open"
+    assert _hand(LEARNER).status_code == 200
+
+
+def test_trainer_opens_and_closes_the_room():
+    _close_room()
+    assert _room(TRAINER, True).json()["roomOpen"] is True
+    assert _chat(LEARNER).status_code == 200
+    assert _room(TRAINER, False).json()["roomOpen"] is False
+    assert _chat(LEARNER).status_code == 409
+
+
+def test_opening_the_room_is_idempotent():
+    assert _room(TRAINER, True).status_code == 200
+    assert _room(TRAINER, True).json()["roomOpen"] is True
+
+
+def test_only_a_trainer_may_open_the_room():
+    _close_room()
+    assert _room(LEARNER, True).status_code == 403
+    assert a.pool.h[f"live:session:{SID}"]["roomOpen"] == "0"
+
+
+def test_a_co_trainer_may_open_the_room():
+    """Every trainer on the team holds the same authority."""
+    co = "co@dynatrace.com"
+    a.pool.h[f"live:session:{SID}"]["trainers"] = json.dumps([TRAINER, co])
+    _close_room()
+    assert _room(co, True).json()["roomOpen"] is True
+
+
+def test_an_ended_room_cannot_be_reopened():
+    """Its pad is already exported and frozen — a late write would vanish."""
+    a.pool.h[f"live:session:{SID}"]["state"] = "ended"
+    assert _room(TRAINER, True).status_code == 409
+    assert _chat(TRAINER).status_code == 409
+
+
+def test_room_flag_is_reported_even_when_false():
+    """Absent must never have to be read as false by the client."""
+    _close_room()
+    body = _room(TRAINER, False).json()
+    assert body["roomOpen"] is False and body["gateAhead"] is False
+
+
+# ── Pacing across a trainer team (EPIC-007) ──────────────────────────────────
+
+def _pacing(email, step, unlock=None, gate=None):
+    body = {"trainerEmail": email, "step": step}
+    if unlock is not None:
+        body["unlockPath"] = unlock
+    if gate is not None:
+        body["gateAhead"] = gate
+    return client.post(f"/api/live/sessions/{SID}/pacing", headers=BEARER,
+                       json=body)
+
+
+def test_any_trainer_may_move_the_class_pointer():
+    co = "co@dynatrace.com"
+    a.pool.h[f"live:session:{SID}"]["trainers"] = json.dumps([TRAINER, co])
+    assert _pacing(TRAINER, 2).json()["trainerStep"] == 2
+    assert _pacing(co, 5).json()["trainerStep"] == 5
+
+
+def test_the_pointer_records_who_moved_it_and_when():
+    """Last write wins, so co-trainers need to see the move happen rather than
+    wonder why the step jumped."""
+    co = "co@dynatrace.com"
+    a.pool.h[f"live:session:{SID}"]["trainers"] = json.dumps([TRAINER, co])
+    body = _pacing(co, 4).json()
+    assert body["pacingBy"] == co
+    assert body["pacingAt"]
+
+
+def test_a_learner_cannot_move_the_pointer():
+    _pacing(TRAINER, 3)
+    assert _pacing(LEARNER, 9).status_code == 403
+    assert a.pool.h[f"live:session:{SID}"]["trainerStep"] == "3"
+
+
+def test_both_toggles_round_trip_independently():
+    body = _pacing(TRAINER, 3, unlock=True).json()
+    assert body["unlockPath"] is True and body["gateAhead"] is False
+    body = _pacing(TRAINER, 3, gate=True).json()
+    assert body["unlockPath"] is True and body["gateAhead"] is True
+    body = _pacing(TRAINER, 3, unlock=False).json()
+    assert body["unlockPath"] is False and body["gateAhead"] is True
+
+
+def test_omitting_a_toggle_leaves_it_alone():
+    """Moving the pointer must not silently reset what the trainer set."""
+    _pacing(TRAINER, 2, unlock=True, gate=True)
+    body = _pacing(TRAINER, 3).json()
+    assert body["unlockPath"] is True and body["gateAhead"] is True
+
+
+# ── Access to one workshop (EPIC-007) ────────────────────────────────────────
+#
+# The workshop route resolves itself from this ONE read, so the status code has
+# to distinguish "no such workshop" from "not yours" — otherwise the app can
+# only render an empty room and hope.
+
+def _detail(email=""):
+    q = f"?email={email}" if email else ""
+    return client.get(f"/api/live/sessions/{SID}{q}", headers=BEARER)
+
+
+def test_unknown_workshop_is_404():
+    assert client.get("/api/live/sessions/ws_nope", headers=BEARER).status_code == 404
+
+
+def test_a_stranger_is_403_not_an_empty_room():
+    r = _detail("stranger@elsewhere.com")
+    assert r.status_code == 403
+    assert "not a participant" in r.json()["detail"]
+
+
+def test_a_rostered_learner_gets_the_workshop():
+    a.pool.s[f"live:session:{SID}:roster"] = {"rostered@x.com"}
+    body = _detail("rostered@x.com").json()
+    assert body["sessionId"] == SID
+    assert body["isTrainer"] is False
+
+
+def test_a_joined_learner_gets_the_workshop_even_off_roster():
+    """join-by-code appends to the roster, but a learner who joined before the
+    roster was retyped must not lose access to the room they are sitting in."""
+    assert _detail(LEARNER).status_code == 200
+
+
+def test_a_trainer_gets_the_workshop_and_the_roster():
+    body = _detail(TRAINER).json()
+    assert body["isTrainer"] is True
+    assert "joinCode" in body or body["rosterCount"] == 0
+
+
+def test_a_co_trainer_is_not_a_stranger():
+    co = "co@dynatrace.com"
+    a.pool.h[f"live:session:{SID}"]["trainers"] = json.dumps([TRAINER, co])
+    assert _detail(co).status_code == 200
+    assert _detail(co).json()["isTrainer"] is True
+
+
+def test_an_anonymous_read_stays_a_masked_200():
+    """The public read path. 403-ing it would break every surface that reads a
+    workshop without claiming an identity."""
+    r = _detail()
+    assert r.status_code == 200
+    assert "***" in r.json()["trainerEmail"]
+
+
+def test_the_detail_payload_answers_role_and_both_gates_in_one_call():
+    """What kills the reload bug: no second request to learn who you are or
+    what is unlocked."""
+    body = _detail(TRAINER).json()
+    for field in ("isTrainer", "hasJoined", "roomOpen", "gateAhead", "state"):
+        assert field in body, f"{field} missing — the route would need a 2nd call"
