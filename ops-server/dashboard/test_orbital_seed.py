@@ -205,3 +205,37 @@ def test_the_app_function_is_tried_before_the_direct_write(monkeypatch):
     out = asyncio.run(dep._ensure_orbital_config("bearer", "https://t.example.com"))
     assert out == "token seeded (via app function)"
     assert order == ["app-function"]
+
+
+def test_a_transient_app_not_found_is_retried_then_reported_as_unverified(monkeypatch):
+    # An app is not routable the instant its install returns: the first call after
+    # an upgrade answers "App not found" and the same call seconds later succeeds.
+    # Without the retry this produced an ACTION REQUIRED warning on EVERY deploy.
+    calls = {"n": 0}
+
+    class _Flaky(_Client):
+        async def post(self, url, headers=None, json=None):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                return _Resp(500, {"error": "App not found."})
+            return _Resp(200, {"status": "already-configured"})
+
+    monkeypatch.setattr(dep, "_orbital_service_token", lambda: "orb-token")
+    _real = asyncio.sleep
+    monkeypatch.setattr(dep.asyncio, "sleep", lambda _s: _real(0))
+    monkeypatch.setattr(dep.httpx, "AsyncClient", lambda *a, **k: _Flaky(None))
+    out = asyncio.run(dep._seed_via_app_function("bearer", "https://t.example.com"))
+    assert calls["n"] == 3 and out == "already configured"
+
+
+def test_an_unreachable_app_function_is_unverified_not_broken(monkeypatch):
+    # The app ships a default bearer, so a question we could not ask is a check we
+    # could not run — NOT a tenant that needs a manual paste.
+    monkeypatch.setattr(dep, "_orbital_service_token", lambda: "orb-token")
+    _real = asyncio.sleep
+    monkeypatch.setattr(dep.asyncio, "sleep", lambda _s: _real(0))
+    monkeypatch.setattr(dep.httpx, "AsyncClient", lambda *a, **k: _Client(_Resp(500, {"e": 1})))
+    out = asyncio.run(dep._seed_via_app_function("bearer", "https://t.example.com"))
+    assert out.startswith("unverified")
+    # "unverified" must take the softer warning branch, never ACTION REQUIRED.
+    assert not any("ACTION REQUIRED" in w for w in dep._scope_warnings("", "", out))

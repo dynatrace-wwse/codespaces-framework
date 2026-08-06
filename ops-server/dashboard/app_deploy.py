@@ -1013,14 +1013,27 @@ async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
     fn = (f"{tenant_url.rstrip('/')}/platform/app-engine/app-functions/v1/apps/"
           f"{APP_ID}/api/seedOrbitalConfig")
     try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(fn, headers={"Authorization": f"Bearer {token}",
-                                          "Content-Type": "application/json"},
-                             json={"token": _orbital_service_token()})
+        # An app is not routable the instant its install returns — the first call
+        # after an upgrade answers "App not found", and the same call seconds later
+        # succeeds. Retrying here is the difference between a definite answer and
+        # an ACTION REQUIRED warning on every single deploy.
+        r = None
+        for attempt, pause in enumerate((0, 5, 10)):
+            if pause:
+                await asyncio.sleep(pause)
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(fn, headers={"Authorization": f"Bearer {token}",
+                                              "Content-Type": "application/json"},
+                                 json={"token": _orbital_service_token()})
+            if r.status_code == 200 or r.status_code == 404:
+                break
         if r.status_code == 404:
             return None  # function not in the installed version yet
         if r.status_code != 200:
-            return f"seed via app function failed (HTTP {r.status_code})"
+            # Could not ask. That is not "not seeded" — the app ships a default
+            # bearer, so an unanswered question is a check we could not run, not a
+            # tenant that is broken. Saying otherwise cries wolf on every deploy.
+            return f"unverified (app function unreachable: HTTP {r.status_code})"
         body = r.json() if r.content else {}
         status = (body or {}).get("status", "")
         return {
@@ -1033,7 +1046,7 @@ async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
                       f"{(body or {}).get('detail', '')}".strip())
     except Exception as exc:
         log.warning("seedOrbitalConfig on %s: %s", tenant_url, exc)
-        return f"seed via app function error: {exc}"
+        return f"unverified (app function error: {exc})"
 
 
 async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
