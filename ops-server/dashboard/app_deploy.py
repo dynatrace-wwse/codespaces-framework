@@ -385,11 +385,15 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
             f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). "
             f"{_ORBITAL_TOKEN_CONSEQUENCE} This is a ONE-TIME manual step on a new tenant: "
             f"open the app → Settings → Orbital Server Configuration and paste the Orbital "
-            f"token. A tenant that already has one needs nothing. It cannot be automated — "
-            f"app-settings:objects:write is not offered in the OAuth client scope catalog "
-            f"(400 invalid_request even for a client with full account rights), and routing "
-            f"the write through an app function does not help: an app function invoked by an "
-            f"external bearer runs with the CALLER's permissions, not the app's.")
+            f"token. A tenant that already has one needs nothing. It cannot be automated "
+            f"FROM HERE — app-settings:objects:write is not offered in the OAuth client "
+            f"scope catalog (400 invalid_request even for a client with full account "
+            f"rights), and routing the write through an app function does not help: an app "
+            f"function invoked by an external bearer runs with the CALLER's permissions, "
+            f"not the app's. A signed-in browser session DOES carry the app's own scopes, "
+            f"so a headless login can do it (that is how COE/SRO/sprint were seeded on "
+            f"2026-08-02) — but that needs an interactive SSO login per tenant, which we "
+            f"only have for tenants we own.")
     return warnings
 
 
@@ -1002,6 +1006,15 @@ async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
     external bearer runs with the CALLER's permissions, not the app's. Measured —
     `POST .../api/boot` with a deploy bearer returns `labs: 0, canWrite: false` on
     a tenant holding 42 lab documents. The function would hit the same 403.
+
+    The corollary, since it is easy to read the above as "impossible": a SIGNED-IN
+    session is exactly the caller whose permissions include the app's, so the same
+    POST issued from inside a logged-in browser succeeds. That is how COE, SRO and
+    sprint actually got their token — a headless browser drove the app on
+    2026-08-02 (23:03/23:06/23:26 UTC, per the UUIDv1 in each object's version) and
+    POSTed `orbital-config` from the app's own page context. It is automatable for
+    any tenant we can log into; it is not automatable from a deploy credential, and
+    a customer tenant gives us neither.
 
     What it IS good for: an honest, definite answer about whether this tenant is
     already configured, which the read-only probe below can only guess at when the
