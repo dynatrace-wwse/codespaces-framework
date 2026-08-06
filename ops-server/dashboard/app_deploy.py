@@ -866,6 +866,27 @@ OUTBOUND_HOSTS = [
     "api.dynatrace.com",
 ]
 
+# Non-prod realms mint through their OWN SSO and Account-Management hosts, and the
+# prod pair above does not cover them. Leaving them out is a silent chicken-and-egg:
+# mintCredentials verifies the client against SSO *before* storing it, the verify is
+# blocked by the allowlist, so the client is never stored — and the old comment said
+# these hosts get added "when the app is configured there", which can therefore never
+# happen. Measured on sprint 2026-08-06:
+#   "client cannot mint platform tokens — … Blocked request to
+#    'sso-sprint.dynatracelabs.com' (host not in allowlist)"
+# dev is deliberately absent: its realm hosts are unverified, and guessing one would
+# put a wrong entry in a security allowlist. Add it once a dev tenant is exercised.
+REALM_OUTBOUND_HOSTS: dict[str, list[str]] = {
+    "sprint": ["sso-sprint.dynatracelabs.com",
+               "api-hardening.internal.dynatracelabs.com"],
+}
+
+
+def _outbound_hosts_for(tenant_url: str) -> list[str]:
+    """Hosts this tenant's app functions must reach, prod baseline + its own realm."""
+    _, domain = classify_tenant(tenant_url)
+    return OUTBOUND_HOSTS + REALM_OUTBOUND_HOSTS.get(domain, [])
+
 
 async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
     """If the tenant enforces a JS-runtime outbound allowlist (sprint/dev do, prod usually
@@ -874,6 +895,7 @@ async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
     Best-effort; needs settings:objects:read+write on the token."""
     base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
     h = {"Authorization": f"Bearer {token}"}
+    wanted = _outbound_hosts_for(tenant_url)
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get(base, headers=h, params={
@@ -893,17 +915,17 @@ async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
                     return "no allowlist object (prod — outbound open)"
                 cr = await c.post(base, headers={**h, "Content-Type": "application/json"}, json=[{
                     "schemaId": OUTBOUND_SCHEMA, "scope": "environment",
-                    "value": {"allowedOutboundConnections": {"enforced": True, "hostList": list(OUTBOUND_HOSTS)}},
+                    "value": {"allowedOutboundConnections": {"enforced": True, "hostList": list(wanted)}},
                 }])
                 if cr.status_code in (200, 201):
-                    return f"created outbound allowlist with {len(OUTBOUND_HOSTS)} host(s)"
+                    return f"created outbound allowlist with {len(wanted)} host(s)"
                 return f"allowlist create failed (HTTP {cr.status_code}: {cr.text[:120]})"
             obj = items[0]
             aoc = (obj.get("value") or {}).get("allowedOutboundConnections", {})
             if not aoc.get("enforced"):
                 return "outbound not enforced (open)"
             hosts = list(aoc.get("hostList", []))
-            missing = [x for x in OUTBOUND_HOSTS if x not in hosts]
+            missing = [x for x in wanted if x not in hosts]
             if not missing:
                 return "allowlist already complete"
             hosts.extend(missing)

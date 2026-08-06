@@ -1128,3 +1128,34 @@ def test_every_rung_that_can_carry_app_settings_read_does():
                and "settings:objects:write" in r for r in rungs)
     # Still degrades all the way to install-only.
     assert rungs[-1].split() == ["app-engine:apps:install", "app-engine:apps:run"]
+
+
+# ---------------------------------------------------------------------------
+# Realm-aware outbound allowlist. A sprint/dev tenant mints through its OWN SSO
+# host, and mintCredentials verifies the client against SSO *before* storing it —
+# so an allowlist missing that host makes the store fail, which means the host is
+# never added, which means the store never succeeds. Measured on sprint 2026-08-06:
+#   "Blocked request to 'sso-sprint.dynatracelabs.com' (host not in allowlist)"
+# ---------------------------------------------------------------------------
+
+def test_prod_tenant_gets_only_the_prod_hosts():
+    hosts = dep._outbound_hosts_for("https://geu80787.apps.dynatrace.com")
+    assert "sso.dynatrace.com" in hosts
+    assert not any("sprint" in h for h in hosts)
+
+
+def test_sprint_tenant_also_gets_its_own_realm_hosts():
+    hosts = dep._outbound_hosts_for("https://ydi9582h.sprint.apps.dynatracelabs.com")
+    assert "sso-sprint.dynatracelabs.com" in hosts
+    assert "api-hardening.internal.dynatracelabs.com" in hosts
+    # the prod baseline is still there — realm hosts are additive, never a swap
+    assert "sso.dynatrace.com" in hosts
+    assert "autonomous-enablements.whydevslovedynatrace.com" in hosts
+
+
+def test_realm_hosts_do_not_mutate_the_shared_baseline():
+    # _outbound_hosts_for must not append into OUTBOUND_HOSTS itself, or one
+    # sprint deploy would leak sprint hosts into every later prod deploy.
+    before = list(dep.OUTBOUND_HOSTS)
+    dep._outbound_hosts_for("https://ydi9582h.sprint.apps.dynatracelabs.com")
+    assert dep.OUTBOUND_HOSTS == before
