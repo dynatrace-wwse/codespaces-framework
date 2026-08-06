@@ -5293,7 +5293,11 @@ class LiveSessionCreate(BaseModel):
     title: str = ""
     trainingId: str = ""
     ref: str = ""                 # optional content branch
-    trainerEmail: str = ""
+    trainerEmail: str = ""         # the creator; always becomes trainers[0]
+    # Co-trainers (EPIC-007). The full desired team may be sent — the creator is
+    # forced to index 0 either way, so a trainer cannot drop themselves. Capped
+    # at live_sessions.MAX_TRAINERS; 400 above that.
+    trainers: list[str] = []
     roster: list[str] = []
     # Trainer's own tenant URL — stamped SERVER-side by the app function. Becomes
     # the workshop's ownerTenant and scopes the trainer's listing (WS-1).
@@ -5374,21 +5378,28 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
     await _require_service_or_writer(request)
     try:
         fields = live_sessions.validate_create(
-            body.title, body.trainingId, body.trainerEmail, body.roster)
+            body.title, body.trainingId, body.trainerEmail, body.roster,
+            body.trainers)
         schedule = live_sessions.validate_schedule(
             body.scheduledAt, body.timezone, body.durationMinutes, body.maxSeats)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    session_id = _new_job_id()
+    session_id = live_sessions.new_workshop_id()
     join_code = await _reserve_join_code(session_id)
     now = datetime.now(timezone.utc)
     session = {
         "title":        fields["title"],
         "trainingId":   fields["trainingId"],
         "ref":          (body.ref or "").strip(),
-        "trainerEmail": fields["trainerEmail"],
+        # The trainer TEAM is the stored truth (up to MAX_TRAINERS). There is no
+        # stored `trainerEmail` — payloads derive it as trainers[0] so there is
+        # exactly one place a trainer can be added or removed.
+        "trainers":     live_sessions.encode_trainers(fields["trainers"]),
         "state":        live_sessions.initial_state(schedule["scheduledAt"]),
+        # The room is closed until the trainer opens it: a learner may always
+        # enter the lobby, but walks into a prepared room or none at all.
+        "roomOpen":     "0",
         "createdAt":    now.isoformat(),
         "startedAt":    "",
         "endedAt":      "",
@@ -5419,8 +5430,9 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
     if fields["roster"]:
         await pool.sadd(roster_key, *fields["roster"])
     await pool.zadd("live:sessions:index", {session_id: now.timestamp()})
-    log.info("Live session %s created by %s (%s, %d invited)", session_id,
-             fields["trainerEmail"], fields["trainingId"], len(fields["roster"]))
+    log.info("Live session %s created by %s (%s, %d invited, %d trainers)",
+             session_id, fields["trainerEmail"], fields["trainingId"],
+             len(fields["roster"]), len(fields["trainers"]))
     return live_sessions.shape_detail(
         session_id, session, fields["roster"], {}, fields["trainerEmail"])
 
@@ -5505,18 +5517,39 @@ async def api_live_sessions_past(request: Request, email: str = "", tenant: str 
 
 @app.get("/api/live/sessions/{session_id}")
 async def api_live_session_detail(session_id: str, request: Request, email: str = ""):
-    """Full session state. The roster and per-learner joined list are only
-    included when the caller email matches trainerEmail; learners get counts.
+    """Full session state — the ONE read the workshop route resolves itself from.
 
-    The trainerEmail match is caller-supplied — anonymous callers get the
-    masked view (no roster/joined/joinCode, masked trainer email) even when
-    they present the trainer's email."""
+    The roster and per-learner joined list are only included when the caller is
+    a trainer of this workshop; learners get counts. The trainer match is
+    caller-supplied — anonymous callers get the masked view (no
+    roster/joined/joinCode, masked trainer email) even when they present a
+    trainer's email.
+
+    Three outcomes, so /live-sessions/{id} can render three different pages from
+    one request instead of scanning a list and guessing (EPIC-007):
+
+      404  no such workshop (never existed, deleted, or past its retention)
+      403  a named caller who is neither trainer, rostered, nor joined
+      200  a member — the payload carries isTrainer/hasJoined/roomOpen/state, so
+           role and gate need no second call
+
+    An anonymous caller (no email at all) still gets the masked 200: that is the
+    public read path, and 403-ing it would break every surface that reads a
+    workshop without claiming an identity. A caller who DOES name themselves gets
+    a definite answer, which is what the app needs to say "you don't have access"
+    rather than render an empty room.
+    """
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
+    named = live_sessions.normalize_email(email)
+    if named and not live_sessions.is_member(session, roster, named) \
+            and named not in (joined or {}):
+        raise HTTPException(status_code=403,
+                            detail="you are not a participant of this workshop")
     detail = live_sessions.shape_detail(session_id, session, roster, joined, email)
     # Service bearer alone must not unmask (BUG-MASK-1); the session trainer
     # (caller email == trainerEmail) or a real org member does.
@@ -5704,6 +5737,55 @@ async def api_live_session_open_registration(session_id: str, body: LiveSessionT
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
 
 
+class LiveSessionRoom(BaseModel):
+    trainerEmail: str = ""
+    open: bool = True
+
+
+@app.post("/api/live/sessions/{session_id}/room")
+async def api_live_session_room(session_id: str, body: LiveSessionRoom, request: Request):
+    """Trainer opens (or closes) the virtual classroom.
+
+    This is the FIRST of a workshop's two gates and it is deliberately separate
+    from /start:
+
+      room open      learners may chat, ask questions, raise a hand and see the
+                     board. The trainer flips this after writing the welcome
+                     note and the pad, so nobody walks into an empty room.
+      state=running  learners may start an environment and open the lab steps.
+
+    Entering the lobby is never gated by either — a learner can always see the
+    workshop exists, what it is, and when it starts. Collapsing the two would
+    force the trainer to choose between opening an unprepared room and leaving
+    the cohort on a locked page while they set it up.
+
+    Idempotent. 409 once the workshop has ended or been cancelled: a finished
+    room cannot be reopened, because its pad is already exported and frozen.
+
+    Auth: service bearer or a signed-in writer, plus the trainer gate.
+    """
+    await _require_service_or_writer(request)
+    sess_key, roster_key, joined_key = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(body.trainerEmail, session):
+        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    state = session.get("state", "")
+    if state in ("ended", "cancelled"):
+        raise HTTPException(status_code=409,
+                            detail=f"the room of a {state} workshop cannot be changed")
+    flag = "1" if body.open else "0"
+    if session.get("roomOpen", "0") != flag:
+        session["roomOpen"] = flag
+        await pool.hset(sess_key, "roomOpen", flag)
+        log.info("Live session %s room %s by %s", session_id,
+                 "opened" if body.open else "closed", body.trainerEmail)
+    roster = await pool.smembers(roster_key)
+    joined = await pool.hgetall(joined_key)
+    return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
+
+
 @app.post("/api/live/sessions/join-by-code")
 async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Request):
     """Join a workshop by its 6-char code (case-insensitive) — appends the
@@ -5778,7 +5860,7 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     # joined/tenant skips — they are calling from body.tenant, so their tenant is
     # known by construction and they never "join" their own workshop.
     targets = live_sessions.roster_targets(
-        roster, session.get("trainerEmail"), body.includeTrainer)
+        roster, live_sessions.trainers_of(session), body.includeTrainer)
     for email, role in targets:
         # `emails` is the caller's chunk of the roster, so it filters LEARNERS
         # only — includeTrainer is explicit intent and must not be cancelled out
@@ -5839,6 +5921,10 @@ class LiveSessionUpdate(BaseModel):
     trainerEmail: str = ""
     title: str | None = None
     description: str | None = None
+    # The trainer team (EPIC-007). REPLACED when supplied. The workshop's LEAD
+    # (trainers[0]) is always kept, so no edit can leave a workshop with no
+    # trainer and no co-trainer can remove the creator.
+    trainers: list[str] | None = None
     roster: list[str] | None = None
     scheduledAt: str | None = None
     timezone: str | None = None
@@ -5879,6 +5965,13 @@ async def api_live_session_update(session_id: str, body: LiveSessionUpdate, requ
         updates["title"] = title
     if body.description is not None:
         updates["description"] = live_sessions.clean_description(body.description)
+    if body.trainers is not None:
+        try:
+            team = live_sessions.validate_trainers(
+                live_sessions.lead_trainer(session), body.trainers)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        updates["trainers"] = live_sessions.encode_trainers(team)
     try:
         sched = live_sessions.validate_schedule(
             body.scheduledAt if body.scheduledAt is not None else session.get("scheduledAt", ""),
@@ -5988,11 +6081,11 @@ async def api_live_session_readiness(session_id: str, request: Request,
     joined = await pool.hgetall(joined_key)
     joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
     training_id = session.get("trainingId", "")
-    # WS-4: the trainer gets a row of their own so their environment is visible
+    # WS-4: every trainer gets a row of their own so their environment is visible
     # on the same board (they run the lab too, with solutions unlocked). Kept
     # separate from the roster so learner counts and masking are unaffected.
-    trainer_email = live_sessions.normalize_email(session.get("trainerEmail"))
-    watched = set(roster) | ({trainer_email} if trainer_email else set())
+    trainer_emails = live_sessions.trainers_of(session)
+    watched = set(roster) | set(trainer_emails)
 
     # One scan of the running arena jobs → email -> meta for this training.
     running_by_email: dict[str, dict] = {}
@@ -6022,7 +6115,7 @@ async def api_live_session_readiness(session_id: str, request: Request,
         if user and user not in running_by_email:
             failed_by_email[user] = record.get("job_id", "")
 
-    rows = live_sessions.roster_targets(roster, trainer_email, include_trainer=True)
+    rows = live_sessions.roster_targets(roster, trainer_emails, include_trainer=True)
     results = []
     for email, role in rows:
         meta = running_by_email.get(email)
@@ -6364,17 +6457,28 @@ async def _require_live_session(session_id: str) -> dict:
     return session
 
 
-def _pad_frozen_guard(session: dict):
-    """Pad writes stop once the session is ended/cancelled — the export
-    snapshot has already been frozen and would silently drop them."""
+def _room_write_guard(session: dict, email: str = ""):
+    """Who may write to the room right now.
+
+    Two refusals, in order:
+
+    1. Ended/cancelled — the export snapshot has already been frozen, so a late
+       write would silently vanish. Nobody, trainer included.
+    2. Room not yet opened — learners are held out, but a TRAINER writes freely.
+       That asymmetry is the point of the room gate: the trainer fills in the
+       welcome note and the pad first, and only then lets the cohort in.
+    """
     if session.get("state") in ("ended", "cancelled"):
         raise HTTPException(status_code=409,
                             detail=f"session is {session.get('state')} — the pad is read-only")
+    if not live_sessions.room_open(session) and not live_sessions.is_trainer(email, session):
+        raise HTTPException(status_code=409,
+                            detail=live_sessions.room_closed_reason(session))
 
 
 async def _pad_add_question(session_id: str, session: dict, email: str,
                             name: str, text: str) -> dict:
-    _pad_frozen_guard(session)
+    _room_write_guard(session, email)
     try:
         text = live_pad.clean_text(text)
     except ValueError as exc:
@@ -6389,7 +6493,7 @@ async def _pad_add_question(session_id: str, session: dict, email: str,
 
 async def _pad_add_answer(session_id: str, session: dict, email: str,
                           name: str, qid: str, text: str) -> dict:
-    _pad_frozen_guard(session)
+    _room_write_guard(session, email)
     try:
         text = live_pad.clean_text(text)
     except ValueError as exc:
@@ -6407,7 +6511,7 @@ async def _pad_add_answer(session_id: str, session: dict, email: str,
 
 async def _pad_set_section(session_id: str, session: dict, email: str,
                            key: str, markdown: str) -> dict:
-    _pad_frozen_guard(session)
+    _room_write_guard(session, email)
     err = live_pad.section_error(key, email, session)
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
@@ -6424,7 +6528,7 @@ async def _room_add_chat(session_id: str, session: dict, identity: dict) -> dict
     the stored trainerEmail. Either way the role is decided here, so a message
     can never claim to be from the trainer. Rate limited per sender (INCR on a
     windowed key — the counter expires itself, so there is nothing to sweep)."""
-    _pad_frozen_guard(session)
+    _room_write_guard(session, identity.get("email", ""))
     try:
         text = live_pad.clean_chat(identity.get("text", ""))
     except ValueError as exc:
@@ -6595,10 +6699,11 @@ class LiveBroadcast(BaseModel):
 
 
 class LivePacing(BaseModel):
-    """Where the trainer is, and whether learners trail them into solutions."""
+    """Where the trainer is, and the two knobs that key off it."""
     trainerEmail: str = ""
     step: int = 0
-    unlockPath: bool | None = None
+    unlockPath: bool | None = None   # release solutions to those who fall behind
+    gateAhead: bool | None = None    # hold those who run ahead at the pointer
 
 
 class LivePadQuestion(BaseModel):
@@ -6725,8 +6830,12 @@ async def api_live_hand(session_id: str, body: LiveHand):
     email = live_sessions.normalize_email(body.email)
     if not live_sessions.is_valid_email(email):
         raise HTTPException(status_code=400, detail="a valid email is required")
-    if session.get("state") != "running":
-        raise HTTPException(status_code=409, detail="workshop is not running")
+    # Gated on the ROOM, not on start: someone who cannot get their environment
+    # going is exactly who needs to raise a hand, and that happens before the
+    # workshop formally starts.
+    reason = live_sessions.room_closed_reason(session)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
     key = _live_hands_key(session_id)
     if body.raised:
         await pool.hset(key, email, live_pad.hand_entry(body.name, body.step, body.note))
@@ -6775,20 +6884,34 @@ async def api_live_broadcast(session_id: str, body: LiveBroadcast):
 
 @app.post("/api/live/sessions/{session_id}/pacing")
 async def api_live_pacing(session_id: str, body: LivePacing):
-    """Trainer publishes where they are, and whether solutions trail them.
+    """Trainer publishes where they are, plus the two knobs that key off it.
 
-    See live_sessions.solution_visible: with unlockPath on, a learner may see
-    the solution for any step the trainer has already moved PAST. Moving from
-    step 3 to 4 releases step 3; step 4 stays sealed until they reach 5.
+    unlockPath (see live_sessions.solution_visible) releases solutions to the
+    learners who fall BEHIND: with it on, a learner may reveal the solution for
+    any step up to and including the one the class is on — the step they are
+    actually stuck on.
+
+    gateAhead (see live_sessions.step_visible) holds the learners who run AHEAD:
+    with it on, a learner cannot open a step past the pointer.
+
+    Both default off, so a trainer who touches nothing runs sequential own pace.
+
+    ANY trainer of this workshop may move the pointer — last write wins. With up
+    to MAX_TRAINERS co-teaching, pacingBy/pacingAt record who moved the class and
+    when, so the others can see it happen rather than wonder why the step jumped.
     """
     session = await _require_live_session(session_id)
     trainer = live_sessions.normalize_email(body.trainerEmail)
     if not live_sessions.is_trainer(trainer, session):
         raise HTTPException(status_code=403, detail="only the trainer may set pacing")
     sess_key, _, _ = _live_keys(session_id)
-    updates = {"trainerStep": str(max(0, int(body.step or 0)))}
+    updates = {"trainerStep": str(max(0, int(body.step or 0))),
+               "pacingBy": trainer,
+               "pacingAt": datetime.now(timezone.utc).isoformat()}
     if body.unlockPath is not None:
         updates["unlockPath"] = "1" if body.unlockPath else "0"
+    if body.gateAhead is not None:
+        updates["gateAhead"] = "1" if body.gateAhead else "0"
     await pool.hset(sess_key, mapping=updates)
     return live_sessions.pacing_state({**session, **updates})
 
@@ -6978,7 +7101,7 @@ async def api_live_pad_chat_pin_ps(body: LivePadSessionBody):
     if identity.get("role") != "trainer":
         raise HTTPException(status_code=403, detail="only the trainer can pin messages")
     session = await _require_live_session(identity["sessionId"])
-    _pad_frozen_guard(session)
+    _room_write_guard(session, identity.get("email", ""))
     if not body.mid:
         raise HTTPException(status_code=400, detail="mid is required")
     _, pins_key, _, _ = _room_keys(identity["sessionId"])
@@ -6999,7 +7122,7 @@ async def api_live_pad_chat_clear_ps(body: LivePadSessionBody):
         raise HTTPException(status_code=403, detail="only the trainer can clear the chat")
     session_id = identity["sessionId"]
     session = await _require_live_session(session_id)
-    _pad_frozen_guard(session)
+    _room_write_guard(session, identity.get("email", ""))
     chat_key, pins_key, clear_key, _ = _room_keys(session_id)
     entries = await pool.xrevrange(chat_key, count=1)
     watermark = entries[0][0] if entries else ""

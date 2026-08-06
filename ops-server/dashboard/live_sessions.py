@@ -5,12 +5,14 @@ dashboard/test_live_sessions.py. The /api/live/* endpoints in app.py stay
 thin: they read/write the Redis keys and delegate every decision here.
 
 Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
-  live:session:{id}         hash  title, trainingId, ref, trainerEmail,
+  live:session:{id}         hash  title, trainingId, ref, trainers (JSON list),
                                   state (scheduled|open|running|ended|cancelled),
-                                  createdAt, startedAt, endedAt
+                                  roomOpen, createdAt, startedAt, endedAt
                                   + OPTIONAL workshop fields (EPIC-002):
                                   scheduledAt, timezone, durationMinutes,
                                   maxSeats, joinCode, cancelledAt
+                                  + pacing (EPIC-007): trainerStep, unlockPath,
+                                  gateAhead, pacingBy, pacingAt
   live:session:{id}:roster  set   lowercase invited emails
   live:session:{id}:joined  hash  email -> ISO joinedAt
   live:session:{id}:tenants hash  email -> normalized tenant URL the learner
@@ -18,10 +20,18 @@ Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
                                   for pre-fix joins — backward compatible)
   live:sessions:index       zset  sessionId scored by epoch createdAt
   live:joincode:{code}      str   sessionId (join-by-code lookup, code UPPER)
+
+The key PREFIX stays `live:session:` deliberately (EPIC-007 §9): every key is
+built by a handful of constructors in app.py, so renaming it to `ws:` would be
+mechanical — but it also moves the terminate-all scanner, the expire fan-out and
+~1,100 lines of pinned tests for no user-visible gain. What became
+workshop-scoped is the ID and the route, not the storage prefix.
 """
 
+import json
 import re
 import secrets
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -37,6 +47,59 @@ STATES = ("scheduled", "open", "running", "ended", "cancelled")
 # trainer looking for a three-week-old cohort found nothing and the record was
 # unreachable for its remaining 23 days.
 SESSION_TTL_SECONDS = 30 * 24 * 3600
+
+
+# ── Workshop identity ─────────────────────────────────────────────────────────
+#
+# A workshop id is the primary key: it addresses the workshop in the URL
+# (/live-sessions/{id}), in every API call, in the Redis keys and in the
+# bizevents that carry workshopId to Grail. It is what makes two workshops of
+# the SAME repo distinguishable — which is the whole point of EPIC-007, since
+# the app used to route workshops by repo tail and therefore could not tell them
+# apart.
+#
+# Shape: ws_{base36 epoch-ms}-{3 bytes hex}   →  ws_mshioahd-78ec1f
+#
+#   ws_       self-identifying: recognisable in a URL, a log line, a Redis scan,
+#             and never confusable with a worker job id (which shares the base36
+#             timestamp shape — see _new_job_id in app.py).
+#   base36 ms lexically sortable by creation time — base36(epoch-ms) is 8 chars
+#             wide for every realistic timestamp (and stays 8 until ~2059), so
+#             string order is chronological order. Toy values in tests are not
+#             fixed-width and do not have that property.
+#   3 bytes   24 bits of entropy inside a single millisecond. The old generator
+#             used 2 bytes; this is 256x the collision headroom.
+#
+# Globally unique by construction: one Orbital Redis serves every tenant, and no
+# tenant, trainer or repo is encoded in the id. Tenant scoping is a FIELD
+# (ownerTenant), never part of the key — a workshop is reachable cross-tenant by
+# design.
+
+WORKSHOP_ID_PREFIX = "ws_"
+
+_B36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _b36(number: int) -> str:
+    """Lowercase base36, no padding. 0 -> '0'."""
+    if number <= 0:
+        return "0"
+    out = []
+    while number:
+        number, rem = divmod(number, 36)
+        out.append(_B36_DIGITS[rem])
+    return "".join(reversed(out))
+
+
+def new_workshop_id(now_ms=None, rng=secrets) -> str:
+    """Mint a workshop id. `now_ms`/`rng` are injectable for tests."""
+    stamp = int(now_ms if now_ms is not None else time.time() * 1000)
+    return f"{WORKSHOP_ID_PREFIX}{_b36(stamp)}-{rng.token_hex(3)}"
+
+
+def is_workshop_id(value) -> bool:
+    """True for ids minted by new_workshop_id(). Cheap route/param guard."""
+    return isinstance(value, str) and value.startswith(WORKSHOP_ID_PREFIX)
 
 
 # ── Emails ────────────────────────────────────────────────────────────────────
@@ -60,6 +123,70 @@ def normalize_roster(emails) -> list[str]:
             seen.add(n)
             out.append(n)
     return out
+
+
+# ── Trainer team ──────────────────────────────────────────────────────────────
+#
+# A workshop has up to MAX_TRAINERS trainers, stored as a JSON list in the
+# `trainers` hash field. trainers[0] is the creator — the "lead" — and is only
+# distinguished for display and for the derived `trainerEmail` echo; every
+# trainer holds identical authority, including moving the class pacing pointer
+# (last write wins, attributed via pacingBy).
+#
+# Trainer identity is workshop MEMBERSHIP, never instructors.json and never IAM:
+# being named on this list is the only thing that makes someone a trainer of
+# this workshop, and it grants nothing anywhere else.
+
+MAX_TRAINERS = 5
+
+
+def encode_trainers(trainers) -> str:
+    """Serialize the team for the Redis hash field."""
+    return json.dumps(list(trainers or []))
+
+
+def trainers_of(session) -> list[str]:
+    """
+    Read the team off a session hash.
+
+    Falls back to a bare `trainerEmail` when `trainers` is absent. That is not a
+    compatibility shim for callers — it is a guard for the deploy window, where a
+    record written by the previous build (or created between the Redis wipe and
+    the service restart) would otherwise 500 every request that touches it.
+    """
+    raw = (session or {}).get("trainers") or ""
+    parsed = None
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+    if not isinstance(parsed, list):
+        parsed = [(session or {}).get("trainerEmail") or ""]
+    return normalize_roster(parsed)
+
+
+def lead_trainer(session) -> str:
+    """The creator. '' when the session has no readable team."""
+    team = trainers_of(session)
+    return team[0] if team else ""
+
+
+def validate_trainers(trainer_email, trainers=None) -> list[str]:
+    """
+    Build the team from the creator plus any co-trainers.
+
+    The creator is always index 0 whether or not the caller included them, so a
+    trainer can never accidentally remove themselves from their own workshop.
+    Raises ValueError on a missing creator or a team over the cap.
+    """
+    lead = normalize_email(trainer_email)
+    if not is_valid_email(lead):
+        raise ValueError("a valid trainerEmail is required")
+    team = [lead] + [t for t in normalize_roster(trainers) if t != lead]
+    if len(team) > MAX_TRAINERS:
+        raise ValueError(f"a workshop may have at most {MAX_TRAINERS} trainers")
+    return team
 
 
 # ── Tenants (cross-tenant workshops) ─────────────────────────────────────────
@@ -135,31 +262,47 @@ def readiness_gap_state(has_joined, joined_tenant, trainer_tenant) -> str:
 
 # ── Create validation ─────────────────────────────────────────────────────────
 
-def validate_create(title, training_id, trainer_email, roster) -> dict:
+def validate_create(title, training_id, trainer_email, roster,
+                    trainers=None) -> dict:
     """Validate + normalize a create request.
 
     Raises ValueError (→ HTTP 400) when title/trainingId/trainerEmail is
-    missing.
+    missing, or when the trainer team exceeds MAX_TRAINERS.
 
     The roster MAY be empty (WS-2): every session gets a join code
     unconditionally and join-by-code APPENDS the joiner to the roster, so a
     code-only workshop is fully supported by the data model. The old
     "at least one valid email" rule rejected that legitimate case.
+
+    `trainerEmail` in the result is the lead (== trainers[0]); it is kept so
+    callers and payload consumers have a single name to display without having
+    to reach into the list.
     """
     title = (title or "").strip()
     training_id = (training_id or "").strip()
-    trainer = normalize_email(trainer_email)
     if not title:
         raise ValueError("title is required")
     if not training_id:
         raise ValueError("trainingId is required")
-    if not is_valid_email(trainer):
-        raise ValueError("a valid trainerEmail is required")
+    team = validate_trainers(trainer_email, trainers)
     return {"title": title, "trainingId": training_id,
-            "trainerEmail": trainer, "roster": normalize_roster(roster)}
+            "trainers": team, "trainerEmail": team[0],
+            "roster": normalize_roster(roster)}
 
 
 # ── Workshop scheduling (EPIC-002) ────────────────────────────────────────────
+#
+# MAX_SEATS is a FIELD BOUND, not a delivery guarantee. Nothing here proves the
+# fleet can actually serve that many learners: capacity_summary() below is a
+# blind sum of worker slots (WORKER_CAPACITY, default 6 per worker) and is
+# repo-blind — no per-repo machine size, no seat cost. See EPIC-007 §8: a
+# 200-seat workshop needs ~34 workers and the fleet runs 3. Callers MUST NOT
+# present an accepted maxSeats as "this workshop can be delivered".
+
+MAX_SEATS = 200
+
+_FIELD_MAX = {"maxSeats": MAX_SEATS}
+
 
 def validate_schedule(scheduled_at, timezone_name, duration_minutes,
                       max_seats) -> dict:
@@ -195,6 +338,9 @@ def validate_schedule(scheduled_at, timezone_name, duration_minutes,
             raise ValueError(f"{field} must be an integer")
         if n < 0:
             raise ValueError(f"{field} must be >= 0")
+        limit = _FIELD_MAX.get(field)
+        if limit and n > limit:
+            raise ValueError(f"{field} must be <= {limit}")
         if n:
             out[field] = str(n)
     return out
@@ -234,12 +380,17 @@ def normalize_join_code(code) -> str:
 # ── Roster / trainer gating ───────────────────────────────────────────────────
 
 def is_trainer(email, session) -> bool:
-    """True when the caller-supplied email matches the stored trainerEmail.
+    """True when the caller-supplied email is on this workshop's trainer team.
+
+    Membership, not equality — a workshop has up to MAX_TRAINERS trainers and
+    they all hold the same authority. Every trainer gate in app.py routes
+    through here, so this one function is the whole multi-trainer change on the
+    authorization side.
 
     The orbital app-function proxy sends no X-Auth headers, so this match is
     the trainer gate (consistent with the open /api/arena/* endpoints)."""
     e = normalize_email(email)
-    return bool(e) and e == normalize_email(session.get("trainerEmail"))
+    return bool(e) and e in trainers_of(session)
 
 
 def on_roster(email, roster) -> bool:
@@ -386,9 +537,25 @@ def is_past(session, roster, email, tenant="") -> bool:
 _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
                     "cancelledAt", "repoUrl", "branch", "description",
                     "trainerStep", "unlockPath",
+                    # Which trainer last moved the class pointer, and when.
+                    # Only meaningful with >1 trainer, and absent until someone
+                    # moves it — so truthy-only echoing is exactly right.
+                    "pacingBy", "pacingAt",
                     # Only set once a workshop has finished, so it costs live
                     # payloads nothing and dates the row in the past listing.
                     "endedAt")
+
+
+def _room_and_gate(session) -> dict:
+    """
+    The two booleans the app needs on EVERY payload, present even when false.
+
+    These decide what a learner may touch, so "absent" must not have to be read
+    as "false" by the client — that implicit-falsiness is precisely the class of
+    bug EPIC-007 exists to remove.
+    """
+    return {"roomOpen": room_open(session),
+            "gateAhead": pacing_state(session)["gateAhead"]}
 
 
 def workshop_fields(session, email) -> dict:
@@ -415,7 +582,8 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
         "title":        session.get("title", ""),
         "trainingId":   session.get("trainingId", ""),
         "state":        session.get("state", ""),
-        "trainerEmail": session.get("trainerEmail", ""),
+        "trainers":     trainers_of(session),
+        "trainerEmail": lead_trainer(session),
         "joinedCount":  len(joined or {}),
         "rosterCount":  len(roster or ()),
         "createdAt":    session.get("createdAt", ""),
@@ -423,6 +591,7 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
         "isTrainer":    is_trainer(e, session),
         "hasJoined":    e in (joined or {}),
     }
+    out.update(_room_and_gate(session))
     out.update(workshop_fields(session, e))
     return out
 
@@ -438,13 +607,17 @@ def shape_detail(session_id, session, roster, joined, email) -> dict:
         "trainingId":   session.get("trainingId", ""),
         "ref":          session.get("ref", ""),
         "state":        session.get("state", ""),
-        "trainerEmail": session.get("trainerEmail", ""),
+        "trainers":     trainers_of(session),
+        "trainerEmail": lead_trainer(session),
         "createdAt":    session.get("createdAt", ""),
         "startedAt":    session.get("startedAt", ""),
         "endedAt":      session.get("endedAt", ""),
         "joinedCount":  len(joined or {}),
         "rosterCount":  len(roster or ()),
+        "isTrainer":    is_trainer(email, session),
+        "hasJoined":    normalize_email(email) in (joined or {}),
     }
+    out.update(_room_and_gate(session))
     out.update(workshop_fields(session, email))
     if is_trainer(email, session):
         out["roster"] = sorted(roster or ())
@@ -470,7 +643,7 @@ TRAINER_ROLE = "trainer"
 LEARNER_ROLE = "learner"
 
 
-def roster_targets(roster, trainer_email, include_trainer) -> list[tuple[str, str]]:
+def roster_targets(roster, trainers, include_trainer) -> list[tuple[str, str]]:
     """(email, role) pairs that provision-all and the readiness board walk.
 
     WS-4: a trainer runs the lab alongside the cohort, so they get an
@@ -479,12 +652,21 @@ def roster_targets(roster, trainer_email, include_trainer) -> list[tuple[str, st
     themselves on the roster stays a single 'learner' row rather than
     appearing twice.
 
-    Roster order is sorted for a stable board; the trainer is always last.
+    `trainers` takes the whole team (a bare string is accepted for the
+    single-trainer callers). Every co-trainer gets their own row, in team order,
+    so a second trainer is provisionable and visible on the board like the first.
+
+    Roster order is sorted for a stable board; the trainers are always last.
     """
     targets = [(e, LEARNER_ROLE) for e in sorted(roster or ())]
-    trainer = normalize_email(trainer_email)
-    if include_trainer and trainer and trainer not in set(roster or ()):
-        targets.append((trainer, TRAINER_ROLE))
+    if isinstance(trainers, str):
+        trainers = [trainers]
+    if include_trainer:
+        seen = set(roster or ())
+        for trainer in normalize_roster(trainers):
+            if trainer not in seen:
+                seen.add(trainer)
+                targets.append((trainer, TRAINER_ROLE))
     return targets
 
 
@@ -551,7 +733,8 @@ def capacity_summary(workers, active_counts, needed) -> dict:
 # already covered. A training that should never reveal answers simply leaves the
 # toggle off.
 
-PACING_FIELDS = ("trainerStep", "unlockPath")
+PACING_FIELDS = ("trainerStep", "unlockPath", "gateAhead", "pacingBy",
+                 "pacingAt")
 
 
 def _as_int(value, default=0):
@@ -562,27 +745,115 @@ def _as_int(value, default=0):
 
 
 def pacing_state(session) -> dict:
-    """The pacing fields of a session, normalized."""
+    """The pacing fields of a session, normalized.
+
+    Two independent trainer opt-ins, both default OFF — a workshop with neither
+    set runs "sequential own pace", which is what a trainer who touches nothing
+    should get:
+
+      unlockPath  release solutions to learners who fall behind (steps <= the
+                  class pointer).
+      gateAhead   hold learners who run ahead at the class pointer.
+
+    pacingBy/pacingAt attribute the last pointer move. With up to MAX_TRAINERS
+    trainers all able to move it (last write wins), co-trainers need to see who
+    moved the class and when.
+    """
     session = session or {}
     return {
         "trainerStep": _as_int(session.get("trainerStep"), 0),
         "unlockPath": str(session.get("unlockPath") or "") == "1",
+        "gateAhead": str(session.get("gateAhead") or "") == "1",
+        "pacingBy": session.get("pacingBy") or "",
+        "pacingAt": session.get("pacingAt") or "",
     }
+
+
+def _class_pointer(state) -> int:
+    """
+    The class pointer as a gating ceiling, floored at step 1.
+
+    trainerStep is 0 until a trainer first moves it, and steps are 1-based. A
+    literal reading would lock a gated learner out of step 1 before the trainer
+    has touched anything — so an unmoved pointer means "the class is on step 1".
+    """
+    return max(state["trainerStep"], 1)
 
 
 def solution_visible(step, session, is_trainer=False) -> bool:
     """May THIS viewer see the solution for `step` in this workshop?
 
-    step is the learner's 1-based step number. The trainer always may. A learner
-    may only when the toggle is on AND the trainer has moved strictly past that
-    step.
+    step is the learner's 1-based step number. A trainer always may — that is
+    role, not pacing, and it does not depend on any toggle. A learner may only
+    when unlockPath is on AND the step is at or behind the class pointer:
+    a straggler can catch up on the step the class is currently doing, which is
+    the one they are actually stuck on.
+
+    Note the ceiling is NOT floored here: with the pointer unmoved (0) nothing is
+    released, which is the correct default — a workshop that has not started has
+    released no solutions.
     """
     if is_trainer:
         return True
     state = pacing_state(session)
     if not state["unlockPath"]:
         return False
-    return _as_int(step, -1) < state["trainerStep"]
+    return _as_int(step, -1) <= state["trainerStep"]
+
+
+def step_visible(step, session, is_trainer=False) -> bool:
+    """May THIS viewer OPEN `step`?
+
+    Default (gateAhead off) every step is openable and the learner paces
+    themselves. With gateAhead on, a learner cannot open a step beyond the class
+    pointer — the knob for a cohort where someone is racing ahead.
+
+    This governs the step BODY only. Titles stay visible either way so the
+    learner can see the shape of the workshop, and solutions remain governed
+    separately by solution_visible().
+    """
+    if is_trainer:
+        return True
+    state = pacing_state(session)
+    if not state["gateAhead"]:
+        return True
+    return _as_int(step, 10 ** 9) <= _class_pointer(state)
+
+
+# ── The room (EPIC-007) ───────────────────────────────────────────────────────
+#
+# A workshop has TWO gates, and they are deliberately separate:
+#
+#   roomOpen        the trainer has opened the virtual classroom. Learners may
+#                   chat, ask questions, raise a hand and see the board. The
+#                   trainer flips this AFTER writing the welcome note and pad,
+#                   so nobody walks into an empty room.
+#   state=running   the trainer has started the workshop. Only now may a learner
+#                   start an environment and open the lab steps.
+#
+# A learner can always ENTER (the lobby is never gated) and can be in the room
+# without being able to start the training. Collapsing these into one flag would
+# force the trainer to either open an unprepared room or keep the cohort staring
+# at a locked page while they set it up.
+
+def room_open(session) -> bool:
+    """True when the trainer has opened the virtual classroom."""
+    session = session or {}
+    if session.get("state") in ("ended", "cancelled"):
+        return False
+    return str(session.get("roomOpen") or "") == "1"
+
+
+def room_closed_reason(session) -> str:
+    """Why the room is unavailable, for a 409 body. '' when it is open."""
+    state = (session or {}).get("state") or ""
+    if state == "ended":
+        return "this workshop has ended"
+    if state == "cancelled":
+        return "this workshop was cancelled"
+    if not room_open(session):
+        return "the trainer has not opened the room yet"
+    return ""
 
 
 # ── Description (workshop RFE) ───────────────────────────────────────────────
