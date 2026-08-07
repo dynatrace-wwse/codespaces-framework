@@ -1408,18 +1408,9 @@ async def latest_version():
             "ref": deploy_ref(), "pinned": bool(APP_DEPLOY_REF)}
 
 
-@router.post("/api/deploy/token")
-async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default=None)):
-    """Override path for ANY tenant (customer / prospect / free trial / cross-account): the
-    caller supplies a platform token created IN the target tenant (scopes apps:install/run/
-    delete). That credential carries the target account's authority, so no SSO/account binding
-    is needed. The token is used once and discarded — never logged or persisted.
-
-    NOT org-member-gated: the platform token IS the authority to deploy on the target tenant,
-    so a signed-out user holding a valid token may deploy/register (nginx routes this one path
-    with opportunistic auth — see ops-server.conf `location = /api/deploy/token`). We audit the
-    GitHub identity when nginx forwards one (signed-in org member), else "anonymous"."""
-    user = x_auth_user or "anonymous"
+async def _deploy_token_flow(user: str, body: dict) -> dict:
+    """The whole token/auto deploy, factored out of the route so it can also be run in the
+    background by /api/deploy/token-start. Raises HTTPException exactly as the route does."""
     action = body.get("action", "deploy")
     if action not in ("deploy", "undeploy"):
         raise HTTPException(400, "action must be deploy or undeploy.")
@@ -1494,7 +1485,7 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
     warnings = _scope_warnings(allowlist, remote_grail, orbital_cfg)
     await tenant_registry.record_deploy(
         _pool(), tenant_id, "auto" if auto else "token",
-        deployer=x_auth_user or "", app_version=res.get("to") or "")
+        deployer="" if user == "anonymous" else user, app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
@@ -1503,6 +1494,83 @@ async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default
             "version": res.get("to"), "url": url, "profile": profile, "credential": source,
             "allowlist": allowlist, "remote_grail": remote_grail,
             "orbital_config": orbital_cfg, "warnings": warnings}
+
+
+@router.post("/api/deploy/token")
+async def deploy_with_token(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Override path for ANY tenant (customer / prospect / free trial / cross-account): the
+    caller supplies a platform token created IN the target tenant (scopes apps:install/run/
+    delete). That credential carries the target account's authority, so no SSO/account binding
+    is needed. The token is used once and discarded — never logged or persisted.
+
+    An empty token means "use the account OAuth client Orbital holds for this tenant"
+    (COE / SRO / sprint) — the tokenless auto-deploy path.
+
+    NOT org-member-gated: the platform token IS the authority to deploy on the target tenant,
+    so a signed-out user holding a valid token may deploy/register (nginx routes this one path
+    with opportunistic auth — see ops-server.conf `location = /api/deploy/token`). We audit the
+    GitHub identity when nginx forwards one (signed-in org member), else "anonymous"."""
+    return await _deploy_token_flow(x_auth_user or "anonymous", body)
+
+
+# ── Background variant of the above, for the app's in-app "Update now" ───────────
+# A deploy is a 1–2 minute build; a Dynatrace app function is capped at ~120 s, and the
+# deploy itself swaps the app out from under any in-flight function. So the app starts the
+# deploy here, gets an id back immediately, and polls token-status until done — the same
+# start/poll shape as /api/arena/sessions/{id}/exec-start.
+DEPLOY_JOB_TTL = 3600
+
+
+def _deploy_job_key(deploy_id: str) -> str:
+    return f"deploy:job:{deploy_id}"
+
+
+@router.post("/api/deploy/token-start")
+async def deploy_with_token_start(body: dict, x_auth_user: str | None = Header(default=None)):
+    """Start a token/auto deploy in the background. Returns {deployId} straight away.
+
+    Argument validation that is cheap and certain (bad action, non-Dynatrace tenant) still
+    fails synchronously, so an obviously wrong call never becomes a job the caller has to
+    poll. Everything after that — credential choice, scope preflight, build, install — runs
+    in the task and surfaces through token-status."""
+    action = body.get("action", "deploy")
+    if action not in ("deploy", "undeploy"):
+        raise HTTPException(400, "action must be deploy or undeploy.")
+    classify_tenant((body.get("tenant") or "").strip())  # 403 if not a Dynatrace domain
+
+    user = x_auth_user or "anonymous"
+    deploy_id = secrets.token_urlsafe(12)
+    key = _deploy_job_key(deploy_id)
+    await _pool().setex(key, DEPLOY_JOB_TTL, json.dumps({"done": False, "action": action}))
+
+    async def _run() -> None:
+        try:
+            result = await _deploy_token_flow(user, body)
+            payload = {"done": True, "ok": True, **result}
+        except HTTPException as exc:
+            payload = {"done": True, "ok": False, "status": exc.status_code,
+                       "error": str(exc.detail)}
+        except Exception as exc:  # never leave the caller polling a job that will never finish
+            log.exception("background deploy %s failed", deploy_id)
+            payload = {"done": True, "ok": False, "status": 500, "error": str(exc)}
+        try:
+            await _pool().setex(key, DEPLOY_JOB_TTL, json.dumps(payload))
+        except Exception:
+            log.exception("could not record result of background deploy %s", deploy_id)
+
+    asyncio.ensure_future(_run())
+    return {"deployId": deploy_id, "done": False}
+
+
+@router.get("/api/deploy/token-status/{deploy_id}")
+async def deploy_with_token_status(deploy_id: str):
+    """Poll a deploy started via token-start. {done:false} while running; when done,
+    {done:true, ok:true, ...} carries the same body /api/deploy/token returns, and
+    {done:true, ok:false, status, error} carries the HTTP error it would have raised."""
+    raw = await _pool().get(_deploy_job_key(deploy_id))
+    if not raw:
+        raise HTTPException(404, "Unknown or expired deploy id.")
+    return json.loads(raw)
 
 
 # ── Account-OAuth-client BOOTSTRAP deploy (transient — Orbital stores NOTHING) ───

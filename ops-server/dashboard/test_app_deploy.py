@@ -7,6 +7,7 @@ Run: /home/ops/ops-venv/bin/python -m dashboard.test_app_deploy
 import asyncio
 import base64
 import hashlib
+import json
 import os
 
 from fastapi import HTTPException
@@ -291,6 +292,114 @@ def test_token_deploy_allows_anonymous():
          dep._register_in_content_service, dep._audit) = saved
     assert res["ok"] is True and res["status"] == "up-to-date"
     assert audited.get("user") == "anonymous", f"signed-out deploy must audit anonymous, got {audited}"
+
+
+class _FakeRedis:
+    """Just enough Redis for the background-deploy job record."""
+
+    def __init__(self):
+        self.store = {}
+
+    async def setex(self, key, ttl, value):
+        self.store[key] = value
+
+    async def get(self, key):
+        return self.store.get(key)
+
+
+def _with_fake_pool(fn):
+    """Run an async test body with dep._pool() served by a fresh _FakeRedis."""
+    fake = _FakeRedis()
+    saved = dep._pool
+    dep._pool = lambda: fake
+    try:
+        return asyncio.run(fn(fake))
+    finally:
+        dep._pool = saved
+
+
+def test_token_start_validates_synchronously():
+    """Obviously-wrong calls must fail on the spot, not become a job the caller has to poll."""
+    def check(fake):
+        _expect_http(400, dep.deploy_with_token_start(
+            {"tenant": "https://x.apps.dynatrace.com", "token": "t", "action": "nuke"}, x_auth_user="a"))
+        _expect_http(403, dep.deploy_with_token_start(
+            {"tenant": "https://evil.example.com", "token": "t"}, x_auth_user="a"))
+        assert fake.store == {}, "a rejected start must not leave a job record behind"
+    fake = _FakeRedis()
+    saved = dep._pool
+    dep._pool = lambda: fake
+    try:
+        check(fake)
+    finally:
+        dep._pool = saved
+
+
+def test_token_start_runs_the_deploy_in_the_background():
+    """token-start returns immediately, then the same result /api/deploy/token would have
+    returned shows up on token-status."""
+    saved = (dep._deploy_with_status, dep._ensure_outbound_allowlist, dep._ensure_remote_grail,
+             dep._register_in_content_service, dep._audit)
+    async def fake_deploy(t, u): return {"status": "upgraded", "from": "1.0.1", "to": "1.0.2"}
+    async def fake_allow(t, u): return ""
+    async def fake_grail(t, u): return ""
+    async def fake_register(u, t): return {"profile": None}
+    async def fake_audit(user, tenant, action, result, **extra): return None
+    dep._deploy_with_status = fake_deploy
+    dep._ensure_outbound_allowlist = fake_allow
+    dep._ensure_remote_grail = fake_grail
+    dep._register_in_content_service = fake_register
+    dep._audit = fake_audit
+
+    async def body(fake):
+        started = await dep.deploy_with_token_start(
+            {"tenant": "https://x.apps.dynatrace.com", "token": "valid-tok"}, x_auth_user="a")
+        assert started["done"] is False and started["deployId"]
+        # Not finished the instant we return — the caller is expected to poll.
+        assert json.loads(fake.store[dep._deploy_job_key(started["deployId"])])["done"] is False
+        for _ in range(50):
+            status = await dep.deploy_with_token_status(started["deployId"])
+            if status["done"]:
+                return status
+            await asyncio.sleep(0.01)
+        raise AssertionError("background deploy never finished")
+
+    try:
+        status = _with_fake_pool(body)
+    finally:
+        (dep._deploy_with_status, dep._ensure_outbound_allowlist, dep._ensure_remote_grail,
+         dep._register_in_content_service, dep._audit) = saved
+    assert status["ok"] is True and status["status"] == "upgraded" and status["version"] == "1.0.2"
+
+
+def test_token_start_reports_a_failed_deploy_instead_of_hanging():
+    """A deploy that raises must land as done+ok:false with the HTTP status, so the app can
+    show the real reason rather than polling forever."""
+    async def body(fake):
+        # 'other' tenant with no token → the flow raises 400 inside the task.
+        started = await dep.deploy_with_token_start(
+            {"tenant": "https://other.apps.dynatrace.com", "token": ""}, x_auth_user="a")
+        for _ in range(50):
+            status = await dep.deploy_with_token_status(started["deployId"])
+            if status["done"]:
+                return status
+            await asyncio.sleep(0.01)
+        raise AssertionError("failed deploy never resolved")
+    status = _with_fake_pool(body)
+    assert status["ok"] is False and status["status"] == 400
+    assert "platform token" in status["error"]
+
+
+def test_token_status_404s_on_an_unknown_id():
+    def body(fake):
+        _expect_http(404, dep.deploy_with_token_status("nope"))
+    fake = _FakeRedis()
+    saved = dep._pool
+    dep._pool = lambda: fake
+    try:
+        body(fake)
+    finally:
+        dep._pool = saved
 
 
 def test_sro_auto_deploys_with_platform_token():
