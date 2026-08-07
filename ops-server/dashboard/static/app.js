@@ -3281,7 +3281,9 @@ async function csSaveProfile() {
 async function csDeleteProfile(id) {
     if (!confirm('Delete profile ' + id + '?')) return;
     const r = await fetch('/api/content/admin/profiles/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'same-origin' });
-    if (r.ok) loadContent(); else document.getElementById('cs-fmsg').textContent = '✗ delete failed';
+    if (r.ok) { loadContent(); return; }
+    const j = await r.json().catch(() => ({}));
+    document.getElementById('cs-fmsg').textContent = '✗ ' + (j.detail || 'delete failed');
 }
 
 async function csResolve() {

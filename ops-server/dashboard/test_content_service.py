@@ -146,6 +146,39 @@ def test_require_writer():
     cs._require_writer("alice")
 
 
+def test_profile_id_comes_from_the_filename_not_the_body():
+    """A profile whose body disagrees with its filename must still be manageable.
+
+    Live defect (2026-08-07): sro_qa.json carried "profileId": "se_demo". The console
+    listed se_demo, but delete/load/tenant-map all key off {id}.json, so delete found
+    nothing, returned ok, and the profile came back on every refresh.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        (cs.PROFILES_DIR / "sro_qa.json").write_text(json.dumps({
+            "profileId": "se_demo", "sources": [{"repo": "dynatrace-wwse/enablement-learning-bytes"}],
+        }))
+
+        ids = [p["profileId"] for p in asyncio.run(cs.list_profiles(x_auth_user="alice"))["profiles"]]
+        assert "sro_qa" in ids and "se_demo" not in ids, ids
+        assert [p["profileId"] for p in asyncio.run(cs.admin_overview(x_auth_user="alice"))["profiles"]] == ids
+
+        # The id the console shows is the one every write path accepts.
+        assert cs._load_profile("sro_qa")["profileId"] == "se_demo"
+        assert asyncio.run(cs.put_tenant_map(
+            {"defaults": {}, "tenants": {"cust9": "sro_qa"}}, x_auth_user="alice"))["ok"]
+        assert asyncio.run(cs.delete_profile("sro_qa", x_auth_user="alice"))["ok"]
+        assert not (cs.PROFILES_DIR / "sro_qa.json").exists()
+
+
+def test_delete_profile_404s_when_there_is_nothing_to_delete():
+    """Silent success is what made the undeletable profile look like a UI bug."""
+    with tempfile.TemporaryDirectory() as d:
+        _setup(Path(d))
+        _expect_http(404, cs.delete_profile, "se_demo", x_auth_user="alice")
+        assert asyncio.run(cs.delete_profile("minimal", x_auth_user="alice"))["ok"]
+
+
 def test_tenant_map_put_validates_profiles():
     with tempfile.TemporaryDirectory() as d:
         _setup(Path(d))

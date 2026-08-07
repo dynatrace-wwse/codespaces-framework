@@ -139,6 +139,34 @@ def _load_profile(profile_id: str) -> dict:
     return json.loads(path.read_text())
 
 
+def _read_profiles() -> list[dict]:
+    """Every profile on disk, each stamped with the id the rest of the service uses.
+
+    The FILENAME is the profile id: `_load_profile`, `put_profile`, `delete_profile` and
+    `put_tenant_map`'s validation all key off `{id}.json`. A `profileId` inside the file
+    that disagrees (hand-edited on the box, or a rename that rewrote the body but not the
+    name) used to be echoed straight back to the console, which then showed an id that no
+    write path could resolve: `delete` looked for a file that did not exist, found nothing,
+    and reported success forever, while the delivery table rejected the same id as unknown.
+    Stamping the stem here is what keeps read and write talking about the same profile.
+    """
+    profiles: list[dict] = []
+    if not PROFILES_DIR.is_dir():
+        return profiles
+    for f in sorted(PROFILES_DIR.glob("*.json")):
+        try:
+            p = json.loads(f.read_text())
+        except Exception as exc:
+            log.warning("Bad profile %s: %s", f.name, exc)
+            continue
+        if p.get("profileId") != f.stem:
+            log.warning("Profile %s declares profileId '%s'; using the filename.",
+                        f.name, p.get("profileId"))
+        p["profileId"] = f.stem
+        profiles.append(p)
+    return profiles
+
+
 def _allowed_repos() -> set[str]:
     """owner/repo allowlist = every repo referenced by any profile + every managed source."""
     repos: set[str] = set()
@@ -540,14 +568,7 @@ async def build_pack_internal(request: Request):
 async def list_profiles(x_auth_user: str | None = Header(default=None)):
     """List all profiles (id, description, sources) for the management UI."""
     _require_writer(x_auth_user)
-    profiles = []
-    if PROFILES_DIR.is_dir():
-        for f in sorted(PROFILES_DIR.glob("*.json")):
-            try:
-                profiles.append(json.loads(f.read_text()))
-            except Exception as exc:
-                log.warning("Bad profile %s: %s", f.name, exc)
-    return {"profiles": profiles}
+    return {"profiles": _read_profiles()}
 
 
 @router.put("/admin/profiles/{profile_id}")
@@ -583,8 +604,13 @@ async def delete_profile(profile_id: str, x_auth_user: str | None = Header(defau
     if not _valid_id(profile_id) or profile_id in ("all", "default"):
         raise HTTPException(400, "Cannot delete this profile.")
     path = PROFILES_DIR / f"{profile_id}.json"
-    if path.is_file():
-        path.unlink()
+    # Reporting {"ok": true} for a profile that is still listed is how "the SE demo
+    # profile cannot be deleted" looked like a UI bug for a day: the console said
+    # deleted, refreshed, and showed it again. If there is nothing to remove, say so.
+    if not path.is_file():
+        raise HTTPException(404, f"No profile '{profile_id}' on disk.")
+    path.unlink()
+    log.info("Profile '%s' deleted by %s", profile_id, x_auth_user)
     return {"ok": True}
 
 
@@ -595,13 +621,7 @@ async def admin_overview(x_auth_user: str | None = Header(default=None)):
     """One call for the content console: all profiles, the delivery table, domain classes, and
     a repo catalog (union of repos across profiles) for the profile picker."""
     _require_writer(x_auth_user)
-    profiles = []
-    if PROFILES_DIR.is_dir():
-        for f in sorted(PROFILES_DIR.glob("*.json")):
-            try:
-                profiles.append(json.loads(f.read_text()))
-            except Exception as exc:
-                log.warning("Bad profile %s: %s", f.name, exc)
+    profiles = _read_profiles()
     # Catalog = unique sources across all profiles (repo → category/label/branch), for the picker.
     catalog: dict[str, dict] = {}
     for p in profiles:
