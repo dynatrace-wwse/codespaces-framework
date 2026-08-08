@@ -3,6 +3,12 @@
 One place that answers: **Platform token or OAuth client? Tenant- or account-level?
 Which scopes?** — for every operation Orbital performs on a target tenant.
 
+> **Standing rule for our own tenants (COE / SRO / sprint), set 2026-08-07:** app deploys use that
+> tenant's **account OAuth client** (`COE_CLIENT_*`, `SRO_CLIENT_*`, `SPRINT_CLIENT_*` in
+> `/home/ops/.env`) via `POST /api/deploy/token` with `"token":""`. **No agent deploys with a
+> platform token** — those are API-testing credentials only, and any deploy-shaped need for one
+> gets asked to the user first. Customer tenants without an OAuth client keep the paste flow below.
+
 ---
 
 ## END STATE (2026-07-31) — the app holds the credential, Orbital stores NOTHING
