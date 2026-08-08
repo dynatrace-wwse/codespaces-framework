@@ -4138,6 +4138,13 @@ class ArenaProvisionRequest(BaseModel):
     # Multi-training repos pack several trainings into one mkdocs nav; this
     # selects which one's step ordinals to replay against.
     trainingKey: str = ""
+    # Workshop this environment belongs to (ws_…). When set, Orbital sizes the
+    # session lifetime from the workshop schedule (a pull-channel learner used
+    # to get the 2h default and lose their environment mid-workshop), stamps
+    # the job with the workshop id, and — the server half of the pacing gate —
+    # clamps resumeStep for learners when gateAhead is on, so a learner cannot
+    # replay themselves past the class pointer with a hand-rolled resume call.
+    workshopId: str = ""
 
 
 def _gen3_platform_provisioner(tenant_url: str):
@@ -4253,6 +4260,19 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     # NameError on EVERY provision and so blocked all environment starts.
     if getattr(body, "sessionHours", 0):
         session_hours = max(session_hours, min(int(body.sessionHours), MAX_SESSION_HOURS))
+    # Workshop-bound provisions (learner self-provision / pull channel) size
+    # themselves from the workshop even when the caller sent no sessionHours —
+    # provision-all already did this; the learner path got the 2h default and
+    # a 3h workshop reaped its cross-tenant learners mid-class.
+    ws_session: dict = {}
+    ws_id = (body.workshopId or "").strip()
+    if ws_id:
+        ws_key, _, _ = _live_keys(ws_id)
+        ws_session = await pool.hgetall(ws_key) or {}
+        if ws_session and not getattr(body, "sessionHours", 0):
+            ws_hours = workshop_session_hours(ws_session)
+            if ws_hours:
+                session_hours = max(session_hours, ws_hours)
     expires_at = (now.replace(microsecond=0) + timedelta(hours=session_hours)).isoformat()
 
     # Environment follows the content: a lab imported from a branch runs its
@@ -4346,6 +4366,21 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     # Resume. Clamped: this is caller-supplied and each replayed step costs real
     # provisioning time, so a bad value must not be able to stall a worker slot.
     resume_step = max(0, min(int(body.resumeStep or 0), 50))
+    # Server half of the workshop pacing gate: with gateAhead on, a learner's
+    # resume replay must not run solutions past the class pointer — the client
+    # gate (workshopGates.canOpenStep) is UI, this is the part a hand-rolled
+    # API call cannot skip. resume_step counts COMPLETED steps, so a learner
+    # allowed to open step N may have completed at most N-1.
+    if ws_session and resume_step:
+        _is_ws_trainer = live_sessions.is_trainer(body.userId, ws_session)
+        if not _is_ws_trainer and live_sessions.pacing_state(ws_session)["gateAhead"]:
+            # A learner may OPEN up to the class pointer (floored at 1, same as
+            # canOpenStep), so they may have COMPLETED at most pointer - 1.
+            ceiling = live_sessions.class_pointer_of(ws_session) - 1
+            if resume_step > ceiling:
+                log.info("Provision %s: resumeStep %d clamped to %d by workshop %s pacing gate",
+                         job_id, resume_step, ceiling, ws_id)
+                resume_step = ceiling
     if resume_step:
         job["resume_step"] = resume_step
         if body.trainingKey:
@@ -4378,6 +4413,10 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     if resume_step:
         redis_meta["resume_step"] = str(resume_step)
         redis_meta["restore_status"] = "pending"
+    if ws_id:
+        # Workshop the environment belongs to — lets boards and cleanup scope
+        # by workshop instead of guessing from (email, training) alone.
+        redis_meta["workshop_id"] = ws_id
     if provisioned_token_ids:
         redis_meta["dt_token_ids"] = json.dumps(provisioned_token_ids)
     if tenant_url:
@@ -5602,8 +5641,12 @@ async def api_live_session_detail(session_id: str, request: Request, email: str 
     # The done-map is only read for a NAMED caller: provisionRequested is
     # per-caller, so an anonymous poll has nobody to answer it for.
     provision_done = await pool.hgetall(_live_provdone_key(session_id)) if named else None
+    # Tenants only matter on the trainer's board (joined rows) — skip the
+    # read for everyone whose payload would drop it in masking anyway.
+    tenants = (await pool.hgetall(_live_tenants_key(session_id))
+               if live_sessions.is_trainer(email, session) else None)
     detail = live_sessions.shape_detail(session_id, session, roster, joined, email,
-                                        provision_done)
+                                        provision_done, tenants)
     # Service bearer alone must not unmask (BUG-MASK-1); the session trainer
     # (caller email == trainerEmail) or a real org member does.
     caller = live_sessions.normalize_email(email)
@@ -5881,16 +5924,16 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
         int(session.get("maxSeats") or 0))
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
-    await pool.sadd(roster_key, email)
-    first_join = await pool.hsetnx(joined_key, email,
-                                   datetime.now(timezone.utc).isoformat())
-    # Cross-tenant workshops: record the joiner's tenant (same as /join).
-    tenant = live_sessions.normalize_tenant(body.tenant)
-    if tenant:
-        await pool.hset(_live_tenants_key(session_id), email, tenant)
-    if first_join:
-        await _emit_live_event(session_id, live_sessions.EVENT_JOINED,
-                               email=email, tenant=tenant, detail="join code")
+    # Registration ONLY — a code join adds the email to the roster, exactly
+    # like a trainer typing it in. It deliberately does NOT check the learner
+    # in or record a tenant: the code may be entered on any tenant, and the
+    # learner still chooses where to RUN the workshop by clicking "Provision
+    # here" (which calls /join and binds the tenant, same as invited learners).
+    # One flow, both entry paths.
+    newly_registered = await pool.sadd(roster_key, email)
+    if newly_registered:
+        await _emit_live_event(session_id, live_sessions.EVENT_REGISTERED,
+                               email=email, detail="join code")
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return {"sessionId": session_id,
@@ -5908,18 +5951,22 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     tenant URL; the session's trainingId/ref drive repo + branch.
 
     Cross-tenant workshops: the trainer's app can only mint tokens for ITS
-    OWN tenant, so ONLY learners whose recorded join-tenant matches
-    body.tenant are provisioned HERE. The rest are not abandoned — the
-    trainer's intent is recorded on the session hash (provisionRequestedAt)
-    and PULLED by each learner's own app instance on its existing session
-    poll, which is the only thing that can mint in their tenant. Those rows
-    come back as "requested".
+    OWN tenant, so learners whose recorded join-tenant matches body.tenant
+    are provisioned HERE with the trainer-minted credentials. Learners who
+    checked in from a DIFFERENT tenant are provisioned here too when Orbital
+    itself can mint for that tenant (_gen3_platform_provisioner — accounts we
+    own, MINT_*_<DOMAIN>); Orbital stores no tenant tokens, it mints, uses and
+    owns revocation exactly as the arena path does. Only learners in tenants
+    Orbital cannot mint for fall back to the pull channel: the trainer's
+    intent is recorded on the session hash (provisionRequestedAt) and PULLED
+    by each learner's own app instance on its session poll — the only thing
+    that can mint in their tenant. Those rows come back as "requested".
 
     The flag is workshop-level and settles per learner in :provdone, so a
     straggler who arrives after this call is provisioned on arrival with no
-    second click. It only fires while the workshop is RUNNING
-    (live_sessions.provision_request_pending), so a trainer who pre-provisions
-    a scheduled workshop does not build foreign-tenant containers hours early.
+    second click. It fires in scheduled/open/running — pre-start provisioning
+    is deliberate (environments verified running before the room opens), and
+    provision_request_pending still refuses ended/cancelled.
     Auth: service bearer or signed-in writer."""
     await _require_service_or_writer(request)
     sess_key, roster_key, joined_key = _live_keys(session_id)
@@ -5965,6 +6012,18 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
         skip = (live_sessions.provision_skip_status(
             email in joined, joined_tenants.get(email, ""), body.tenant)
             if role == "learner" else "")
+        # A foreign-tenant learner is still directly provisionable when
+        # Orbital can mint for THEIR tenant itself (accounts we own —
+        # COE/SRO/sprint). tenant_for_env switches the provision call to the
+        # learner's tenant with no dtEnv, so api_arena_provision takes its
+        # gen3 mint path. Orbital never stores the tokens — mint, inject,
+        # revoke on terminate, same as every arena provision.
+        tenant_for_env = (body.tenant or "").rstrip("/")
+        if skip == "foreign-tenant":
+            learner_tenant = (joined_tenants.get(email, "") or "").rstrip("/")
+            if learner_tenant and _gen3_platform_provisioner(learner_tenant) is not None:
+                tenant_for_env = learner_tenant
+                skip = ""
         if skip:
             # Not a dead end any more: the flag set above is what their own
             # tenant's app will act on. Reported as "requested" so the board
@@ -5973,14 +6032,15 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                             "reason": skip,
                             "message": live_sessions.PROVISION_REQUESTED_MESSAGE})
             continue
-        per = body.perUser.get(email) or body.perUser.get(email.lower()) or {}
+        per = ({} if tenant_for_env != (body.tenant or "").rstrip("/")
+               else body.perUser.get(email) or body.perUser.get(email.lower()) or {})
         try:
             # Pass the trainer's (already-authenticated) request through the
             # arena gate — provision-all itself is service/writer-gated above.
             provisioned = await api_arena_provision(ArenaProvisionRequest(
                 trainingId=session.get("trainingId", ""),
                 userId=email,
-                tenantUrl=(body.tenant or "").rstrip("/"),
+                tenantUrl=tenant_for_env,
                 ref=session.get("ref", ""),
                 dtEnv=per.get("dtEnv") or {},
                 dtTokenIds=per.get("dtTokenIds") or [],
@@ -5995,7 +6055,7 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
             await pool.hset(provdone_key, email, status)
             await _emit_live_event(
                 session_id, live_sessions.EVENT_PROVISION_STARTED, email=email,
-                tenant=body.tenant, actor=body.trainerEmail, detail=status)
+                tenant=tenant_for_env, actor=body.trainerEmail, detail=status)
             results.append({
                 "email":  email,
                 "role":   role,
@@ -6055,6 +6115,12 @@ async def api_live_session_provision_ack(session_id: str,
     status = (body.status or "").strip()[:40] or "queued"
     # Every outcome settles, failures included — see LiveSessionProvisionAck.
     await pool.hset(_live_provdone_key(session_id), email, status)
+    # The tenant that actually executed the request IS the learner's binding —
+    # persist it so the trainer's board shows where the environment lives, not
+    # just where the learner first checked in.
+    ack_tenant = live_sessions.normalize_tenant(body.tenant)
+    if ack_tenant:
+        await pool.hset(_live_tenants_key(session_id), email, ack_tenant)
     failed = status == "failed" or bool(body.error)
     await _emit_live_event(
         session_id,

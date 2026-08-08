@@ -396,8 +396,21 @@ def test_shape_detail_trainer_gets_roster_and_joined():
                           joined, " Trainer@Dynatrace.com ")
     assert out["roster"] == ["alice@x.com", "bob@x.com"]  # sorted
     assert out["joined"] == [
-        {"email": "alice@x.com", "joinedAt": "2026-07-14T10:00:00+00:00"},
-        {"email": "bob@x.com", "joinedAt": "2026-07-14T10:05:00+00:00"},
+        {"email": "alice@x.com", "joinedAt": "2026-07-14T10:00:00+00:00", "tenant": ""},
+        {"email": "bob@x.com", "joinedAt": "2026-07-14T10:05:00+00:00", "tenant": ""},
+    ]
+
+
+def test_shape_detail_trainer_joined_rows_carry_the_checkin_tenant():
+    """The trainer's board shows WHERE each learner will run the workshop —
+    the tenant bound at Provision-here (or re-bound by a later check-in)."""
+    joined = {"bob@x.com": "2026-07-14T10:05:00+00:00"}
+    tenants = {"bob@x.com": "https://abc123.apps.dynatrace.com"}
+    out = ls.shape_detail("sid-1", _session(), {"bob@x.com"}, joined,
+                          " Trainer@Dynatrace.com ", tenants=tenants)
+    assert out["joined"] == [
+        {"email": "bob@x.com", "joinedAt": "2026-07-14T10:05:00+00:00",
+         "tenant": "https://abc123.apps.dynatrace.com"},
     ]
 
 
@@ -712,16 +725,17 @@ def test_provision_request_normalizes_the_callers_email():
     assert not ls.provision_request_pending(sess, "  Late@X.com ", {"late@x.com": "queued"})
 
 
-def test_provision_request_needs_a_running_workshop():
-    """The environment gate is 'started' (EPIC-007).
-
-    Without this, re-opening a finished workshop days later would silently
-    build a container for whoever loaded the page.
+def test_provision_request_fires_before_start_but_never_after_end():
+    """Pre-start provisioning is deliberate: the trainer readies environments
+    before the room opens. A finished workshop must still never provision —
+    re-opening it days later must not silently build a container for whoever
+    loads the page.
     """
     flag = {"provisionRequestedAt": "2026-08-07T10:00:00+00:00"}
-    for state in ("scheduled", "open", "ended", "cancelled"):
+    for state in ("scheduled", "open", "running"):
+        assert ls.provision_request_pending(_session(state=state, **flag), "a@x.com", {}), state
+    for state in ("ended", "cancelled"):
         assert not ls.provision_request_pending(_session(state=state, **flag), "a@x.com", {}), state
-    assert ls.provision_request_pending(_session(state="running", **flag), "a@x.com", {})
 
 
 def test_no_request_no_provisioning():
@@ -831,3 +845,11 @@ def test_shape_events_keeps_the_stream_id_for_paging():
 def test_events_stream_is_capped():
     """Uncapped XADD grows for the 30-day life of the session keys."""
     assert 0 < ls.EVENTS_MAXLEN <= 10000
+
+
+def test_class_pointer_of_reads_the_raw_session_hash():
+    """Public helper for callers holding the session hash (the provision-time
+    resume clamp). Floors at 1 exactly like the gate the client mirrors."""
+    assert ls.class_pointer_of({}) == 1
+    assert ls.class_pointer_of({"trainerStep": "0"}) == 1
+    assert ls.class_pointer_of({"trainerStep": "7"}) == 7

@@ -302,10 +302,12 @@ PROVISION_REQUESTED_MESSAGE = "requested — their own tenant will provision it"
 def provision_request_pending(session, email, provision_done=None) -> bool:
     """Does this caller have an outstanding trainer provision request?
 
-    Only while the workshop is RUNNING. The environment gate is "started"
-    (EPIC-007), so a request must not fire in a room that has not opened yet or
-    one that has ended — otherwise re-opening a finished workshop days later
-    would silently build a container for whoever loads the page.
+    Fires in scheduled/open/running — pre-start provisioning is the point: the
+    trainer requests environments ahead of the workshop so learners start with
+    zero delay, and each learner's own app instance picks the request up the
+    next time it is open in their chosen tenant. NEVER after ended/cancelled —
+    re-opening a finished workshop days later must not silently build a
+    container for whoever loads the page.
 
     `provision_done` is required evidence, and `None` means "not looked up",
     which is NOT the same as `{}` ("looked up, nobody settled yet"). Answering
@@ -314,7 +316,7 @@ def provision_request_pending(session, email, provision_done=None) -> bool:
     """
     if provision_done is None:
         return False
-    if session.get("state", "") != "running":
+    if session.get("state", "") not in ("scheduled", "open", "running"):
         return False
     if not session.get("provisionRequestedAt", ""):
         return False
@@ -335,6 +337,7 @@ def provision_request_pending(session, email, provision_done=None) -> bool:
 # would drift out of step with the log it is supposed to reflect.
 
 EVENT_JOINED = "joined"
+EVENT_REGISTERED = "registered"
 EVENT_PROVISION_REQUESTED = "provision-requested"
 EVENT_PROVISION_ACCEPTED = "provision-accepted"
 EVENT_PROVISION_STARTED = "provision-started"
@@ -343,7 +346,7 @@ EVENT_STARTED = "started"
 EVENT_ENDED = "ended"
 
 EVENT_KINDS = (
-    EVENT_JOINED, EVENT_PROVISION_REQUESTED, EVENT_PROVISION_ACCEPTED,
+    EVENT_JOINED, EVENT_REGISTERED, EVENT_PROVISION_REQUESTED, EVENT_PROVISION_ACCEPTED,
     EVENT_PROVISION_STARTED, EVENT_PROVISION_FAILED, EVENT_STARTED, EVENT_ENDED,
 )
 
@@ -724,11 +727,14 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
 
 
 def shape_detail(session_id, session, roster, joined, email,
-                 provision_done=None) -> dict:
+                 provision_done=None, tenants=None) -> dict:
     """Full session state (GET /api/live/sessions/{id}).
 
     Everyone gets the scalar fields + joined/roster counts; the roster and
-    the joined list (who + when) are only included for the trainer.
+    the joined list (who + when + the tenant they checked in from) are only
+    included for the trainer. `tenants` is the email→tenant hash from
+    _live_tenants_key — optional, so write-echo callers that don't read it
+    simply return joined rows without a tenant.
 
     `provisionRequested` is scoped to the CALLER — it is the pull channel for
     trainer-triggered provisioning, so it must answer "does the person holding
@@ -757,7 +763,8 @@ def shape_detail(session_id, session, roster, joined, email,
     out.update(workshop_fields(session, email))
     if is_trainer(email, session):
         out["roster"] = sorted(roster or ())
-        out["joined"] = [{"email": k, "joinedAt": v}
+        out["joined"] = [{"email": k, "joinedAt": v,
+                          "tenant": (tenants or {}).get(k, "")}
                          for k, v in sorted((joined or {}).items())]
     return out
 
@@ -903,6 +910,12 @@ def pacing_state(session) -> dict:
         "pacingBy": session.get("pacingBy") or "",
         "pacingAt": session.get("pacingAt") or "",
     }
+
+
+def class_pointer_of(session) -> int:
+    """Public form of _class_pointer for callers holding the raw session hash —
+    the highest 1-based step a gated learner may open right now."""
+    return _class_pointer(pacing_state(session))
 
 
 def _class_pointer(state) -> int:
