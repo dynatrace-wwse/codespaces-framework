@@ -13,11 +13,22 @@ Redis model (docs/live-training-architecture.md, ops-server/CLAUDE.md):
                                   maxSeats, joinCode, cancelledAt
                                   + pacing (EPIC-007): trainerStep, unlockPath,
                                   gateAhead, pacingBy, pacingAt
+                                  + provisioning (PASS 2): provisionRequestedAt,
+                                  provisionRequestedBy
   live:session:{id}:roster  set   lowercase invited emails
   live:session:{id}:joined  hash  email -> ISO joinedAt
   live:session:{id}:tenants hash  email -> normalized tenant URL the learner
                                   joined FROM (cross-tenant workshops; absent
                                   for pre-fix joins — backward compatible)
+  live:session:{id}:provdone hash email -> how the trainer's provision request
+                                  was settled (queued|already-active|failed).
+                                  Absence + the session flag is what makes a
+                                  request still pending, so a learner who
+                                  arrives after the trainer clicked is still
+                                  provisioned (cross-tenant, PASS 2)
+  live:session:{id}:events  strm  audit trail of the workshop: who joined, who
+                                  was requested, which tenant accepted and what
+                                  happened. Capped at EVENTS_MAXLEN
   live:sessions:index       zset  sessionId scored by epoch createdAt
   live:joincode:{code}      str   sessionId (join-by-code lookup, code UPPER)
 
@@ -239,25 +250,141 @@ def provision_skip_status(has_joined, joined_tenant, workshop_tenant):
     return None
 
 
-def readiness_gap_state(has_joined, joined_tenant, trainer_tenant) -> str:
+def readiness_gap_state(has_joined, joined_tenant, trainer_tenant,
+                        requested=False) -> str:
     """State for a roster email with NO running job and NO failed record.
 
     With the trainer's tenant supplied (updated app), be honest on the board:
-      "not-joined" — the learner never joined (will provision on entry)
-      "foreign"    — joined from another tenant (provisions on entry there)
+      "not-joined" — the learner never joined (will provision on arrival)
+      "requested"  — the trainer asked for them; their own app instance has not
+                     picked it up yet (see the provision-request section below)
+      "foreign"    — joined from another tenant, no request outstanding
       "none"       — joined same-tenant (or tenant unrecorded), simply not
                      provisioned yet
     Without a trainer tenant (legacy app) always "none" — the old contract.
+
+    "requested" outranks "foreign" because it is the more actionable fact: the
+    trainer does not need to know which tenant a learner sits in, they need to
+    know whether anything is still going to happen. It deliberately does NOT
+    outrank "not-joined" — a learner who never arrived is the one case the
+    trainer has to act on, and hiding that behind "requested" would make an
+    empty room look like a busy one.
     """
     tt = normalize_tenant(trainer_tenant)
     if not tt:
         return "none"
     if not has_joined:
         return "not-joined"
+    if requested:
+        return "requested"
     jt = normalize_tenant(joined_tenant)
     if jt and jt != tt:
         return "foreign"
     return "none"
+
+
+# ── Provision requests (cross-tenant, PASS 2) ────────────────────────────────
+#
+# The root constraint above means a trainer's app can never provision a
+# foreign-tenant learner itself. The learner's OWN app instance can — it is the
+# only thing that can mint in that tenant — so the trainer's intent is recorded
+# here and PULLED by the learner's browser on its existing 10s session poll.
+# Orbital still stores no tenant credential; it stores a flag.
+#
+# The intent is workshop-level (`provisionRequestedAt` on the session hash) and
+# NOT a per-learner queue, so a learner who arrives after the trainer clicked is
+# provisioned on arrival with no second click. The per-learner half is only a
+# done-marker (`live:session:{id}:provdone`), which is what stops it repeating.
+
+PROVISION_REQUESTED_MESSAGE = "requested — their own tenant will provision it"
+
+
+def provision_request_pending(session, email, provision_done=None) -> bool:
+    """Does this caller have an outstanding trainer provision request?
+
+    Only while the workshop is RUNNING. The environment gate is "started"
+    (EPIC-007), so a request must not fire in a room that has not opened yet or
+    one that has ended — otherwise re-opening a finished workshop days later
+    would silently build a container for whoever loads the page.
+
+    `provision_done` is required evidence, and `None` means "not looked up",
+    which is NOT the same as `{}` ("looked up, nobody settled yet"). Answering
+    True without having read the done-map would provision someone who was
+    already provisioned, so the missing case fails closed.
+    """
+    if provision_done is None:
+        return False
+    if session.get("state", "") != "running":
+        return False
+    if not session.get("provisionRequestedAt", ""):
+        return False
+    who = normalize_email(email)
+    if not who:
+        return False
+    return who not in provision_done
+
+
+# ── Audit trail ──────────────────────────────────────────────────────────────
+#
+# One ordered record of everything that happens to a workshop, written to the
+# Redis stream live:session:{id}:events (same XADD shape as :broadcast/:chat).
+#
+# It serves two callers, which is why it is one mechanism and not two: it is the
+# durable log of the provisioning workflow, AND it is what the trainer's client
+# reads to toast "someone just joined". A second, separate notification channel
+# would drift out of step with the log it is supposed to reflect.
+
+EVENT_JOINED = "joined"
+EVENT_PROVISION_REQUESTED = "provision-requested"
+EVENT_PROVISION_ACCEPTED = "provision-accepted"
+EVENT_PROVISION_STARTED = "provision-started"
+EVENT_PROVISION_FAILED = "provision-failed"
+EVENT_STARTED = "started"
+EVENT_ENDED = "ended"
+
+EVENT_KINDS = (
+    EVENT_JOINED, EVENT_PROVISION_REQUESTED, EVENT_PROVISION_ACCEPTED,
+    EVENT_PROVISION_STARTED, EVENT_PROVISION_FAILED, EVENT_STARTED, EVENT_ENDED,
+)
+
+# Cap the stream. A 300-seat workshop emits several events per learner, and an
+# uncapped XADD grows for the 30-day life of the session keys.
+EVENTS_MAXLEN = 2000
+
+
+def audit_event(kind, email="", tenant="", actor="", detail="", now=None) -> dict:
+    """Flat str->str fields for one XADD.
+
+    Redis stream fields are strings, so everything is stringified here rather
+    than at each of the seven call sites. Empty fields are dropped so a reader
+    never has to distinguish "absent" from "empty string".
+    """
+    if kind not in EVENT_KINDS:
+        raise ValueError(f"unknown audit event kind: {kind}")
+    fields = {
+        "kind": kind,
+        "ts": now or datetime.now().astimezone().isoformat(timespec="seconds"),
+        "email": normalize_email(email),
+        "tenant": normalize_tenant(tenant),
+        "actor": normalize_email(actor),
+        "detail": str(detail or "")[:200],
+    }
+    return {k: v for k, v in fields.items() if v}
+
+
+def shape_events(entries) -> list[dict]:
+    """Redis stream entries -> JSON rows, oldest first.
+
+    `id` is the stream id, which the client sends back as `since` to page
+    forward. That is what makes the trainer's arrival toast fire once per
+    learner instead of once per poll.
+    """
+    out = []
+    for entry_id, fields in entries or ():
+        row = {"id": entry_id}
+        row.update({k: v for k, v in (fields or {}).items()})
+        out.append(row)
+    return out
 
 
 # ── Create validation ─────────────────────────────────────────────────────────
@@ -596,11 +723,18 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
     return out
 
 
-def shape_detail(session_id, session, roster, joined, email) -> dict:
+def shape_detail(session_id, session, roster, joined, email,
+                 provision_done=None) -> dict:
     """Full session state (GET /api/live/sessions/{id}).
 
     Everyone gets the scalar fields + joined/roster counts; the roster and
-    the joined list (who + when) are only included for the trainer."""
+    the joined list (who + when) are only included for the trainer.
+
+    `provisionRequested` is scoped to the CALLER — it is the pull channel for
+    trainer-triggered provisioning, so it must answer "does the person holding
+    THIS browser need an environment", never "does anyone". Callers that pass no
+    `provision_done` (start/end/patch, which return the detail as an echo of a
+    write rather than as a poll) get False and never trigger a provision."""
     out = {
         "sessionId":    session_id,
         "title":        session.get("title", ""),
@@ -616,6 +750,8 @@ def shape_detail(session_id, session, roster, joined, email) -> dict:
         "rosterCount":  len(roster or ()),
         "isTrainer":    is_trainer(email, session),
         "hasJoined":    normalize_email(email) in (joined or {}),
+        "provisionRequested": provision_request_pending(
+            session, email, provision_done),
     }
     out.update(_room_and_gate(session))
     out.update(workshop_fields(session, email))

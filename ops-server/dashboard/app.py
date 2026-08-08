@@ -5289,6 +5289,37 @@ def _live_tenants_key(session_id: str) -> str:
     return f"live:session:{session_id}:tenants"
 
 
+def _live_provdone_key(session_id: str) -> str:
+    """Hash email -> how the trainer's provision request was settled.
+
+    The trainer's intent is stored on the session hash (provisionRequestedAt)
+    and applies to the whole roster; this is the per-learner half that stops it
+    from repeating. Absence is what keeps a request pending, which is what
+    provisions a straggler on arrival without a second click."""
+    return f"live:session:{session_id}:provdone"
+
+
+def _live_events_key(session_id: str) -> str:
+    """Stream: the workshop's audit trail (joins, provision requests, which
+    tenant accepted, what happened). Also what the trainer's client reads to
+    toast an arrival — one record, so the log and the notification cannot
+    disagree."""
+    return f"live:session:{session_id}:events"
+
+
+async def _emit_live_event(session_id: str, kind: str, **fields):
+    """Append one audit entry. Never raises.
+
+    An audit write must not be able to fail the action it is recording — a
+    trainer's provision-all must not 500 because Redis hiccuped on the log."""
+    try:
+        await pool.xadd(_live_events_key(session_id),
+                        live_sessions.audit_event(kind, **fields),
+                        maxlen=live_sessions.EVENTS_MAXLEN, approximate=True)
+    except Exception as exc:                                   # pragma: no cover
+        log.warning("Live session %s: audit event %s dropped: %s", session_id, kind, exc)
+
+
 class LiveSessionCreate(BaseModel):
     title: str = ""
     trainingId: str = ""
@@ -5346,6 +5377,24 @@ class LiveSessionProvisionAll(BaseModel):
     # the cohort. Solutions need no flag — the app shows every LAB_SOLUTION
     # block to instructors regardless of the tenant-wide solutions-mode toggle.
     includeTrainer: bool = False
+
+
+class LiveSessionProvisionAck(BaseModel):
+    """A learner's own tenant reporting what it did with the trainer's request.
+
+    This is the far end of the pull channel: the app in the learner's tenant saw
+    provisionRequested on its session poll, minted there, and is now settling
+    the request so it does not fire again.
+    """
+    email: str = ""
+    tenant: str = ""              # the tenant that acted (stamped by the app)
+    # queued | already-active | failed. EVERY outcome settles the request,
+    # failures included — otherwise a permanently failing provision (no
+    # capacity, bad training id) would retry on every 10s poll forever. The
+    # trainer's re-click is the retry: provision-all clears :provdone.
+    status: str = ""
+    jobId: str = ""
+    error: str = ""
 
 
 async def _reserve_join_code(session_id: str) -> str:
@@ -5550,7 +5599,11 @@ async def api_live_session_detail(session_id: str, request: Request, email: str 
             and named not in (joined or {}):
         raise HTTPException(status_code=403,
                             detail="you are not a participant of this workshop")
-    detail = live_sessions.shape_detail(session_id, session, roster, joined, email)
+    # The done-map is only read for a NAMED caller: provisionRequested is
+    # per-caller, so an anonymous poll has nobody to answer it for.
+    provision_done = await pool.hgetall(_live_provdone_key(session_id)) if named else None
+    detail = live_sessions.shape_detail(session_id, session, roster, joined, email,
+                                        provision_done)
     # Service bearer alone must not unmask (BUG-MASK-1); the session trainer
     # (caller email == trainerEmail) or a real org member does.
     caller = live_sessions.normalize_email(email)
@@ -5575,12 +5628,18 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
     err = live_sessions.join_error(session.get("state", ""), email, roster, session)
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
-    await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
+    first_join = await pool.hsetnx(joined_key, email,
+                                   datetime.now(timezone.utc).isoformat())
     # Cross-tenant workshops: remember which tenant the learner joined FROM
     # (last join wins — a re-join from another tenant updates it).
     tenant = live_sessions.normalize_tenant(body.tenant)
     if tenant:
         await pool.hset(_live_tenants_key(session_id), email, tenant)
+    # Audit + the trainer's arrival toast. Only on the FIRST join, or a learner
+    # reloading their tab would re-notify the trainer on every refresh.
+    if first_join:
+        await _emit_live_event(session_id, live_sessions.EVENT_JOINED,
+                               email=email, tenant=tenant)
     return {"state": session.get("state", ""),
             "joinedCount": await pool.hlen(joined_key)}
 
@@ -5607,6 +5666,8 @@ async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction
         await pool.hset(sess_key, mapping={
             "state": new_state, "startedAt": session["startedAt"]})
         log.info("Live session %s started by %s", session_id, body.trainerEmail)
+        await _emit_live_event(session_id, live_sessions.EVENT_STARTED,
+                               actor=body.trainerEmail)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
@@ -5636,6 +5697,10 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, 
         await _store_pad_export(session_id, session)
         await _store_completion_record(session_id, session)
         log.info("Live session %s ended by %s", session_id, body.trainerEmail)
+        # Emitted BEFORE the TTL fan-out below, which includes the events
+        # stream — writing it after would set a TTL and then extend the key.
+        await _emit_live_event(session_id, live_sessions.EVENT_ENDED,
+                               actor=body.trainerEmail)
     await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
@@ -5817,11 +5882,15 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
     await pool.sadd(roster_key, email)
-    await pool.hsetnx(joined_key, email, datetime.now(timezone.utc).isoformat())
+    first_join = await pool.hsetnx(joined_key, email,
+                                   datetime.now(timezone.utc).isoformat())
     # Cross-tenant workshops: record the joiner's tenant (same as /join).
     tenant = live_sessions.normalize_tenant(body.tenant)
     if tenant:
         await pool.hset(_live_tenants_key(session_id), email, tenant)
+    if first_join:
+        await _emit_live_event(session_id, live_sessions.EVENT_JOINED,
+                               email=email, tenant=tenant, detail="join code")
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return {"sessionId": session_id,
@@ -5840,9 +5909,17 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
 
     Cross-tenant workshops: the trainer's app can only mint tokens for ITS
     OWN tenant, so ONLY learners whose recorded join-tenant matches
-    body.tenant are provisioned. Others are reported honestly instead of
-    being pinned to the wrong tenant: "foreign-tenant" (provisions on entry
-    from their own tenant) or "not-joined" (tenant unknown until they join).
+    body.tenant are provisioned HERE. The rest are not abandoned — the
+    trainer's intent is recorded on the session hash (provisionRequestedAt)
+    and PULLED by each learner's own app instance on its existing session
+    poll, which is the only thing that can mint in their tenant. Those rows
+    come back as "requested".
+
+    The flag is workshop-level and settles per learner in :provdone, so a
+    straggler who arrives after this call is provisioned on arrival with no
+    second click. It only fires while the workshop is RUNNING
+    (live_sessions.provision_request_pending), so a trainer who pre-provisions
+    a scheduled workshop does not build foreign-tenant containers hours early.
     Auth: service bearer or signed-in writer."""
     await _require_service_or_writer(request)
     sess_key, roster_key, joined_key = _live_keys(session_id)
@@ -5854,28 +5931,47 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
+    provdone_key = _live_provdone_key(session_id)
+    # Record the intent BEFORE provisioning anyone. If this call dies half way
+    # through a 200-seat roster, the learners it never reached are still covered
+    # by the pull path rather than silently skipped.
+    await pool.hset(sess_key, mapping={
+        "provisionRequestedAt": datetime.now(timezone.utc).isoformat(),
+        "provisionRequestedBy": live_sessions.normalize_email(body.trainerEmail),
+    })
+    await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_REQUESTED,
+                           actor=body.trainerEmail, tenant=body.tenant,
+                           detail=f"{len(roster)} on roster")
     wanted = {e.strip().lower() for e in body.emails if e.strip()} if body.emails else None
     results = []
     # WS-4: the trainer is provisioned like a learner but is never subject to the
     # joined/tenant skips — they are calling from body.tenant, so their tenant is
     # known by construction and they never "join" their own workshop.
-    targets = live_sessions.roster_targets(
+    # `emails` is the caller's chunk of the roster, so it filters LEARNERS
+    # only — includeTrainer is explicit intent and must not be cancelled out by
+    # a chunk that happens not to contain the trainer's address.
+    targets = [(email, role) for email, role in live_sessions.roster_targets(
         roster, live_sessions.trainers_of(session), body.includeTrainer)
+        if not (wanted is not None and role == live_sessions.LEARNER_ROLE
+                and email.lower() not in wanted)]
+    # Un-settle exactly the people THIS call is about, which is what makes a
+    # re-click the retry for anyone whose provision failed. Scoped to this
+    # chunk rather than deleting the whole hash: the app splits a large roster
+    # across several calls, and a blanket delete would wipe the earlier chunks'
+    # markers and re-provision everyone on chunk two.
+    if targets:
+        await pool.hdel(provdone_key, *[e for e, _ in targets])
     for email, role in targets:
-        # `emails` is the caller's chunk of the roster, so it filters LEARNERS
-        # only — includeTrainer is explicit intent and must not be cancelled out
-        # by a chunk that happens not to contain the trainer's address.
-        if (wanted is not None and role == live_sessions.LEARNER_ROLE
-                and email.lower() not in wanted):
-            continue
         skip = (live_sessions.provision_skip_status(
             email in joined, joined_tenants.get(email, ""), body.tenant)
             if role == "learner" else "")
         if skip:
-            results.append({"email": email, "role": role, "status": skip,
-                            "message": (live_sessions.FOREIGN_TENANT_MESSAGE
-                                        if skip == "foreign-tenant"
-                                        else live_sessions.NOT_JOINED_MESSAGE)})
+            # Not a dead end any more: the flag set above is what their own
+            # tenant's app will act on. Reported as "requested" so the board
+            # says "still going to happen" rather than "nothing will".
+            results.append({"email": email, "role": role, "status": "requested",
+                            "reason": skip,
+                            "message": live_sessions.PROVISION_REQUESTED_MESSAGE})
             continue
         per = body.perUser.get(email) or body.perUser.get(email.lower()) or {}
         try:
@@ -5893,27 +5989,116 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                 # environment exactly as the session ends.
                 sessionHours=workshop_session_hours(session),
             ), request)
+            status = "already-active" if provisioned.get("deduped") else "queued"
+            # Settle the request for this learner: their own app must not
+            # provision a second time when it next polls.
+            await pool.hset(provdone_key, email, status)
+            await _emit_live_event(
+                session_id, live_sessions.EVENT_PROVISION_STARTED, email=email,
+                tenant=body.tenant, actor=body.trainerEmail, detail=status)
             results.append({
                 "email":  email,
                 "role":   role,
-                "status": "already-active" if provisioned.get("deduped") else "queued",
+                "status": status,
                 "jobId":  provisioned.get("jobId", ""),
             })
         except HTTPException as exc:
             results.append({"email": email, "role": role, "status": "error",
                             "error": str(exc.detail)[:200]})
+            await _emit_live_event(
+                session_id, live_sessions.EVENT_PROVISION_FAILED, email=email,
+                tenant=body.tenant, actor=body.trainerEmail, detail=str(exc.detail))
         except Exception as exc:
             results.append({"email": email, "role": role, "status": "error",
                             "error": str(exc)[:200]})
+            await _emit_live_event(
+                session_id, live_sessions.EVENT_PROVISION_FAILED, email=email,
+                tenant=body.tenant, actor=body.trainerEmail, detail=str(exc))
+    # Errors deliberately do NOT settle :provdone — a learner this call failed
+    # on stays pending, so their own tenant retries on the next poll.
     log.info("Live session %s provision-all by %s: %d queued, %d active, "
-             "%d foreign-tenant, %d not-joined, %d errors",
+             "%d requested (own tenant will provision), %d errors",
              session_id, body.trainerEmail,
              sum(1 for r in results if r["status"] == "queued"),
              sum(1 for r in results if r["status"] == "already-active"),
-             sum(1 for r in results if r["status"] == "foreign-tenant"),
-             sum(1 for r in results if r["status"] == "not-joined"),
+             sum(1 for r in results if r["status"] == "requested"),
              sum(1 for r in results if r["status"] == "error"))
     return {"results": results}
+
+
+@app.post("/api/live/sessions/{session_id}/provision-ack")
+async def api_live_session_provision_ack(session_id: str,
+                                         body: LiveSessionProvisionAck,
+                                         request: Request):
+    """A learner's own tenant settles the trainer's provision request.
+
+    The far end of the pull channel. The trainer's app cannot mint for a
+    foreign tenant, so the learner's app does it there and reports back here;
+    this marks :provdone so the request stops firing on their session poll.
+
+    Deliberately explicit rather than inferred from a job scan: the session
+    detail is polled by every learner every 10s, and a scan of job:running:* per
+    learner per poll does not survive a 300-seat room. It is also the natural
+    place to record "this tenant accepted the request" in the audit trail.
+
+    Idempotent — re-acking overwrites the same field. Auth: service bearer or
+    signed-in writer (learners ack through the app's authed proxy, same as
+    join-by-code)."""
+    await _require_service_or_writer(request)
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    sess_key, _, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    status = (body.status or "").strip()[:40] or "queued"
+    # Every outcome settles, failures included — see LiveSessionProvisionAck.
+    await pool.hset(_live_provdone_key(session_id), email, status)
+    failed = status == "failed" or bool(body.error)
+    await _emit_live_event(
+        session_id,
+        live_sessions.EVENT_PROVISION_FAILED if failed
+        else live_sessions.EVENT_PROVISION_ACCEPTED,
+        email=email, tenant=body.tenant,
+        detail=(body.error or body.jobId or status))
+    log.info("Live session %s provision-ack %s from %s: %s%s",
+             session_id, email, body.tenant or "?", status,
+             f" ({body.error[:120]})" if body.error else "")
+    return {"ok": True, "status": status}
+
+
+@app.get("/api/live/sessions/{session_id}/events")
+async def api_live_session_events(session_id: str, request: Request,
+                                  email: str = "", since: str = "", limit: int = 100):
+    """The workshop's audit trail, oldest first.
+
+    Two readers, one record: it is the durable log of the provisioning workflow
+    AND the source of the trainer's "someone just joined" toast. A separate
+    notification channel would drift out of step with the log it reflects.
+
+    `since` is a stream id from a previous page — that is what makes the toast
+    fire once per learner instead of once per poll. Emails and tenants are
+    masked for anyone who is not a trainer of this workshop, on the same
+    footing as the roster (BUG-MASK-1: a service bearer alone does not unmask).
+    """
+    sess_key, _, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    # xrange is inclusive, so page forward from the id AFTER the last one seen.
+    start = f"({since}" if since else "-"
+    try:
+        entries = await pool.xrange(_live_events_key(session_id), start, "+",
+                                    count=max(1, min(int(limit or 100), 500)))
+    except Exception:
+        # A malformed `since` from a stale client must not 500 the room.
+        entries = await pool.xrange(_live_events_key(session_id), "-", "+", count=100)
+    rows = live_sessions.shape_events(entries)
+    caller = live_sessions.normalize_email(email)
+    if live_sessions.is_trainer(email, session) or _sees_full_identities(request, caller):
+        return {"events": rows}
+    return {"events": masking.mask_events(rows)}
 
 
 class LiveSessionUpdate(BaseModel):
@@ -6068,9 +6253,14 @@ async def api_live_session_readiness(session_id: str, request: Request,
 
     Cross-tenant workshops: with `tenant` (the trainer's tenant, sent by the
     updated app function) learners without an environment are classified
-    honestly instead of "none": "foreign" (joined from another tenant —
-    provisions on entry there) or "not-joined" (never joined). Without
-    `tenant` the legacy "none" contract is preserved."""
+    honestly instead of "none": "requested" (the trainer asked and the
+    learner's own tenant has not acted yet), "foreign" (joined from another
+    tenant, nothing outstanding) or "not-joined" (never joined). Without
+    `tenant` the legacy "none" contract is preserved.
+
+    Each row also carries the learner's bound `tenant`, so the board can show
+    who is running where rather than only encoding it as a state string. It is
+    masked for anyone who is not a trainer, exactly like the email."""
     sess_key, roster_key, joined_key = _live_keys(session_id)
     session = await pool.hgetall(sess_key)
     if not session:
@@ -6116,27 +6306,34 @@ async def api_live_session_readiness(session_id: str, request: Request,
             failed_by_email[user] = record.get("job_id", "")
 
     rows = live_sessions.roster_targets(roster, trainer_emails, include_trainer=True)
+    provision_done = await pool.hgetall(_live_provdone_key(session_id))
     results = []
     for email, role in rows:
+        # The tenant the learner is bound to — the trainer's own for a trainer
+        # row, since they are asking from it and never join their own workshop.
+        row_tenant = tenant if role == "trainer" else joined_tenants.get(email, "")
         meta = running_by_email.get(email)
         if meta:
             job_id = meta.get("job_id", "")
             livelog = await pool.get(f"job:livelog:{job_id}") if job_id else ""
-            results.append({"email": email, "role": role,
+            results.append({"email": email, "role": role, "tenant": row_tenant,
                             "state": live_sessions.readiness_state(meta, livelog),
                             "jobId": job_id})
         elif email in failed_by_email:
-            results.append({"email": email, "role": role, "state": "failed",
+            results.append({"email": email, "role": role, "tenant": row_tenant,
+                            "state": "failed",
                             "jobId": failed_by_email[email]})
         else:
-            results.append({"email": email, "role": role,
+            results.append({"email": email, "role": role, "tenant": row_tenant,
                             # The trainer's tenant is the one they are asking from,
                             # and they never join their own workshop — so the
                             # foreign/not-joined classifications don't apply.
                             "state": "none" if role == "trainer"
                             else live_sessions.readiness_gap_state(
                                 email in joined,
-                                joined_tenants.get(email, ""), tenant)})
+                                joined_tenants.get(email, ""), tenant,
+                                requested=live_sessions.provision_request_pending(
+                                    session, email, provision_done))})
     payload = {"results": results}
     # trainerEmail is caller-supplied — anonymous callers who know it must
     # not harvest the roster; they get masked emails (states stay visible).
@@ -6322,6 +6519,7 @@ async def _expire_live_session_keys(session_id: str, session: dict):
     without a pad, chat or join code."""
     sections_key, qa_key, _ = _pad_keys(session_id)
     keys = [*_live_keys(session_id), _live_tenants_key(session_id),
+            _live_provdone_key(session_id), _live_events_key(session_id),
             sections_key, qa_key, *_room_keys(session_id)]
     if session.get("joinCode"):
         keys.append(f"live:joincode:{session['joinCode']}")
@@ -6336,6 +6534,7 @@ async def _delete_live_session_keys(session_id: str, session: dict):
     from every list. delete on a missing key is a no-op."""
     sections_key, qa_key, export_key = _pad_keys(session_id)
     keys = [*_live_keys(session_id), _live_tenants_key(session_id),
+            _live_provdone_key(session_id), _live_events_key(session_id),
             sections_key, qa_key, export_key, *_room_keys(session_id),
             # Delete is pre-start only, so a completion record should not exist
             # yet — but leaving one behind would outlive its workshop by 30 days.

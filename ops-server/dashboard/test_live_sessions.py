@@ -690,3 +690,144 @@ def test_finished_workshop_artefacts_outlive_nothing():
     """
     import dashboard.live_pad as lp
     assert ls.SESSION_TTL_SECONDS >= lp.EXPORT_TTL_SECONDS
+
+
+# ── Provision requests (cross-tenant, PASS 2) ────────────────────────────────
+
+def test_provision_request_is_pending_until_the_learner_is_marked_done():
+    """The flag is workshop-level; :provdone is the per-learner half.
+
+    This is what lets a straggler who arrives after the trainer clicked be
+    provisioned on arrival with no second click.
+    """
+    sess = _session(state="running", provisionRequestedAt="2026-08-07T10:00:00+00:00")
+    assert ls.provision_request_pending(sess, "late@x.com", {})
+    assert ls.provision_request_pending(sess, "late@x.com", {"other@x.com": "queued"})
+    assert not ls.provision_request_pending(sess, "late@x.com", {"late@x.com": "queued"})
+
+
+def test_provision_request_normalizes_the_callers_email():
+    """The done-marker is written lowercase; the caller's email is not."""
+    sess = _session(state="running", provisionRequestedAt="2026-08-07T10:00:00+00:00")
+    assert not ls.provision_request_pending(sess, "  Late@X.com ", {"late@x.com": "queued"})
+
+
+def test_provision_request_needs_a_running_workshop():
+    """The environment gate is 'started' (EPIC-007).
+
+    Without this, re-opening a finished workshop days later would silently
+    build a container for whoever loaded the page.
+    """
+    flag = {"provisionRequestedAt": "2026-08-07T10:00:00+00:00"}
+    for state in ("scheduled", "open", "ended", "cancelled"):
+        assert not ls.provision_request_pending(_session(state=state, **flag), "a@x.com", {}), state
+    assert ls.provision_request_pending(_session(state="running", **flag), "a@x.com", {})
+
+
+def test_no_request_no_provisioning():
+    """A workshop nobody asked to provision must never auto-provision."""
+    assert not ls.provision_request_pending(_session(state="running"), "a@x.com", {})
+    assert not ls.provision_request_pending(
+        _session(state="running", provisionRequestedAt=""), "a@x.com", {})
+
+
+def test_provision_request_ignores_an_empty_caller():
+    """An anonymous poll must not match the roster-wide flag."""
+    sess = _session(state="running", provisionRequestedAt="2026-08-07T10:00:00+00:00")
+    assert not ls.provision_request_pending(sess, "", {})
+    assert not ls.provision_request_pending(sess, None, {})
+
+
+def test_shape_detail_scopes_the_request_to_the_caller():
+    """provisionRequested drives an auto-provision, so it must answer 'do I
+    need one', never 'does anyone'."""
+    sess = _session(state="running", provisionRequestedAt="2026-08-07T10:00:00+00:00")
+    done = {"done@x.com": "queued"}
+    waiting = ls.shape_detail("ws_1", sess, {"done@x.com", "wait@x.com"},
+                              {}, "wait@x.com", done)
+    settled = ls.shape_detail("ws_1", sess, {"done@x.com", "wait@x.com"},
+                              {}, "done@x.com", done)
+    assert waiting["provisionRequested"] is True
+    assert settled["provisionRequested"] is False
+
+
+def test_shape_detail_without_provision_done_never_triggers():
+    """start/end/patch echo the detail back after a write. They pass no
+    done-map, and must not be read as 'you have a request waiting'."""
+    sess = _session(state="running", provisionRequestedAt="2026-08-07T10:00:00+00:00")
+    assert ls.shape_detail("ws_1", sess, set(), {}, "a@x.com")["provisionRequested"] is False
+
+
+SRO_T = "https://sro97894.apps.dynatrace.com"
+COE_T = "https://geu80787.apps.dynatrace.com"
+
+
+def test_readiness_reports_requested_over_foreign():
+    """'foreign' tells the trainer where someone sits; 'requested' tells them
+    something is still going to happen. The second is the actionable one."""
+    assert ls.readiness_gap_state(True, SRO_T, COE_T, requested=True) == "requested"
+    assert ls.readiness_gap_state(True, SRO_T, COE_T, requested=False) == "foreign"
+    assert ls.readiness_gap_state(True, COE_T, COE_T, requested=True) == "requested"
+
+
+def test_readiness_never_hides_a_learner_who_never_arrived():
+    """not-joined outranks requested. A trainer has to act on an empty seat,
+    and 'requested' would make an empty room look like a busy one."""
+    assert ls.readiness_gap_state(False, "", COE_T, requested=True) == "not-joined"
+
+
+def test_readiness_gap_state_default_is_the_old_contract():
+    """The new argument is opt-in — legacy callers keep their behaviour."""
+    assert ls.readiness_gap_state(True, SRO_T, COE_T) == "foreign"
+    assert ls.readiness_gap_state(True, COE_T, COE_T) == "none"
+    assert ls.readiness_gap_state(True, SRO_T, "", requested=True) == "none"
+
+
+# ── Audit trail ──────────────────────────────────────────────────────────────
+
+def test_audit_event_is_flat_strings_for_xadd():
+    ev = ls.audit_event(ls.EVENT_PROVISION_ACCEPTED, email="A@X.com",
+                        tenant="https://SRO97894-1.apps.dynatrace.com/",
+                        actor="trainer@x.com", detail="ok", now="2026-08-07T10:00:00+00:00")
+    assert all(isinstance(k, str) and isinstance(v, str) for k, v in ev.items())
+    assert ev["email"] == "a@x.com"
+    # Same normalization as the :tenants hash, or the audit trail and the
+    # provisioning decision would disagree about which tenant someone is in.
+    assert ev["tenant"] == SRO_T
+    assert ev["kind"] == "provision-accepted"
+
+
+def test_audit_event_drops_empty_fields():
+    """A reader must never have to tell 'absent' from 'empty string'."""
+    ev = ls.audit_event(ls.EVENT_STARTED, actor="t@x.com", now="2026-08-07T10:00:00+00:00")
+    assert "email" not in ev and "tenant" not in ev and "detail" not in ev
+    assert ev["actor"] == "t@x.com"
+
+
+def test_audit_event_rejects_an_unknown_kind():
+    """The kinds are a closed set — the client filters on them."""
+    try:
+        ls.audit_event("provision-maybe")
+    except ValueError:
+        return
+    raise AssertionError("unknown kind must raise")
+
+
+def test_audit_event_truncates_detail():
+    ev = ls.audit_event(ls.EVENT_PROVISION_FAILED, detail="x" * 500)
+    assert len(ev["detail"]) == 200
+
+
+def test_shape_events_keeps_the_stream_id_for_paging():
+    """The id is what makes the trainer's toast fire once per learner instead
+    of once per poll."""
+    rows = ls.shape_events([("1754-0", {"kind": "joined", "email": "a@x.com"}),
+                            ("1755-0", {"kind": "started", "actor": "t@x.com"})])
+    assert [r["id"] for r in rows] == ["1754-0", "1755-0"]
+    assert rows[0]["kind"] == "joined"
+    assert ls.shape_events(None) == []
+
+
+def test_events_stream_is_capped():
+    """Uncapped XADD grows for the 30-day life of the session keys."""
+    assert 0 < ls.EVENTS_MAXLEN <= 10000

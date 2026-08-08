@@ -73,10 +73,20 @@ def mask_live_detail(item: dict) -> dict:
 
 def mask_readiness(payload: dict) -> dict:
     """Anonymous view of GET /api/live/sessions/{id}/readiness — the roster
-    emails are masked; states/jobIds stay (jobIds are already public in the
-    dashboard's running list)."""
+    emails and bound tenants are masked; states/jobIds stay (jobIds are already
+    public in the dashboard's running list).
+
+    The tenant is masked on the same grounds as mask_progress and
+    mask_attendees: in a cross-tenant workshop knowing which tenant someone
+    runs in is itself identifying.
+    """
     return {**payload,
-            "results": [{**row, "email": mask_email(row.get("email", ""))}
+            "results": [{**row,
+                         "email": mask_email(row.get("email", "")),
+                         # Only when the row has one: a row without a tenant
+                         # must not gain an empty field it never had.
+                         **({"tenant": mask_tenant(row["tenant"])}
+                            if row.get("tenant") else {})}
                         for row in payload.get("results", [])]}
 
 
@@ -112,6 +122,33 @@ def mask_attendees(rows: list, keep: str = "") -> list:
                   "email": mask_email(row.get("email", "")),
                   "tenant": mask_tenant(row.get("tenant", ""))}
             for row in rows or []]
+
+
+def mask_events(rows: list) -> list:
+    """Non-trainer view of the workshop audit trail.
+
+    The trail is a cohort-wide record — who joined, whose tenant provisioned
+    what — so it is exactly the shape of disclosure BUG-MASK-1 was about. The
+    ordering, the kinds and the timestamps carry no identity and stay, so a
+    learner's client can still page the stream; every address and tenant is
+    masked, including `actor`, since the trainer's own address is as
+    identifying as a learner's.
+
+    No `keep` parameter: unlike the attendee rail and the chat, nothing in the
+    trail is addressed to a learner, so there is no reason to unmask their own
+    row and no need to hand this function the caller's identity.
+    """
+    masked = []
+    for row in rows or []:
+        # Only rewrite fields the row actually has: audit_event drops empties,
+        # so adding "email": "" here would make an absent field look present.
+        out = dict(row)
+        for field, fn in (("email", mask_email), ("actor", mask_email),
+                          ("tenant", mask_tenant)):
+            if out.get(field):
+                out[field] = fn(out[field])
+        masked.append(out)
+    return masked
 
 
 def mask_chat(messages: list, keep: str = "") -> list:
