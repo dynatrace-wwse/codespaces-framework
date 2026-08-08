@@ -758,6 +758,10 @@ def shape_detail(session_id, session, roster, joined, email,
         "hasJoined":    normalize_email(email) in (joined or {}),
         "provisionRequested": provision_request_pending(
             session, email, provision_done),
+        # The request timestamp is the client's dedupe key: the learner's app
+        # fires the pull-channel provision once per (session, requestedAt), so a
+        # remount while the flag is still true cannot mint a second token pair.
+        "provisionRequestedAt": session.get("provisionRequestedAt", ""),
     }
     out.update(_room_and_gate(session))
     out.update(workshop_fields(session, email))

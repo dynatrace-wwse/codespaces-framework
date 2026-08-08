@@ -373,11 +373,91 @@ templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")
 pool: redis.Redis | None = None
 
 
+async def _sweep_leaked_platform_tokens():
+    """Delete leaked platform tokens on every account Orbital can mint for.
+
+    Platform tokens count against a hard 50-per-account cap EVEN AFTER THEY
+    EXPIRE, and on 2026-08-08 leaked session pairs exhausted it — every mint
+    then failed with HTTP 400 and every provision on that tenant broke. Two
+    classes are swept: (a) any expired token, (b) a non-expired `enbl-*`
+    session token whose (repo, user) prefix matches no running job. Named
+    long-lived tokens (no `enbl-` prefix, unexpired) are never touched.
+
+    A token minted in the milliseconds before its job hash is written could in
+    principle be swept by a concurrently running pass; the window is a few
+    lines of api_arena_provision and the consequence is one failed provision
+    the trainer just retries, so it is accepted rather than locked around."""
+    from provisioning import PlatformTokenProvisioner
+    now = datetime.now(timezone.utc)
+    # Prefixes of tokens that legitimately belong to a live session — built the
+    # same way create_tokens() builds token names.
+    live_prefixes = set()
+    cursor = 0
+    while True:
+        cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=200)
+        for key in keys:
+            m = await pool.hgetall(key)
+            repo = (m.get("repo") or "").split("/")[-1][:20].replace("_", "-")
+            user = ((m.get("arena_user") or m.get("user") or "")
+                    .split("@")[0][:10].replace("_", "-").replace(".", "-"))
+            if repo and user:
+                live_prefixes.add(f"enbl-{repo}-{user}")
+        if cursor == 0:
+            break
+    for sfx in ("SPRINT", "DEV", "PROD"):
+        cid = os.environ.get(f"MINT_CLIENT_ID_{sfx}")
+        csec = os.environ.get(f"MINT_CLIENT_SECRET_{sfx}")
+        res = os.environ.get(f"MINT_RESOURCE_{sfx}", "")
+        sso = os.environ.get(f"MINT_SSO_{sfx}")
+        api = os.environ.get(f"MINT_API_HOST_{sfx}")
+        if not (cid and csec and res and sso and api):
+            continue
+        prov = PlatformTokenProvisioner(
+            # tenant_url/env_id are only used for token CREATION; the sweeper
+            # only lists and deletes, which are account-scoped.
+            tenant_url="https://unused.sweep", env_id="sweep",
+            account_uuid=res.split(":")[-1], sso_token_url=sso,
+            account_api_host=api, oauth_client_id=cid, oauth_client_secret=csec)
+        tokens = await prov.list_tokens()
+        doomed = []
+        for t in tokens:
+            name = t.get("name", "")
+            tid = t.get("tokenId") or t.get("id") or ""
+            exp = t.get("expirationDate") or t.get("expiresAt") or ""
+            expired = False
+            if exp:
+                try:
+                    expired = datetime.fromisoformat(exp.replace("Z", "+00:00")) < now
+                except ValueError:
+                    pass
+            orphaned = (name.startswith("enbl-")
+                        and not any(name.startswith(p) for p in live_prefixes))
+            if tid and (expired or orphaned):
+                doomed.append(tid)
+        if doomed:
+            log.info("platform-token sweep (%s): revoking %d leaked of %d total",
+                     sfx, len(doomed), len(tokens))
+            await prov.revoke_tokens(doomed)
+
+
+async def _platform_token_sweep_loop():
+    await asyncio.sleep(120)  # let startup settle before the first pass
+    while True:
+        try:
+            await _sweep_leaked_platform_tokens()
+        except Exception as exc:  # sweeping must never take the dashboard down
+            log.warning("platform-token sweep failed (retrying next cycle): %s", exc)
+        await asyncio.sleep(900)
+
+
 @app.on_event("startup")
 async def startup():
     global pool
     pool = redis.from_url(REDIS_URL, decode_responses=True)
     log.info("Dashboard connected to Redis")
+    # Leaked platform tokens break minting account-wide once the 50-token cap
+    # is hit — sweep them continuously rather than waiting for the next outage.
+    asyncio.get_running_loop().create_task(_platform_token_sweep_loop())
     # 5-min ops snapshot (tenants/trainings/workers/queues) → COE gauges + log line.
     if _OTEL_ACTIVE:
         try:
@@ -4314,8 +4394,16 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
             import logging as _log
             mint_error = str(exc)[:300]
             _log.getLogger("ops-dashboard").warning(
-                "Platform-token provisioning failed for %s / %s: %s — falling back to worker creds",
+                "Platform-token provisioning failed for %s / %s: %s",
                 repo_nwo, body.userId, exc)
+            # Fail CLOSED, not back to worker creds: a gen3 tenant has no classic
+            # tokens, so the fallback environment always dies later in
+            # postCreateCommand with the generic "DT_OPERATOR_TOKEN is required
+            # but not set" — hours of debugging away from the real cause. Surface
+            # the mint error at provision time instead (2026-08-08: the 50-token
+            # account cap produced exactly this doomed-fallback failure mode).
+            raise HTTPException(status_code=502,
+                                detail=f"Token minting failed for {tenant_url}: {mint_error}")
     elif tenant_url and (body.apiToken or (body.oauthClientId and body.oauthClientSecret)):
         try:
             provisioner = DTTokenProvisioner(
@@ -6061,6 +6149,11 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                 "role":   role,
                 "status": status,
                 "jobId":  provisioned.get("jobId", ""),
+                # Which tenant the environment actually landed in. The trainer's
+                # app compares this against its own tenant: when Orbital minted
+                # directly for a foreign learner, the trainer-minted pair was
+                # never injected and must be revoked, not tracked.
+                "tenant": tenant_for_env,
             })
         except HTTPException as exc:
             results.append({"email": email, "role": role, "status": "error",
@@ -6656,6 +6749,14 @@ async def _store_completion_record(session_id: str, session: dict):
             started=live_progress.has_started(session))
         rows = await _query_coe_grail(query)
         shaped = live_progress.shape_progress(rows, sorted(roster))
+        # A learner with no telemetry has no tenant on their row — fill it from
+        # the tenant they bound at check-in, so the frozen board never shows a
+        # blank Tenant column for someone the workshop knew perfectly well.
+        joined_tenants = await pool.hgetall(_live_tenants_key(session_id))
+        for r in shaped.get("results", []):
+            if not r.get("tenant") and joined_tenants.get(r.get("email", "")):
+                r["tenant"] = live_sessions.normalize_tenant(
+                    joined_tenants[r["email"]])
         record = {
             "sessionId": session_id,
             "title": session.get("title", ""),

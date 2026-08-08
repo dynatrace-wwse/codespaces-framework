@@ -331,6 +331,19 @@ class PlatformTokenProvisioner:
         env["DT_ENVIRONMENT"] = self.tenant_url
         return ProvisionedTokens(env=env, token_ids=token_ids, expires_at=expires_iso, tenant_url=self.tenant_url)
 
+    async def list_tokens(self) -> list[dict]:
+        """All platform tokens on the account. Used by the leak sweeper: expired
+        tokens still count against the hard 50-per-account cap, so they must be
+        deleted, not just left to lapse."""
+        bearer = await self._bearer()
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(self._tokens_url, headers={"Authorization": f"Bearer {bearer}"})
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list):
+                return data
+            return data.get("items") or data.get("tokens") or data.get("results") or []
+
     async def revoke_tokens(self, token_ids: list[str]):
         if not token_ids:
             return
