@@ -404,6 +404,13 @@ async def _sweep_leaked_platform_tokens():
                 live_prefixes.add(f"enbl-{repo}-{user}")
         if cursor == 0:
             break
+    # DANGER before adding a MINT_*_<DOMAIN> account here: the orphan rule below matches
+    # `enbl-{repo}-{user}` — the name ORBITAL mints under. Tokens the APP mints for its own
+    # tenant are named `enbl-{trainingId}-{user}` (mintTrainingTokens.function.ts), so on an
+    # account where the app mints, every LIVE learner token looks orphaned and this sweep
+    # would revoke it mid-session. App-minted accounts are reclaimed by the app's own
+    # reconciler (api/reconcileMintedTokens.function.ts); do not point this at them until
+    # both sides agree on one name.
     for sfx in ("SPRINT", "DEV", "PROD"):
         cid = os.environ.get(f"MINT_CLIENT_ID_{sfx}")
         csec = os.environ.get(f"MINT_CLIENT_SECRET_{sfx}")
@@ -5580,6 +5587,18 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
         "startedAt":    "",
         "endedAt":      "",
         "joinCode":     join_code,
+        # Pacing defaults, written at create so a trainer opening the controls
+        # finds the room already set the way a workshop is normally run:
+        #
+        #   Release solutions  OFF — solutions are the trainer's to give out.
+        #   Hold the class here ON — everyone works the step being taught; a
+        #                            learner racing to the end and finishing
+        #                            alone is the failure mode this prevents.
+        #
+        # Both were previously absent-means-off, so "Hold the class here" had to
+        # be switched on by hand at the start of every single workshop.
+        "unlockPath":   "0",
+        "gateAhead":    "1",
     }
     # WS-3: freeze the content repo on the workshop at create time. The stored
     # trainingId is the CATALOG id and is not a repo name; resolving here (not in
@@ -6018,6 +6037,16 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
     # learner still chooses where to RUN the workshop by clicking "Provision
     # here" (which calls /join and binds the tenant, same as invited learners).
     # One flow, both entry paths.
+    #
+    # A trainer is the exception: they are already a member by name, so the
+    # code is just their way IN (a co-trainer handed the code rather than a
+    # link). Adding them to the roster would demote them to a learner row on
+    # the board and inflate the cohort count by one.
+    if live_sessions.is_trainer(email, session):
+        return {"sessionId": session_id,
+                **live_sessions.shape_summary(
+                    session_id, session, roster,
+                    await pool.hgetall(joined_key), email)}
     newly_registered = await pool.sadd(roster_key, email)
     if newly_registered:
         await _emit_live_event(session_id, live_sessions.EVENT_REGISTERED,
@@ -6597,7 +6626,11 @@ async def api_live_session_progress(session_id: str, request: Request,
             session_id, training_id, cohort, live_progress.since_timestamp(session),
             started=live_progress.has_started(session))
         records = await _query_coe_grail(query)
-        payload = live_progress.shape_progress(records, cohort)
+        # The trainer team is queried (they may be on the roster, and their
+        # events are in the window) but never charted — the board is the class,
+        # and the people teaching it are not in it.
+        payload = live_progress.shape_progress(
+            records, cohort, live_sessions.trainers_of(session))
         payload.update({
             "workshopId": session_id,
             "workshopName": session.get("title", ""),
@@ -6748,7 +6781,11 @@ async def _store_completion_record(session_id: str, session: dict):
             live_progress.since_timestamp(session),
             started=live_progress.has_started(session))
         rows = await _query_coe_grail(query)
-        shaped = live_progress.shape_progress(rows, sorted(roster))
+        # Same exclusion as the live board — the frozen record must not start
+        # reporting trainers as cohort members just because it was written by a
+        # different code path.
+        shaped = live_progress.shape_progress(
+            rows, sorted(roster), live_sessions.trainers_of(session))
         # A learner with no telemetry has no tenant on their row — fill it from
         # the tenant they bound at check-in, so the frozen board never shows a
         # blank Tenant column for someone the workshop knew perfectly well.
@@ -7525,23 +7562,34 @@ _PAD_PAGE_HTML = """<!DOCTYPE html>
    it cannot read the Dynatrace app's data-theme — different document, different
    origin. The theme has to be passed in (?theme=), and is stamped on <html>
    before first paint so there is no flash of the wrong one. */
+/* The values below are Dynatrace Strato tokens, copied literally rather than
+   picked by eye: this window sits beside the app on the same screen and any
+   drift reads as a second, worse product. Dark is Strato dark (the Sprint
+   theme), light is Strato light. Sources:
+     --bg          background-base-default          #19192c / #f9f9fa
+     --surface     background-container-neutral     #212135 / #f2f2f5
+     --border      border-neutral-default           #3b3b52 / #dadbe4
+     --text        text-neutral-default             #ebecff / #2f2f4f
+     --accent      text-primary-default             #adb0ff / #464cce
+     --danger      text-critical-default            #ff999c / #bb0731
+     --success     text-success-default             #6fc3ba / #2d6761 */
 :root, :root[data-theme="dark"] {
-  --bg: #1a1a2e; --surface: #16213e; --border: #0d3460;
-  --text: #d4d4d4; --text-dim: #718096; --text-strong: #e2e8f0;
-  --accent: #00b4d8; --code-bg: #0d1117;
-  --code-text: #c9d1d9; --code-text-strong: #e6edf3; --link: #79c0ff;
-  --btn: #0e639c; --btn-hover: #1177bb; --on-accent: #ffffff;
-  --surface-2: #131c33; --border-soft: #4a5568;
-  --danger: #fc8181; --success: #48bb78; --warning: #f6c343;
+  --bg: #19192c; --surface: #212135; --border: #3b3b52;
+  --text: #ebecff; --text-dim: #9c9db8; --text-strong: #ffffff;
+  --accent: #adb0ff; --code-bg: #111122;
+  --code-text: #ebecff; --code-text-strong: #ffffff; --link: #adb0ff;
+  --btn: #4a4ad4; --btn-hover: #5a5ae4; --on-accent: #ffffff;
+  --surface-2: #1e1e30; --border-soft: #4a4a63;
+  --danger: #ff999c; --success: #6fc3ba; --warning: #ffc95c;
 }
 :root[data-theme="light"] {
-  --bg: #f5f6f7; --surface: #ffffff; --border: #d8dde3;
-  --text: #1a1d21; --text-dim: #5a6672; --text-strong: #0e1114;
-  --accent: #0e7c9b; --code-bg: #f3f5f7;
-  --code-text: #24292f; --code-text-strong: #0e1114; --link: #0969da;
-  --btn: #0969da; --btn-hover: #0860ca; --on-accent: #ffffff;
-  --surface-2: #eef1f4; --border-soft: #c3cad2;
-  --danger: #b42318; --success: #067647; --warning: #b54708;
+  --bg: #f9f9fa; --surface: #ffffff; --border: #dadbe4;
+  --text: #2f2f4f; --text-dim: #595a7d; --text-strong: #16162b;
+  --accent: #464cce; --code-bg: #f2f2f5;
+  --code-text: #2f2f4f; --code-text-strong: #16162b; --link: #464cce;
+  --btn: #464cce; --btn-hover: #383db0; --on-accent: #ffffff;
+  --surface-2: #f2f2f5; --border-soft: #c8c9d6;
+  --danger: #bb0731; --success: #2d6761; --warning: #96590f;
 }
 </style>
 <script>
@@ -7557,15 +7605,20 @@ body { display: flex; flex-direction: column; }
   padding: 0 16px; display: flex; align-items: center; justify-content: space-between;
   flex-shrink: 0; border-bottom: 1px solid var(--border); gap: 16px; }
 #brand { display: flex; align-items: center; gap: 8px; }
-#brand-logo { color: var(--accent); font-size: 18px; }
+#brand-logo { display: flex; align-items: center; }
+#brand-logo svg { width: 20px; height: 20px; display: block; }
 #brand-name { color: var(--text-strong); font-weight: 600; font-size: 13px; letter-spacing: .3px; }
 #who { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 #main { flex: 1; overflow-y: auto; padding: 20px; max-width: 860px; width: 100%;
   margin: 0 auto; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
   padding: 14px 16px; margin-bottom: 14px; }
-.card h3 { color: var(--accent); font-size: 13px; margin-bottom: 10px;
-  text-transform: uppercase; letter-spacing: .5px; }
+/* Sentence case, not SHOUTING. "WELCOME" / "SOLUTIONS" / "QUESTIONS & ANSWERS"
+   read as system labels; they are section headings a person wrote. Strong text
+   colour, so they are near-black on light and near-white on dark — the accent
+   made them the loudest thing on a page whose content is what matters. */
+.card h3 { color: var(--text-strong); font-size: 14px; font-weight: 600;
+  margin-bottom: 10px; letter-spacing: 0; }
 .md { font-size: 13px; line-height: 1.55; color: var(--code-text); word-break: break-word; }
 .md h1, .md h2, .md h3 { color: var(--text-strong); margin: 10px 0 6px; }
 .md h1 { font-size: 16px; } .md h2 { font-size: 14px; } .md h3 { font-size: 13px; }
@@ -7603,8 +7656,8 @@ button:disabled { opacity: .5; cursor: default; }
 #rail { width: 320px; flex-shrink: 0; background: var(--surface-2);
   border-left: 1px solid var(--border); display: flex; flex-direction: column;
   min-height: 0; }
-.rail-h { color: var(--accent); font-size: 11px; text-transform: uppercase;
-  letter-spacing: .5px; padding: 9px 12px; border-bottom: 1px solid var(--border);
+.rail-h { color: var(--text-strong); font-size: 12px; font-weight: 600;
+  letter-spacing: 0; padding: 9px 12px; border-bottom: 1px solid var(--border);
   display: flex; justify-content: space-between; align-items: center; }
 .rail-h .n { color: var(--text-dim); font-size: 11px; letter-spacing: 0; }
 #people { max-height: 38%; overflow-y: auto; padding: 6px 0; flex-shrink: 0; }
@@ -7653,8 +7706,27 @@ button:disabled { opacity: .5; cursor: default; }
 <body>
 <div id="topbar">
   <div id="brand">
-    <span id="brand-logo">⬡</span>
-    <span id="brand-name">Virtual Room</span>
+    <!-- The Enablement app's own icon (ui/assets/icon.svg), inlined: this page
+         is served from Orbital's origin and the app's asset bundle is not
+         reachable from here, so an <img src> would 404. Keep the two in step. -->
+    <span id="brand-logo" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+        <defs>
+          <linearGradient id="padHat" x1="14" y1="20" x2="86" y2="84" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#1496FF"/>
+            <stop offset="0.55" stop-color="#6F4BF2"/>
+            <stop offset="1" stop-color="#73BE28"/>
+          </linearGradient>
+        </defs>
+        <path d="M50 22 L88 40 L50 58 L12 40 Z" fill="url(#padHat)"/>
+        <path d="M50 30.5 L70.5 40 L50 49.5 L29.5 40 Z" fill="#ffffff" fill-opacity="0.22"/>
+        <path d="M30 47 L30 62 C30 69 39 74 50 74 C61 74 70 69 70 62 L70 47 L50 56.5 Z"
+              fill="url(#padHat)" fill-opacity="0.85"/>
+        <path d="M84 41 L84 60" stroke="url(#padHat)" stroke-width="3.2" stroke-linecap="round"/>
+        <circle cx="84" cy="64" r="4.2" fill="#73BE28"/>
+      </svg>
+    </span>
+    <span id="brand-name">Virtual Classroom</span>
     <span id="title" style="color:var(--text-dim)"></span>
   </div>
   <span id="who">Connecting…</span>
