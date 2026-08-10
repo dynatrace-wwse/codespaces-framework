@@ -869,6 +869,11 @@ CENTRAL_TENANT_HOST = "wwse.apps.dynatrace.com"
 COE_TENANT_IDS = {"wwse", "geu80787"}
 REMOTE_GRAIL_SCHEMA = "app:my.dynatrace.enablements:remote-grail"
 REMOTE_GRAIL_SCHEMA_VERSION = "1.1"
+# The tenant's own copy of its account OAuth client, so the app can mint per-learner
+# platform tokens and update itself without Orbital holding anything.
+# settings/schemas/mint-client.schema.json in the app repo.
+MINT_CLIENT_SCHEMA = "app:my.dynatrace.enablements:mint-client"
+MINT_CLIENT_SCHEMA_VERSION = "1.0.0"
 # App-settings (NOT classic settings) schema holding the Orbital service bearer —
 # settings/schemas/orbital-config.schema.json in the app repo. Unprefixed here because
 # the app-settings API resolves it within the Dt-App-Context app.
@@ -909,14 +914,23 @@ def _outbound_hosts_for(tenant_url: str) -> list[str]:
     return OUTBOUND_HOSTS + REALM_OUTBOUND_HOSTS.get(domain, [])
 
 
-async def _ensure_outbound_allowlist(token: str, tenant_url: str) -> str:
+async def _ensure_outbound_allowlist(token: str, tenant_url: str,
+                                     extra_hosts: list[str] | None = None) -> str:
     """If the tenant enforces a JS-runtime outbound allowlist (sprint/dev do, prod usually
     doesn't), add the content-delivery hosts so the app's functions can reach Orbital + GitHub.
     Only ever adds hosts to an existing enforced list — never creates or tightens a restriction.
     Best-effort; needs settings:objects:read+write on the token."""
     base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
     h = {"Authorization": f"Bearer {token}"}
+    # `extra_hosts` is where the realm the app will ACTUALLY authenticate against comes
+    # from: the ssoUrl/apiHost of the client being installed. REALM_OUTBOUND_HOSTS only
+    # knows the realms we happen to have met, so a tenant in an unlisted one would store
+    # a client and then fail every mint at the allowlist — the same chicken-and-egg the
+    # sprint entry was added to fix, one layer up.
     wanted = _outbound_hosts_for(tenant_url)
+    for extra in extra_hosts or []:
+        if extra and extra not in wanted:
+            wanted = wanted + [extra]
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get(base, headers=h, params={
@@ -1020,6 +1034,68 @@ async def _ensure_remote_grail(token: str, tenant_url: str) -> str:
     except Exception as exc:
         log.warning("remote-grail for %s: %s", tenant_url, exc)
         return f"remote-grail error: {exc}"
+
+
+async def _store_mint_client(token: str, tenant_url: str, client_id: str, client_secret: str,
+                             account_urn: str, sso_url: str, api_host: str) -> str:
+    """Write the pasted account OAuth client into the TENANT'S OWN `mint-client` settings
+    object, so from here on the app mints its own per-learner tokens and its own install
+    bearer. Orbital keeps nothing: the secret is in memory for this one call and is deleted
+    by the caller immediately after.
+
+    This is the step whose absence made every new tenant half-broken. It looks impossible if
+    you go through the app-settings API — `app-settings:objects:write` is genuinely not in
+    the OAuth client scope catalog. But app settings and classic settings are the SAME
+    objects (measured on ydi9582h: the app's `remote-grail` object has an identical objectId
+    through both APIs), and the classic door opens with `settings:objects:write`, which every
+    account client can hold. `_ensure_remote_grail` has been walking through that door on
+    every deploy the whole time.
+
+    Idempotent, and re-registering a tenant deliberately overwrites: the admin just supplied
+    this client, so it is the freshest statement of intent.
+
+    Best-effort — returns a human-readable status; never raises, and never logs the secret.
+    """
+    base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
+    h = {"Authorization": f"Bearer {token}"}
+    value = {"clientId": client_id, "clientSecret": client_secret,
+             "accountUrn": account_urn, "ssoUrl": sso_url, "apiHost": api_host}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            # A freshly installed app's schemas are not queryable the instant the install
+            # returns — same race the orbital-config seeding hits. Retry before concluding
+            # the tenant cannot hold a client.
+            r = None
+            for pause in (0, 5, 10):
+                if pause:
+                    await asyncio.sleep(pause)
+                r = await c.get(base, headers=h, params={
+                    "schemaIds": MINT_CLIENT_SCHEMA, "scopes": "environment",
+                    "fields": "objectId"})
+                if r.status_code == 200:
+                    break
+            if r is None or r.status_code == 403:
+                return "skipped (token lacks settings:objects:read/write)"
+            if r.status_code != 200:
+                return f"skipped (settings read HTTP {r.status_code})"
+            items = r.json().get("items", [])
+            if items:
+                pr = await c.put(f"{base}/{items[0]['objectId']}",
+                                 headers={**h, "Content-Type": "application/json"},
+                                 json={"value": value})
+                if pr.status_code in (200, 201, 204):
+                    return "updated (app mints + self-updates on its own)"
+                return f"update failed (HTTP {pr.status_code}: {pr.text[:120]})"
+            cr = await c.post(base, headers={**h, "Content-Type": "application/json"}, json=[{
+                "schemaId": MINT_CLIENT_SCHEMA, "schemaVersion": MINT_CLIENT_SCHEMA_VERSION,
+                "scope": "environment", "value": value,
+            }])
+            if cr.status_code in (200, 201):
+                return "stored (app mints + self-updates on its own)"
+            return f"create failed (HTTP {cr.status_code}: {cr.text[:120]})"
+    except Exception as exc:
+        log.warning("mint-client store for %s: %s", tenant_url, exc)
+        return f"mint-client error: {exc}"
 
 
 def _orbital_service_token() -> str | None:
@@ -1607,6 +1683,9 @@ async def deploy_with_token_status(deploy_id: str):
 # Design + threat model: ops-server/docs/tenant-credentials.md.
 
 MINT_SCOPE = "platform-token:tokens:write platform-token:tokens:manage"
+# Environment-scoped, and NOT covered by MINT_SCOPE: DynaKube's per-session ActiveGate
+# token. Mirrors AG_SCOPE in the app's api/mintCredentials.function.ts.
+AG_SCOPE = "environment-api:activegate-tokens:write"
 # Realm SSO token endpoints + Account Management API hosts per domain class
 # (classify_tenant → prod/sprint/dev). Overridable per request for unusual realms.
 SSO_TOKEN_URL_BY_DOMAIN = {
@@ -1711,28 +1790,74 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     allowlist = ""
     remote_grail = ""
     orbital_cfg = ""
+    mint_client = "skipped (deploy failed)"
+    mint_ready = False
+    mint_st = 0
+    api_host = ACCOUNT_API_BY_DOMAIN.get(domain, ACCOUNT_API_BY_DOMAIN["prod"])
+    # The app authenticates this client against these two hosts on every mint and every
+    # self-update. If the tenant enforces an outbound allowlist and they are not on it,
+    # storing the client succeeds and everything that uses it fails.
+    realm_hosts = [h for h in (urlparse(sso_url).hostname, urlparse(api_host).hostname) if h]
     if res["status"] != "error":
-        allowlist = await _ensure_outbound_allowlist(token, tenant)
+        allowlist = await _ensure_outbound_allowlist(token, tenant, extra_hosts=realm_hosts)
         remote_grail = await _ensure_remote_grail(token, tenant)
         orbital_cfg = await _ensure_orbital_config(token, tenant)
+
+        # 2. Can this client mint platform tokens? Storing one that cannot would install a
+        #    credential that fails at the first hands-on launch instead of here.
+        mint_bearer, mint_st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, MINT_SCOPE)
+        mint_ready = mint_bearer is not None
+        if mint_bearer:
+            del mint_bearer
+
+        # 2b. DynaKube mints an ActiveGate token per session, and a platform token cannot
+        #     carry that scope — it is environment-scoped and separate. Without it every
+        #     Kubernetes training dies at ActiveGate with an error that looks nothing like
+        #     a credential problem. mintCredentials checks this before storing when a human
+        #     pastes the client; check it here too, for the path where nobody does.
+        ag_bearer, ag_st, _ = await _oauth_bearer(
+            sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}", AG_SCOPE)
+        ag_ready = ag_bearer is not None
+        if ag_bearer:
+            del ag_bearer
+        if mint_ready and not ag_ready:
+            scope_warnings.append(
+                f"ActiveGate tokens NOT available (SSO HTTP {ag_st}): grant "
+                f"{AG_SCOPE} on this environment, or Kubernetes trainings will fail when "
+                f"DynaKube starts. Everything else works without it.")
+
+        # 3. Hand the client to the TENANT — the step that makes it self-sufficient. From
+        #    here the app mints its own per-learner tokens and its own install bearer for
+        #    "Update now", so this tenant never needs Orbital to hold a credential for it.
+        if mint_ready:
+            mint_client = await _store_mint_client(
+                token, tenant, cid, csec, account_urn, sso_url, api_host)
+        else:
+            mint_client = "skipped (client cannot mint platform tokens)"
     del token
+    del csec  # discard the secret — never persisted
     if res["status"] == "error":
         await _audit(user, tenant_id, "deploy", "deploy-error", via="oauth-bootstrap",
                      client_id=cid, rc=res.get("rc"))
         raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
 
-    # 2. Mint probe — can this client mint platform tokens? (Advisory only: tells the admin
-    #    the client is ready to paste INTO the app. We store nothing either way.)
-    mint_bearer, mint_st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, MINT_SCOPE)
-    mint_ready = mint_bearer is not None
-    if mint_bearer:
-        del mint_bearer
-    del csec  # discard the secret — never persisted
     if not mint_ready:
         scope_warnings.append(
-            f"token minting NOT available (SSO HTTP {mint_st}): the client lacks the account "
-            f"permissions platform-token:tokens:write + platform-token:tokens:manage. Grant them "
-            f"before configuring the client inside the app, or hands-on labs can't mint per-user tokens.")
+            f"ACTION REQUIRED — token minting NOT available (SSO HTTP {mint_st}): the client "
+            f"lacks the account permissions platform-token:tokens:write + "
+            f"platform-token:tokens:manage. On an environment that still allows classic API "
+            f"tokens the app will mint those with its own identity and labs will work; on an "
+            f"environment where classic creation has been retired (it is rolled out per "
+            f"environment) every hands-on launch will refuse. Grant the two permissions and "
+            f"register the tenant again.")
+    elif not mint_client.startswith(("stored", "updated")):
+        scope_warnings.append(
+            f"ACTION REQUIRED — the OAuth client could NOT be stored on this tenant "
+            f"({mint_client}). Until it is, this tenant cannot mint per-learner platform "
+            f"tokens and cannot update itself from inside the app. Grant the client "
+            f"settings:objects:read + settings:objects:write on this environment and register "
+            f"the tenant again, or paste the client by hand in the app under "
+            f"Settings → Training Token Minting.")
 
     reg = await _register_in_content_service(user, tenant)
     profile = (reg or {}).get("profile")
@@ -1747,11 +1872,11 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
-                 mint_ready=mint_ready, warnings=warnings)
+                 mint_ready=mint_ready, mint_client=mint_client, warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
             "remote_grail": remote_grail, "orbital_config": orbital_cfg,
-            "mintReady": mint_ready, "warnings": warnings}
+            "mintReady": mint_ready, "mintClient": mint_client, "warnings": warnings}
 
 
 @router.get("/api/deploy/audit")
