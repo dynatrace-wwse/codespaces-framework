@@ -373,98 +373,17 @@ templates = Jinja2Templates(directory=DASHBOARD_DIR / "templates")
 pool: redis.Redis | None = None
 
 
-async def _sweep_leaked_platform_tokens():
-    """Delete leaked platform tokens on every account Orbital can mint for.
-
-    Platform tokens count against a hard 50-per-account cap EVEN AFTER THEY
-    EXPIRE, and on 2026-08-08 leaked session pairs exhausted it — every mint
-    then failed with HTTP 400 and every provision on that tenant broke. Two
-    classes are swept: (a) any expired token, (b) a non-expired `enbl-*`
-    session token whose (repo, user) prefix matches no running job. Named
-    long-lived tokens (no `enbl-` prefix, unexpired) are never touched.
-
-    A token minted in the milliseconds before its job hash is written could in
-    principle be swept by a concurrently running pass; the window is a few
-    lines of api_arena_provision and the consequence is one failed provision
-    the trainer just retries, so it is accepted rather than locked around."""
-    from provisioning import PlatformTokenProvisioner
-    now = datetime.now(timezone.utc)
-    # Prefixes of tokens that legitimately belong to a live session — built the
-    # same way create_tokens() builds token names.
-    live_prefixes = set()
-    cursor = 0
-    while True:
-        cursor, keys = await pool.scan(cursor, match="job:running:enablement-*", count=200)
-        for key in keys:
-            m = await pool.hgetall(key)
-            repo = (m.get("repo") or "").split("/")[-1][:20].replace("_", "-")
-            user = ((m.get("arena_user") or m.get("user") or "")
-                    .split("@")[0][:10].replace("_", "-").replace(".", "-"))
-            if repo and user:
-                live_prefixes.add(f"enbl-{repo}-{user}")
-        if cursor == 0:
-            break
-    # DANGER before adding a MINT_*_<DOMAIN> account here: the orphan rule below matches
-    # `enbl-{repo}-{user}` — the name ORBITAL mints under. Tokens the APP mints for its own
-    # tenant are named `enbl-{trainingId}-{user}` (mintTrainingTokens.function.ts), so on an
-    # account where the app mints, every LIVE learner token looks orphaned and this sweep
-    # would revoke it mid-session. App-minted accounts are reclaimed by the app's own
-    # reconciler (api/reconcileMintedTokens.function.ts); do not point this at them until
-    # both sides agree on one name.
-    for sfx in ("SPRINT", "DEV", "PROD"):
-        cid = os.environ.get(f"MINT_CLIENT_ID_{sfx}")
-        csec = os.environ.get(f"MINT_CLIENT_SECRET_{sfx}")
-        res = os.environ.get(f"MINT_RESOURCE_{sfx}", "")
-        sso = os.environ.get(f"MINT_SSO_{sfx}")
-        api = os.environ.get(f"MINT_API_HOST_{sfx}")
-        if not (cid and csec and res and sso and api):
-            continue
-        prov = PlatformTokenProvisioner(
-            # tenant_url/env_id are only used for token CREATION; the sweeper
-            # only lists and deletes, which are account-scoped.
-            tenant_url="https://unused.sweep", env_id="sweep",
-            account_uuid=res.split(":")[-1], sso_token_url=sso,
-            account_api_host=api, oauth_client_id=cid, oauth_client_secret=csec)
-        tokens = await prov.list_tokens()
-        doomed = []
-        for t in tokens:
-            name = t.get("name", "")
-            tid = t.get("tokenId") or t.get("id") or ""
-            exp = t.get("expirationDate") or t.get("expiresAt") or ""
-            expired = False
-            if exp:
-                try:
-                    expired = datetime.fromisoformat(exp.replace("Z", "+00:00")) < now
-                except ValueError:
-                    pass
-            orphaned = (name.startswith("enbl-")
-                        and not any(name.startswith(p) for p in live_prefixes))
-            if tid and (expired or orphaned):
-                doomed.append(tid)
-        if doomed:
-            log.info("platform-token sweep (%s): revoking %d leaked of %d total",
-                     sfx, len(doomed), len(tokens))
-            await prov.revoke_tokens(doomed)
-
-
-async def _platform_token_sweep_loop():
-    await asyncio.sleep(120)  # let startup settle before the first pass
-    while True:
-        try:
-            await _sweep_leaked_platform_tokens()
-        except Exception as exc:  # sweeping must never take the dashboard down
-            log.warning("platform-token sweep failed (retrying next cycle): %s", exc)
-        await asyncio.sleep(900)
-
-
 @app.on_event("startup")
 async def startup():
     global pool
     pool = redis.from_url(REDIS_URL, decode_responses=True)
     log.info("Dashboard connected to Redis")
-    # Leaked platform tokens break minting account-wide once the 50-token cap
-    # is hit — sweep them continuously rather than waiting for the next outage.
-    asyncio.get_running_loop().create_task(_platform_token_sweep_loop())
+    # No platform-token sweep here any more. It reclaimed tokens ORBITAL minted, and Orbital
+    # no longer mints for anyone. It was also the one piece of code that could mass-revoke a
+    # live cohort: its orphan rule matched on the name Orbital mints under, so pointing it at
+    # an account where the APP mints would have revoked every learner's token mid-session.
+    # Reclaiming app-minted tokens is the app's job — see the enablement app's
+    # docs/token-lifecycle.md.
     # 5-min ops snapshot (tenants/trainings/workers/queues) → COE gauges + log line.
     if _OTEL_ACTIVE:
         try:
@@ -1545,19 +1464,9 @@ async def api_terminate_job(job_id: str, request: Request):
 
     # Revoke provisioned DT tokens for this session (best-effort, non-blocking)
     meta = await pool.hgetall(f"job:running:{job_id}")
-    # Only Orbital-minted tokens carry a stored auth cred here. App-minted tokens
-    # (multi-tenancy) are revoked by the app itself — Orbital holds no tenant cred.
-    if meta.get("mint_kind") == "platform" and meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
-        # Orbital-minted platform tokens (gen3) — revoke via the account OAuth client (from env).
-        try:
-            token_ids = json.loads(meta["dt_token_ids"])
-            prov = _gen3_platform_provisioner(meta["dt_tenant_url"])
-            if prov:
-                asyncio.create_task(prov.revoke_tokens(token_ids))
-                log.info("Revoking %d platform token(s) for session %s", len(token_ids), job_id)
-        except Exception as exc:
-            log.warning("Could not initiate platform-token revocation for %s: %s", job_id, exc)
-    elif (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+    # Only tokens minted from a credential the CALLER supplied are revocable here. App-minted
+    # tokens are revoked by the app itself — Orbital holds no tenant credential.
+    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
             and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
         from provisioning import DTTokenProvisioner
         try:
@@ -4234,33 +4143,20 @@ class ArenaProvisionRequest(BaseModel):
     workshopId: str = ""
 
 
-def _gen3_platform_provisioner(tenant_url: str):
-    """Build a PlatformTokenProvisioner for a tenant whose classic apiToken creation is
-    disabled (gen3 — sprint/dev, and prod as it migrates). Reads the per-account account
-    OAuth client from env: MINT_{CLIENT_ID,CLIENT_SECRET,RESOURCE,SSO,API_HOST}_<DOMAIN>.
-    Returns None when the tenant isn't gen3 or no creds are configured for its account."""
-    try:
-        tenant_id, domain = classify_tenant(tenant_url)
-    except Exception:
-        return None
-    sfx = domain.upper()  # SPRINT / DEV / PROD
-    cid = os.environ.get(f"MINT_CLIENT_ID_{sfx}")
-    csec = os.environ.get(f"MINT_CLIENT_SECRET_{sfx}")
-    res = os.environ.get(f"MINT_RESOURCE_{sfx}", "")
-    sso = os.environ.get(f"MINT_SSO_{sfx}")
-    api = os.environ.get(f"MINT_API_HOST_{sfx}")
-    if not (cid and csec and res and sso and api):
-        return None
-    from provisioning import PlatformTokenProvisioner
-    return PlatformTokenProvisioner(
-        tenant_url=tenant_url, env_id=tenant_id, account_uuid=res.split(":")[-1],
-        sso_token_url=sso, account_api_host=api, oauth_client_id=cid, oauth_client_secret=csec)
-
-
-# NOTE: Orbital deliberately holds NO per-tenant OAuth client. Self-managed tenants mint
-# their own platform tokens INSIDE the app (the OAuth client lives in the app's app-state on
-# that tenant) and pass only token VALUES here via ArenaProvisionRequest.dtEnv. The env-based
-# _gen3_platform_provisioner remains only for tenants we own (COE/SRO/sprint, MINT_*_<DOMAIN>).
+# NOTE: Orbital mints NOTHING from a credential of its own, for ANY tenant — including the
+# ones we own. Every tenant mints its own platform tokens INSIDE the app (the OAuth client
+# lives in that tenant's app-state) and passes only token VALUES here via
+# ArenaProvisionRequest.dtEnv.
+#
+# There used to be an env-based fallback (_gen3_platform_provisioner, MINT_*_<DOMAIN>) that
+# minted on behalf of sprint/dev/prod accounts. It was removed deliberately: keeping a
+# credential Orbital could mint with meant one tenant behaved unlike every other, and readers
+# — human and agent alike — kept discovering the capability and building on it. The MINT_*
+# variables still exist in the environment for dtctl / MCP / REST work; nothing in Orbital
+# reads them for minting.
+#
+# A tenant whose app has no OAuth client configured cannot provision. That is intended: the
+# fix is to configure the client on that tenant, not to mint for it from here.
 
 
 @app.post("/api/arena/provision")
@@ -4374,7 +4270,7 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
     dt_env: dict[str, str] = {}
     provisioned_token_ids: list[str] = []
     token_provisioned = False
-    mint_kind = ""  # "platform" when Orbital minted via the Account Management API (gen3)
+    mint_kind = ""  # "classic" when minted from a credential the caller supplied
     mint_error = ""  # surfaced in the response so callers (training-test) can log WHY
 
     tenant_url = body.tenantUrl.rstrip("/") if body.tenantUrl else ""
@@ -4386,31 +4282,6 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
         token_provisioned = True
         if not tenant_url:
             tenant_url = (dt_env.get("DT_ENVIRONMENT") or "").rstrip("/")
-    elif tenant_url and (_gen3 := _gen3_platform_provisioner(tenant_url)) is not None:
-        # gen3 tenant (classic apiToken creation disabled, e.g. sprint): Orbital mints
-        # platform tokens via the account OAuth client. Orbital owns revocation (mint_kind).
-        try:
-            specs = await load_token_specs(repo_nwo, ref=session_ref)
-            result = await _gen3.create_tokens(repo=repo_nwo, user_id=body.userId,
-                                               specs=specs, expires_in_hours=session_hours)
-            dt_env = result.env
-            provisioned_token_ids = result.token_ids
-            token_provisioned = True
-            mint_kind = "platform"
-        except Exception as exc:
-            import logging as _log
-            mint_error = str(exc)[:300]
-            _log.getLogger("ops-dashboard").warning(
-                "Platform-token provisioning failed for %s / %s: %s",
-                repo_nwo, body.userId, exc)
-            # Fail CLOSED, not back to worker creds: a gen3 tenant has no classic
-            # tokens, so the fallback environment always dies later in
-            # postCreateCommand with the generic "DT_OPERATOR_TOKEN is required
-            # but not set" — hours of debugging away from the real cause. Surface
-            # the mint error at provision time instead (2026-08-08: the 50-token
-            # account cap produced exactly this doomed-fallback failure mode).
-            raise HTTPException(status_code=502,
-                                detail=f"Token minting failed for {tenant_url}: {mint_error}")
     elif tenant_url and (body.apiToken or (body.oauthClientId and body.oauthClientSecret)):
         try:
             provisioner = DTTokenProvisioner(
@@ -5368,17 +5239,9 @@ async def api_arena_terminate(job_id: str, request: Request):
 
     # Best-effort: revoke provisioned DT tokens
     meta = await pool.hgetall(f"job:running:{job_id}")
-    # Only Orbital-minted tokens carry a stored auth cred here. App-minted tokens
-    # (multi-tenancy) are revoked by the app itself — Orbital holds no tenant cred.
-    if meta.get("mint_kind") == "platform" and meta.get("dt_token_ids") and meta.get("dt_tenant_url"):
-        try:
-            token_ids = json.loads(meta["dt_token_ids"])
-            prov = _gen3_platform_provisioner(meta["dt_tenant_url"])
-            if prov:
-                asyncio.create_task(prov.revoke_tokens(token_ids))
-        except Exception as exc:
-            log.warning("Could not initiate platform-token revocation for %s: %s", job_id, exc)
-    elif (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+    # Only tokens minted from a credential the CALLER supplied are revocable here. App-minted
+    # tokens are revoked by the app itself — Orbital holds no tenant credential.
+    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
             and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
         from provisioning import DTTokenProvisioner
         try:
@@ -6070,14 +5933,11 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     Cross-tenant workshops: the trainer's app can only mint tokens for ITS
     OWN tenant, so learners whose recorded join-tenant matches body.tenant
     are provisioned HERE with the trainer-minted credentials. Learners who
-    checked in from a DIFFERENT tenant are provisioned here too when Orbital
-    itself can mint for that tenant (_gen3_platform_provisioner — accounts we
-    own, MINT_*_<DOMAIN>); Orbital stores no tenant tokens, it mints, uses and
-    owns revocation exactly as the arena path does. Only learners in tenants
-    Orbital cannot mint for fall back to the pull channel: the trainer's
-    intent is recorded on the session hash (provisionRequestedAt) and PULLED
-    by each learner's own app instance on its session poll — the only thing
-    that can mint in their tenant. Those rows come back as "requested".
+    checked in from a DIFFERENT tenant go through the pull channel: the
+    trainer's intent is recorded on the session hash (provisionRequestedAt)
+    and PULLED by each learner's own app instance on its session poll — the
+    only thing that can mint in their tenant. Those rows come back as
+    "requested".
 
     The flag is workshop-level and settles per learner in :provdone, so a
     straggler who arrives after this call is provisioned on arrival with no
@@ -6129,18 +5989,11 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
         skip = (live_sessions.provision_skip_status(
             email in joined, joined_tenants.get(email, ""), body.tenant)
             if role == "learner" else "")
-        # A foreign-tenant learner is still directly provisionable when
-        # Orbital can mint for THEIR tenant itself (accounts we own —
-        # COE/SRO/sprint). tenant_for_env switches the provision call to the
-        # learner's tenant with no dtEnv, so api_arena_provision takes its
-        # gen3 mint path. Orbital never stores the tokens — mint, inject,
-        # revoke on terminate, same as every arena provision.
+        # A foreign-tenant learner always goes through the pull channel: only their own
+        # tenant's app can mint for them. Orbital used to shortcut this for the handful of
+        # accounts it held credentials for, which made one tenant behave unlike every other
+        # for no reason a reader could see. Uniform path, uniform behaviour.
         tenant_for_env = (body.tenant or "").rstrip("/")
-        if skip == "foreign-tenant":
-            learner_tenant = (joined_tenants.get(email, "") or "").rstrip("/")
-            if learner_tenant and _gen3_platform_provisioner(learner_tenant) is not None:
-                tenant_for_env = learner_tenant
-                skip = ""
         if skip:
             # Not a dead end any more: the flag set above is what their own
             # tenant's app will act on. Reported as "requested" so the board

@@ -3411,7 +3411,7 @@ async function goRegisterOauth(action) {
                     + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '')
                     + ((j.warnings || []).length ? `<br><span class="content-hint">⚠ ${j.warnings.map(escapeHtml).join('<br>⚠ ')}</span>` : '');
             }
-            loadRegisterAudit(); loadMintClients();
+            loadRegisterAudit();
         } else if (r.status === 401) {
             m.textContent = '✗ Sign in as a GitHub org member to deploy.';
         } else {
@@ -3459,24 +3459,6 @@ async function loadTenantRegistry() {
 function loadRegister() {
     wireRegister();
     loadRegisterAudit();
-    loadMintClients();
     loadTenantRegistry();
 }
 
-async function loadMintClients() {
-    const el = document.getElementById('reg-mint-clients');
-    if (!el) return;
-    try {
-        const r = await fetch('/api/deploy/mint-clients', { credentials: 'same-origin' });
-        if (!r.ok) { el.innerHTML = ''; return; }
-        const j = await r.json();
-        const rows = j.mintClients || [];
-        el.innerHTML = rows.length
-            ? '<h3 style="margin:24px 0 8px">Legacy env mint clients (tenants we own)</h3>'
-              + '<p class="content-hint" style="margin:0 0 6px">Per-domain account OAuth clients Orbital holds in its env for the tenants we operate (COE/SRO/sprint). Self-managed tenants are NOT here — they hold their own client inside the app and mint locally. Rotate in myaccount.dynatrace.com; the secret is never shown.</p>'
-              + '<table><thead><tr><th>Domain</th><th>Client ID</th><th>Account</th><th>Source</th></tr></thead><tbody>'
-              + rows.map(c => `<tr><td>${escapeHtml(c.domain)}</td><td><code>${escapeHtml(c.clientId)}</code></td><td><code style="font-size:0.72rem">${escapeHtml(c.account)}</code></td><td>${escapeHtml(c.scope || '')}</td></tr>`).join('')
-              + '</tbody></table>'
-            : '';
-    } catch { el.innerHTML = ''; }
-}
