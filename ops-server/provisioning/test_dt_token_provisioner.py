@@ -225,16 +225,23 @@ def test_platform_token_create_uses_account_api_and_env_resource():
         res = asyncio.run(_pt().create_tokens("dynatrace-wwse/enablement-kubernetes-101", "devlove@dynatracelabs.com", SPECS))
     finally:
         restore()
-    # tokens minted into env vars
+    # ONE token per user (platform tokens are capped per owner across accounts), and every
+    # spec's env var carries that same value.
     assert res.env["DT_OPERATOR_TOKEN"].startswith("dt0s16.")
-    assert res.env["DT_INGEST_TOKEN"].startswith("dt0s16.")
-    assert len(res.token_ids) == 2
+    assert res.env["DT_INGEST_TOKEN"] == res.env["DT_OPERATOR_TOKEN"]
+    assert len(res.token_ids) == 1
     # create POSTs hit the account platform-tokens endpoint with the env URN as resource
     creates = [c for c in calls if c[0] == "POST" and c[1].endswith("/platform-tokens")]
-    assert creates and all("/iam/v1/accounts/ceae4b9d/platform-tokens" in c[1] for c in creates)
+    assert len(creates) == 1
+    assert all("/iam/v1/accounts/ceae4b9d/platform-tokens" in c[1] for c in creates)
     body = creates[0][2]["json"]
     assert body["resource"] == ["urn:dtenvironment:ydi9582h"]
     assert "expirationDate" in body and isinstance(body["scope"], list)
+    # name keeps the enbl-{repo}-{user} prefix the sweeper's live-allowlist matches on
+    assert body["name"] == "enbl-enablement-kubernete-devlove-session"
+    # scopes are the UNION of both specs, deduped + sorted
+    assert "storage:metrics:write" in body["scope"] and "settings:objects:write" in body["scope"]
+    assert body["scope"] == sorted(set(body["scope"]))
     # bearer fetched with platform-token scope + account resource
     tok = [c for c in calls if c[1].endswith("/sso/oauth2/token")][0][2]["data"]
     assert "platform-token:tokens:write" in tok["scope"]
