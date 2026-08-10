@@ -491,6 +491,33 @@ async def _sync_repo() -> tuple[bool, str]:
     return True, f"{ref}@{head}{suffix}"
 
 
+async def _stamp_ui_version(env: dict) -> str:
+    """Regenerate ui/app/enablement/config/version.ts from app.config.json before building.
+
+    The app repo wires `scripts/update-version.cjs` as the npm `prebuild`/`predeploy` hook, but we
+    invoke `node_modules/.bin/dt-app deploy` directly, so npm lifecycle hooks never fire. Without
+    this the shipped bundle carries whatever APP_VERSION was last committed by hand while
+    app.config.json — the version the registry and `/api/deploy/latest-version` report — moves
+    ahead. Tenants then sit permanently on "update available": the deploy really succeeds, but
+    Admin keeps displaying the stale baked-in version, so the check never clears (COE showed
+    1.0.306 while running 1.0.310).
+
+    Best-effort: on any failure the deploy proceeds — a stale version string is better than a
+    blocked deploy, and `git reset --hard` in `_sync_repo()` restores the file next time.
+    """
+    script = Path(APP_REPO_DIR) / "scripts" / "update-version.cjs"
+    if not script.exists():
+        return "update-version.cjs not found"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "node", str(script), cwd=APP_REPO_DIR, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except (asyncio.TimeoutError, OSError) as exc:
+        return f"version stamp failed: {exc}"
+    return out.decode(errors="replace").strip()
+
+
 async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     """Shell `dt-app deploy` with the delegated token as DT_APP_PLATFORM_TOKEN (dt-app builds,
     signs and POSTs the archive to the registry — correct by construction). Token is passed via
@@ -503,6 +530,7 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
            # node lives in /usr/local/bin (symlink); ensure it's on PATH for the systemd service
            "PATH": "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", ""),
            "HOME": os.environ.get("HOME", "/home/ops")}
+    await _stamp_ui_version(env)
     proc = await asyncio.create_subprocess_exec(
         str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
