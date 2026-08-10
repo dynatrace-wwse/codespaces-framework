@@ -1341,6 +1341,8 @@ latestPublicActiveGateImage() {
 }
 
 fixSprintActiveGateImage() {
+  # Post-apply fallback. generateDynakube already pins the public AG image on sprint,
+  # so this is a safety net for DynaKubes applied from outside the generator.
   # No-op unless the tenant is sprint. On sprint: warn and patch the deployed DynaKube's
   # spec.activeGate.image to the latest public build (the operator then recreates the AG
   # pod with a pullable image). Best-effort — never fails the deploy.
@@ -1702,6 +1704,21 @@ generateDynakube() {
     oa_image_line="image: \"public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}\""
     printInfo "ActiveGate image: public.ecr.aws/dynatrace/dynatrace-activegate:${ag_tag}"
     printInfo "OneAgent image: public.ecr.aws/dynatrace/dynatrace-oneagent:${oa_tag}"
+  fi
+
+  # Sprint tenants resolve the ActiveGate to a private-ECR build that a k3d/kind
+  # cluster cannot pull. Pin the AG to the latest PUBLIC build at GENERATION time so
+  # the manifest is pullable the moment it is applied — including when a lab step
+  # applies it by hand, where deployDynatrace's post-apply fixSprintActiveGateImage
+  # never runs. No-op on prod/gen2 tenants. ARM already resolved an image above.
+  if [[ -z "$ag_image_line" ]] && isSprintTenant "${DT_ENVIRONMENT:-$DT_TENANT}"; then
+    local sprint_ag_img
+    if sprint_ag_img="$(latestPublicActiveGateImage)"; then
+      ag_image_line="image: \"${sprint_ag_img}\""
+      printWarn "Sprint tenant — default ActiveGate image is not pullable, pinning to ${sprint_ag_img}"
+    else
+      printWarn "Sprint tenant but no public ActiveGate image resolved — AG may ImagePullBackOff."
+    fi
   fi
 
   # --- Build the Dynakube YAML ---
