@@ -289,26 +289,46 @@ class PlatformTokenProvisioner:
         token_ids: list[str] = []
         errors: list[str] = []
         needs_ag = False
+        # ONE platform token per user carrying the union of every spec's scopes — not one per
+        # spec. Platform tokens are capped per OWNER (~50), and the owner is whoever owns the
+        # delivery tenant, so the budget to fit inside is one room's worth of learners. At the
+        # ~20-seat target three tokens a seat is 60 against a 50 ceiling — a full room breaches
+        # it with no leaks at all; one token a seat is 20. Exhausting this cap is also what
+        # broke every provision on 2026-08-08. Each spec's env_var still gets the value, so
+        # nothing downstream (functions.sh, labs) changes. Classic minting keeps one token per
+        # spec — classic apiTokens have no such cap.
+        all_scopes: list[str] = []
+        for spec in specs:
+            # Classic apiToken scopes are meaningless to the platform-token API — translate
+            # to platform scopes. activeGateTokenManagement.* has no platform equivalent →
+            # flags an ActiveGate-token pre-mint instead.
+            platform_scopes, spec_needs_ag = to_platform_scopes(spec.scopes)
+            needs_ag = needs_ag or spec_needs_ag
+            if not platform_scopes:
+                log.info("Spec '%s' has no platform scopes after translation — contributes none", spec.name_suffix)
+            all_scopes.extend(platform_scopes)
+        union_scopes = sorted(set(all_scopes))
         async with httpx.AsyncClient(timeout=20) as client:
-            for spec in specs:
-                # Classic apiToken scopes are meaningless to the platform-token API — translate
-                # to platform scopes. activeGateTokenManagement.* has no platform equivalent →
-                # flags an ActiveGate-token pre-mint instead.
-                platform_scopes, spec_needs_ag = to_platform_scopes(spec.scopes)
-                needs_ag = needs_ag or spec_needs_ag
-                if not platform_scopes:
-                    log.info("Spec '%s' has no platform scopes after translation — skipping platform token", spec.name_suffix)
-                    continue
-                name = f"{prefix}-{spec.name_suffix}"[:100]
-                payload = {"name": name, "scope": platform_scopes, "resource": resource,
+            if union_scopes:
+                name = f"{prefix}-session"[:100]
+                payload = {"name": name, "scope": union_scopes, "resource": resource,
                            "tags": ["enablement", repo_short], "expirationDate": expires_iso}
                 try:
                     r = await client.post(self._tokens_url, headers=headers, json=payload)
                     r.raise_for_status()
                     data = r.json()
-                    env[spec.env_var] = data["token"]
-                    token_ids.append(data.get("tokenId") or data.get("id"))
-                    log.info("Created platform token '%s' (id=%s, scopes=%s)", name, token_ids[-1], platform_scopes)
+                    token = data["token"]
+                    for spec in specs:
+                        env[spec.env_var] = token
+                    # Only one id is appended now, so a None here would be the whole revoke
+                    # list — the token would then be unreclaimable and sit on the cap.
+                    token_id = data.get("tokenId") or data.get("id")
+                    if token_id:
+                        token_ids.append(token_id)
+                    else:
+                        errors.append(f"platform token '{name}': created but returned no id (cannot be revoked)")
+                    log.info("Created platform token '%s' (id=%s, env=%s, scopes=%s)",
+                             name, token_id, [s.env_var for s in specs], union_scopes)
                 except httpx.HTTPStatusError as exc:
                     errors.append(f"platform token '{name}': HTTP {exc.response.status_code} — {exc.response.text[:200]}")
         # An operator spec that needed activeGateTokenManagement → pre-mint an ActiveGate token
