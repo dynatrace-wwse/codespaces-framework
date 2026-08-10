@@ -11,26 +11,50 @@ Which scopes?** — for every operation Orbital performs on a target tenant.
 
 ---
 
-## END STATE (2026-07-31) — the app holds the credential, Orbital stores NOTHING
+## END STATE (2026-08-10) — one paste, then the tenant is self-sufficient
 
-The design has moved to **app-held minting**. Read this first; the sections below are the
-per-generation reference.
+The design has moved to **app-held minting**, and as of 2026-08-10 the configuration step is
+automatic. Read this first; the sections below are the per-generation reference.
 
-1. **Bootstrap (once):** the tenant admin pastes an account OAuth client in Orbital's
-   Register Tenant tab. Orbital mints one deploy bearer, installs the app, and **discards
-   every credential** — the client is never written to Redis, disk, or logs. (Enforced by a
-   test: `test_oauth_bootstrap_stores_nothing`.)
-2. **Configure (once):** the admin pastes the same client **into the app** (Admin → Token
-   minting → the `mintCredentials` app function). It is stored in the app's own **app-state**
-   on that tenant (admin-ACL, function-readable, tenant-local). The app verifies the client
-   can mint (account platform-token scope + environment ActiveGate scope) before storing.
+1. **Register (once, the only human action):** the tenant admin pastes an account OAuth client
+   in Orbital's Register Tenant tab. Orbital mints one deploy bearer, installs the app, writes
+   the outbound allowlist (**including the client's own SSO/account-API hosts**, so an unfamiliar
+   realm is reachable) and remote-grail, **hands the client to the tenant** (step 2), and then
+   **discards every credential** — nothing is written to Redis, disk, or logs. (Enforced by
+   `test_oauth_bootstrap_stores_nothing` and `test_the_secret_never_reaches_redis_or_the_audit`.)
+2. **Configure (automatic, inside step 1):** `_store_mint_client` writes the client into the
+   app's own **`mint-client` settings object** on that tenant — through the *classic* settings
+   API with `settings:objects:write`, the same door `_ensure_remote_grail` has always used.
+   `clientSecret` is a `secret`-typed property: masked to every external reader, plaintext only
+   to the app. Before storing, Orbital probes the account mint scopes and the environment
+   ActiveGate scope and warns on each independently.
+
+   > This step used to be a manual second paste, documented as impossible to automate because
+   > `app-settings:objects:write` is not grantable to any OAuth client. That scope is indeed
+   > ungrantable — and it is the wrong door. App settings and classic settings are the **same
+   > objects**: measured on ydi9582h, the app's `remote-grail` object returns an identical
+   > `objectId` through `/platform/classic/environment-api/v2/settings/objects?schemaIds=app:my.dynatrace.enablements:remote-grail`
+   > and `/platform/app-settings/v2/objects?schema-id=remote-grail`.
+
+   The legacy `mint:oauth-client` app-state key is still **read** as a fallback, so tenants
+   configured the old way (ydi, COE, SRO) keep working with no migration. Settings is also the
+   more durable home: an app uninstall **destroys** app-state and **keeps** settings.
 3. **Steady state:** the **app** — not Orbital — mints per-user platform tokens (account API,
    env-scoped, short-TTL, tagged) and DynaKube ActiveGate tokens for each training session,
    and revokes them at session end. Orbital only ever receives the resulting token **values**
    (`ArenaProvisionRequest.dtEnv`). **Orbital holds no tenant credential at any point.**
+   A tenant that *cannot* mint now **refuses to provision** and reports the SSO/scope error,
+   instead of shipping an empty `DT_OPERATOR_TOKEN` that fails minutes later in the operator
+   install.
 4. **Self-update:** the app mints a short-lived, install-scoped bearer from its stored client
    and hands only that to Orbital, which builds + deploys the new version and discards it. The
-   client secret never leaves the tenant; app-state persists across versions.
+   client secret never leaves the tenant; settings persist across versions.
+
+   > Until 2026-08-10 the app posted `token: ''` unconditionally, which means "Orbital, use the
+   > client *you* hold". Orbital holds three, so "Update now" worked on exactly COE, SRO and
+   > ydi and answered every other tenant with an honest 400 (measured on bfs7010h,
+   > `deploy:job:wESlPSHDPJ5ChO2j`). The tokenless post is still the fallback when a tenant has
+   > no stored client, so those three are unaffected.
 
 **Why this is safe:** a full Orbital compromise exposes **no** tenant credential — there is
 nothing at rest to steal. The secret lives only on its own tenant, reachable only by an admin
@@ -73,25 +97,31 @@ At call time Orbital does `client_credentials` against the realm SSO with the ri
 `resource`: the **account (`urn:dtaccount:…`)** for both deploy and minting. Orbital
 already has this machinery (COE auto-deploy + sprint mint, both proven live).
 
-### Self-serve rollout (implemented 2026-07-31)
+### Self-serve rollout (`POST /api/deploy/oauth`, current as of 2026-08-10)
 
-The Register Tenant tab now has an **Account OAuth client** form (`POST /api/deploy/oauth`):
-the tenant admin pastes tenant URL + client id + secret + `urn:dtaccount:<uuid>`, Orbital
+The Register Tenant tab has an **Account OAuth client** form: the tenant admin pastes tenant
+URL + client id + secret + `urn:dtaccount:<uuid>`, and Orbital
 
 1. mints a deploy bearer (`app-engine:apps:install app-engine:apps:run` + `settings:objects:*`,
-   falling back to the minimal set and warning when the client lacks settings),
-2. deploys/upgrades the app, sets remote-grail + outbound allowlist, registers content,
-3. probes the mint scopes (`platform-token:tokens:write platform-token:tokens:manage`) —
-   when granted and "enable token minting" is checked, stores the client **Fernet-encrypted**
-   in Redis (`deploy:mintclient:{tenant_id}`).
+   falling back down a scope ladder and warning when the client lacks settings),
+2. deploys/upgrades the app, sets remote-grail + outbound allowlist (with the **client's own**
+   `ssoUrl`/`apiHost` added, so an unfamiliar realm is reachable), registers content,
+3. probes the account mint scopes (`platform-token:tokens:write platform-token:tokens:manage`)
+   and the environment ActiveGate scope (`environment-api:activegate-tokens:write`), warning
+   on each independently,
+4. **writes the client into the tenant's own `mint-client` settings object**
+   (`_store_mint_client`) and then drops every credential it held.
 
-Arena/training provisioning (`_tenant_platform_provisioner` in `dashboard/app.py`) prefers
-that registered client over the per-domain `MINT_*` env clients, so any tenant registered
-this way mints + revokes short-lived per-user platform tokens (scopes from the repo's
-`dt-tokens.yaml`, classic→platform translation in `provisioning/token_specs.py`) with no
-Orbital config change. Realm SSO + Account-API hosts default by domain
-(`SSO_TOKEN_URL_BY_DOMAIN` / `ACCOUNT_API_BY_DOMAIN` in `app_deploy.py`), overridable per
-request (`ssoUrl` / `apiHost`).
+Realm SSO + Account-API hosts default by domain (`SSO_TOKEN_URL_BY_DOMAIN` /
+`ACCOUNT_API_BY_DOMAIN` in `app_deploy.py`), overridable per request (`ssoUrl` / `apiHost`).
+
+**Orbital does not mint, and does not store a mint client.** PR #144 removed the last paths
+that did: `_gen3_platform_provisioner`, the `api_arena_provision` fallback branch, the
+cross-tenant workshop shortcut, `_sweep_leaked_platform_tokens`, `GET /api/deploy/mint-clients`
+and `PlatformTokenProvisioner`. The `deploy:mintclient:{tenant_id}` Redis key no longer exists.
+Every training token on a registered tenant is minted **by the app, with the tenant's own
+client**, using scopes from the repo's `dt-tokens.yaml` (classic→platform translation in
+`provisioning/token_specs.py`).
 
 ### Why the client needs NO Grail / data scopes
 
@@ -126,11 +156,16 @@ platform-token notes below are the fallback/legacy reference.
 
 ---
 
-## THREAT MODEL — what an Orbital compromise means for a registered tenant
+## THREAT MODEL — the OAuth client is account-admin in effect, wherever it lives
 
-**Read this before rolling out to customer/prospect tenants.** When a tenant enables token
-minting, Orbital holds that tenant's account OAuth client (Fernet-encrypted in Redis, key
-`GH_OAUTH_ENC_KEY` in `/home/ops/.env`). Be honest about the blast radius.
+**Read this before rolling out to customer/prospect tenants.**
+
+> **Orbital no longer holds it.** Since 2026-08-10 the client is stored on the **tenant** (a
+> `secret`-typed property of the app's own `mint-client` settings object) and Orbital keeps
+> nothing at rest — so the "Orbital compromise" half of this model is now moot, and what
+> remains is the blast radius of the *permission itself*, which is unchanged and still the
+> reason to be careful about who is asked to create one. The Orbital-held variant below is
+> retained because it describes the risk the permission carries in any home.
 
 ### The dangerous scope is `platform-token:tokens:write`, and it is effectively account-admin
 
@@ -156,32 +191,41 @@ comparatively bounded; **the account mint permission is the crown jewel.** Delet
 client in myaccount instantly revokes all of it — that is the customer's kill switch.
 
 ### Mitigations in place
-- Client stored Fernet-encrypted (not plaintext); never logged; API returns client_id only.
+- **The client lives only on its own tenant** (`mint-client` settings, `secret`-typed property:
+  masked to every external reader, plaintext only to the app). Orbital holds it for the duration
+  of one deploy call and never writes it anywhere — asserted by
+  `test_the_secret_never_reaches_redis_or_the_audit`. A full Orbital compromise yields **no**
+  tenant credential.
+- The secret never leaves the tenant afterwards; it only ever exits as **ephemeral,
+  purpose-scoped bearers** (mint / install).
 - Minted **session** tokens are env-scoped (`urn:dtenvironment:{env_id}`) + short-lived
   (4h) + tagged `enablement` + revoked on terminate — the *legitimate* use is tightly bound.
 - nginx allows the deploy endpoints signed-out but they only *use* a supplied credential;
-  the stored client is reachable only via provisioning code, not any read endpoint.
+  there is no read endpoint that returns one.
+- **Kill switch:** deleting the OAuth client in myaccount instantly revokes everything above.
 
 ### Mitigations NOT yet in place (do before customer GA)
-- **Encryption key + Redis on the same host** — an attacker with Orbital root gets both the
-  ciphertext and `GH_OAUTH_ENC_KEY`. A KMS / HSM-held key, or a per-tenant key the customer
-  controls, would stop plaintext extraction from a host compromise.
 - **No scope ceiling on the account side** — ask Dynatrace whether a mint client can be
   capped to a *fixed scope allowlist* (mint only these N scopes) and *fixed environment*.
   If yes, that collapses the blast radius from "account admin" to "can mint operator/ingest
-  on one env." **This is the single most important ask.**
+  on one env." **This is the single most important ask**, and it is now the only structural
+  one left: moving the client to the tenant removed the others.
 - **Egress/anomaly monitoring** on the mint path (alert on scopes/resources outside the
   enablement set).
+- **At-rest honesty:** a value the app must itself use to authenticate cannot be
+  envelope-encrypted against a tenant admin — the app would need the key, which then lives on
+  the same tenant. The boundary is the settings ACL plus "Orbital holds nothing", not
+  client-side crypto. We deliberately ship no key-in-bundle theatre.
 
-### The lower-blast-radius alternative — app-held client, not Orbital-held
-Move the OAuth client into the **app's own encrypted app-state on the tenant**; app functions
-call SSO + Account API directly and pass minted token *values* to Orbital (the
-`ArenaProvisionRequest.dtEnv` path already exists). Then **Orbital holds no tenant
-credential** — a single Orbital compromise exposes *nothing*; each tenant's secret lives only
-in that tenant. Trade-off: the secret sits in tenant app-state (whoever can invoke the admin
-app functions there can use it) and app functions need `sso.dynatrace.com` + the account API
-host on their outbound allowlist. This is arguably the correct end-state for customer tenants;
-the Orbital-held model is fine for tenants we own (COE/SRO/sprint).
+### Implemented 2026-08-10 — app-held client (was "the lower-blast-radius alternative")
+The OAuth client now lives in the **app's own `mint-client` settings object on the tenant**;
+app functions call SSO + the Account API directly and pass minted token *values* to Orbital
+(`ArenaProvisionRequest.dtEnv`). **Orbital holds no tenant credential** — a single Orbital
+compromise exposes nothing. Residual trade-off, unchanged from when this was a proposal:
+whoever can invoke the admin app functions on that tenant can use the client, and app functions
+need the realm SSO + account API host on their outbound allowlist (which
+`_ensure_outbound_allowlist` now adds automatically from the pasted client). This is the model
+for **all** tenants, ours included.
 
 ---
 
@@ -202,55 +246,50 @@ token with `storage:events:write` + `storage:bizevents:read` + `storage:buckets:
    token-create scope it uses for hands-on labs (operator/ingest tokens).
 4. *(optional)* **Read documents** — only if you want Orbital to verify imported content.
 
-## What to create — by tenant generation
+## What to create — one answer, all generations
 
-### Gen2 / classic-token tenants (most prod: `*.apps.dynatrace.com`, e.g. geu80787, sro97894)
-**A Platform token created IN the target tenant** (Settings → Platform tokens), scopes:
+**An account OAuth client with the scope set in `dynatrace-app-enablements/docs/tenant-onboarding.md`.**
+Register it once, and the tenant covers both mint paths and its own updates. There is no
+gen2/gen3 decision to make any more, because the client works on both and the app picks the
+path the environment allows.
 
-| Scope | For |
-|---|---|
-| `app-engine:apps:install` | install / upgrade |
-| `app-engine:apps:run` | run app functions |
-| `app-engine:apps:delete` | undeploy only |
-| `settings:objects:read` + `settings:objects:write` | remote-grail config + outbound allowlist (classic settings API) |
-| `api-tokens:tokens:read` + `api-tokens:tokens:write` | grant the app its `environment-api:api-tokens:write` self-mint scope at install (so hands-on labs can mint operator/ingest tokens) |
-| `document:documents:read` *(optional)* | content verification |
+### Which mint path the app takes, and what needs the client
 
-The app then **self-mints** training tokens with its own installed identity — classic
-API-token creation still works on these tenants.
+| Path | Credential | Client needed? |
+|---|---|---|
+| Classic `dt0c01` | the app's **own installed AppEngine identity** (manifest scope `environment-api:api-tokens:write`) | **no** |
+| Platform `dt0s16` | stored client → account bearer → `POST {apiHost}/iam/v1/accounts/{uuid}/platform-tokens` | **yes** |
+| ActiveGate `dt0g02` | stored client → env-scoped bearer | **yes** |
+| Self-update | stored client → env-scoped install bearer | **yes** |
 
-> ⚠️ **`environment-api:api-tokens:write` is now DEPRECATED** (shown as deprecated in the
-> OAuth-client scope picker). That is the scope the app's self-mint relies on. So the gen2
-> path above is on borrowed time — as classic token creation is retired tenant-by-tenant
-> (sprint already, prod following), **the Account Management platform-token path becomes
-> the direction for ALL generations**, not just gen3. Treat the gen2 self-mint as legacy;
-> prioritise the Account Management mint (below) as the long-term mechanism.
+Classic minting needing no client is why an unconfigured tenant looks *half* working — a
+training starts, but gen3 minting and "Update now" both fail. That asymmetry is the fingerprint
+of a tenant with no stored client.
 
-### Gen3 / migrated tenants (sprint: `*.sprint.apps.dynatracelabs.com`, e.g. ydi9582h; rolling out to prod)
-Classic API-token **creation is disabled** here (Settings API returns 400 "only available
-in Account Management" — see `dynatrace-app-enablements/docs/sprint-mint-platform-tokens-spike.md`).
-So token minting can't go through the tenant. You need **two** things:
+### Classic-token retirement is per ENVIRONMENT, not per domain or per account
 
-1. **The same per-tenant Platform token as gen2** (deploy + settings) — *minus* the
-   `api-tokens` scopes (no effect here).
-2. **An account-level OAuth client** (myaccount.dynatrace.com → Identity & access
-   management → OAuth clients, in the tenant's **account**) authorized for **token
-   management**, used against the Account Management API (`api.dynatrace.com`) to mint
-   platform tokens for trainings. Orbital holds it **encrypted** (like B) and brokers
-   mint/revoke. **Exact account scope: confirm in the OAuth-client UI** — it's in the
-   `account-*` family (the create-client picker lists e.g. `account-idm-read/write`,
-   `account-uac-read/write`); grant the token/identity-management one. Hand Orbital:
-   `client_id`, `client_secret`, account `urn:dtaccount:<uuid>`. (The exact create
-   endpoint/body is finalized once this client exists — the IAM base
-   `api.dynatrace.com/iam/v1/accounts` is confirmed reachable.)
+Measured 2026-08-10, in the **same** sprint account: `ydi9582h` created a `dt0c01` normally,
+while `pvf2584h` answered
+`400 "Creation of new tokens is now only available in Account Management."`
+So "sprint = gen3, prod = gen2" is not a rule you can rely on, and neither is anything derived
+from the account. Treat every environment as possibly retired: register the OAuth client and the
+question stops mattering. (Background:
+`dynatrace-app-enablements/docs/sprint-mint-platform-tokens-spike.md`.)
 
-## How Orbital uses A at Register Tenant
-`/api/deploy/token` (paste token) or `/api/deploy/start` (SSO): deploy → then
-`_ensure_outbound_allowlist` + `_ensure_remote_grail` (both need `settings:objects:write`).
-If the token lacks `settings:objects:write`, the deploy still succeeds but those steps are
-**skipped** and reported in the deploy response/audit `warnings[]` (see app_deploy.py).
+`environment-api:api-tokens:write` — the scope the classic self-mint relies on — is shown as
+DEPRECATED in the scope picker, so the classic path is on borrowed time everywhere. The Account
+Management platform-token path is the long-term mechanism for **all** generations.
+
+## How Orbital uses the credential at Register Tenant
+`/api/deploy/oauth` (client, preferred) or `/api/deploy/token` (paste, fallback): deploy → then
+`_ensure_outbound_allowlist` + `_ensure_remote_grail` + `_store_mint_client` (all three need
+`settings:objects:write`). If the credential lacks it, the deploy still succeeds but those steps
+are **skipped** and reported in the response/audit `warnings[]` — and for `_store_mint_client`
+that is raised as **ACTION REQUIRED**, since the tenant is then not self-sufficient.
 
 ## Quick decision
-- **Prod `.apps.dynatrace.com`** → one tenant Platform token (gen2 scope set). Done.
-- **Sprint/dev `.sprint|dev.apps.dynatracelabs.com`** → tenant Platform token (deploy +
-  settings) **plus** an account OAuth client for minting (gen3).
+- **Any tenant, any domain, any generation** → one account OAuth client, registered through
+  `/api/deploy/oauth`. Done.
+- **Admin cannot create an OAuth client** → the platform-token paste flow in
+  `dynatrace-app-enablements/docs/tenant-onboarding.md` § Fallback. Installs and updates by
+  paste, classic minting works, gen3 minting and self-update do not.
