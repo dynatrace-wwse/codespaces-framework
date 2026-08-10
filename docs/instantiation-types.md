@@ -207,6 +207,47 @@ Key points:
 `getAppURL()` and `registerApp()` use to build the wildcard subdomain URL instead of
 the sslip.io or Codespaces URL.
 
+#### Telling an Orbital Codespace from a hand-opened one
+
+A Codespace can be started two ways, and only one of them wants an SSH server:
+
+| Launch path | `ORBITAL_ENVIRONMENT` | `INSTANTIATION_TYPE` | sshd installed |
+|---|---|---|---|
+| GitHub UI / `gh codespace create`, repo Orbital never touched | absent | `github-codespaces` | no |
+| GitHub UI, repo Orbital used **before** | stale `true` → confirmed away | `github-codespaces` | no |
+| Enablement App → Orbital | `true` | `orbital_codespaces` | yes |
+| Sysbox job / local / dev container / CI | n/a | `orbital` / `local-docker-container` / `remote-container` / `github-workflow` | no |
+
+The subtlety is row 2. Orbital passes its signal by setting `ORBITAL_ENVIRONMENT`
+as a **user Codespaces secret scoped to the repo** — the only channel GitHub offers
+for getting a value into a Codespace it is about to create. A secret cannot be bound
+to one Codespace, so on its own the marker is sticky: after a single app-launched
+training, every Codespace the learner later opens by hand on that repo sees it too.
+
+Two mechanisms keep row 2 honest:
+
+1. **Confirmation.** `variables.sh` treats the secret as a hint and asks Orbital
+   about *this* Codespace: `GET /api/codespace/orbital/$CODESPACE_NAME` →
+   `{"orbital": true|false}`, answered from the `job:running:{name}` record Orbital
+   writes for every Codespace it creates. Only an explicit `false` downgrades the
+   type — an unreachable ops server, a missing `curl` or an unparseable answer keeps
+   `orbital_codespaces`, because a stale marker costs one small `apt-get` while a
+   wrong downgrade kills the in-app terminal for a whole training. The verdict is
+   cached under `~/.cache/dt-framework/orbital-codespace.$CODESPACE_NAME`, so the
+   5-second call is paid at most once per Codespace and not on every terminal open.
+   Point it elsewhere with `ORBITAL_BASE_URL`.
+2. **Cleanup.** `_clear_orbital_marker()` un-scopes the secret from the repo when
+   Orbital deletes or reaps the Codespace, so the marker does not outlive the
+   session that needed it.
+
+`setUpTerminal` installs sshd for `orbital_codespaces` only. The install uses
+`apt-get --no-install-recommends`: `openssh-server` *recommends*
+`default-logind | logind | libpam-systemd`, which pulls systemd, systemd-sysv,
+systemd-resolved, systemd-timesyncd and dbus into the devcontainer — a 7-minute
+install that rewrites `/etc/nsswitch.conf` and replaces `/sbin/init`. None of it is
+needed: the Codespaces agent starts sshd itself, the framework only puts the binary
+and its host keys on disk.
+
 ### 5. 🧑‍🚀 Codespaces launched from the Enablement App (planned)
 
 The [Enablement App](enablement-app.md) lets a learner launch a training from inside their

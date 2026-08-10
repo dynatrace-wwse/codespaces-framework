@@ -87,3 +87,19 @@ source_functions() {
   [[ "$output" == *'INSTANTIATION_TYPE'* ]]
   [[ "$output" == *'orbital_codespaces'* ]]
 }
+
+@test "installCodespaceSSH: a plain github-codespaces Codespace never triggers it" {
+  # Regression guard. The gate once read `orbital_codespaces|github-codespaces)`,
+  # which made every hand-opened Codespace run a 7-minute apt-get it cannot use.
+  # The condition itself must not mention github-codespaces.
+  run grep -B2 "    installCodespaceSSH" "$FAKE_REPO/.devcontainer/util/functions.sh"
+  [[ "$output" != *'github-codespaces'* ]]
+}
+
+@test "installCodespaceSSH: apt-get runs with --no-install-recommends" {
+  # openssh-server's Recommends line (default-logind|logind|libpam-systemd, …)
+  # drags in systemd, systemd-sysv, systemd-resolved and dbus: 7 minutes, a
+  # rewritten /etc/nsswitch.conf and a replaced /sbin/init inside the devcontainer.
+  run grep -A3 "apt-get install" "$FAKE_REPO/.devcontainer/util/functions.sh"
+  [[ "$output" == *'--no-install-recommends'* ]]
+}

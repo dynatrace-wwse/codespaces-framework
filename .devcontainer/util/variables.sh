@@ -92,6 +92,53 @@ elif [[ -n $GITHUB_WORKFLOW ]] || [[ -n $GITHUB_STEP_SUMMARY ]]; then
 else
   INSTANTIATION_TYPE="local-docker-container"
 fi
+
+# Orbital ops server — overridable so a dev/staging deployment can be pointed at.
+export ORBITAL_BASE_URL="${ORBITAL_BASE_URL:-https://autonomous-enablements.whydevslovedynatrace.com}"
+
+# Confirm "orbital_codespaces" against Orbital itself.
+#
+# ORBITAL_ENVIRONMENT is a *user* Codespaces secret scoped to the repo, so it
+# outlives the session that set it: after one app-launched training, every
+# Codespace the learner later opens BY HAND on that repo also sees the secret and
+# would claim to be Orbital-orchestrated. The secret cannot be bound to a single
+# Codespace — but Orbital knows exactly which Codespace names it created
+# (job:running:{name}), so ask it about this one.
+#
+# Fail-safe direction: only an explicit "not mine" downgrades the type. Ops server
+# unreachable, no curl, no CODESPACE_NAME, unparseable answer → stay
+# orbital_codespaces. A stale marker then costs one small apt-get, whereas wrongly
+# downgrading a real Orbital session kills the in-app terminal for that training.
+#
+# The verdict is cached per Codespace: variables.sh is sourced on every terminal
+# open, and no shell may hang on a 5s HTTP call more than once.
+if [ "$INSTANTIATION_TYPE" = "orbital_codespaces" ] && [ -n "${CODESPACE_NAME:-}" ]; then
+  _orb_cache="${HOME}/.cache/dt-framework/orbital-codespace.${CODESPACE_NAME}"
+  if [ -r "$_orb_cache" ]; then
+    _orb_verdict=$(cat "$_orb_cache" 2>/dev/null)
+  else
+    _orb_verdict="1"   # default: trust the marker
+    if command -v curl >/dev/null 2>&1; then
+      # `|| true`: a non-zero curl must leave the fail-safe default in place, not
+      # abort a caller that sources this under `set -e`.
+      _orb_answer=$(curl -fsS -m 5 \
+        "${ORBITAL_BASE_URL}/api/codespace/orbital/${CODESPACE_NAME}" 2>/dev/null || true)
+      case "$_orb_answer" in
+        *'"orbital":false'*|*'"orbital": false'*) _orb_verdict="0" ;;
+      esac
+      unset _orb_answer
+    fi
+    # Cache every completed attempt, including the fail-safe one, so the 5s
+    # timeout is paid at most once per Codespace.
+    mkdir -p "$(dirname "$_orb_cache")" 2>/dev/null \
+      && printf '%s' "$_orb_verdict" > "$_orb_cache" 2>/dev/null
+  fi
+  if [ "$_orb_verdict" = "0" ]; then
+    INSTANTIATION_TYPE="github-codespaces"
+  fi
+  unset _orb_cache _orb_verdict
+fi
+
 export INSTANTIATION_TYPE=$INSTANTIATION_TYPE
 
 if [ -e "$COUNT_FILE" ]; then
