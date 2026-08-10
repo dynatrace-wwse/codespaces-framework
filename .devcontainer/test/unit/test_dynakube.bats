@@ -558,3 +558,42 @@ EOF
   [[ "$output" != *"KUBECTL_SHOULD_NOT_RUN"* ]]
   [[ "$output" != *"downgrading to the latest available"* ]]
 }
+
+@test "generateDynakube: pins the public ActiveGate image on a sprint tenant (x86)" {
+  source_functions
+  latestPublicActiveGateImage() { echo "public.ecr.aws/dynatrace/dynatrace-activegate:9.9.9.9-9"; }
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  DT_ENVIRONMENT="https://ydi9582h.sprint.apps.dynatracelabs.com" generateDynakube apponly
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" == *'image: "public.ecr.aws/dynatrace/dynatrace-activegate:9.9.9.9-9"'* ]]
+}
+
+@test "generateDynakube: no ActiveGate image on a non-sprint tenant (x86)" {
+  source_functions
+  # would fail the test if the sprint branch ran
+  latestPublicActiveGateImage() { echo "public.ecr.aws/dynatrace/dynatrace-activegate:SHOULD_NOT_RUN"; }
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  generateDynakube apponly   # setup() exports a prod DT_ENVIRONMENT
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" != *"SHOULD_NOT_RUN"* ]]
+  [[ "$output" != *"dynatrace-activegate:"* ]]
+}
+
+@test "generateDynakube: sprint + ARM keeps the ARM image, no double pin" {
+  source_functions
+  latestPublicActiveGateImage() { echo "public.ecr.aws/dynatrace/dynatrace-activegate:SHOULD_NOT_RUN"; }
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  ARCH="aarch64" DT_ENVIRONMENT="https://ydi9582h.sprint.apps.dynatracelabs.com" \
+    generateDynakube apponly
+
+  run grep -c '^    image:' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [ "$output" = "1" ]
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" == *"dynatrace-activegate:1.2.3.4-5"* ]]
+  [[ "$output" != *"SHOULD_NOT_RUN"* ]]
+}
