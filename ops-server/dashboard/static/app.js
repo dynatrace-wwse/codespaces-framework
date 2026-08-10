@@ -3414,7 +3414,7 @@ async function goRegisterOauth(action) {
                         ? ' · <strong style="color:#2da44e">token minting configured</strong> — this tenant now mints its own tokens and updates itself'
                         : ` · <strong style="color:#d29922">client NOT stored on the tenant</strong> (${escapeHtml(j.mintClient || 'unknown')}) — paste it in the app under Settings → Training Token Minting`;
                 m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + mint
-                    + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '')
+                    + (j.profile ? ` · the trainings delivered to this tenant match the profile <strong>"${escapeHtml(j.profile)}"</strong>` : '')
                     + ((j.warnings || []).length ? `<br><span class="content-hint">⚠ ${j.warnings.map(escapeHtml).join('<br>⚠ ')}</span>` : '');
             }
             loadRegisterAudit();
