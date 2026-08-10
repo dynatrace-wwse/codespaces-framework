@@ -113,17 +113,30 @@ def test_no_orbital_token_configured_skips_before_any_call(monkeypatch):
     assert called["n"] == 0
 
 
-def test_the_seed_warning_states_the_manual_step_and_why_it_is_manual():
-    # An earlier version of this claimed seeding was automatic. It is not: an app
-    # function invoked by an external bearer runs with the CALLER's permissions,
-    # so routing the write through the app hits the same ungrantable scope.
-    # Telling an admin the install handled it would leave them with a tenant that
-    # 401s and no reason to look at settings.
-    w = dep._scope_warnings("", "", "skipped (something)")[0]
-    assert "ONE-TIME manual step" in w
-    assert "Orbital Server Configuration" in w
-    assert "cannot be automated" in w
-    assert "CALLER's permissions" in w
+def test_an_unseeded_orbital_config_is_no_longer_worth_warning_about():
+    # History, because this assertion has now been inverted twice and the reasons
+    # are not interchangeable:
+    #
+    #   1. Originally the warning claimed seeding was automatic. It was not — an app
+    #      function invoked by an external bearer runs with the CALLER's permissions,
+    #      so routing the write through the app hit the same ungrantable
+    #      app-settings:objects:write.
+    #   2. So the warning became an ACTION REQUIRED manual step.
+    #   3. Then the app started shipping its own Orbital bearer
+    #      (api/_orbital-baked-token.ts), which is the last rung of getOrbitalToken().
+    #      An unseeded tenant provisions labs and runs workshops perfectly well, so
+    #      ACTION REQUIRED was crying wolf on every single deploy.
+    #
+    # The status string is still reported verbatim in the deploy result and the audit
+    # row; it just no longer raises a warning nobody needs to act on.
+    assert dep._scope_warnings("", "", "skipped (something)") == []
+
+
+def test_a_token_orbital_itself_rejects_is_still_worth_warning_about():
+    # The one orbital-config outcome that is a real defect, and it points at THIS
+    # server rather than at the tenant admin, who can do nothing about it.
+    w = dep._scope_warnings("", "", "seed refused: Orbital did not accept the token")[0]
+    assert "ACTION REQUIRED" in w
 
 
 
