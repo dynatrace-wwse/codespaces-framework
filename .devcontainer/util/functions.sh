@@ -2043,17 +2043,19 @@ exposeMkdocs(){
   printInfo "Exposing Mkdocs in your dev.container in port 8000 & running in the background, type 'jobs' to show the process."
   nohup mkdocs serve --dev-addr=0.0.0.0:8000 --watch-theme --dirtyreload --livereload > /dev/null 2>&1 &
 
-  # Register mkdocs with ingress if the controller is available
-  if kubectl get ns ingress-nginx &>/dev/null; then
+  if [[ "$CODESPACES" == true ]]; then
+    # Codespaces forwards port 8000 directly, so mkdocs needs no ingress — and
+    # must not build one: registerMkdocs' Ingress has no host-less catch-all
+    # rule (port 80 belongs to the training app), and its Service/Endpoints
+    # resolve the backend IP with `docker exec kind-control-plane`, which is
+    # Kind-only. Registry row only, so the greeting still lists the docs.
+    _registerMkdocsRow "" 8000
+    printInfo "Mkdocs registered and accessible at: $(getAppURL "docs" 8000)"
+  elif kubectl get ns ingress-nginx &>/dev/null; then
+    # Orbital + local: exposed through the ingress controller like any app.
     registerMkdocs
   else
-    local url
-    if [[ "$CODESPACES" == true ]]; then
-      url="https://${CODESPACE_NAME}-8000.app.github.dev"
-    else
-      url="http://localhost:8000"
-    fi
-    printInfo "Mkdocs available at: $url"
+    printInfo "Mkdocs available at: http://localhost:8000"
   fi
 }
 
@@ -2177,11 +2179,16 @@ installIngressController() {
 
 getAppURL() {
   # Returns the user-facing URL for an app based on environment type.
-  # Usage: getAppURL <app-name>
+  # Usage: getAppURL <app-name> [codespaces-port]
   # Orbital:    wildcard subdomain {appname}--{job_slug}.autonomous-enablements.*
-  # Codespaces: port 80 is forwarded; catch-all ingress rule routes the request.
+  # Codespaces: one forwarded port per service. Default 80 — the ingress
+  #             catch-all rule routes it to the training app. Services that
+  #             bypass the ingress (mkdocs on 8000) pass their own port.
   # Local/other: magic-DNS sslip.io URL
   local app_name="$1"
+  # ":-" so both an omitted and an explicitly-empty 2nd arg fall back to 80
+  # (registerApp deliberately stores an empty cs_port).
+  local cs_port="${2:-80}"
   local detected_ip
 
   if [[ "$(detectRunEnvironment)" == "orbital" ]] && [[ -n "${ORBITAL_JOB_ID:-}" ]]; then
@@ -2189,7 +2196,8 @@ getAppURL() {
     subdomain=$(computeOrbitalSubdomain "$app_name")
     echo "https://${subdomain}.autonomous-enablements.whydevslovedynatrace.com"
   elif [[ "$CODESPACES" == true ]]; then
-    echo "https://${CODESPACE_NAME}-80.app.github.dev"
+    # Orgs can be issued a non-default forwarding domain.
+    echo "https://${CODESPACE_NAME}-${cs_port}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
   else
     detected_ip=$(detectIP)
     echo "http://${app_name}.${detected_ip}.${MAGIC_DOMAIN}"
@@ -2414,7 +2422,10 @@ listApps() {
   fi
 
   printInfoSection "Registered Applications"
-  while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port; do
+  # Read ALL 7 fields. With only 6 names, `read` stuffs the remainder into the
+  # last one, so cs_port became the literal "|" for a row with an empty
+  # orbital_subdomain — which then leaked into the Codespaces URL.
+  while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port orbital_subdomain; do
     local url
     url=$(getAppURL "$app_name" "$cs_port")
     printInfo "  ${app_name} (ns: ${namespace}) → ${url}"
@@ -2483,20 +2494,22 @@ spec:
               number: 8000
 MKDOCSEOF
 
-  # Register in app registry
-  local cs_port=""
-  if [[ "$CODESPACES" == true ]]; then
-    cs_port=8000  # mkdocs already listens on 8000
-  fi
+  # Reached through the ingress on port 80 like any other app, so cs_port is
+  # empty — the Codespaces path never gets here (see exposeMkdocs).
+  _registerMkdocsRow "$mkdocs_host" ""
+
+  printInfo "Mkdocs registered and accessible at: $(getAppURL "docs" "")"
+}
+
+_registerMkdocsRow() {
+  # Writes the "docs" row of the app registry. Usage: _registerMkdocsRow <ingress_host> <cs_port>
+  # 7 fields, same shape as registerApp — greeting.sh and listApps both read 7.
+  local ingress_host="$1" cs_port="$2"
   mkdir -p "$(dirname "$APP_REGISTRY")"
   # Remove old entry if exists
   grep -v "^docs|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
   mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
-  echo "docs|default|mkdocs-external|8000|${mkdocs_host}|${cs_port}" >> "$APP_REGISTRY"
-
-  local url
-  url=$(getAppURL "docs" "$cs_port")
-  printInfo "Mkdocs registered and accessible at: $url"
+  echo "docs|default|mkdocs-external|8000|${ingress_host}|${cs_port}|" >> "$APP_REGISTRY"
 }
 
 deployAITravelAdvisorApp(){

@@ -127,15 +127,14 @@ source_functions() {
   [ "$result" = "http://todoapp.10.0.0.1.sslip.io" ]
 }
 
-@test "getAppURL: Codespaces ignores port arg, always returns port 80 (catch-all ingress)" {
+@test "getAppURL: Codespaces honours an explicit port (mkdocs on 8000)" {
   source_functions
   export CODESPACES=true
   export CODESPACE_NAME="myspace"
 
-  # A port arg may still be passed by legacy callers — it must be ignored.
-  # Codespaces forwards only port 80; the catch-all ingress rule routes the request.
-  result=$(getAppURL "todoapp" "8080")
-  [ "$result" = "https://myspace-80.app.github.dev" ]
+  # Services that bypass the ingress get their own forwarded port.
+  result=$(getAppURL "docs" "8000")
+  [ "$result" = "https://myspace-8000.app.github.dev" ]
 }
 
 @test "getAppURL: returns Codespaces port 80 URL when no port given" {
@@ -145,6 +144,25 @@ source_functions() {
 
   result=$(getAppURL "todoapp")
   [ "$result" = "https://myspace-80.app.github.dev" ]
+}
+
+@test "getAppURL: empty port arg falls back to 80 (registerApp stores an empty cs_port)" {
+  source_functions
+  export CODESPACES=true
+  export CODESPACE_NAME="myspace"
+
+  result=$(getAppURL "todoapp" "")
+  [ "$result" = "https://myspace-80.app.github.dev" ]
+}
+
+@test "getAppURL: honours a non-default port-forwarding domain" {
+  source_functions
+  export CODESPACES=true
+  export CODESPACE_NAME="myspace"
+  export GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN="preview.app.github.dev"
+
+  result=$(getAppURL "todoapp")
+  [ "$result" = "https://myspace-80.preview.app.github.dev" ]
 }
 
 @test "getAppURL: returns Orbital wildcard subdomain URL" {
@@ -258,6 +276,33 @@ source_functions() {
   run listApps
   [ "$status" -eq 0 ]
   [[ "$output" == *"No applications registered"* ]]
+}
+
+@test "listApps: 7-field row does not leak a delimiter into the Codespaces port" {
+  source_functions
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  export CODESPACES=true
+  export CODESPACE_NAME="myspace"
+  # 7 fields with an empty cs_port AND an empty orbital_subdomain — reading
+  # only 6 names used to leave cs_port as the literal "|".
+  echo "todoapp|todoapp|todoapp|8080|todoapp.127.0.0.1.sslip.io||" > "$APP_REGISTRY"
+
+  run listApps
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"https://myspace-80.app.github.dev"* ]]
+  [[ "$output" != *"myspace-|"* ]]
+}
+
+@test "listApps: mkdocs row keeps its own forwarded port" {
+  source_functions
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  export CODESPACES=true
+  export CODESPACE_NAME="myspace"
+  echo "docs|default|mkdocs-external|8000||8000|" > "$APP_REGISTRY"
+
+  run listApps
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"https://myspace-8000.app.github.dev"* ]]
 }
 
 # ============================================================
