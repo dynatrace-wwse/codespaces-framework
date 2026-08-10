@@ -330,19 +330,30 @@ def _permission_hint(action: str, output: str) -> str:
             f"Create the token in the TARGET tenant with those scopes and retry. ")
 
 
-# What an unseeded Orbital token actually costs, today.
+# What an unseeded Orbital token actually costs, today: nothing, on any app
+# version that ships the baked bearer.
 #
-# Stated precisely rather than dramatically. Workshops break immediately: the
-# /api/live/* endpoints require the service bearer with no exception. Hands-on
-# labs keep working for now only because /api/arena/* is still inside its
-# compatibility window (_require_arena_auth allows anonymous callers while
-# ARENA_AUTH_ENFORCE != "1") — when that flips, they stop too. Saying "every
-# environment action fails" is wrong today and would be right later; saying which
-# breaks now and which breaks next is right in both.
+# This text used to say workshops fail immediately and labs fail when the arena
+# compatibility window closes. That was true before the app carried its own
+# bearer, and it has been wrong since app commit 0c030fa (api/_orbital-baked-token.ts,
+# 2026-08-06). getOrbitalToken() (api/orbital.function.ts, api/codespace.function.ts)
+# resolves in order: the tenant's `orbital-config` object → ORBITAL_TOKEN env
+# (dt-app dev only) → the bearer compiled into the bundle. Every Orbital call the
+# app makes — /api/arena/* AND /api/live/* — goes through that one resolver, so an
+# unseeded tenant provisions, mints, and runs workshops exactly like a seeded one.
+# Reported as ACTION REQUIRED on a tenant that demonstrably worked, this warning
+# was crying wolf.
+#
+# Seeding is now an OVERRIDE, not a prerequisite. The one case where its absence
+# bites is a server-side rotation: ORBITAL_TOKEN changed in /home/ops/.env without
+# redeploying the app with the new baked value. That is rotation discipline here,
+# not a paste a tenant admin must perform.
 _ORBITAL_TOKEN_CONSEQUENCE = (
-    "Without it, workshops and live sessions fail immediately (those endpoints always "
-    "require the token), and hands-on labs keep working only while Orbital's arena "
-    "compatibility window is open — they fail too once it closes.")
+    "Not blocking: the app ships a default Orbital bearer, so an unseeded tenant still "
+    "provisions labs and runs workshops/live sessions. Setting a token in the app → "
+    "Settings → Orbital Server Configuration is an optional per-tenant override; the only "
+    "case where its absence matters is ORBITAL_TOKEN being rotated on this server without "
+    "redeploying the app with the new baked value.")
 
 
 def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "") -> list[str]:
@@ -359,41 +370,41 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
     if "token lacks settings" in (allowlist or ""):
         warnings.append(
             "outbound allowlist NOT updated: the deploy token is missing settings:objects:write.")
-    # An unseeded orbital-config is the loudest failure of the three: the app installs
-    # fine and then 401s on every provision, with nothing in the UI explaining why.
+    # orbital-config seeding is optional since the app started shipping its own
+    # bearer; these branches report what happened, they do not raise an alarm.
     if (orbital_config or "").startswith("unverified"):
-        # Weaker claim, weaker warning: this is "check it", not "it is broken".
-        # Add app-settings:objects:read to the deploy client and this becomes a
-        # definite answer instead of a shrug.
         warnings.append(
             "Could not verify the app's Orbital token — the deploy credential cannot read app "
             "settings. Add app-settings:objects:read to the client and this check becomes "
-            f"definite. If this tenant is new, set the token once in the app → "
-            f"Admin → Orbital Server Configuration; {_ORBITAL_TOKEN_CONSEQUENCE} "
-            "An already-configured tenant needs nothing.")
+            f"definite. {_ORBITAL_TOKEN_CONSEQUENCE}")
     elif (orbital_config or "").startswith("seed refused"):
-        # The app answered, and said no. That is a server-side problem, not the
-        # admin's: Orbital handed out a token its own /api/service/verify rejects.
+        # The only genuinely actionable branch. The app asked Orbital about the
+        # token Orbital itself sent, and Orbital said no — which means the value
+        # in ORBITAL_TOKEN is stale. The bearer baked into the shipped app is
+        # normally that same value, so a mismatch here is the one failure mode
+        # the default bearer does NOT cover: unseeded tenants 401 everywhere.
         warnings.append(
             f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). This one is on "
             f"this server, not the tenant: ORBITAL_TOKEN in /home/ops/.env is not a value "
-            f"Orbital itself accepts. Fix it there and re-deploy. "
-            f"{_ORBITAL_TOKEN_CONSEQUENCE}")
+            f"Orbital itself accepts. Fix it there and re-deploy. This is also the one case "
+            f"the app's baked bearer does not cover — if the server token was rotated, the "
+            f"shipped one is stale too and every unseeded tenant will 401 on Orbital until "
+            f"the app is rebuilt with the new value (api/_orbital-baked-token.ts).")
     elif (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or "") \
             or "error" in (orbital_config or ""):
+        # FYI, not an alarm. The expected outcome on a tenant we do not own: the
+        # deploy bearer cannot write app-settings (an app function invoked by an
+        # external bearer runs with the CALLER's permissions, and
+        # app-settings:objects:write is not in the OAuth client scope catalog at
+        # all — 400 invalid_request even for a client with full account rights).
+        # The tenant runs on the baked bearer regardless, so this is a note about
+        # a skipped optional step, not a defect and not a task for the admin.
         warnings.append(
-            f"ACTION REQUIRED — Orbital token not seeded ({orbital_config}). "
-            f"{_ORBITAL_TOKEN_CONSEQUENCE} This is a ONE-TIME manual step on a new tenant: "
-            f"open the app → Settings → Orbital Server Configuration and paste the Orbital "
-            f"token. A tenant that already has one needs nothing. It cannot be automated "
-            f"FROM HERE — app-settings:objects:write is not offered in the OAuth client "
-            f"scope catalog (400 invalid_request even for a client with full account "
-            f"rights), and routing the write through an app function does not help: an app "
-            f"function invoked by an external bearer runs with the CALLER's permissions, "
-            f"not the app's. A signed-in browser session DOES carry the app's own scopes, "
-            f"so a headless login can do it (that is how COE/SRO/sprint were seeded on "
-            f"2026-08-02) — but that needs an interactive SSO login per tenant, which we "
-            f"only have for tenants we own.")
+            f"FYI — Orbital token not seeded on this tenant ({orbital_config}). "
+            f"{_ORBITAL_TOKEN_CONSEQUENCE} Expected on a tenant we do not own: the deploy "
+            f"credential cannot write app settings (app-settings:objects:write is not "
+            f"grantable to an OAuth client, and an app function invoked by an external "
+            f"bearer runs with the caller's permissions). Nothing to do.")
     return warnings
 
 

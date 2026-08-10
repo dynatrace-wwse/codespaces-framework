@@ -1183,17 +1183,42 @@ def test_a_client_with_the_documented_scopes_deploys():
     assert dep.blocking_missing(caps) == []
 
 
-def test_the_unseeded_orbital_token_warning_names_the_manual_step():
+def test_the_unseeded_orbital_token_warning_does_not_cry_wolf():
+    """An unseeded tenant is not a broken tenant.
+
+    Since the app ships its own bearer (api/_orbital-baked-token.ts), a tenant
+    that was never seeded provisions labs and runs workshops exactly like a
+    seeded one — getOrbitalToken() falls through orbital-config → env → baked.
+    The old wording called this ACTION REQUIRED and claimed live sessions "fail
+    immediately", on tenants that demonstrably worked.
+    """
     w = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
     assert len(w) == 1
-    assert "workshops and live sessions fail immediately" in w[0]
+    assert "ACTION REQUIRED" not in w[0]
+    assert "fail immediately" not in w[0]
+    assert "ships a default Orbital bearer" in w[0]
     assert "Orbital Server Configuration" in w[0]
     # It must not send the admin off to grant a scope that cannot be granted,
     # and must not imply the install could have handled it — routing the write
     # through an app function fails the same way, because such a function runs
     # with the caller's permissions.
-    assert "not offered in the OAuth client scope catalog" in w[0]
-    assert "CALLER's permissions" in w[0]
+    assert "not grantable to an OAuth client" in w[0]
+    assert "caller's permissions" in w[0]
+
+
+def test_only_a_stale_server_token_is_action_required():
+    """The one branch the baked bearer does NOT cover.
+
+    "seed refused" means Orbital rejected the token Orbital itself sent, i.e.
+    ORBITAL_TOKEN here is stale. The shipped bearer is normally that same value,
+    so it is stale too and unseeded tenants really do 401 — the only case worth
+    shouting about.
+    """
+    w = dep._scope_warnings("", "", "seed refused: Orbital did not accept the token")
+    assert len(w) == 1
+    assert "ACTION REQUIRED" in w[0]
+    assert "ORBITAL_TOKEN in /home/ops/.env" in w[0]
+    assert "_orbital-baked-token.ts" in w[0]
 
 
 def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
@@ -1208,13 +1233,12 @@ def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
     hard = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
     assert len(soft) == 1 and len(hard) == 1
     assert "Could not verify" in soft[0]
+    # Neither is ACTION REQUIRED any more: the app carries its own bearer, so an
+    # unknown or absent orbital-config does not stop the tenant working.
     assert "ACTION REQUIRED" not in soft[0]
-    assert "ACTION REQUIRED" in hard[0]
-    # Both still say what breaks and where to fix it — precisely. "Every
-    # environment action fails" was wrong while the arena compat window is open;
-    # workshops break now, labs break when it closes.
+    assert "ACTION REQUIRED" not in hard[0]
     for w in (soft[0], hard[0]):
-        assert "workshops and live sessions fail immediately" in w
+        assert "ships a default Orbital bearer" in w
         assert "Orbital Server Configuration" in w
     # The soft one points at the scope that turns a shrug into an answer.
     assert "app-settings:objects:read" in soft[0]
