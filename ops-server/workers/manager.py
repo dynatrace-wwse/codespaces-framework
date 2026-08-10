@@ -85,6 +85,31 @@ APP_PROXY_PORT_COUNT = int(os.environ.get("APP_PROXY_PORT_COUNT", "100"))
 _MASTER_K3D_LB_PORT = 30080
 
 
+def _dead_worker_candidate(rec: dict, job_id: str, active_jobs) -> bool:
+    """Could this ``job:running`` record belong to a worker that no longer exists?
+
+    Pure and cheap on purpose: the terminate reconciler calls it for every key in
+    a 15 s scan, and only asks Redis whether ``worker:{id}`` is registered when
+    this says yes — the keyspace scan already dominates our Redis budget.
+
+    A **Codespace is never a candidate**, whatever its ``worker_id`` says.
+    ``codespace_service.provision()`` stores ``worker_id="github-codespaces"`` as
+    a display label for the Running tab; no agent ever registers that worker, so
+    without this guard every Codespace record was reaped seconds after it was
+    written (measured 2026-08-10: provisioned 16:15:38, reaped 16:15:46). The
+    record is load-bearing — losing it 404s the in-app terminal
+    (``/api/jobs/{id}/shell-token``), flips ``/api/codespace/orbital/{name}`` to
+    false so the framework skips the relay sshd install, skips the ``ssh_ready``
+    hold so the app announces "ready" with no shell, and disables idle/expiry
+    reaping and History. GitHub owns the Codespace lifecycle; ``_expiry_reaper``
+    is what cleans these up, as its own docstring says.
+    """
+    if rec.get("provider") == "codespace":
+        return False
+    worker_id = rec.get("worker_id", "")
+    return bool(worker_id and worker_id != "master" and job_id not in active_jobs)
+
+
 def _branch_of(job: dict) -> str:
     return job.get("ref") or job.get("head_branch") or "main"
 
@@ -460,8 +485,8 @@ class WorkerManager:
                     # re-provisioning would match a dead session) and inflate the
                     # dashboard. If the owning worker is no longer registered, the
                     # container is unreachable regardless of flags — reap the record.
-                    if (worker_id and worker_id != "master"
-                            and job_id not in self.active_jobs
+                    # Codespaces are excluded — see _dead_worker_candidate.
+                    if (_dead_worker_candidate(rec, job_id, self.active_jobs)
                             and not await self.pool.exists(f"worker:{worker_id}")):
                         log.info("Reconciler: worker %s gone — reaping orphan %s",
                                  worker_id, job_id)

@@ -420,6 +420,15 @@ async def _append_creation_log(dtUser: str, name: str) -> None:
     actually happened while the repo was provisioning. Fetched once, when the
     Codespace first reaches ready — guarded by a flag on the running hash."""
     key = f"job:running:{name}"
+    # Never resurrect a record that is gone. Redis `hset` CREATES the key, so a
+    # status poll landing after the session was terminated or reaped rebuilt a
+    # partial, TTL-less job:running hash out of the flag writes below — which
+    # then flapped against the master reconciler (recreate → reap → recreate)
+    # and made /api/codespace/orbital/{name} answer true or false depending on
+    # which side of the 15 s loop the question arrived. If the session is over
+    # there is nothing to fetch anyway.
+    if not await _pool().exists(key):
+        return
     if await _pool().hget(key, "creation_log_fetched"):
         return
     # Mark first (best-effort at-most-once; a failed fetch clears the flag below
