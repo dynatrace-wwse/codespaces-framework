@@ -124,8 +124,13 @@ printRunningApplications(){
                 # Field 6 of the registry is the forwarded port: empty for apps
                 # served by the :80 ingress catch-all, 8000 for mkdocs.
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-${cs_port:-80}.${_fwd_domain}"
-            else
+            elif [[ -n "$ingress_host" ]]; then
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}http://${ingress_host}"
+            else
+                # No host for this environment (e.g. a row written for
+                # Codespaces read back elsewhere) — say so rather than printing
+                # a bare "http://".
+                echo -e "${CYAN}   $app_name ${NORMAL}${NORMAL}has no URL for this environment${RESET}"
             fi
         done < "$APP_REGISTRY"
     fi
