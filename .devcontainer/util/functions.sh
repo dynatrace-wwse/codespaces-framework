@@ -343,7 +343,101 @@ installK9s() {
 }
 
 
+ensureDockerGroupAccess() {
+  # Recover from losing the entrypoint race for the docker group.
+  #
+  # /entrypoint.sh aligns the container's docker GID with the host socket:
+  #   groupmod -g $(stat -c %g /var/run/docker.sock) docker
+  #   usermod  -aG docker $USER
+  #   exec sg docker "$*"
+  # Measured in a Codespace, that takes 3-5s (15:05:41 -> 15:05:46). Its final
+  # `exec sg` only re-groups the container's own CMD, which is how `make start`
+  # and the VS Code dev container run post-create — those are never affected.
+  #
+  # Codespaces instead runs postCreateCommand as a SEPARATE `docker exec`, and the
+  # devcontainer CLI fires it ~4s after the container starts (measured 15:05:45.197)
+  # — inside the entrypoint's window. dockerd snapshots the exec's supplementary
+  # groups at creation, so when the CLI wins the race that process tree never holds
+  # the docker GID: every docker call in post-create fails with
+  #   permission denied while trying to connect to the Docker daemon socket
+  # k3d cannot create the cluster and post-create exits 1. Observed on 3 of 5
+  # Codespaces. It reads as a phantom because `docker ps` works in every shell
+  # opened afterwards — those execs are created after the entrypoint has finished.
+  #
+  # Orbital/Sysbox uses `docker run -d … sleep infinity` + `docker exec` too, but
+  # only execs after cloning the repo, long past the entrypoint's window.
+  #
+  # Strictly a no-op whenever docker already answers, so healthy runs in all four
+  # instantiation types return on the first line.
+  local script="${1:-$0}"
+  local verdict
+  verdict="$(_dockerAccessVerdict "$script")"
+  case "$verdict" in ok|no-socket) return 0 ;; esac
+
+  # Only printed on the unhealthy path, and it is the evidence that identifies the
+  # race: the group DB lists the membership while this process's credentials do not.
+  printWarn "Docker socket is not reachable — waiting for the entrypoint's docker-group fix"
+  printInfo "  socket gid      : $(stat -c '%g' "${DOCKER_SOCKET:-/var/run/docker.sock}" 2>/dev/null)"
+  printInfo "  group database  : $(getent group docker 2>/dev/null)"
+  printInfo "  this process    : $(id -G 2>/dev/null)"
+  printInfo "  verdict         : $verdict"
+
+  # The entrypoint may still be between groupmod and usermod; give it a bounded
+  # chance to finish before deciding.
+  local waited=0
+  while [ "$verdict" = "no-membership" ] && [ "$waited" -lt 30 ]; do
+    sleep 1
+    waited=$((waited + 1))
+    verdict="$(_dockerAccessVerdict "$script")"
+  done
+
+  case "$verdict" in
+    ok)
+      printInfo "Docker became reachable after ${waited}s"
+      return 0
+      ;;
+    regroup)
+      printInfo "Group membership is in place but this process predates it — re-executing $script under the docker group"
+      export DT_DOCKER_REGROUP=1
+      exec sg docker "$script"
+      ;;
+    no-membership)
+      printWarn "$(id -un) is still not a member of the docker group after ${waited}s — continuing; docker calls will fail"
+      ;;
+    already-regrouped)
+      printWarn "Already re-executed under the docker group and docker is still unreachable"
+      ;;
+    not-a-script)
+      # Sourced into an interactive shell: re-execing would kill the user's terminal.
+      printWarn "Group membership exists but this shell predates it. Open a new shell, or run 'newgrp docker'."
+      ;;
+    no-sg)
+      printWarn "'sg' is unavailable — cannot re-acquire the docker group in this process"
+      ;;
+  esac
+  return 1
+}
+
+_dockerAccessVerdict() {
+  # Pure decision helper for ensureDockerGroupAccess: echoes exactly one token and
+  # changes nothing, so every branch — including the re-exec — is unit-testable
+  # without actually replacing the process.
+  docker info >/dev/null 2>&1 && { echo "ok"; return 0; }
+  [ -S "${DOCKER_SOCKET:-/var/run/docker.sock}" ] || { echo "no-socket"; return 0; }
+  # `id -nG <user>` reads the group DB rather than this process's frozen
+  # credentials — that discrepancy is exactly what we are detecting.
+  id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -qx docker || { echo "no-membership"; return 0; }
+  [ -z "${DT_DOCKER_REGROUP:-}" ] || { echo "already-regrouped"; return 0; }
+  [ -f "${1:-$0}" ] || { echo "not-a-script"; return 0; }
+  command -v sg >/dev/null 2>&1 || { echo "no-sg"; return 0; }
+  echo "regroup"
+}
+
 setUpTerminal(){
+  # First thing post-create.sh does, so the re-exec below costs nothing but a
+  # repeated source of the framework.
+  ensureDockerGroupAccess
+
   printInfoSection "Sourcing the DT-Enablement framework functions to the terminal, adding aliases, a Dynatrace greeting and installing power10k into .zshrc for user $USER "
 
   printInfoSection "Installing power10k into .zshrc for user $USER "
