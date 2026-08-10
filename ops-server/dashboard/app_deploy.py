@@ -330,30 +330,27 @@ def _permission_hint(action: str, output: str) -> str:
             f"Create the token in the TARGET tenant with those scopes and retry. ")
 
 
-# What an unseeded Orbital token actually costs, today: nothing, on any app
-# version that ships the baked bearer.
+# WE DO NOT SEED THE ORBITAL TOKEN ANY MORE, so its absence is not a warning.
 #
-# This text used to say workshops fail immediately and labs fail when the arena
-# compatibility window closes. That was true before the app carried its own
-# bearer, and it has been wrong since app commit 0c030fa (api/_orbital-baked-token.ts,
-# 2026-08-06). getOrbitalToken() (api/orbital.function.ts, api/codespace.function.ts)
-# resolves in order: the tenant's `orbital-config` object → ORBITAL_TOKEN env
-# (dt-app dev only) → the bearer compiled into the bundle. Every Orbital call the
-# app makes — /api/arena/* AND /api/live/* — goes through that one resolver, so an
-# unseeded tenant provisions, mints, and runs workshops exactly like a seeded one.
-# Reported as ACTION REQUIRED on a tenant that demonstrably worked, this warning
-# was crying wolf.
+# The app ships its own bearer (dynatrace-app-enablements
+# api/_orbital-baked-token.ts, since 0c030fa / 2026-08-06). getOrbitalToken()
+# resolves the tenant's `orbital-config` object → ORBITAL_TOKEN env (dt-app dev
+# only) → the bearer compiled into the bundle, and EVERY Orbital call the app
+# makes goes through that one resolver — /api/live/* as much as /api/arena/*. An
+# unseeded tenant provisions, mints and runs workshops exactly like a seeded one.
 #
-# Seeding is now an OVERRIDE, not a prerequisite. The one case where its absence
-# bites is a server-side rotation: ORBITAL_TOKEN changed in /home/ops/.env without
-# redeploying the app with the new baked value. That is rotation discipline here,
-# not a paste a tenant admin must perform.
-_ORBITAL_TOKEN_CONSEQUENCE = (
-    "Not blocking: the app ships a default Orbital bearer, so an unseeded tenant still "
-    "provisions labs and runs workshops/live sessions. Setting a token in the app → "
-    "Settings → Orbital Server Configuration is an optional per-tenant override; the only "
-    "case where its absence matters is ORBITAL_TOKEN being rotated on this server without "
-    "redeploying the app with the new baked value.")
+# This file used to emit "ACTION REQUIRED — Orbital token not seeded … workshops
+# and live sessions fail immediately", and did so on a fresh sprint tenant that
+# had already provisioned a training and minted tokens. The seed call fails by
+# design on any tenant we do not own: an app function invoked by an EXTERNAL
+# bearer runs with the CALLER's permissions, and app-settings:objects:write is
+# not grantable to an OAuth client at all. Warning about a step that cannot
+# succeed and does not need to teaches operators to skim the warnings list,
+# which is how the one that matters gets missed.
+#
+# So: skipped / failed / error / unverified produce NOTHING. The raw status is
+# still returned as the `orbital_config` field and written to the audit record,
+# so a deploy can still be diagnosed. Only `seed refused` warns — see below.
 
 
 def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "") -> list[str]:
@@ -370,14 +367,7 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
     if "token lacks settings" in (allowlist or ""):
         warnings.append(
             "outbound allowlist NOT updated: the deploy token is missing settings:objects:write.")
-    # orbital-config seeding is optional since the app started shipping its own
-    # bearer; these branches report what happened, they do not raise an alarm.
-    if (orbital_config or "").startswith("unverified"):
-        warnings.append(
-            "Could not verify the app's Orbital token — the deploy credential cannot read app "
-            "settings. Add app-settings:objects:read to the client and this check becomes "
-            f"definite. {_ORBITAL_TOKEN_CONSEQUENCE}")
-    elif (orbital_config or "").startswith("seed refused"):
+    if (orbital_config or "").startswith("seed refused"):
         # The only genuinely actionable branch. The app asked Orbital about the
         # token Orbital itself sent, and Orbital said no — which means the value
         # in ORBITAL_TOKEN is stale. The bearer baked into the shipped app is
@@ -390,21 +380,13 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
             f"the app's baked bearer does not cover — if the server token was rotated, the "
             f"shipped one is stale too and every unseeded tenant will 401 on Orbital until "
             f"the app is rebuilt with the new value (api/_orbital-baked-token.ts).")
-    elif (orbital_config or "").startswith("skipped") or "failed" in (orbital_config or "") \
-            or "error" in (orbital_config or ""):
-        # FYI, not an alarm. The expected outcome on a tenant we do not own: the
-        # deploy bearer cannot write app-settings (an app function invoked by an
-        # external bearer runs with the CALLER's permissions, and
-        # app-settings:objects:write is not in the OAuth client scope catalog at
-        # all — 400 invalid_request even for a client with full account rights).
-        # The tenant runs on the baked bearer regardless, so this is a note about
-        # a skipped optional step, not a defect and not a task for the admin.
-        warnings.append(
-            f"FYI — Orbital token not seeded on this tenant ({orbital_config}). "
-            f"{_ORBITAL_TOKEN_CONSEQUENCE} Expected on a tenant we do not own: the deploy "
-            f"credential cannot write app settings (app-settings:objects:write is not "
-            f"grantable to an OAuth client, and an app function invoked by an external "
-            f"bearer runs with the caller's permissions). Nothing to do.")
+    # No branch for skipped/failed/error. A seed that did not happen is not an
+    # event: the app runs on its baked bearer, and the write fails by design on
+    # any tenant we do not own (external bearer → caller's permissions → the
+    # ungrantable app-settings:objects:write). A warning nobody can act on is
+    # noise that teaches operators to skim the list, which is how the one
+    # warning that matters gets missed. The raw status is still returned as the
+    # `orbital_config` field and written to the audit record, so nothing is lost.
     return warnings
 
 

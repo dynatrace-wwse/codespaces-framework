@@ -681,16 +681,12 @@ def test_ensure_orbital_config_never_clobbers_configured_token():
     assert "put" not in captured and "post" not in captured
 
 
-def test_scope_warnings_flags_unseeded_orbital_config():
-    w = dep._scope_warnings("added 1 host(s)", "enabled → wwse",
-                            "skipped (token lacks app-settings:objects:write)")
-    assert len(w) == 1
-    assert "Orbital token not seeded" in w[0]
-    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse",
-                               "seed failed (HTTP 500)") != []
-    # seeded / pre-existing → silent
-    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "token seeded") == []
-    assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", "already configured") == []
+def test_scope_warnings_says_nothing_about_orbital_config():
+    """Every orbital-config outcome except "seed refused" is silent — we do not
+    seed any more, the app carries its own bearer. See _scope_warnings."""
+    for status in ("skipped (token lacks app-settings:objects:write)",
+                   "seed failed (HTTP 500)", "token seeded", "already configured"):
+        assert dep._scope_warnings("added 1 host(s)", "enabled → wwse", status) == [], status
 
 
 # --- deploy ref pinning -------------------------------------------------------
@@ -1183,27 +1179,25 @@ def test_a_client_with_the_documented_scopes_deploys():
     assert dep.blocking_missing(caps) == []
 
 
-def test_the_unseeded_orbital_token_warning_does_not_cry_wolf():
-    """An unseeded tenant is not a broken tenant.
+def test_an_unseeded_orbital_token_is_not_a_warning_at_all():
+    """We do not seed any more, so not having seeded is not news.
 
-    Since the app ships its own bearer (api/_orbital-baked-token.ts), a tenant
-    that was never seeded provisions labs and runs workshops exactly like a
-    seeded one — getOrbitalToken() falls through orbital-config → env → baked.
-    The old wording called this ACTION REQUIRED and claimed live sessions "fail
-    immediately", on tenants that demonstrably worked.
+    The app ships its own bearer (api/_orbital-baked-token.ts), so a tenant that
+    was never seeded provisions labs and runs workshops exactly like a seeded
+    one. The seed call additionally CANNOT succeed on a tenant we do not own —
+    an app function invoked by an external bearer runs with the caller's
+    permissions, and app-settings:objects:write is ungrantable. Every one of
+    these statuses is therefore silent; `orbital_config` still carries the raw
+    string for diagnosis.
     """
-    w = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
-    assert len(w) == 1
-    assert "ACTION REQUIRED" not in w[0]
-    assert "fail immediately" not in w[0]
-    assert "ships a default Orbital bearer" in w[0]
-    assert "Orbital Server Configuration" in w[0]
-    # It must not send the admin off to grant a scope that cannot be granted,
-    # and must not imply the install could have handled it — routing the write
-    # through an app function fails the same way, because such a function runs
-    # with the caller's permissions.
-    assert "not grantable to an OAuth client" in w[0]
-    assert "caller's permissions" in w[0]
+    for status in ("skipped (token lacks app-settings:objects:write)",
+                   "skipped (ORBITAL_TOKEN not configured)",
+                   'seed via app function: error Missing scopes: '
+                   '["app-settings:objects:write"]',
+                   "seed failed (HTTP 500)",
+                   "unverified (credential cannot read app settings)",
+                   "unverified (app function unreachable: HTTP 404)"):
+        assert dep._scope_warnings("", "", status) == [], status
 
 
 def test_only_a_stale_server_token_is_action_required():
@@ -1221,27 +1215,18 @@ def test_only_a_stale_server_token_is_action_required():
     assert "_orbital-baked-token.ts" in w[0]
 
 
-def test_unverifiable_orbital_token_is_a_softer_warning_than_a_missing_one():
-    """"Cannot read" is not "not configured".
+def test_the_other_two_post_install_warnings_are_untouched():
+    """Silencing the orbital-config family must not silence its neighbours.
 
-    The deploy credential may lack app-settings READ, in which case we simply do
-    not know whether a token is already there. Reporting that as "not seeded"
-    cried wolf on every already-configured tenant, which is how a real warning
-    stops being read.
+    remote-grail and the outbound allowlist really are skipped when the deploy
+    token lacks settings:objects:write, and really do fail silently afterwards.
     """
-    soft = dep._scope_warnings("", "", "unverified (credential cannot read app settings)")
-    hard = dep._scope_warnings("", "", "skipped (token lacks app-settings:objects:write)")
-    assert len(soft) == 1 and len(hard) == 1
-    assert "Could not verify" in soft[0]
-    # Neither is ACTION REQUIRED any more: the app carries its own bearer, so an
-    # unknown or absent orbital-config does not stop the tenant working.
-    assert "ACTION REQUIRED" not in soft[0]
-    assert "ACTION REQUIRED" not in hard[0]
-    for w in (soft[0], hard[0]):
-        assert "ships a default Orbital bearer" in w
-        assert "Orbital Server Configuration" in w
-    # The soft one points at the scope that turns a shrug into an answer.
-    assert "app-settings:objects:read" in soft[0]
+    w = dep._scope_warnings("skipped (token lacks settings:objects:write)",
+                            "skipped (token lacks settings:objects:write)",
+                            "skipped (token lacks app-settings:objects:write)")
+    assert len(w) == 2
+    assert any("remote-grail NOT configured" in x for x in w)
+    assert any("outbound allowlist NOT updated" in x for x in w)
 
 
 def test_every_rung_that_can_carry_app_settings_read_does():
