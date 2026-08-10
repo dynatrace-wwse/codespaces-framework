@@ -191,14 +191,24 @@ def _email(value) -> str:
     return str(value or "").strip().lower()
 
 
-def shape_progress(records, roster=None) -> dict:
+def shape_progress(records, roster=None, trainers=None) -> dict:
     """Fold raw Grail records into one row per learner plus a summary.
 
     Every roster email gets a row even with zero events ("not-started") — a
     board that silently omits the people who haven't started is the one thing a
     trainer cannot act on. Attendees who joined by code and are not on the
     roster appear too, from their events alone.
+
+    `trainers` are excluded from the board entirely. A trainer runs the lab
+    alongside the cohort (WS-4), which means they emit exactly the same
+    telemetry a learner does — so a co-trainer working through the steps showed
+    up as a row with a progress bar and a score, sitting in the cohort count and
+    dragging the average. The board answers "how is the CLASS doing", and the
+    people teaching it are not the class. The lead was already absent only by
+    accident (never on the roster, and often not running the lab); this makes it
+    the rule, for the whole trainer team.
     """
+    excluded = {_email(t) for t in (trainers or []) if _email(t)}
     rows: dict[str, dict] = {}
 
     def row(email: str) -> dict:
@@ -212,11 +222,14 @@ def shape_progress(records, roster=None) -> dict:
         })
 
     for email in sorted({_email(e) for e in (roster or []) if _email(e)}):
+        # A trainer who also put themselves on the roster is still a trainer.
+        if email in excluded:
+            continue
         row(email)
 
     for rec in records or []:
         email = _email(rec.get("userEmail"))
-        if not email:
+        if not email or email in excluded:
             continue
         r = row(email)
         event_type = str(rec.get("eventType") or rec.get("event.type") or "")

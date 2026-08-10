@@ -640,6 +640,20 @@ def is_member(session, roster, email, tenant="") -> bool:
         return True
     if not is_trainer(email, session):
         return False
+    # Tenant scoping is about the LEAD only.
+    #
+    # WS-1 exists because one person's address can be signed into several
+    # tenants, so "your workshops" filled up with workshops they had created
+    # somewhere else. That reasoning covers the creator and nobody else. A
+    # co-trainer was named explicitly, by address, exactly like a roster entry —
+    # so scoping them by tenant hid the workshop from the very person who was
+    # invited to teach it: added on COE, signed into sprint, workshop absent
+    # from their home page AND their Workshops list, with no way in.
+    #
+    # Co-trainers are therefore treated like learners here: named means member,
+    # whatever tenant they run on. That is what makes co-teaching cross-tenant.
+    if normalize_email(email) != lead_trainer(session):
+        return True
     owner = normalize_tenant(session.get("ownerTenant"))
     caller = normalize_tenant(tenant)
     return not (owner and caller) or owner == caller
@@ -894,9 +908,11 @@ def _as_int(value, default=0):
 def pacing_state(session) -> dict:
     """The pacing fields of a session, normalized.
 
-    Two independent trainer opt-ins, both default OFF — a workshop with neither
-    set runs "sequential own pace", which is what a trainer who touches nothing
-    should get:
+    Two independent trainer switches. Absent still means OFF here — this
+    function is the reader and must stay honest about what is stored — but new
+    workshops are CREATED with gateAhead="1" (see api_live_session_create), so
+    a trainer who touches nothing gets "hold the class here" on and solutions
+    withheld. Workshops created before that default keep their stored values:
 
       unlockPath  release solutions to learners who fall behind (steps <= the
                   class pointer).

@@ -361,3 +361,37 @@ def test_a_started_workshop_keeps_its_grace_window():
     now = datetime(2026, 8, 5, 16, 0, tzinfo=timezone.utc)
     session = _unstarted(startedAt="2026-08-05T15:00:00Z")
     assert lp.since_timestamp(session, now=now) == "2026-08-05T13:00:00Z"
+
+
+# ── Trainers are not the cohort ───────────────────────────────────────────────
+
+def test_trainers_never_appear_on_the_board():
+    # WS-4: a trainer runs the lab alongside the class, so they emit exactly
+    # the telemetry a learner does. Charting it put the trainer — and, once
+    # teams existed, every co-trainer — into the cohort count and the progress
+    # average. The board is the class; the people teaching it are not.
+    out = lp.shape_progress(
+        [_rec(lp.STARTED, "lead@dynatrace.com"),
+         _rec(lp.STARTED, "co@dynatrace.com"),
+         _rec(lp.STEP_COMPLETED, "co@dynatrace.com", completedSteps="4", stepCount="5"),
+         _rec(lp.STARTED, "alice@x.com")],
+        ["alice@x.com"],
+        ["lead@dynatrace.com", "co@dynatrace.com"])
+    assert [r["email"] for r in out["results"]] == ["alice@x.com"]
+    assert out["summary"]["total"] == 1
+
+
+def test_a_trainer_on_their_own_roster_is_still_a_trainer():
+    # Some trainers put themselves on the roster. That is not a promotion to
+    # learner — the seeded row has to be dropped too, or the board shows them
+    # as a permanently "not-started" attendee.
+    out = lp.shape_progress([], ["alice@x.com", "Lead@Dynatrace.com"],
+                            ["lead@dynatrace.com"])
+    assert [r["email"] for r in out["results"]] == ["alice@x.com"]
+
+
+def test_no_trainer_list_keeps_every_row():
+    # Callers that pass no team (older call sites, the standalone runner) must
+    # behave exactly as before.
+    out = lp.shape_progress([_rec(lp.STARTED, "alice@x.com")], ["alice@x.com"])
+    assert [r["email"] for r in out["results"]] == ["alice@x.com"]

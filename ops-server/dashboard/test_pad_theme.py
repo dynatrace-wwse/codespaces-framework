@@ -16,10 +16,32 @@ _TPL = a._PAD_PAGE_HTML
 
 
 def _body_without_token_declarations() -> str:
-    """The template minus the :root blocks, which SHOULD hold literal hex."""
+    """The template minus the parts that SHOULD hold literal hex.
+
+    Two exemptions, both deliberate:
+
+    - the `:root` blocks, which are where the theme tokens are declared;
+    - the brand mark, an inline copy of the app's own icon (a graduation cap in
+      the Dynatrace gradient). A logo is the one thing on the page that must
+      NOT change with the theme — it is the same mark in the app header, on the
+      tile and here, and re-tinting it per theme would make it a different
+      logo.
+    """
     _, rest = _TPL.split(':root[data-theme="light"] {', 1)
     _, body = rest.split("}", 1)
-    return body
+    brand_start = body.index('<span id="brand-logo"')
+    brand_end = body.index("</span>", body.index("</svg>", brand_start))
+    return body[:brand_start] + body[brand_end:]
+
+
+def test_the_brand_mark_is_the_only_exempt_colour():
+    """Guards the exemption above: it must cover the logo and nothing else."""
+    brand_start = _TPL.index('<span id="brand-logo"')
+    brand_end = _TPL.index("</span>", _TPL.index("</svg>", brand_start))
+    exempt = _TPL[brand_start:brand_end]
+    assert "<svg" in exempt and "linearGradient" in exempt
+    # It is a logo, not a layout: nothing themeable hides inside the exemption.
+    assert "var(--" not in exempt
 
 
 def test_both_themes_are_defined():

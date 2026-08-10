@@ -354,6 +354,21 @@ def test_is_listed_roster_member_crosses_tenants():
     assert ls.is_listed(sess, {"alice@x.com"}, "alice@x.com", "https://sro97894.apps.dynatrace.com")
 
 
+def test_is_listed_co_trainer_crosses_tenants():
+    # A co-trainer was named by address, exactly like a roster entry, so the
+    # tenant scope must not apply to them: added on COE, signed into sprint,
+    # the workshop vanished from their home page and their Workshops list.
+    # Only the LEAD stays scoped (that is the case WS-1 was written for).
+    sess = _session(state="open", trainers=[TRAINER, "co@dynatrace.com"])
+    sess["ownerTenant"] = "https://geu80787.apps.dynatrace.com"
+    other = "https://ydi9582h.sprint.apps.dynatracelabs.com"
+    assert ls.is_listed(sess, set(), "co@dynatrace.com", other)
+    assert ls.is_listed(sess, set(), "co@dynatrace.com", sess["ownerTenant"])
+    # The lead is still tenant-scoped, and a stranger is still not a member.
+    assert not ls.is_listed(sess, set(), TRAINER, other)
+    assert not ls.is_listed(sess, set(), "nobody@x.com", other)
+
+
 # ── Response shaping ─────────────────────────────────────────────────────────
 
 def test_shape_summary_learner():
