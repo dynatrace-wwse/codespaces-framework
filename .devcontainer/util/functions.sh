@@ -373,18 +373,19 @@ setUpTerminal(){
   # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
 
-  # Codespaces need an SSH server so `gh codespace ssh` works — and the Orbital
-  # relay (Enablement App terminal/exec) depends on it. The stock image ships
-  # none. Install it for EVERY Codespace, not just orbital_codespaces: the
-  # ORBITAL_ENVIRONMENT secret occasionally fails to surface in the post-create
-  # environment (GitHub secret-injection flake), which used to silently skip
-  # sshd and permanently break the in-app terminal. Local, dev-container and
-  # Sysbox/orbital instantiations are left untouched.
-  case "$INSTANTIATION_TYPE" in
-    orbital_codespaces|github-codespaces)
-      installCodespaceSSH
-      ;;
-  esac
+  # Only an Orbital-orchestrated Codespace needs an SSH server: the Enablement App
+  # relays its terminal in over `gh codespace ssh`, and the stock image ships no
+  # sshd. A plain Codespace opened from GitHub must NOT pay for that install, and
+  # local, dev-container and Sysbox/orbital instantiations never needed it.
+  #
+  # This used to also fire for `github-codespaces`, as belt-and-braces against
+  # GitHub failing to surface the ORBITAL_ENVIRONMENT secret in the post-create
+  # environment. That belt is now in variables.sh, which reads the canonical
+  # /workspaces/.codespaces/shared/.env-secrets *before* computing the type — so
+  # the braces here only cost every manual Codespace an apt-get it cannot use.
+  if [ "$INSTANTIATION_TYPE" = "orbital_codespaces" ]; then
+    installCodespaceSSH
+  fi
 }
 
 installCodespaceSSH() {
@@ -396,8 +397,17 @@ installCodespaceSSH() {
     printInfo "openssh-server already present at /usr/sbin/sshd — skipping install"
   else
     printInfo "openssh-server not found — installing via apt-get"
+    # --no-install-recommends is load-bearing, not tidiness. openssh-server's hard
+    # Depends are all small and mostly already in the image; its *Recommends* line
+    # ("default-logind | logind | libpam-systemd, ncurses-term, xauth, ssh-import-id")
+    # drags in systemd, systemd-sysv, systemd-resolved, systemd-timesyncd and dbus.
+    # That took 7 minutes, rewrote /etc/nsswitch.conf, tried to take over
+    # /etc/resolv.conf and replaced /sbin/init inside the devcontainer. Nothing here
+    # needs a logind session: the Codespaces agent starts sshd itself, we only have
+    # to put the binary and its host keys on disk.
     sudo apt-get update -qq \
-      && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server \
+      && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+           --no-install-recommends openssh-server \
       || printWarn "Failed to install openssh-server"
   fi
 

@@ -99,6 +99,40 @@ def _tenant_meta(dt_environment: str) -> tuple[str, str]:
     return tenant_id, stage
 
 
+async def _clear_orbital_marker(dtUser: str, repo: str) -> None:
+    """Un-scope the ORBITAL_ENVIRONMENT Codespaces secret from ``repo``.
+
+    ``provision()`` sets it as a *user* secret scoped to the repo, because that is
+    the only channel GitHub gives us for passing a signal into a Codespace. But a
+    Codespaces secret cannot be bound to a single Codespace: left behind, it makes
+    every Codespace the learner later opens BY HAND on that repo report
+    ``INSTANTIATION_TYPE=orbital_codespaces`` and install an sshd it never uses.
+
+    Best-effort — a failure here must never break a terminate. ``variables.sh``
+    also confirms the marker against ``/api/codespace/orbital/{name}``, so a leaked
+    secret is a slow path, not a wrong answer.
+    """
+    if not dtUser or not repo:
+        return
+    try:
+        repo_id = (json.loads(await _gh(dtUser, "api", f"repos/{repo}")) or {}).get("id")
+        if not repo_id:
+            return
+        await _gh(dtUser, "api", "-X", "DELETE",
+                  f"/user/codespaces/secrets/ORBITAL_ENVIRONMENT/repositories/{repo_id}")
+        log.info("Cleared ORBITAL_ENVIRONMENT scope user=%s repo=%s", dtUser, repo)
+    except Exception as exc:
+        # Removing the only selected repo can be refused; drop the whole secret then.
+        try:
+            await _gh(dtUser, "api", "-X", "DELETE",
+                      "/user/codespaces/secrets/ORBITAL_ENVIRONMENT")
+            log.info("Deleted ORBITAL_ENVIRONMENT secret user=%s (scope removal failed: %s)",
+                     dtUser, exc)
+        except Exception as exc2:
+            log.warning("Could not clear ORBITAL_ENVIRONMENT for %s on %s: %s / %s",
+                        dtUser, repo, exc, exc2)
+
+
 async def delete_codespace(dtUser: str, name: str) -> None:
     """Delete a learner's Codespace, clear its running record, and DESTROY the learner's
     stored GitHub credential — the token is kept (encrypted, short-lived) only to spin +
@@ -109,6 +143,9 @@ async def delete_codespace(dtUser: str, name: str) -> None:
     meta = await _pool().hgetall(f"job:running:{name}")
     repo, machine = meta.get("repo", ""), meta.get("machine", "")
     await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")  # needs the token
+    # Needs the credential, so it has to happen before the token is destroyed below —
+    # otherwise the marker stays on the learner's account forever.
+    await _clear_orbital_marker(dtUser, repo)
     await _pool().delete(f"job:running:{name}")
     await _pool().delete(f"gh:token:{dtUser}")  # destroy the credential now the Codespace is gone
     log.info("Codespace deleted name=%s user=%s repo=%s machine=%s (credential destroyed)",
@@ -143,6 +180,8 @@ async def reap_codespace_if_idle(dtUser: str, name: str, max_idle_min: int | Non
     if reason:
         try:
             await _gh(dtUser, "api", "-X", "DELETE", f"user/codespaces/{name}")
+            repo = await _pool().hget(f"job:running:{name}", "repo") or ""
+            await _clear_orbital_marker(dtUser, repo)  # before the credential goes
             await _pool().delete(f"gh:token:{dtUser}")  # credential dies with the Codespace
             log.info("Reaped Codespace name=%s user=%s reason=%s", name, dtUser, reason)
         except Exception as exc:
@@ -216,6 +255,24 @@ async def list_machines(repo: str, dtUser: str = "", ref: str | None = None):
     return {"machines": data.get("machines", data)}
 
 
+@router.get("/api/codespace/orbital/{name}")
+async def is_orbital(name: str):
+    """Authoritative answer to "did Orbital create this Codespace?".
+
+    The framework's ``variables.sh`` calls this from *inside* a Codespace to confirm
+    a possibly-stale ``ORBITAL_ENVIRONMENT`` secret before it settles on
+    ``INSTANTIATION_TYPE=orbital_codespaces`` (and installs an sshd for the terminal
+    relay). ``provision()`` writes ``job:running:{name}`` for every Codespace it
+    creates, so its existence is the ground truth the secret cannot provide.
+
+    Unauthenticated on purpose: the caller is a bare post-create shell with no
+    Orbital credential, and the response is one boolean about a name the caller
+    already knows. Nothing is created, mutated, or disclosed — a wrong guess at a
+    Codespace name only ever gets ``false``.
+    """
+    return {"orbital": bool(await _pool().exists(f"job:running:{name}"))}
+
+
 @router.post("/api/codespace/provision")
 async def provision(body: ProvisionBody):
     """Set the 3 DT_* values as the learner's repo-scoped Codespaces secrets, then create a
@@ -233,6 +290,10 @@ async def provision(body: ProvisionBody):
         # Signals to the framework (variables.sh) that this Codespace is orchestrated
         # by Orbital → INSTANTIATION_TYPE=orbital_codespaces → setUpTerminal installs
         # the SSH server so the in-app terminal relay can attach.
+        # This is a repo-scoped USER secret — it cannot be bound to one Codespace, so
+        # it is only a *hint*: variables.sh confirms it against
+        # GET /api/codespace/orbital/{name}, and _clear_orbital_marker() un-scopes it
+        # when the Codespace is deleted or reaped.
         "ORBITAL_ENVIRONMENT": "true",
     }
     for name, value in secrets_map.items():
