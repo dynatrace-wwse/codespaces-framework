@@ -370,3 +370,151 @@ source_functions() {
   [[ "$output" != *"--type=NodePort"* ]]
   [[ "$output" != *"nodePort"* ]]
 }
+
+# ============================================================
+# installIngressController
+# ============================================================
+# Two regressions are pinned here, both from the Codespaces failure:
+#   1. it used to wait 120s and DISCARD the result, printing "installed and
+#      ready" regardless — so the run continued with no controller and the next
+#      registerApp died with "no endpoints available for service
+#      ingress-nginx-controller-admission".
+#   2. it used to apply the static provider manifest, which always ships the
+#      admission webhook: two certgen Jobs must write a secret the controller
+#      mounts with optional:false before it can start at all (~150s of a ~250s
+#      startup on a 4-core Codespace).
+
+setup_ingress_mocks() {
+  export CLUSTER_ENGINE=k3d
+  mkdir -p "$FAKE_REPO/.devcontainer/yaml/ingress"
+  echo "controller: {admissionWebhooks: {enabled: false}}" \
+    > "$FAKE_REPO/.devcontainer/yaml/ingress/values-k3d.yaml"
+  echo "controller: {admissionWebhooks: {enabled: false}}" \
+    > "$FAKE_REPO/.devcontainer/yaml/ingress/values-kind.yaml"
+  export FRAMEWORK_CACHE=""
+}
+
+@test "installIngressController: installs via Helm with the admission webhook disabled" {
+  source_functions
+  setup_ingress_mocks
+
+  kubectl() { case "$1 $2" in "get ns") return 1 ;; *) return 0 ;; esac; }
+  helm() { echo "HELMARGS: $*"; return 0; }
+  export -f kubectl helm
+
+  run installIngressController
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HELMARGS:"* ]]
+  [[ "$output" == *"--repo https://kubernetes.github.io/ingress-nginx"* ]]
+  [[ "$output" == *"values-k3d.yaml"* ]]
+  # the static manifest path must be gone
+  [[ "$output" != *"deploy/static/provider"* ]]
+  [[ "$output" == *"Ingress controller installed and ready"* ]]
+}
+
+@test "installIngressController: derives the chart version from INGRESS_NGINX_VERSION" {
+  source_functions
+  setup_ingress_mocks
+  export INGRESS_NGINX_VERSION=1.12.1
+
+  kubectl() { case "$1 $2" in "get ns") return 1 ;; *) return 0 ;; esac; }
+  helm() { echo "HELMARGS: $*"; return 0; }
+  export -f kubectl helm
+
+  run installIngressController
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--version 4.12.1"* ]]
+}
+
+@test "installIngressController: kind uses its own values file" {
+  source_functions
+  setup_ingress_mocks
+  export CLUSTER_ENGINE=kind
+
+  kubectl() { case "$1 $2" in "get ns") return 1 ;; *) return 0 ;; esac; }
+  helm() { echo "HELMARGS: $*"; return 0; }
+  export -f kubectl helm
+
+  run installIngressController
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"values-kind.yaml"* ]]
+}
+
+@test "installIngressController: returns non-zero and does not claim success when the wait fails" {
+  source_functions
+  setup_ingress_mocks
+  export INGRESS_READY_TIMEOUT=1
+
+  kubectl() {
+    case "$1 $2" in
+      "get ns")           return 1 ;;
+      "wait --namespace") return 1 ;;   # controller never becomes ready
+      *)                  return 0 ;;
+    esac
+  }
+  helm() { return 0; }
+  export -f kubectl helm
+
+  run installIngressController
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"Ingress controller installed and ready"* ]]
+  [[ "$output" == *"did not become ready"* ]]
+}
+
+@test "installIngressController: returns non-zero when the helm install fails" {
+  source_functions
+  setup_ingress_mocks
+
+  kubectl() { case "$1 $2" in "get ns") return 1 ;; *) return 0 ;; esac; }
+  helm() { return 1; }
+  export -f kubectl helm
+
+  run installIngressController
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"helm install of ingress-nginx"* ]]
+  [[ "$output" != *"Ingress controller installed and ready"* ]]
+}
+
+@test "installIngressController: fails clearly when the values file is missing" {
+  source_functions
+  export CLUSTER_ENGINE=k3d FRAMEWORK_CACHE=""
+
+  kubectl() { case "$1 $2" in "get ns") return 1 ;; *) return 0 ;; esac; }
+  helm() { echo "HELM SHOULD NOT RUN"; return 0; }
+  export -f kubectl helm
+
+  run installIngressController
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Missing ingress values file"* ]]
+  [[ "$output" != *"HELM SHOULD NOT RUN"* ]]
+}
+
+@test "installIngressController: no static-manifest apply and no 120s timeout remain" {
+  run cat "$BATS_TEST_DIRNAME/../../util/functions.sh"
+  # The apply of the upstream static manifest is what dragged the admission
+  # webhook in. Match the fetch itself, not the words — the function comment
+  # legitimately names the manifests it replaced.
+  [[ "$output" != *"raw.githubusercontent.com/kubernetes/ingress-nginx"* ]]
+  [[ "$output" != *"--timeout=120s"* ]]
+  [[ "$output" == *'INGRESS_READY_TIMEOUT:-600'* ]]
+}
+
+@test "ingress values: both engines disable the admission webhook" {
+  run cat "$BATS_TEST_DIRNAME/../../yaml/ingress/values-k3d.yaml"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"admissionWebhooks:"* ]]
+  [[ "$output" == *"enabled: false"* ]]
+
+  run cat "$BATS_TEST_DIRNAME/../../yaml/ingress/values-kind.yaml"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"admissionWebhooks:"* ]]
+  [[ "$output" == *"enabled: false"* ]]
+}
+
+@test "ingress values: kind reproduces the static kind provider settings" {
+  run cat "$BATS_TEST_DIRNAME/../../yaml/ingress/values-kind.yaml"
+  [[ "$output" == *"hostPort:"* ]]
+  [[ "$output" == *"type: NodePort"* ]]
+  [[ "$output" == *'ingress-ready: "true"'* ]]
+  [[ "$output" == *"watchIngressWithoutClass: true"* ]]
+}

@@ -1,0 +1,49 @@
+# ingress-nginx Helm values — kind (CLUSTER_ENGINE=kind).
+#
+# Replaces the static deploy/static/provider/kind/deploy.yaml manifest. kind has
+# no LoadBalancer, so the controller binds host ports on the control-plane node
+# instead; yaml/kind/kind-cluster.yml labels that node `ingress-ready=true` and
+# maps hostPorts 80/443 (plus 30080/30443). Each setting below reproduces one
+# line of that static manifest.
+#
+# See values-k3d.yaml for the full rationale on admissionWebhooks.enabled.
+
+controller:
+  # Same reasoning as values-k3d.yaml: removes the certgen Jobs, the
+  # `optional: false` secret mount that blocks controller startup, and the
+  # ValidatingWebhookConfiguration whose missing endpoints produced
+  # "no endpoints available for service ingress-nginx-controller-admission".
+  admissionWebhooks:
+    enabled: false
+
+  # provider/kind: containerPort 80/443 published as hostPort on the node.
+  hostPort:
+    enabled: true
+
+  # provider/kind: Service type NodePort (no LoadBalancer in kind).
+  service:
+    type: NodePort
+
+  # provider/kind: pin to the node kind-cluster.yml labelled ingress-ready=true.
+  nodeSelector:
+    ingress-ready: "true"
+    kubernetes.io/os: linux
+
+  # provider/kind: the control-plane node is the only node, so tolerate its taints.
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Equal
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Equal
+      effect: NoSchedule
+
+  # provider/kind: --watch-ingress-without-class=true
+  watchIngressWithoutClass: true
+
+  # provider/kind: --publish-status-address=localhost (no LoadBalancer to
+  # take the address from, so publishService must be off).
+  publishService:
+    enabled: false
+  extraArgs:
+    publish-status-address: localhost
