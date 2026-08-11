@@ -786,13 +786,19 @@
                         <tr><td><code>app-settings:objects:read</code></td><td>check whether this tenant already has its Orbital token, so the install can tell you whether the manual step below is still outstanding. Optional — without it that check reports “could not verify” instead of a definite answer.</td></tr>
                         <tr><td><code>settings:objects:read</code></td><td>read the outbound allowlist before changing it</td></tr>
                         <tr><td><code>settings:objects:write</code></td><td>enable training-telemetry forwarding, add the hosts below to the outbound allowlist if your tenant enforces one, and — the important one — store this client in your own tenant so the app can mint and self-update without Orbital keeping anything</td></tr>
-                        <tr><td><code>environment-api:activegate-tokens:write</code></td><td>mint the per-session tokens a lab environment needs</td></tr>
+                        <tr><td><code>environment-api:api-tokens:read</code></td><td>list and clean up the per-learner tokens the app minted</td></tr>
+                        <tr><td><code>environment-api:api-tokens:write</code></td><td>mint each learner's environment token directly (classic <code>dt0c01</code>) — the primary path, immune to per-user IAM differences</td></tr>
+                        <tr><td><code>environment-api:activegate-tokens:write</code></td><td>mint the ActiveGate token a Kubernetes lab environment needs</td></tr>
+                        <tr><td><code>document:documents:read</code></td><td>read training content stored on the tenant</td></tr>
+                        <tr><td><code>document:documents:write</code></td><td>import labs and images under one service identity — any admin can then manage them without creating duplicate copies</td></tr>
+                        <tr><td><code>document:documents:delete</code></td><td>remove labs the tenant's profile no longer lists</td></tr>
+                        <tr><td><code>document:documents:admin</code></td><td>manage content documents regardless of which admin imported them</td></tr>
                         <tr><td colspan="2" style="padding-top:8px"><strong style="color:var(--accent)">Account</strong></td></tr>
-                        <tr><td><code>platform-token:tokens:write</code></td><td>mint per-user platform tokens after install</td></tr>
+                        <tr><td><code>platform-token:tokens:write</code></td><td>mint per-user platform tokens where classic token creation has been retired (rolled out per environment)</td></tr>
                         <tr><td><code>platform-token:tokens:manage</code></td><td>revoke them when a session ends</td></tr>
                     </tbody>
                 </table>
-                <p class="content-hint" style="margin:0 0 8px">Orbital checks the client against your tenant <em>before</em> installing anything and names any scope that is missing, so a wrong client costs you a message rather than a broken install.</p>
+                <p class="content-hint" style="margin:0 0 8px">Orbital checks the client against your tenant <em>before</em> installing anything and names any scope that is missing, so a wrong client costs you a message rather than a broken install. Want to verify first without installing anything? Run the <a href="https://autonomous-enablements-check.whydevslovedynatrace.com" target="_blank">tenant readiness check</a> — same probes, nothing deployed. Note: scopes cannot be added to an existing client — if one is missing, create a new client.</p>
 
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">After install: nothing, if the client is complete</h4>
                 <p class="content-hint" style="margin:0 0 8px">The install writes the client into your tenant's own <strong>Settings → Training Token Minting</strong> and the app takes it from there — per-learner tokens, and its own updates. The deploy result says <code>stored</code> when that worked; if it says anything else it also says which permission is missing, and you can paste the same client on that Settings page by hand.</p>
