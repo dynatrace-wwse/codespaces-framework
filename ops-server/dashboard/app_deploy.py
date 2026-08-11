@@ -874,6 +874,12 @@ REMOTE_GRAIL_SCHEMA_VERSION = "1.1"
 # settings/schemas/mint-client.schema.json in the app repo.
 MINT_CLIENT_SCHEMA = "app:my.dynatrace.enablements:mint-client"
 MINT_CLIENT_SCHEMA_VERSION = "1.0.0"
+# Per-tenant instructor allowlist — settings/schemas/instructors.schema.json in the app
+# repo. Seeded here with the account admin who registers the tenant, so a self-service
+# tenant recognises its own admin as an instructor without a code change (the baked
+# instructors.json can never list the 70 SEs installing on their own tenants).
+INSTRUCTORS_SCHEMA = "app:my.dynatrace.enablements:instructors"
+INSTRUCTORS_SCHEMA_VERSION = "1.0.0"
 # App-settings (NOT classic settings) schema holding the Orbital service bearer —
 # settings/schemas/orbital-config.schema.json in the app repo. Unprefixed here because
 # the app-settings API resolves it within the Dt-App-Context app.
@@ -1096,6 +1102,71 @@ async def _store_mint_client(token: str, tenant_url: str, client_id: str, client
     except Exception as exc:
         log.warning("mint-client store for %s: %s", tenant_url, exc)
         return f"mint-client error: {exc}"
+
+
+def _email_from_bearer(token: str) -> str | None:
+    """The `email` claim of a JWT bearer, lower-cased. The account OAuth client's
+    client-credentials token carries the CREATOR's email (measured on scu37051:
+    asad.ali@dynatrace.com), which is exactly the Dynatrace login that will sign into the
+    app — so it is the right identity to seed as this tenant's instructor. Best-effort."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        email = str(claims.get("email") or claims.get("preferred_username") or "").strip().lower()
+        return email if "@" in email else None
+    except Exception:
+        return None
+
+
+async def _store_instructors(token: str, tenant_url: str, emails: list[str]) -> str:
+    """Merge `emails` into the tenant's own `instructors` settings object (union with any
+    already there — never clobber an admin-curated list). Same classic-settings door as
+    `_store_mint_client`: `settings:objects:write`, which every account client can hold.
+    Best-effort; returns a human-readable status and never raises."""
+    wanted = sorted({e.strip().lower() for e in emails if e and "@" in e})
+    if not wanted:
+        return "skipped (no instructor email to seed)"
+    base = tenant_url.rstrip("/") + "/platform/classic/environment-api/v2/settings/objects"
+    h = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = None
+            for pause in (0, 5, 10):
+                if pause:
+                    await asyncio.sleep(pause)
+                r = await c.get(base, headers=h, params={
+                    "schemaIds": INSTRUCTORS_SCHEMA, "scopes": "environment",
+                    "fields": "objectId,value"})
+                if r.status_code == 200:
+                    break
+            if r is None or r.status_code == 403:
+                return "skipped (token lacks settings:objects:read/write)"
+            if r.status_code != 200:
+                return f"skipped (settings read HTTP {r.status_code})"
+            items = r.json().get("items", [])
+            existing = []
+            if items:
+                existing = list((items[0].get("value") or {}).get("emails") or [])
+            merged = sorted({*(str(e).strip().lower() for e in existing), *wanted})
+            value = {"emails": merged}
+            if items:
+                if {str(e).strip().lower() for e in existing} >= set(wanted):
+                    return f"unchanged ({len(existing)} instructor(s) already set)"
+                pr = await c.put(f"{base}/{items[0]['objectId']}",
+                                 headers={**h, "Content-Type": "application/json"},
+                                 json={"value": value})
+                return ("updated (%d instructor(s))" % len(merged)) if pr.status_code in (200, 201, 204) \
+                    else f"update failed (HTTP {pr.status_code}: {pr.text[:120]})"
+            cr = await c.post(base, headers={**h, "Content-Type": "application/json"}, json=[{
+                "schemaId": INSTRUCTORS_SCHEMA, "schemaVersion": INSTRUCTORS_SCHEMA_VERSION,
+                "scope": "environment", "value": value,
+            }])
+            return ("stored (%d instructor(s))" % len(merged)) if cr.status_code in (200, 201) \
+                else f"create failed (HTTP {cr.status_code}: {cr.text[:120]})"
+    except Exception as exc:
+        log.warning("instructors store for %s: %s", tenant_url, exc)
+        return f"instructors error: {exc}"
 
 
 def _orbital_service_token() -> str | None:
@@ -1974,6 +2045,7 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     remote_grail = ""
     orbital_cfg = ""
     mint_client = "skipped (deploy failed)"
+    instructors = "skipped (deploy failed)"
     mint_ready = False
     mint_st = 0
     # The app authenticates this client against the SSO and account-API hosts on every
@@ -2023,6 +2095,15 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
                 token, tenant, cid, csec, account_urn, sso_url, api_host)
         else:
             mint_client = "skipped (client cannot mint learner tokens)"
+
+        # 4. Seed the account admin as an instructor ON THIS TENANT. The baked
+        #    instructors.json can never list the SEs installing on their own tenants, so
+        #    without this every one of them (measured: asad.ali@dynatrace.com on scu37051)
+        #    is refused "Only instructors can import content" on their own tenant. The
+        #    email is the client creator's (JWT `email` claim = the Dynatrace login that
+        #    signs into the app), plus the Register-Tenant form's deployer email if given.
+        seed_emails = [e for e in (_email_from_bearer(token), deployer_email) if e]
+        instructors = await _store_instructors(token, tenant, seed_emails)
     del token
     del csec  # discard the secret — never persisted
     if res["status"] == "error":
@@ -2069,13 +2150,13 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
-                 mint_ready=mint_ready, mint_client=mint_client, preflight=preflight,
-                 warnings=warnings)
+                 mint_ready=mint_ready, mint_client=mint_client, instructors=instructors,
+                 preflight=preflight, warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
             "remote_grail": remote_grail, "orbital_config": orbital_cfg,
-            "mintReady": mint_ready, "mintClient": mint_client, "preflight": preflight,
-            "warnings": warnings}
+            "mintReady": mint_ready, "mintClient": mint_client, "instructors": instructors,
+            "preflight": preflight, "warnings": warnings}
 
 
 @router.get("/api/deploy/audit")
