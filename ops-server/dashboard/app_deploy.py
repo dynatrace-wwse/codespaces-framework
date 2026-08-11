@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -1724,6 +1724,158 @@ async def _oauth_bearer(sso_url: str, cid: str, csec: str, resource: str,
         return None, 0, str(exc)
 
 
+# ─── Registration preflight (2026-08-11 — HANDOFF_TOKEN_AND_DOCUMENT_IDENTITY §8.9) ───
+#
+# A granted scope is not proof. A 200 from the mint API is not proof. The only evidence a
+# tenant can hand a learner a WORKING token is minting one and using it where the Operator
+# will — so that is what registration does now, BEFORE anything is installed. Everything
+# the preflight creates is deleted before it returns.
+
+LIVE_HOST_BY_DOMAIN = {
+    # The host that authenticates raw token values — sprint has NO `.live.`.
+    "prod": "https://{tid}.live.dynatrace.com",
+    "sprint": "https://{tid}.sprint.dynatracelabs.com",
+    "dev": "https://{tid}.dev.dynatracelabs.com",
+}
+CLASSIC_MINT_SCOPE = "environment-api:api-tokens:write"
+DOC_SCOPE = ("document:documents:read document:documents:write "
+             "document:documents:delete")
+# What the app's PLATFORM_SPECS translate to (api/_platform-mint.ts toPlatformScopes) —
+# the preflight mints the same shape the first learner will get.
+PLATFORM_LEARNER_SCOPES = [
+    "fleet-management:activegate.connection-info:read",
+    "fleet-management:activegate.tokens:create",
+    "fleet-management:activegate.tokens:write",
+    "fleet-management:container-images:read",
+    "fleet-management:oneagent.connection-info:read",
+    "fleet-management:oneagents:download",
+    "settings:objects:read",
+    "settings:objects:write",
+    "storage:entities:read",
+    "storage:events:write",
+    "storage:logs:write",
+    "storage:metrics:write",
+]
+
+
+def _preflight_expiry() -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: str,
+                                    tenant_id: str, domain: str, account_urn: str,
+                                    api_host: str) -> dict:
+    """Which learner-token tier this tenant+client can actually deliver.
+
+    Classic first: mint a real dt0c01 through the client and call the live domain with
+    it (self-contained scopes — no owner-IAM intersection). Where classic creation is
+    retired (HTTP 400, rolled out per ENVIRONMENT), mint a real platform token and probe
+    it the same way — the only check that exposes the `scopes ∩ owner IAM policy` trap,
+    because the mint API stamps scope names without any entitlement check (measured on
+    scu37051: 12 scopes ACTIVE, every call "Permission denied.").
+
+    Returns {"tier": "classic"|"platform"|"none", "detail": str}.
+    """
+    live = LIVE_HOST_BY_DOMAIN.get(domain, LIVE_HOST_BY_DOMAIN["prod"]).format(tid=tenant_id)
+    proxy = f"{tenant.rstrip('/')}/platform/classic/environment-api/v2/apiTokens"
+    detail: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            bearer, st, _err = await _oauth_bearer(sso_url, cid, csec,
+                                                   f"urn:dtenvironment:{tenant_id}",
+                                                   CLASSIC_MINT_SCOPE)
+            if bearer is None:
+                detail.append(f"classic path unavailable: SSO refused {CLASSIC_MINT_SCOPE} "
+                              f"(HTTP {st})")
+            else:
+                hdr = {"Authorization": f"Bearer {bearer}"}
+                r = await c.post(proxy, headers=hdr, json={
+                    "name": "enbl-preflight", "scopes": ["InstallerDownload"],
+                    "expirationDate": _preflight_expiry()})
+                if r.status_code == 201:
+                    d = r.json()
+                    probe = await c.get(
+                        f"{live}/api/v1/deployment/installer/agent/connectioninfo",
+                        headers={"Authorization": f"Api-Token {d.get('token', '')}"})
+                    if d.get("id"):
+                        await c.delete(f"{proxy}/{d['id']}", headers=hdr)
+                    if probe.status_code == 200:
+                        return {"tier": "classic",
+                                "detail": "classic dt0c01 minted and proven live"}
+                    detail.append(f"classic token minted but refused live "
+                                  f"(HTTP {probe.status_code})")
+                elif r.status_code == 400:
+                    detail.append("classic API-token creation is retired on this "
+                                  "environment (HTTP 400)")
+                else:
+                    detail.append(f"classic mint refused (HTTP {r.status_code}): "
+                                  f"{r.text[:160]}")
+
+            pt_bearer, st2, _err2 = await _oauth_bearer(sso_url, cid, csec, account_urn,
+                                                        MINT_SCOPE)
+            if pt_bearer is None:
+                detail.append(f"platform path unavailable: SSO refused the account mint "
+                              f"permissions (HTTP {st2})")
+                return {"tier": "none", "detail": "; ".join(detail)}
+            acct = account_urn.split(":")[-1]
+            base = f"{api_host.rstrip('/')}/iam/v1/accounts/{acct}/platform-tokens"
+            hdr = {"Authorization": f"Bearer {pt_bearer}"}
+            r = await c.post(base, headers=hdr, json={
+                "name": "enbl-preflight", "scope": PLATFORM_LEARNER_SCOPES,
+                "resource": [f"urn:dtenvironment:{tenant_id}"],
+                "tags": ["enablement", "preflight"],
+                "expirationDate": _preflight_expiry()})
+            if r.status_code not in (200, 201):
+                detail.append(f"platform mint refused (HTTP {r.status_code}): {r.text[:160]}")
+                return {"tier": "none", "detail": "; ".join(detail)}
+            d = r.json()
+            probe = await c.get(f"{live}/api/v1/deployment/installer/agent/connectioninfo",
+                                headers={"Authorization": f"Api-Token {d.get('token', '')}"})
+            tok_id = d.get("tokenId") or d.get("id")
+            if tok_id:
+                await c.delete(f"{base}/{tok_id}", headers=hdr)
+            if probe.status_code == 200:
+                return {"tier": "platform", "detail": "; ".join(detail)}
+            detail.append(
+                f"platform token minted but the live environment refused it "
+                f"(HTTP {probe.status_code}). A platform token's effective permissions are "
+                f"its scopes ∩ the IAM policy of its OWNER — the person who created this "
+                f"OAuth client — and the mint API does not check that. Recreate the client "
+                f"as a user with admin rights on this environment.")
+            return {"tier": "none", "detail": "; ".join(detail)}
+    except httpx.HTTPError as e:
+        detail.append(f"preflight error: {e}")
+        return {"tier": "none", "detail": "; ".join(detail)}
+
+
+async def _preflight_documents(sso_url: str, cid: str, csec: str, tenant: str,
+                               tenant_id: str) -> tuple[bool, str]:
+    """The path the content importer uses: create a document AS THE APP's service
+    identity (env-scoped client-credentials bearer) and delete it again. This is what
+    failed on Asad's tenant while every scope readback said fine."""
+    bearer, st, err = await _oauth_bearer(sso_url, cid, csec,
+                                          f"urn:dtenvironment:{tenant_id}", DOC_SCOPE)
+    if bearer is None:
+        return False, f"SSO refused the document scopes (HTTP {st}): {err}"
+    base = f"{tenant.rstrip('/')}/platform/document/v1/documents"
+    hdr = {"Authorization": f"Bearer {bearer}"}
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.post(base, headers=hdr,
+                             data={"name": "enbl-preflight", "type": "enablement-preflight"},
+                             files={"content": ("content", b"{}", "application/json")})
+            if r.status_code not in (200, 201):
+                return False, f"document create refused (HTTP {r.status_code}): {r.text[:160]}"
+            d = r.json()
+            doc_id, ver = d.get("id"), d.get("version", 1)
+            if doc_id:
+                await c.delete(f"{base}/{doc_id}", headers=hdr,
+                               params={"optimistic-locking-version": str(ver)})
+            return True, "document created and deleted as the service identity"
+    except httpx.HTTPError as e:
+        return False, f"document probe error: {e}"
+
+
 @router.post("/api/deploy/oauth")
 async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default=None)):
     """BOOTSTRAP deploy/undeploy with an account-level OAuth client — transient, Orbital
@@ -1758,8 +1910,39 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     sso_url = (body.get("ssoUrl") or "").strip() or SSO_TOKEN_URL_BY_DOMAIN.get(
         domain, SSO_TOKEN_URL_BY_DOMAIN["prod"])
 
-    # 1. Deploy bearer — full scope set first, minimal on SSO 400 (client lacks settings:*).
     scope_warnings: list[str] = []
+    api_host = ACCOUNT_API_BY_DOMAIN.get(domain, ACCOUNT_API_BY_DOMAIN["prod"])
+    allow_partial = bool(body.get("allowPartial"))
+
+    # 0. PREFLIGHT (deploy only) — refuse and install NOTHING when this tenant+client
+    #    cannot hand a learner a working token or cannot own its content documents.
+    #    HTTP 412 names what failed; allowPartial:true is the explicit human override.
+    preflight: dict = {}
+    if action == "deploy":
+        learner = await _preflight_learner_tokens(
+            sso_url, cid, csec, tenant, tenant_id, domain, account_urn, api_host)
+        docs_ok, docs_detail = await _preflight_documents(sso_url, cid, csec, tenant, tenant_id)
+        preflight = {"learnerTokenTier": learner["tier"], "learnerDetail": learner["detail"],
+                     "documentsReady": docs_ok, "documentsDetail": docs_detail}
+        failures = []
+        if learner["tier"] == "none":
+            failures.append(f"no working learner-token path — {learner['detail']}")
+        if not docs_ok:
+            failures.append(f"content documents cannot be written as the app — {docs_detail}")
+        if failures:
+            if not allow_partial:
+                await _audit(user, tenant_id, "deploy", "preflight-refused",
+                             via="oauth-bootstrap", client_id=cid, detail=" | ".join(failures))
+                raise HTTPException(412,
+                    "Preflight refused — nothing was installed. " + " | ".join(failures)
+                    + " Scopes cannot be added to an existing OAuth client: create a new one "
+                      "with the full 15-scope list (verify it first at "
+                      "https://autonomous-enablements-check.whydevslovedynatrace.com), then "
+                      "register again — or send allowPartial:true to install anyway.")
+            scope_warnings.append("preflight failures overridden by allowPartial: "
+                                  + " | ".join(failures))
+
+    # 1. Deploy bearer — full scope set first, minimal on SSO 400 (client lacks settings:*).
     if action == "undeploy":
         token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_UNDEPLOY_SCOPES)
     else:
@@ -1793,11 +1976,14 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     mint_client = "skipped (deploy failed)"
     mint_ready = False
     mint_st = 0
-    api_host = ACCOUNT_API_BY_DOMAIN.get(domain, ACCOUNT_API_BY_DOMAIN["prod"])
-    # The app authenticates this client against these two hosts on every mint and every
-    # self-update. If the tenant enforces an outbound allowlist and they are not on it,
-    # storing the client succeeds and everything that uses it fails.
-    realm_hosts = [h for h in (urlparse(sso_url).hostname, urlparse(api_host).hostname) if h]
+    # The app authenticates this client against the SSO and account-API hosts on every
+    # mint and every self-update, and live-probes minted tokens against the LIVE host.
+    # If the tenant enforces an outbound allowlist and they are not on it, storing the
+    # client succeeds and everything that uses it fails.
+    live_host = urlparse(LIVE_HOST_BY_DOMAIN.get(
+        domain, LIVE_HOST_BY_DOMAIN["prod"]).format(tid=tenant_id)).hostname
+    realm_hosts = [h for h in (urlparse(sso_url).hostname, urlparse(api_host).hostname,
+                               live_host) if h]
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant, extra_hosts=realm_hosts)
         remote_grail = await _ensure_remote_grail(token, tenant)
@@ -1829,11 +2015,14 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         # 3. Hand the client to the TENANT — the step that makes it self-sufficient. From
         #    here the app mints its own per-learner tokens and its own install bearer for
         #    "Update now", so this tenant never needs Orbital to hold a credential for it.
-        if mint_ready:
+        #    Stored whenever the preflight proved a learner-token tier: with classic-first
+        #    the client is what mints CLASSIC tokens too, so "cannot mint platform tokens"
+        #    is no longer a reason to withhold it.
+        if preflight.get("learnerTokenTier") in ("classic", "platform") or mint_ready:
             mint_client = await _store_mint_client(
                 token, tenant, cid, csec, account_urn, sso_url, api_host)
         else:
-            mint_client = "skipped (client cannot mint platform tokens)"
+            mint_client = "skipped (client cannot mint learner tokens)"
     del token
     del csec  # discard the secret — never persisted
     if res["status"] == "error":
@@ -1841,16 +2030,24 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
                      client_id=cid, rc=res.get("rc"))
         raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
 
-    if not mint_ready:
+    if not mint_ready and preflight.get("learnerTokenTier") == "classic":
+        scope_warnings.append(
+            f"platform-token FALLBACK not available (SSO HTTP {mint_st}): the client lacks "
+            f"the account permissions platform-token:tokens:write + platform-token:tokens:"
+            f"manage. Classic minting through the client works today; if this environment "
+            f"later retires classic API-token creation, launches will refuse. Create a new "
+            f"client with the full 15-scope list to be future-proof.")
+    elif not mint_ready:
         scope_warnings.append(
             f"ACTION REQUIRED — token minting NOT available (SSO HTTP {mint_st}): the client "
             f"lacks the account permissions platform-token:tokens:write + "
             f"platform-token:tokens:manage. On an environment that still allows classic API "
-            f"tokens the app will mint those with its own identity and labs will work; on an "
-            f"environment where classic creation has been retired (it is rolled out per "
+            f"tokens the app will mint those through the stored client and labs will work; on "
+            f"an environment where classic creation has been retired (it is rolled out per "
             f"environment) every hands-on launch will refuse. Grant the two permissions and "
             f"register the tenant again.")
-    elif not mint_client.startswith(("stored", "updated")):
+    if (mint_ready or preflight.get("learnerTokenTier") in ("classic", "platform")) \
+            and not mint_client.startswith(("stored", "updated")):
         scope_warnings.append(
             f"ACTION REQUIRED — the OAuth client could NOT be stored on this tenant "
             f"({mint_client}). Until it is, this tenant cannot mint per-learner platform "
@@ -1872,11 +2069,13 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
-                 mint_ready=mint_ready, mint_client=mint_client, warnings=warnings)
+                 mint_ready=mint_ready, mint_client=mint_client, preflight=preflight,
+                 warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
             "remote_grail": remote_grail, "orbital_config": orbital_cfg,
-            "mintReady": mint_ready, "mintClient": mint_client, "warnings": warnings}
+            "mintReady": mint_ready, "mintClient": mint_client, "preflight": preflight,
+            "warnings": warnings}
 
 
 @router.get("/api/deploy/audit")
