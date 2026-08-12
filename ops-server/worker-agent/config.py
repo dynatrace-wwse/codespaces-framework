@@ -35,6 +35,59 @@ WORKER_CAPACITY = int(os.environ.get("WORKER_CAPACITY", "6"))
 # WORKER_MAX_HEAVY    — max concurrent heavy-lane jobs (e.g. dt-cnfs).
 WORKER_COST_BUDGET = int(os.environ["WORKER_COST_BUDGET"]) if os.environ.get("WORKER_COST_BUDGET") else None
 WORKER_MAX_HEAVY = int(os.environ["WORKER_MAX_HEAVY"]) if os.environ.get("WORKER_MAX_HEAVY") else None
+
+# ── Per-slot resource limits ────────────────────────────────────────────────
+# Slots run untrusted learner workloads (a full k3d cluster, and whatever the
+# lab tells the learner to install). Until now they were started with NO limits
+# at all, so one slot could consume the whole host.
+#
+# Defaults are derived from measurement, not guesswork (amd001, 2026-08-12,
+# Kubernetes-101 through the operator + DynaKube steps):
+#   committed (anon+slab) 1.61 GiB · transient peak 2.2–3.1 GiB · 0.127 vCPU avg
+# So 3 GiB is ~1.9× the committed working set and still above the worst observed
+# peak — it stops a runaway without touching a healthy lab.
+#
+# Off by default: enable per worker with WORKER_SLOT_LIMITS=1, verify a full lab
+# run, then roll out. Disabling is a single env var and a restart.
+WORKER_SLOT_LIMITS = os.environ.get("WORKER_SLOT_LIMITS", "0").strip().lower() in ("1", "true", "yes")
+# Hard ceiling per slot. OOM-kills inside the slot's own cgroup, so a runaway
+# takes out one learner's cluster instead of the whole worker.
+WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "3072"))
+# Soft floor: under host pressure the kernel reclaims from slots above this
+# first, so a heavy neighbour is squeezed before a well-behaved one.
+WORKER_SLOT_MEMORY_RESERVATION_MB = int(os.environ.get("WORKER_SLOT_MEMORY_RESERVATION_MB", "2048"))
+# CPU WEIGHT, not a quota. Deliberately not --cpus: a hard CFS quota would
+# throttle exactly the k3d-creation burst and make every provision slower.
+# Shares only arbitrate *contention*, so idle CPU stays fully available.
+WORKER_SLOT_CPU_SHARES = int(os.environ.get("WORKER_SLOT_CPU_SHARES", "1024"))
+# A nested k3d cluster runs a few hundred processes; 4096 is far above normal
+# and still bounds a fork bomb.
+WORKER_SLOT_PIDS_LIMIT = int(os.environ.get("WORKER_SLOT_PIDS_LIMIT", "4096"))
+
+
+def slot_limit_args() -> list[str]:
+    """docker run flags enforcing the per-slot resource envelope.
+
+    Returns [] when WORKER_SLOT_LIMITS is off, so the call site stays identical
+    whether limits are enabled or not.
+
+    Note there is deliberately no disk quota: the workers run overlayfs on ext4,
+    where ``--storage-opt size=`` is unsupported (it needs XFS with prjquota).
+    Per-slot disk is reported on the heartbeat for observability instead.
+    """
+    if not WORKER_SLOT_LIMITS:
+        return []
+    args = [
+        "--memory", f"{WORKER_SLOT_MEMORY_MB}m",
+        # Equal to --memory ⇒ swap disabled for the slot. Swapping a k3d
+        # cluster degrades far worse than failing it outright.
+        "--memory-swap", f"{WORKER_SLOT_MEMORY_MB}m",
+        "--pids-limit", str(WORKER_SLOT_PIDS_LIMIT),
+        "--cpu-shares", str(WORKER_SLOT_CPU_SHARES),
+    ]
+    if 0 < WORKER_SLOT_MEMORY_RESERVATION_MB < WORKER_SLOT_MEMORY_MB:
+        args += ["--memory-reservation", f"{WORKER_SLOT_MEMORY_RESERVATION_MB}m"]
+    return args
 # Private IP of this worker (auto-detected; override via WORKER_HOST env var).
 WORKER_HOST = os.environ.get("WORKER_HOST") or _detect_host_ip()
 # Optional SSH alias the master uses to reach this worker (defaults to WORKER_HOST).

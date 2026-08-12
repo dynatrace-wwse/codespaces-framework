@@ -49,6 +49,9 @@ from .config import (
     K3D_LB_HTTP_PORT,
     SLOT_BASE_DIR,
     TEST_IMAGE,
+    WORKER_SLOT_LIMITS,
+    WORKER_SLOT_MEMORY_MB,
+    slot_limit_args,
 )
 from .executor import (
     execute_integration_test,
@@ -200,6 +203,19 @@ class SysboxPool:
             for i in range(capacity)
         ]
         self._queue: asyncio.Queue[SysboxSlot] = asyncio.Queue()
+        # Warm-up progress. ``ready_count`` is the number of slots that have
+        # completed _init_slot at least once — the ONLY honest answer to "how
+        # many sessions can this worker take right now". It is published as the
+        # worker's ``capacity`` so the fleet controller, the workshop capacity
+        # check and the dashboard all stop believing a booting worker's nominal
+        # figure (a 12-slot pool takes ~4.5 min to warm; the old code advertised
+        # all 12 from second zero).
+        self.ready_count = 0
+        # Set as soon as the FIRST slot is usable, so job consumption can begin
+        # ~2 min before the pool finishes instead of waiting for the last slot.
+        self.first_ready = asyncio.Event()
+        # Set when every slot has been attempted (success or failure).
+        self.warm_complete = asyncio.Event()
 
     async def init(self) -> int:
         """Start all slots concurrently. Returns the number of ready slots."""
@@ -208,6 +224,11 @@ class SysboxPool:
             return_exceptions=True,
         )
         ready = sum(1 for r in results if r is True)
+        self.warm_complete.set()
+        if not ready:
+            # Nothing warmed. Unblock consumers so they can exit/retry rather
+            # than hang forever on first_ready.
+            self.first_ready.set()
         log.info("SysboxPool: %d/%d slots ready", ready, self._capacity)
         return ready
 
@@ -246,6 +267,10 @@ class SysboxPool:
                 "--name", slot.sb_name,
                 "-p", f"{slot.port}:{K3D_LB_HTTP_PORT}",
                 "-v", f"{slot.workspace}:/workspaces",
+                # Resource envelope (no-op unless WORKER_SLOT_LIMITS=1). Applied
+                # to the OUTER Sysbox, so it bounds the slot's entire nested
+                # world — inner dockerd, k3d cluster, and every pod inside it.
+                *slot_limit_args(),
                 "docker:25-dind",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
@@ -313,16 +338,28 @@ class SysboxPool:
         # Record current image digest for staleness detection on release.
         slot.image_digest = await _image_digest(TEST_IMAGE)
 
+        # Count this slot once, on its FIRST successful warm. release() re-inits
+        # the same slot between jobs, which must not inflate the count.
+        if not slot.ever_ready:
+            slot.ever_ready = True
+            self.ready_count += 1
+            self.first_ready.set()
+
         await self._queue.put(slot)
         log.info(
-            "Slot %d (%s) ready — port %d, image %.12s",
+            "Slot %d (%s) ready — port %d, image %.12s (%d/%d warm)",
             slot.index, slot.sb_name, slot.port, slot.image_digest,
+            self.ready_count, self._capacity,
         )
         return True
 
     async def acquire(self) -> SysboxSlot:
         """Block until a pre-warmed slot is available and return it."""
         return await self._queue.get()
+
+    def free_slots(self) -> int:
+        """Warm slots not currently claimed by a job."""
+        return self._queue.qsize()
 
     async def release(self, slot: SysboxSlot, healthy: bool = True) -> None:
         """Clean slot state and return it to the pool.
@@ -438,6 +475,16 @@ class WorkerAgent:
         self.sysbox_pool = SysboxPool(WORKER_CAPACITY)
         # Maps job_id → SysboxSlot so _kill_job_container can find the right container.
         self._job_slots: dict[str, SysboxSlot] = {}
+        # Warm-up telemetry: monotonic start, and seconds-to-fully-warm once the
+        # pool finishes. The fleet controller needs a measured T_boot to size how
+        # far ahead of demand it must launch.
+        self._start_monotonic = time.monotonic()
+        self._time_to_ready_s: int = 0
+        self._warm_task: asyncio.Task | None = None
+        # Cordon flag, refreshed from Redis on every consume tick. The master
+        # sets worker:{id} draining=1 on scale-down; until this existed the
+        # agent kept claiming jobs onto a host about to be terminated.
+        self._draining = False
 
     async def start(self):
         """Connect to master Redis, register, initialize pool, and start consuming."""
@@ -458,8 +505,21 @@ class WorkerAgent:
 
         await self._register()
 
+        # Warm the pool CONCURRENTLY with the service loops instead of blocking
+        # on it. _consume_queue waits only for the FIRST slot, so a 12-slot
+        # worker starts taking jobs ~2 min into a ~4.5 min warm-up instead of
+        # after it. The heartbeat also starts immediately, so the fleet sees
+        # honest, rising slot counts during warm-up rather than a static lie.
+        if WORKER_SLOT_LIMITS:
+            log.info(
+                "Slot resource limits ON: %dMB memory cap, %s",
+                WORKER_SLOT_MEMORY_MB, " ".join(slot_limit_args()),
+            )
+        else:
+            log.info("Slot resource limits OFF (set WORKER_SLOT_LIMITS=1 to enable)")
+
         log.info("Initializing Sysbox pool (%d slots)...", WORKER_CAPACITY)
-        await self.sysbox_pool.init()
+        self._warm_task = asyncio.create_task(self.sysbox_pool.init())
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -613,6 +673,11 @@ class WorkerAgent:
             return
         self._shutdown = True
         self._running = False
+        # Stop warming mid-flight — otherwise _init_slot keeps creating Sysbox
+        # containers while shutdown is busy removing them, and the pool
+        # teardown races slots into existence behind itself.
+        if self._warm_task and not self._warm_task.done():
+            self._warm_task.cancel()
         log.info(
             "Received %s — terminating %d active job(s)", sig.name, len(self.active_jobs)
         )
@@ -651,9 +716,19 @@ class WorkerAgent:
         worker_key = f"worker:{WORKER_ID}"
         fields = {
             "arch": WORKER_ARCH,
-            "capacity": str(WORKER_CAPACITY),
+            # capacity == warm slots, NOT the nominal setting. At registration
+            # the pool has not warmed a single slot, so the honest answer is 0
+            # and it rises as slots come up. Everything that consumes this field
+            # — the fleet controller, the workshop capacity check, the dashboard
+            # — is asking "how many sessions can this host take", and used to be
+            # told the nominal figure from second zero of a multi-minute warm-up.
+            "capacity": "0",
+            "slots_total": str(WORKER_CAPACITY),
+            "slots_ready": "0",
+            "slots_free": "0",
             "active_jobs": "0",
-            "status": "ready",
+            "status": "warming",
+            "draining": "0",
             "host": WORKER_HOST,
             "ssh_host": WORKER_SSH_HOST or WORKER_HOST,
             "registered_at": datetime.now(timezone.utc).isoformat(),
@@ -675,6 +750,28 @@ class WorkerAgent:
             port_pool_key, APP_PROXY_PORT_START, APP_PROXY_PORT_START + APP_PROXY_PORT_COUNT - 1,
         )
 
+    async def _refresh_draining(self) -> bool:
+        """Read the cordon flag from Redis; True means: claim no new jobs.
+
+        Called once per consume tick (~5s), so a scale-down cordon takes effect
+        within one BLPOP timeout. Deliberately **fails open** — if Redis is
+        unreachable the worker keeps serving, because a transient blip must not
+        quietly idle the fleet. Un-cordoning is just as immediate, which is what
+        makes "un-drain instead of launching" a viable scale-up shortcut.
+        """
+        try:
+            raw = await self.pool.hget(f"worker:{WORKER_ID}", "draining")
+        except Exception:
+            return self._draining
+        draining = str(raw or "0").strip().lower() in ("1", "true", "yes")
+        if draining != self._draining:
+            log.info("Cordon %s — %s",
+                     "SET" if draining else "CLEARED",
+                     "no new jobs will be claimed" if draining
+                     else "resuming normal job intake")
+        self._draining = draining
+        return draining
+
     @staticmethod
     def _collect_metrics() -> dict:
         """Collect host CPU, memory, disk, and container metrics."""
@@ -686,6 +783,10 @@ class WorkerAgent:
             metrics["mem_pct"] = str(round(vm.percent, 1))
             metrics["mem_used_gb"] = str(round(vm.used / 1024 ** 3, 2))
             metrics["mem_total_gb"] = str(round(vm.total / 1024 ** 3, 2))
+            # MemAvailable, not free — the admission decision cares about what a
+            # new session can actually claim, which includes reclaimable cache.
+            # Measured: a full Kubernetes-101 session commits ~1.6 GiB.
+            metrics["mem_available_mb"] = str(int(vm.available / 1024 ** 2))
         except ImportError:
             # psutil not yet installed — read procfs directly
             try:
@@ -707,6 +808,7 @@ class WorkerAgent:
                     metrics["mem_pct"] = str(round((total - avail) / total * 100, 1))
                     metrics["mem_total_gb"] = str(round(total / 1024 ** 2, 2))
                     metrics["mem_used_gb"] = str(round((total - avail) / 1024 ** 2, 2))
+                    metrics["mem_available_mb"] = str(int(avail / 1024))
             except Exception:
                 pass
         try:
@@ -730,18 +832,38 @@ class WorkerAgent:
         # Static fields written every heartbeat so they survive key expiry + recreation.
         static_fields = {
             "arch": WORKER_ARCH,
-            "capacity": str(WORKER_CAPACITY),
+            "slots_total": str(WORKER_CAPACITY),
             "host": WORKER_HOST,
             "ssh_host": WORKER_SSH_HOST or WORKER_HOST,
         }
         while self._running:
             try:
                 metrics = await asyncio.get_event_loop().run_in_executor(None, self._collect_metrics)
+                ready = self.sysbox_pool.ready_count
+                active = len(self.active_jobs)
+                # Record time-to-fully-warm exactly once, when the pool finishes.
+                if not self._time_to_ready_s and self.sysbox_pool.warm_complete.is_set():
+                    self._time_to_ready_s = int(time.monotonic() - self._start_monotonic)
+                    log.info("Worker fully warm after %ds", self._time_to_ready_s)
+                if self._draining:
+                    status = "draining"
+                elif not self.sysbox_pool.warm_complete.is_set():
+                    status = "warming"
+                elif active >= ready:
+                    status = "busy"
+                else:
+                    status = "ready"
                 await self.pool.hset(worker_key, mapping={
                     **static_fields,
-                    "active_jobs": str(len(self.active_jobs)),
+                    # capacity == warm slots (see _register). slots_free is what a
+                    # scale-up decision actually consumes.
+                    "capacity": str(ready),
+                    "slots_ready": str(ready),
+                    "slots_free": str(max(0, ready - active)),
+                    "time_to_ready_s": str(self._time_to_ready_s),
+                    "active_jobs": str(active),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
-                    "status": "ready" if len(self.active_jobs) < WORKER_CAPACITY else "busy",
+                    "status": status,
                     **{k: str(v) for k, v in self.scheduler.stats().items()},
                     **metrics,
                 })
@@ -759,12 +881,27 @@ class WorkerAgent:
         """
         queue_key = f"queue:test:{WORKER_ARCH}"
         direct_key = f"queue:direct:{WORKER_ID}"
+
+        # Don't claim jobs before a slot exists to run them in. Waiting on the
+        # FIRST slot (not the whole pool) is what lets a warming worker start
+        # serving minutes early; claiming with zero warm slots would just park
+        # a learner's session on an unusable host.
+        await self.sysbox_pool.first_ready.wait()
         log.info("Consuming from %s and %s", queue_key, direct_key)
 
         while self._running:
             try:
                 if self.semaphore.locked():
                     await asyncio.sleep(1)
+                    continue
+
+                # Cordon check — the master sets draining=1 to take this worker
+                # out of rotation before terminating it (scale-down, or a spot
+                # interruption notice). BLPOP's 5s timeout bounds how long a
+                # cordon takes to bite. Fail OPEN on a Redis error: a blip must
+                # not silently stop the fleet from taking work.
+                if await self._refresh_draining():
+                    await asyncio.sleep(2)
                     continue
 
                 result = await self.pool.blpop([direct_key, queue_key], timeout=5)

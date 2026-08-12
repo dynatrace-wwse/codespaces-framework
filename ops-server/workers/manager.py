@@ -295,6 +295,15 @@ class WorkerManager:
             "arch": "arm64",
             "role": "master",
             "capacity": str(MAX_PARALLEL_WORKERS),
+            # Mirror the remote agents' vocabulary so the fleet controller can
+            # read one shape across the whole fleet. The master has no warm-up
+            # phase (no Sysbox pool), so ready == total from the start. It is
+            # never a scale-up/scale-down target — fleet_policy skips role=master
+            # — but it must still be countable.
+            "slots_total": str(MAX_PARALLEL_WORKERS),
+            "slots_ready": str(MAX_PARALLEL_WORKERS),
+            "slots_free": str(MAX_PARALLEL_WORKERS),
+            "draining": "0",
             "active_jobs": "0",
             "status": "ready",
             "registered_at": datetime.now(timezone.utc).isoformat(),
@@ -386,11 +395,13 @@ class WorkerManager:
         while not self._shutdown:
             try:
                 metrics = await asyncio.get_event_loop().run_in_executor(None, self._collect_metrics)
+                active = len(self.active_jobs)
                 await self.pool.hset("worker:master-arm64", mapping={
-                    "active_jobs": str(len(self.active_jobs)),
+                    "active_jobs": str(active),
+                    "slots_free": str(max(0, MAX_PARALLEL_WORKERS - active)),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "status": (
-                        "ready" if len(self.active_jobs) < MAX_PARALLEL_WORKERS
+                        "ready" if active < MAX_PARALLEL_WORKERS
                         else "busy"
                     ),
                     **metrics,

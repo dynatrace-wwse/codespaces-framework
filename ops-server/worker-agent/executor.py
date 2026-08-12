@@ -105,6 +105,10 @@ class SysboxSlot:
     workspace: Path           # host path mounted at /workspaces inside the Sysbox
     port: int                 # fixed host port published on this Sysbox for app proxy
     image_digest: str = field(default="", compare=False)
+    # True once this slot has warmed successfully at least once. Used by
+    # SysboxPool.ready_count so the re-init on every release() doesn't
+    # double-count a slot that was already part of the warm pool.
+    ever_ready: bool = field(default=False, compare=False)
 
 
 async def _alloc_app_port(redis_pool) -> int | None:
