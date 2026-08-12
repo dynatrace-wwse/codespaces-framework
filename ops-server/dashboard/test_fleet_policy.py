@@ -51,18 +51,53 @@ def test_c5_model_reproduces_production_reality():
     # The only real validation available: production runs 6 on a c5.2xlarge,
     # and the 12-session load test failed on memory pressure.
     assert fp.slots_for_instance("c5.2xlarge") == 6
-    assert fp.slots_for_instance("c5.2xlarge", safety=1.0) == 7
+    assert fp.memory_slots("c5.2xlarge", safety=1.0) == 7
+    assert fp.limiting_factor("c5.2xlarge") == "memory"
 
 
-def test_r6a_model_matches_measured_host_memory():
+def test_r6a_memory_ceiling_matches_measured_host_memory():
     # Density box reported 62,919 MiB. Raw arithmetic 37, planned 29.
-    assert fp.slots_for_instance("r6a.2xlarge") == 29
-    assert fp.slots_for_instance("r6a.2xlarge", safety=1.0) == 37
+    assert fp.memory_slots("r6a.2xlarge") == 29
+    assert fp.memory_slots("r6a.2xlarge", safety=1.0) == 37
 
 
-def test_memory_optimized_beats_compute_optimized_per_instance():
-    # The whole cost thesis: same vCPU count, far more sessions.
-    assert fp.slots_for_instance("r6a.2xlarge") > 4 * fp.slots_for_instance("c5.2xlarge")
+def test_r6a_is_cpu_bound_not_memory_bound():
+    # MEASURED 2026-08-12: 30 full-lab sessions on one r6a.2xlarge left memory
+    # comfortable (41.7 GiB of 62.9, pressure ~0%) while CPU pressure held 98%
+    # for 18 minutes and every install missed the framework's 600s readiness
+    # gate. Planning on memory alone would oversell this shape ~2x.
+    assert fp.cpu_slots("r6a.2xlarge") == 16
+    assert fp.slots_for_instance("r6a.2xlarge") == 16
+    assert fp.limiting_factor("r6a.2xlarge") == "cpu"
+
+
+def test_planning_takes_the_lower_of_both_ceilings():
+    for t in fp.INSTANCE_MEMORY_MB:
+        if fp.slots_for_instance(t):
+            assert fp.slots_for_instance(t) == min(fp.memory_slots(t), fp.cpu_slots(t)), t
+
+
+def test_more_memory_than_cores_can_feed_is_wasted():
+    # r6a.4xlarge has twice the RAM of m6a.4xlarge and the same core count, so
+    # it buys no extra sessions — the cost model must not pretend otherwise.
+    assert fp.memory_slots("r6a.4xlarge") > fp.memory_slots("m6a.4xlarge")
+    assert fp.slots_for_instance("r6a.4xlarge") >= fp.slots_for_instance("m6a.4xlarge")
+    eu = fp.ON_DEMAND_USD_PER_HOUR["eu-west-2"]
+    per_session = lambda t: eu[t] / fp.slots_for_instance(t)   # noqa: E731
+    assert per_session("m6a.4xlarge") < per_session("r6a.4xlarge")
+
+
+def test_anything_beats_compute_optimized():
+    # The cost thesis survives the CPU correction: c5 is still worst.
+    ranked = fp.rank_by_cost("eu-west-2")
+    assert ranked[-1]["instance_type"] == "c5.2xlarge"
+    assert ranked[0]["usd_per_session_hour"] < 0.5 * ranked[-1]["usd_per_session_hour"]
+
+
+def test_rank_by_cost_prices_deliverable_slots_not_installed_ram():
+    for row in fp.rank_by_cost("eu-west-2"):
+        assert row["slots"] == min(row["memory_slots"], row["cpu_slots"])
+        assert row["binds"] in ("memory", "cpu", "balanced")
 
 
 def test_unknown_instance_type_refuses_rather_than_guesses():
@@ -72,9 +107,10 @@ def test_unknown_instance_type_refuses_rather_than_guesses():
 
 
 def test_instances_for_seats_includes_redundancy():
-    per = fp.slots_for_instance("r6a.2xlarge")          # 29
-    assert fp.instances_for_seats(70, "r6a.2xlarge") == 3 + 1
-    assert fp.instances_for_seats(70, "r6a.2xlarge", redundancy=False) == 3
+    per = fp.slots_for_instance("r6a.2xlarge")          # 16 (CPU-bound)
+    assert per == 16
+    assert fp.instances_for_seats(70, "r6a.2xlarge") == 5 + 1
+    assert fp.instances_for_seats(70, "r6a.2xlarge", redundancy=False) == 5
     # N+1 must genuinely cover the loss of one host.
     assert (fp.instances_for_seats(70, "r6a.2xlarge") - 1) * per >= 70
 
@@ -169,12 +205,12 @@ def test_no_action_when_target_already_met():
 
 
 def test_launch_count_derived_from_measured_density():
-    # 70 seats, nothing running, 29 slots per r6a.2xlarge → 3.
+    # 70 seats, nothing running, 16 usable slots per r6a.2xlarge → 5.
     plan = fp.plan_scale_up(70, _state([]), instance_type="r6a.2xlarge",
                             per_call_cap=10)
     assert plan["action"] == "launch"
-    assert plan["launch"] == 3
-    assert plan["per_instance"] == 29
+    assert plan["launch"] == 5
+    assert plan["per_instance"] == 16
 
 
 def test_undrain_is_preferred_over_launching():
@@ -347,11 +383,19 @@ def test_current_vs_proposed_fleet_cost_and_capacity():
     proposed_slots = 3 * fp.slots_for_instance("r6a.2xlarge")
 
     assert now_slots == 12
-    assert proposed_slots == 87
+    assert proposed_slots == 48
     # Monthly bill roughly doubles...
     assert proposed["total_usd"] > now["total_usd"]
     # ...while cost per slot collapses.
-    assert (proposed["total_usd"] / proposed_slots) < 0.35 * (now["total_usd"] / now_slots)
+    assert (proposed["total_usd"] / proposed_slots) < 0.55 * (now["total_usd"] / now_slots)
+
+    # And the shape the CPU measurement actually favours: same daily spend as
+    # 3 x r6a.2xlarge, but 25% more usable seats, because m6a.4xlarge's cores
+    # can feed its RAM.
+    balanced = fp.estimate_cost(2, "m6a.4xlarge", 730.0, eu)
+    balanced_slots = 2 * fp.slots_for_instance("m6a.4xlarge")
+    assert balanced_slots == 60 > proposed_slots
+    assert abs(balanced["total_usd"] - proposed["total_usd"]) < 1.0
 
 
 if __name__ == "__main__":

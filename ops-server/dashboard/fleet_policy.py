@@ -58,6 +58,29 @@ HOST_CACHE_RESERVE_MB = 1500
 # conntrack) are unmeasured above ~12 slots — so plan below the ceiling.
 SLOT_SAFETY_FACTOR = 0.8
 
+# ── the CPU term (measured 2026-08-12 on r6a.2xlarge, 30 sessions) ──────────
+# Memory is NOT the only ceiling. Running the Kubernetes-101 lab
+# (dynatraceDeployOperator + deployApplicationMonitoring) on 30 sessions at once
+# on 8 vCPU left memory completely comfortable — 41.7 GiB of 62.9, memory
+# pressure ~0% — while CPU pressure sat at 98% for eighteen minutes. Every
+# install eventually converged, but all 30 blew past the framework's own
+# readiness gate (dynatraceDeployOperator waits 60 × 10s), which a learner sees
+# as "Run solution" failing.
+#
+# So the binding constraint for an INSTRUCTOR-LED class — where everyone is told
+# to run the same step at the same moment — is CPU, not RAM.
+#
+#   measured: ~265 CPU-seconds per lab install (8 vCPU × ~18 min × 98%, minus
+#             the steady-state draw of 30 idle sessions)
+#   gate:     600 s before the framework gives up
+#   =>        N concurrent installs on V vCPU each get V/N cores, so
+#             265·N/V <= 600  →  N <= 2.26·V
+#
+# Rounded down to 2.0 for margin.
+LAB_INSTALL_CPU_SECONDS = 265
+LAB_READINESS_GATE_S = 600
+SESSIONS_PER_VCPU = 2.0
+
 # Nominal usable RAM (MiB) as the OS reports it — i.e. after firmware/kernel
 # reserve. c5.2xlarge and r6a.2xlarge are measured; the rest follow the same
 # ~97.5% of nominal ratio.
@@ -74,6 +97,21 @@ INSTANCE_MEMORY_MB = {
     "r6a.4xlarge":  128560,
     "r6i.4xlarge":  128560,
     "r5.4xlarge":   128560,
+}
+
+INSTANCE_VCPUS = {
+    "c5.2xlarge":    8,
+    "c5.4xlarge":   16,
+    "m5.2xlarge":    8,
+    "m6a.2xlarge":   8,
+    "m6i.2xlarge":   8,
+    "m6a.4xlarge":  16,
+    "r5.2xlarge":    8,
+    "r6a.2xlarge":   8,      # measured
+    "r6i.2xlarge":   8,
+    "r6a.4xlarge":  16,
+    "r6i.4xlarge":  16,
+    "r5.4xlarge":   16,
 }
 
 DEFAULT_INSTANCE_TYPE = "r6a.2xlarge"
@@ -106,12 +144,8 @@ def is_known_region(region: str) -> bool:
 
 # ── capacity model ──────────────────────────────────────────────────────────
 
-def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR) -> int:
-    """How many concurrent full-lab sessions one instance should be planned for.
-
-    Returns 0 for an unknown type — callers must treat that as "refuse to plan"
-    rather than guessing, because guessing high is how a class gets oversold.
-    """
+def memory_slots(instance_type: str, safety: float = SLOT_SAFETY_FACTOR) -> int:
+    """Sessions an instance can HOLD, from the measured committed footprint."""
     mem = INSTANCE_MEMORY_MB.get(instance_type, 0)
     if mem <= 0:
         return 0
@@ -119,6 +153,41 @@ def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR) -
     if usable <= 0:
         return 0
     return max(0, int((usable / SESSION_COMMITTED_MB) * safety))
+
+
+def cpu_slots(instance_type: str) -> int:
+    """Sessions that can run the lab's heavy step SIMULTANEOUSLY and still pass
+    the framework's readiness gate. See SESSIONS_PER_VCPU for the measurement.
+    """
+    vcpus = INSTANCE_VCPUS.get(instance_type, 0)
+    return int(vcpus * SESSIONS_PER_VCPU) if vcpus > 0 else 0
+
+
+def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR) -> int:
+    """How many concurrent full-lab sessions one instance should be planned for.
+
+    The lower of the memory ceiling and the CPU ceiling. Both are measured, and
+    which one binds depends on the shape: a c5.2xlarge runs out of RAM first
+    (6 vs 16), an r6a.2xlarge runs out of CPU first (16 vs 29). Planning on
+    memory alone is what would have oversold an r-family box by nearly 2×.
+
+    Returns 0 for an unknown type — callers must treat that as "refuse to plan"
+    rather than guessing, because guessing high is how a class gets oversold.
+    """
+    mem_slots = memory_slots(instance_type, safety)
+    cpu_cap = cpu_slots(instance_type)
+    if mem_slots <= 0 or cpu_cap <= 0:
+        return 0
+    return min(mem_slots, cpu_cap)
+
+
+def limiting_factor(instance_type: str) -> str:
+    """Which ceiling binds for this shape — shown in the UI so the operator can
+    see whether more RAM or more cores would actually buy anything."""
+    m, c = memory_slots(instance_type), cpu_slots(instance_type)
+    if m <= 0 or c <= 0:
+        return "unknown"
+    return "memory" if m < c else ("cpu" if c < m else "balanced")
 
 
 def instances_for_seats(seats: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
@@ -412,6 +481,8 @@ ON_DEMAND_USD_PER_HOUR = {
     "eu-west-2": {
         "c5.2xlarge": 0.4040,
         "m6a.2xlarge": 0.3996,
+        "m6a.4xlarge": 0.7992,
+        "m6i.2xlarge": 0.4440,
         "r6a.2xlarge": 0.5328,
         "r6a.4xlarge": 1.0656,
         "r6i.2xlarge": 0.5920,
@@ -420,9 +491,36 @@ ON_DEMAND_USD_PER_HOUR = {
     "ap-southeast-1": {
         "c5.2xlarge": 0.3920,
         "m6a.2xlarge": 0.4320,
+        "m6a.4xlarge": 0.8640,
+        "m6i.2xlarge": 0.4800,
         "r6a.2xlarge": 0.5472,
         "r6a.4xlarge": 1.0944,
         "r6i.2xlarge": 0.6080,
         "r5.2xlarge": 0.6080,
     },
 }
+
+
+def rank_by_cost(region: str, hours: float = 1.0) -> list[dict]:
+    """Instance types ranked by $/session-hour, cheapest first.
+
+    Uses the planning slot count (min of memory and CPU), so a shape whose RAM
+    its cores cannot feed is priced on what it can actually deliver.
+    """
+    prices = ON_DEMAND_USD_PER_HOUR.get(region, {})
+    rows = []
+    for t, unit in prices.items():
+        slots = slots_for_instance(t)
+        if slots <= 0:
+            continue
+        rows.append({
+            "instance_type": t,
+            "slots": slots,
+            "memory_slots": memory_slots(t),
+            "cpu_slots": cpu_slots(t),
+            "binds": limiting_factor(t),
+            "usd_per_hour": unit,
+            "usd_per_session_hour": round(unit / slots, 5),
+            "usd_window": round(unit * hours, 2),
+        })
+    return sorted(rows, key=lambda r: r["usd_per_session_hour"])
