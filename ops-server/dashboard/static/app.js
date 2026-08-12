@@ -3404,11 +3404,17 @@ async function goRegisterOauth(action) {
             else {
                 const v = j.version || '?';
                 const s = j.status === 'up-to-date' ? `already up-to-date (v${v})` : j.status === 'upgraded' ? `upgraded v${j.from} → v${v}` : `installed v${v}`;
-                const mint = j.mintReady
-                    ? ' · <strong style="color:#2da44e">mint scopes verified</strong> — now paste this client into the app (Admin → Token minting)'
-                    : ' · <strong style="color:#d29922">mint scopes MISSING</strong> (grant platform-token:tokens:write/manage before configuring the app)';
+                // The single fact that decides whether this tenant is finished or not:
+                // did the client land in the tenant's own settings? "mint scopes verified"
+                // alone used to read as done when nothing had been configured at all.
+                const stored = /^(stored|updated)/.test(j.mintClient || '');
+                const mint = !j.mintReady
+                    ? ' · <strong style="color:#d29922">mint scopes MISSING</strong> (grant platform-token:tokens:write + :manage on the account, then register again)'
+                    : stored
+                        ? ' · <strong style="color:#2da44e">token minting configured</strong> — this tenant now mints its own tokens and updates itself'
+                        : ` · <strong style="color:#d29922">client NOT stored on the tenant</strong> (${escapeHtml(j.mintClient || 'unknown')}) — paste it in the app under Settings → Training Token Minting`;
                 m.innerHTML = `✓ ${s} — <a href="${escapeHtml(j.url || '#')}" target="_blank">open app</a>` + mint
-                    + (j.profile ? ` · content profile ${escapeHtml(j.profile)}` : '')
+                    + (j.profile ? ` · the trainings delivered to this tenant match the profile <strong>"${escapeHtml(j.profile)}"</strong>` : '')
                     + ((j.warnings || []).length ? `<br><span class="content-hint">⚠ ${j.warnings.map(escapeHtml).join('<br>⚠ ')}</span>` : '');
             }
             loadRegisterAudit();

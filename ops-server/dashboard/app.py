@@ -4471,9 +4471,18 @@ async def api_arena_session_status(job_id: str, request: Request):
     else:
         status = "provisioning"
 
-    # Anonymous callers get the learner identity masked (the app's bearer /
-    # signed-in members get full values — the app needs them for the UI + DQL
-    # session-id substitution).
+    # Anonymous callers get the learner IDENTITY (the email) masked; the app's
+    # bearer / signed-in members get it in full.
+    #
+    # `dtSessionId` is deliberately EXEMPT from masking. It is the per-user
+    # Grail-isolation id the learner's own DQL must match on
+    # (`endsWith(k8s.cluster.name, "<id>")`), and the app polls this endpoint
+    # WITHOUT the bearer — `session-tick` skips the app-settings token lookup
+    # for latency. Masking it rewrote every {{DT_SESSION_ID}} filter to
+    # `endsWith(..., "se***")`: a query that can never match, failing silently
+    # with an empty result rather than an error. It also leaks nothing the
+    # caller does not already hold — reaching this endpoint requires the
+    # unguessable job id, which grants a root shell via `wsUrl` anyway.
     full = _has_full_access(request)
 
     # Resume outcome. Section TITLES only — never the commands that were
@@ -4499,8 +4508,7 @@ async def api_arena_session_status(job_id: str, request: Request):
         "userId":     meta.get("arena_user", "") if full
                       else masking.mask_email(meta.get("arena_user", "")),
         "expiresAt":  meta.get("expires_at", ""),
-        "dtSessionId": meta.get("dt_hostgroup", "") if full
-                       else masking.mask_email(meta.get("dt_hostgroup", "")),
+        "dtSessionId": meta.get("dt_hostgroup", ""),
         **resume_fields,
     }
 
@@ -4545,8 +4553,8 @@ async def api_arena_user_session(userId: str, trainingId: str, request: Request,
                     "userId":     meta.get("arena_user", "") if full
                                   else masking.mask_email(meta.get("arena_user", "")),
                     "expiresAt":  meta.get("expires_at", ""),
-                    "dtSessionId": meta.get("dt_hostgroup", "") if full
-                                   else masking.mask_email(meta.get("dt_hostgroup", "")),
+                    # Never masked — see the note on the session-status route.
+                    "dtSessionId": meta.get("dt_hostgroup", ""),
                 }
         if cursor == 0:
             break
@@ -5755,11 +5763,11 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
 
 @app.delete("/api/live/sessions/{session_id}")
 async def api_live_session_delete(session_id: str, request: Request, trainerEmail: str = ""):
-    """Trainer hard-deletes a workshop that has NOT started — allowed only in
-    scheduled/open. 409 once running/ended/cancelled (a started or finished
-    workshop is history, not deletable; cancel/end + the 7-day TTL cover those).
-    403 on trainerEmail mismatch, 404 if already gone. Removes every key AND the
-    index entry, so the workshop vanishes for the whole cohort.
+    """Trainer hard-deletes a workshop — allowed before it starts
+    (scheduled/open) and once it is finished (ended/cancelled). 409 only while
+    running: deleting a live room would strand its cohort. 403 on trainerEmail
+    mismatch, 404 if already gone. Removes every key AND the index entry, so the
+    workshop vanishes for the whole cohort.
     Auth: service bearer or signed-in writer.
 
     Accepts trainerEmail as a QUERY param or in the BODY. Its three sibling
