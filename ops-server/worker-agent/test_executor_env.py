@@ -80,6 +80,22 @@ def test_hostgroup_explicit_wins_over_derived():
     assert env["DT_HOSTGROUP"] == "alice-20260101"
 
 
+def test_hostgroup_long_local_part_is_bounded():
+    # 17 local + '-' + YYYYMMDD = 26, so the framework can always append the
+    # whole id to the DynaKube name (cap 37) and endsWith() keeps matching.
+    env = _write(user="maria.jose.rodriguez.fernandez@dynatrace.com")
+    assert len(env["DT_HOSTGROUP"]) == 26
+    assert env["DT_HOSTGROUP"].startswith("maria-jose-rodrig")
+
+
+def test_hostgroup_shared_prefix_collides_by_design():
+    # Documented limit of plain truncation (no hash): two learners sharing the
+    # first 17 characters of their local part get the same id and merged data.
+    a = _write(user="maria.jose.rodriguez.fernandez@dynatrace.com")
+    b = _write(user="maria.jose.rodriguez.gomez@dynatrace.com")
+    assert a["DT_HOSTGROUP"] == b["DT_HOSTGROUP"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

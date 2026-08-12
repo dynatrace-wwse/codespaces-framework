@@ -43,10 +43,17 @@ Environment (all optional):
   TRAINING_TEST_API_TOKEN           alternative: existing token with apiTokens.write
   TRAINING_TEST_REQUIRE_MINT=1      fail the run if token minting did not happen
   TRAINING_TEST_READY_TIMEOUT_S     provisioning wait cap (default 1500)
+  TRAINING_TEST_DQL_TOKEN           dt0s16 platform token (read scopes) for the SAME tenant
+                                    as TRAINING_TEST_TENANT_URL — lets the runner execute the
+                                    trainings' dql-verification blocks. Unset -> DQL SKIPPED.
+                                    (QA read usage; never a deploy credential.)
+  TRAINING_TEST_REQUIRE_DQL=1       turn a DQL SKIPPED into a run failure
+  TRAINING_TEST_DQL_SETTLE_S        how long to retry Grail checks before the verdict (default 180)
 """
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -66,6 +73,8 @@ EXEC_TIMEOUT_S = 120        # instant checks / setup commands
 WAIT_TIMEOUT_S = 660        # LAB_WAIT-gated verifies (covers framework waitForPod 60x10s)
 SOLVE_TIMEOUT_S = 840       # solution commands via exec-start (operator deploys)
 SOLVE_POLL_S = int(os.environ.get("TRAINING_TEST_SOLVE_POLL_S", "5"))
+DQL_SETTLE_S = int(os.environ.get("TRAINING_TEST_DQL_SETTLE_S", "180"))
+DQL_POLL_S = int(os.environ.get("TRAINING_TEST_DQL_POLL_S", "20"))
 FILE_MARK = "===TT_FILE:"
 
 QUIZ_TYPES = ("multiple-choice", "dql-verification", "instructor-code", "shell-verification")
@@ -134,6 +143,81 @@ def orbital_bearer() -> str:
         except Exception:
             tok = ""
     return tok.split(",")[0].strip()  # comma-separated for rotation; send the first
+
+
+def _b36(n: int) -> str:
+    """base36 of an int — same compact, sortable encoding as Orbital's job ids."""
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if n <= 0:
+        return "0"
+    out = []
+    while n:
+        n, r = divmod(n, 36)
+        out.append(digits[r])
+    return "".join(reversed(out))
+
+
+def short_tag(run_tag: str) -> str:
+    """Compress the caller's run tag to 1-4 characters.
+
+    The whole test identity has to fit Orbital's HOSTGROUP_LOCAL_MAX (17), which
+    is what keeps the session id inside the framework's DynaKube name cap and
+    therefore keeps `endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}")` matching.
+    The long tags callers pass (workers/manager.py forwards nightly_run_id, e.g.
+    "nightly-20260506-020000") used to blow the budget on their own.
+    """
+    t = re.sub(r"[^a-z0-9]+", "", (run_tag or "").lower())
+    if t.startswith("nightly"):
+        return "n"
+    if t.startswith("manual") or not t:
+        return "m"
+    return t[:4]
+
+
+def runner_user_id(run_tag: str, when: float) -> str:
+    """Test identity: "tt-<tag>-<b36 epoch-ms>@orbital.internal" (<= 17 chars local).
+
+    Unique per run — the one-session-per-user guard must never dedupe onto a
+    stale session, and each run needs its own per-user Grail isolation id.
+    """
+    return f"tt-{short_tag(run_tag)}-{_b36(int(when * 1000))}@orbital.internal"
+
+
+def substitute_placeholders(text: str, session_vars: dict) -> str:
+    """Substitute {{DT_SESSION_ID}} / {{DT_TENANT}} / {{JOB_ID}} exactly like the
+    app does (ui/app/training/utils/templateVars.ts). Unknown placeholders are
+    left literal — the app leaves them literal too, and a silent "" here would
+    turn `endsWith(k8s.cluster.name, "")` into a filter that matches every
+    cluster and passes on a classmate's data.
+    """
+    def repl(m):
+        return session_vars.get(m.group(1), m.group(0))
+    return re.sub(r"\{\{\s*([A-Z][A-Z0-9_]*)\s*\}\}", repl, text or "")
+
+
+def run_dql(tenant_url: str, token: str, query: str, timeout_s: int = 60):
+    """Execute a DQL query against the tenant's platform query API.
+
+    Returns (records, error). `records` is a list on success, None on failure.
+    Classic dt0c01 tokens are rejected here ("Could not parse JWT") — this needs
+    a gen3 dt0s16 platform token with read scopes (QA read usage only).
+    """
+    url = f"{tenant_url.rstrip('/')}/platform/storage/query/v1/query:execute"
+    body = json.dumps({"query": query, "requestTimeoutMilliseconds": 30000}).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+            d = json.load(r)
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:200]}"
+    state = d.get("state")
+    if state and state != "SUCCEEDED":
+        return None, f"query state={state}"
+    return (d.get("result") or {}).get("records", []) or [], ""
 
 
 class Orbital:
@@ -220,6 +304,33 @@ class Orbital:
 
 
 # ── content extraction ──────────────────────────────────────────────────────
+
+def extract_dql_checks(files):
+    """files: list of (fname, text) -> [(fname, label, dql, expect)] in doc order.
+
+    The learner's Grail assertions. Kept out of extract_from_docs' 4-tuple on
+    purpose: shell checks run inside the session, these run against the tenant
+    after an ingest settle window, so they have their own lifecycle.
+    """
+    out = []
+    for fname, text in files:
+        for kind, body in BLOCK_RE.findall(text):
+            if kind != "LAB_QUESTION":
+                continue
+            try:
+                doc = parse_block(body)
+            except Exception:
+                continue
+            if not isinstance(doc, dict) or doc.get("type") != "dql-verification":
+                continue
+            if validate_question(doc):       # structurally broken — already reported as a quiz problem
+                continue
+            out.append((fname,
+                        doc.get("buttonText") or doc.get("question") or "",
+                        doc.get("dql") or "",
+                        doc.get("expect") if isinstance(doc.get("expect"), dict) else {"operator": "not-empty"}))
+    return out
+
 
 def extract_from_docs(files):
     """files: list of (fname, text). Returns (setups, solutions, checks, quizzes),
@@ -360,6 +471,102 @@ def with_wait(cmd):
     return f"export LAB_WAIT=1; {cmd}"
 
 
+def evaluate_dql(records, expect):
+    """Port of the app's evaluateDqlResult (ui/app/utils/dqlUtils.ts).
+
+    DQL blocks use their own expect grammar (not-empty | eq | gte | gt |
+    contains, with an optional `field`), which is NOT the shell grammar that
+    evaluate() speaks — so the learner's button and this runner must agree here.
+    """
+    op = (expect or {}).get("operator")
+    if op == "not-empty":
+        return len(records) > 0
+    if not records:
+        return False
+    first = records[0]
+    if not isinstance(first, dict) or not first:
+        return False
+    field = expect.get("field")
+    target = first.get(field) if field else first[next(iter(first))]
+    if target is None:
+        return False
+    val = expect.get("value")
+    try:
+        if op == "eq":
+            return str(target) == str(val)
+        if op == "gte":
+            return float(target) >= float(val)
+        if op == "gt":
+            return float(target) > float(val)
+    except (TypeError, ValueError):
+        return False
+    if op == "contains":
+        return str(val) in str(target)
+    return False
+
+
+def run_dql_checks(dql_checks, session_vars, tenant_url, token):
+    """Execute the trainings' Grail assertions, retrying until ingest settles.
+
+    Returns (failures, skipped) — both lists of human-readable strings. A check
+    that cannot be executed is SKIPPED, never a pass: silence is exactly what
+    let a broken `endsWith` filter ride a green nightly for weeks.
+    """
+    failures, skipped = [], []
+    if not dql_checks:
+        return failures, skipped
+
+    header(f"== GRAIL CHECKS ({len(dql_checks)}) ==")
+    if not token or not tenant_url:
+        why = ("TRAINING_TEST_DQL_TOKEN not set" if not token else "no tenant URL")
+        for fname, label, _dql, _exp in dql_checks:
+            log(f"  [dql] {YELLOW}SKIPPED{RESET} [{fname}] {label} — {why}")
+            skipped.append(f"{fname}: {label} ({why})")
+        return failures, skipped
+
+    session_id = session_vars.get("DT_SESSION_ID", "")
+    if not session_id:
+        # endsWith(k8s.cluster.name, "") matches EVERY cluster — a check that
+        # "passes" on a classmate's data is worse than one that never ran.
+        for fname, label, _dql, _exp in dql_checks:
+            log(f"  [dql] {YELLOW}SKIPPED{RESET} [{fname}] {label} — session has no dtSessionId")
+            skipped.append(f"{fname}: {label} (no dtSessionId)")
+        return failures, skipped
+
+    pending = [(f, lbl, substitute_placeholders(q, session_vars), exp) for f, lbl, q, exp in dql_checks]
+    deadline = time.time() + DQL_SETTLE_S
+    attempt = 0
+    while pending:
+        attempt += 1
+        still = []
+        for fname, label, query, expect in pending:
+            records, err = run_dql(tenant_url, token, query)
+            if records is None:
+                log(f"  [dql] {YELLOW}SKIPPED{RESET} [{fname}] {label} — {err}")
+                skipped.append(f"{fname}: {label} ({err})")
+                continue
+            if evaluate_dql(records, expect):
+                log(f"  [dql] {tag(True, 'PASS')} [{fname}] {label} -> {len(records)} record(s)"
+                    f" expect={expect.get('operator')} {expect.get('value', '')}"
+                    + (f" (attempt {attempt})" if attempt > 1 else ""))
+            else:
+                still.append((fname, label, query, expect))
+        pending = still
+        if not pending or time.time() >= deadline:
+            break
+        log(f"  [dql] {len(pending)} check(s) not satisfied yet — telemetry still settling, "
+            f"retrying in {DQL_POLL_S}s (up to {DQL_SETTLE_S}s)")
+        time.sleep(DQL_POLL_S)
+
+    for fname, label, query, expect in pending:
+        log(f"  [dql] {tag(False, 'PASS')} [{fname}] {label} -> no records after {DQL_SETTLE_S}s "
+            f"(expect={expect.get('operator')} {expect.get('value', '')})")
+        for ln in query.strip().splitlines():
+            relay("        |", ln)
+        failures.append(f"{fname}: Grail check '{label}' returned nothing")
+    return failures, skipped
+
+
 # ── phases ──────────────────────────────────────────────────────────────────
 
 def doc_title(content):
@@ -434,7 +641,7 @@ def main():
 
     # 2. Provision — unique user per run so the one-session-per-user guard never
     #    dedupes onto a stale session, and per-user Grail isolation gets a fresh id.
-    user_id = f"training-test+{args.run_tag}-{int(started)}@orbital.internal"
+    user_id = runner_user_id(args.run_tag, started)
     payload = {"trainingId": training["id"], "userId": user_id}
     if args.ref:
         payload["ref"] = args.ref
@@ -497,9 +704,11 @@ def main():
         files = [(n, t) for n, t in files if n != MKDOCS_MARK]
         files, training_key = order_by_nav(files, mkdocs_text)
         setups, solutions, checks, quizzes = extract_from_docs(files)
+        dql_checks = extract_dql_checks(files)
         titles = {fname: doc_title(content) for fname, content in files}
         step(4, f"docs: {len(files)} files -> {len(setups)} setup cmds, "
-             f"{len(solutions)} solutions, {len(checks)} shell checks, {len(quizzes)} question blocks")
+             f"{len(solutions)} solutions, {len(checks)} shell checks, "
+             f"{len(dql_checks)} Grail checks, {len(quizzes)} question blocks")
         # The learner's path — sections (docs) strictly in doc order. Each
         # section is exercised exactly as a learner walks it: setup -> solution
         # (blocking, LAB_WAIT) -> solution verify -> the section's checks ->
@@ -613,6 +822,23 @@ def main():
             if not ok:
                 failures.append(f"section {i} ({fname}): " + "; ".join(sec_fail[:3]))
 
+        # 5b. The learner's Grail assertions — executed against the real tenant,
+        #     BEFORE the session is torn down, with a settle window because log
+        #     and trace ingest lands in Grail a minute or more after the
+        #     container produced it. A shape-only check here is what let a
+        #     broken endsWith() filter ride a green nightly.
+        dql_fail, dql_skipped = run_dql_checks(
+            dql_checks,
+            {"DT_SESSION_ID": prov.get("dtSessionId", ""),
+             "DT_TENANT": tenant,
+             "JOB_ID": job_id},
+            tenant,
+            os.environ.get("TRAINING_TEST_DQL_TOKEN", ""),
+        )
+        failures.extend(dql_fail)
+        if dql_skipped and os.environ.get("TRAINING_TEST_REQUIRE_DQL") == "1":
+            failures.append(f"TRAINING_TEST_REQUIRE_DQL=1 but {len(dql_skipped)} Grail check(s) were skipped")
+
         # 6. Training verdict — one line per section, in learner order.
         n_ok = sum(1 for _f, _t, ok, _e, _d in section_results if ok)
         log("")
@@ -621,6 +847,11 @@ def main():
             log(f"  {i}. {tag(ok, 'PASS')}  {fname}"
                 f"{' — ' + title if title else ''}  ({dur_s}s)"
                 + ("" if ok else f"  {RED}[{'; '.join(sec_fail[:2])}]{RESET}"))
+        if dql_checks:
+            n_dql_ok = len(dql_checks) - len(dql_fail) - len(dql_skipped)
+            log(f"  Grail: {n_dql_ok}/{len(dql_checks)} passed"
+                + (f", {len(dql_fail)} failed" if dql_fail else "")
+                + (f", {YELLOW}{len(dql_skipped)} skipped (NOT counted as passed){RESET}" if dql_skipped else ""))
 
     finally:
         # 7. Always release the environment — a leaked session burns a worker
@@ -637,7 +868,7 @@ def main():
         log(f"{RED}{BOLD}TRAINING_TEST: FAILURE{RESET}")
         return 1
     log(f"\n{GREEN}RESULT: all steps passed end-to-end in {dur}s "
-        f"(provision -> mint -> steps -> solutions -> quizzes -> terminate){RESET}")
+        f"(provision -> mint -> steps -> solutions -> quizzes -> grail -> terminate){RESET}")
     log(f"{GREEN}{BOLD}TRAINING_TEST: SUCCESS{RESET}")
     return 0
 
