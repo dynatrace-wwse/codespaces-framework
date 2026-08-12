@@ -77,18 +77,39 @@ printRunningApplications(){
 
     local running_app=false
 
-    # Determine the run environment from raw signals. greeting.sh runs as a
-    # standalone bash process that sources only variables.sh — functions.sh
-    # (and detectRunEnvironment) is NOT available here, so detect inline using
-    # the same signals detectRunEnvironment uses:
-    #   orbital    → ORBITAL_ENVIRONMENT=true or K3D_CLUSTER_NAME=master-*
-    #   codespaces → CODESPACE_NAME set
+    # Determine the run environment. greeting.sh runs as a standalone bash
+    # process that sources only variables.sh — functions.sh (and
+    # detectRunEnvironment) is NOT available here. Use INSTANTIATION_TYPE,
+    # which variables.sh has already computed and which is authoritative:
+    # it handles the combined Codespace+Orbital case AND the "is this
+    # Codespace really mine?" downgrade (cached Orbital API verdict).
+    #
+    # Do NOT re-derive from ORBITAL_ENVIRONMENT here: that is a STICKY
+    # repo-scoped Codespaces secret, so it reads "true" inside a plain,
+    # hand-opened Codespace too. Classifying such a Codespace as "orbital"
+    # left it with no orbital_subdomain and fell through to the magic-DNS
+    # branch, printing unreachable sslip.io links.
+    #
+    #   orbital    → wildcard subdomain on autonomous-enablements.*
+    #   codespaces → GitHub port forwarding (incl. orbital_codespaces: an
+    #                Orbital-launched Codespace still serves apps this way,
+    #                which is also what getAppURL concludes)
     #   local      → fallback (magic-DNS sslip.io)
     local _greet_env="local"
-    if [[ "${ORBITAL_ENVIRONMENT:-}" == "true" ]] || [[ "${K3D_CLUSTER_NAME:-}" == master-* ]]; then
-        _greet_env="orbital"
-    elif [[ -n "${CODESPACE_NAME:-}" ]]; then
-        _greet_env="codespaces"
+    case "${INSTANTIATION_TYPE:-}" in
+        orbital)                              _greet_env="orbital"    ;;
+        orbital_codespaces|github-codespaces) _greet_env="codespaces" ;;
+    esac
+    # Fallbacks, only when INSTANTIATION_TYPE gave nothing (missing .env, or a
+    # cached older variables.sh). The master-* cluster prefix is the Orbital
+    # worker's port-override pattern — the same extra signal detectRunEnvironment
+    # uses, which INSTANTIATION_TYPE does not carry.
+    if [[ "$_greet_env" == "local" ]]; then
+        if [[ "${K3D_CLUSTER_NAME:-}" == master-* ]]; then
+            _greet_env="orbital"
+        elif [[ -n "${CODESPACE_NAME:-}" ]]; then
+            _greet_env="codespaces"
+        fi
     fi
 
     # Apps are exposed via ingress — show them from the registry, with the URL
@@ -100,9 +121,16 @@ printRunningApplications(){
             if [[ "$_greet_env" == "orbital" && -n "$orbital_subdomain" ]]; then
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${orbital_subdomain}.autonomous-enablements.whydevslovedynatrace.com"
             elif [[ "$_greet_env" == "codespaces" ]]; then
-                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-80.${_fwd_domain}"
-            else
+                # Field 6 of the registry is the forwarded port: empty for apps
+                # served by the :80 ingress catch-all, 8000 for mkdocs.
+                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${CODESPACE_NAME}-${cs_port:-80}.${_fwd_domain}"
+            elif [[ -n "$ingress_host" ]]; then
                 echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}http://${ingress_host}"
+            else
+                # No host for this environment (e.g. a row written for
+                # Codespaces read back elsewhere) — say so rather than printing
+                # a bare "http://".
+                echo -e "${CYAN}   $app_name ${NORMAL}${NORMAL}has no URL for this environment${RESET}"
             fi
         done < "$APP_REGISTRY"
     fi
