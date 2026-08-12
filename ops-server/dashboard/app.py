@@ -516,7 +516,7 @@ async def _require_writer(request: Request) -> dict:
 # feature is never accidentally open to the whole org when the var is unset.
 FLEET_OWNERS = {
     u.strip().lower()
-    for u in os.environ.get("OPS_FLEET_OWNERS", "shinojosa").split(",")
+    for u in os.environ.get("OPS_FLEET_OWNERS", "sergiohinojosa").split(",")
     if u.strip()
 }
 
