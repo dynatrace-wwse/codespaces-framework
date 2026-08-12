@@ -18,7 +18,28 @@ import base64
 import json
 
 AWS_CLI = "/usr/local/bin/aws"
+# Home region: where the master, Redis and the golden AMI live. Every call
+# accepts an explicit region so a bootcamp can be run elsewhere (ap-southeast-1
+# for the APAC event) — but anything that resolves networking from the template
+# instance is home-region only until the AMI is copied. See region_ready().
 REGION = "eu-west-2"
+
+# AMI per region. A launch in a region with no entry must FAIL LOUDLY rather
+# than fall back to the home AMI: an AMI id is region-scoped, so a fallback
+# would launch nothing and report success.
+WORKER_AMI_BY_REGION = {
+    "eu-west-2": "ami-01c331ae9b0054602",
+}
+# Template instance per region — its subnet / security groups / key-name are
+# resolved live at launch so networking never drifts from production.
+TEMPLATE_INSTANCE_BY_REGION = {
+    "eu-west-2": "i-02b773319c758fe40",
+}
+# Redis endpoint a worker in this region should phone home to. Cross-region
+# workers need VPC peering — never expose Redis to the internet.
+MASTER_REDIS_BY_REGION = {
+    "eu-west-2": "172.31.36.172",
+}
 
 # Golden worker AMI v2 — baked 2026-07-15 from the LIVE worker-1 (docker +
 # sysbox + ops-worker-agent + current /home/ops/.env). v1 (ami-0ed76cf85fa7d2967,
@@ -42,6 +63,12 @@ WORKER_NAME_PREFIX = "autonomous-enablements-worker"
 MAX_SCALE_UP = 4
 
 DEFAULT_INSTANCE_TYPE = "c5.2xlarge"
+
+# vCPU service quota codes. On-Demand and Spot are SEPARATE quotas, per region —
+# a fleet that fits one can be refused by the other, and a VcpuLimitExceeded
+# mid-herd looks exactly like a boot failure.
+QUOTA_ONDEMAND_STANDARD = "L-1216C47A"
+QUOTA_SPOT_STANDARD = "L-34B43A08"
 
 CREDS_ERROR = (
     "AWS credentials expired or missing — refresh ~/.aws/credentials"
@@ -89,26 +116,49 @@ def _validate_scale_count(count: int) -> int:
     return count
 
 
-def _build_user_data() -> str:
-    """Cloud-init user-data shell script for a fresh spot worker.
+def _build_user_data(redis_host: str = MASTER_REDIS_HOST,
+                     capacity: int | None = None) -> str:
+    """Cloud-init user-data shell script for a fresh worker.
 
+    - Stops the baked agent FIRST. The golden AMI was baked from a live worker,
+      so it boots carrying that worker's identity and would heartbeat as it
+      (overwriting the real worker's registration) until this script lands.
     - Derives a unique WORKER_ID from the instance id (IMDSv2, token-based).
-    - Ensures WORKER_ID= in /home/ops/.env (sed-replace existing line, else
-      append).
-    - Ensures MASTER_REDIS_URL points at the master's private IP
-      (sed-rewrites the host part of an existing redis:// URL — password
-      userinfo preserved — else appends a default URL).
-    - Restarts ops-worker-agent so it registers with the new identity.
+    - Clears WORKER_SSH_HOST, which the AMI inherited from the instance it was
+      baked from. Left stale, the master's PTY bridge SSHes to the WRONG BOX for
+      every shell opened on this worker — observed on the first launched worker
+      (2026-08-12): it registered ssh_host=autonomous-enablements-worker.
+    - Ensures MASTER_REDIS_URL points at this region's master (sed-rewrites the
+      host part of an existing redis:// URL — password userinfo preserved).
+    - Optionally pins WORKER_CAPACITY, so a bigger instance type warms the slot
+      count its memory actually supports instead of the AMI's baked-in figure.
+    - Starts ops-worker-agent so it registers with the correct identity.
     """
+    capacity_block = ""
+    if capacity:
+        capacity_block = f"""
+# Slot count for this instance size (overrides whatever the AMI baked in).
+if grep -q '^WORKER_CAPACITY=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_CAPACITY=.*|WORKER_CAPACITY={capacity}|" "$ENV_FILE"
+else
+  echo "WORKER_CAPACITY={capacity}" >> "$ENV_FILE"
+fi
+"""
     return f"""#!/bin/bash
 set -uo pipefail
 ENV_FILE=/home/ops/.env
+
+# Stop BEFORE rewriting identity: the golden AMI boots as the worker it was
+# baked from and would briefly heartbeat under that worker's id.
+systemctl stop ops-worker-agent || true
 
 # IMDSv2: fetch a session token, then the instance id (last 8 chars).
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \\
   -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \\
   "http://169.254.169.254/latest/meta-data/instance-id" | tail -c 8)
+PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \\
+  "http://169.254.169.254/latest/meta-data/local-ipv4")
 WORKER_ID="worker-x86_64-spot-${{INSTANCE_ID}}"
 
 touch "$ENV_FILE"
@@ -120,15 +170,24 @@ else
   echo "WORKER_ID=${{WORKER_ID}}" >> "$ENV_FILE"
 fi
 
-# Ensure MASTER_REDIS_URL points at the master ({MASTER_REDIS_HOST}),
+# Point WORKER_SSH_HOST at THIS box. Inherited from the AMI it names the
+# instance the image was baked from, and the master would SSH there for every
+# shell session opened against this worker.
+if grep -q '^WORKER_SSH_HOST=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_SSH_HOST=.*|WORKER_SSH_HOST=${{PRIVATE_IP}}|" "$ENV_FILE"
+else
+  echo "WORKER_SSH_HOST=${{PRIVATE_IP}}" >> "$ENV_FILE"
+fi
+{capacity_block}
+# Ensure MASTER_REDIS_URL points at the master ({redis_host}),
 # preserving any redis://[:password@] userinfo already present.
 if grep -q '^MASTER_REDIS_URL=' "$ENV_FILE"; then
-  sed -i -E "s|^(MASTER_REDIS_URL=redis://([^@/]*@)?)[^:/@]+|\\1{MASTER_REDIS_HOST}|" "$ENV_FILE"
+  sed -i -E "s|^(MASTER_REDIS_URL=redis://([^@/]*@)?)[^:/@]+|\\1{redis_host}|" "$ENV_FILE"
 else
-  echo "MASTER_REDIS_URL=redis://{MASTER_REDIS_HOST}:6379/0" >> "$ENV_FILE"
+  echo "MASTER_REDIS_URL=redis://{redis_host}:6379/0" >> "$ENV_FILE"
 fi
 
-systemctl restart ops-worker-agent
+systemctl start ops-worker-agent
 """
 
 
@@ -197,14 +256,14 @@ def _start_stop_allowed(instance: dict) -> bool:
 
 # ── AWS CLI plumbing ─────────────────────────────────────────────────────────
 
-async def _aws(*args: str):
+async def _aws(*args: str, region: str | None = None):
     """Run the aws CLI and return parsed JSON stdout.
 
     Raises :class:`FleetError` with a classified message on non-zero exit
     (expired federated creds get the stable CREDS_ERROR string).
     """
     proc = await asyncio.create_subprocess_exec(
-        AWS_CLI, *args, "--region", REGION, "--output", "json",
+        AWS_CLI, *args, "--region", region or REGION, "--output", "json",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -213,6 +272,81 @@ async def _aws(*args: str):
         raise FleetError(_classify_aws_error(err.decode(errors="replace")))
     text = out.decode(errors="replace").strip()
     return json.loads(text) if text else None
+
+
+async def check_credentials(region: str = REGION) -> dict:
+    """Report whether AWS access works right now, and what it allows.
+
+    Deliberately never raises: this is the endpoint behind the dashboard's
+    "check credentials" button, whose entire job is to say *plainly* that there
+    are no usable credentials so they can be pasted over SSH. An exception here
+    would be reported as a server error and hide the answer.
+
+    Returns identity, expiry hint, and vCPU quota headroom — the three things
+    that silently block a scale-up. Quota is per-region and On-Demand and Spot
+    are separate quotas, so a fleet that fits one can still be refused.
+    """
+    result: dict = {
+        "ok": False, "region": region, "identity": None, "account": None,
+        "error": None, "quota": {}, "checked_at": None,
+    }
+    from datetime import datetime, timezone
+    result["checked_at"] = datetime.now(timezone.utc).isoformat()
+
+    try:
+        ident = await _aws("sts", "get-caller-identity", region=region)
+    except FleetError as exc:
+        result["error"] = str(exc)
+        return result
+    except Exception as exc:                      # noqa: BLE001 - never raise
+        result["error"] = f"credential check failed: {exc}"
+        return result
+
+    result["ok"] = True
+    result["account"] = (ident or {}).get("Account")
+    arn = (ident or {}).get("Arn", "")
+    result["identity"] = arn.rsplit("/", 1)[-1] if arn else None
+    result["arn"] = arn
+
+    # Quota headroom is advisory — a missing quota permission must not turn a
+    # working credential into a reported failure.
+    for label, code in (("on_demand", QUOTA_ONDEMAND_STANDARD),
+                        ("spot", QUOTA_SPOT_STANDARD)):
+        try:
+            q = await _aws("service-quotas", "get-service-quota",
+                           "--service-code", "ec2", "--quota-code", code,
+                           region=region)
+            value = ((q or {}).get("Quota") or {}).get("Value")
+            result["quota"][label] = {
+                "vcpus": int(value) if value is not None else None,
+                "adjustable": ((q or {}).get("Quota") or {}).get("Adjustable"),
+            }
+        except Exception as exc:                  # noqa: BLE001
+            result["quota"][label] = {"vcpus": None, "error": str(exc)[:160]}
+
+    return result
+
+
+async def region_ready(region: str) -> dict:
+    """Whether we can actually launch in ``region`` today.
+
+    An AMI id is region-scoped. Falling back to the home-region AMI in a foreign
+    region launches nothing while reporting success, so a missing entry is a
+    hard "not ready" with the concrete missing piece named.
+    """
+    missing = []
+    if region not in WORKER_AMI_BY_REGION:
+        missing.append("golden AMI not copied to this region")
+    if region not in TEMPLATE_INSTANCE_BY_REGION:
+        missing.append("no template instance for subnet/security-group lookup")
+    if region not in MASTER_REDIS_BY_REGION:
+        missing.append("no Redis endpoint reachable from this region (VPC peering)")
+    return {
+        "region": region,
+        "ready": not missing,
+        "missing": missing,
+        "ami": WORKER_AMI_BY_REGION.get(region),
+    }
 
 
 async def _describe_by_ids(instance_ids: list[str]) -> list[dict]:

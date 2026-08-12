@@ -77,6 +77,7 @@ app.include_router(codespace_router)
 
 # EC2 spot-worker fleet scaling (aws CLI, no boto3) — see dashboard/fleet.py.
 from dashboard import fleet  # noqa: E402
+from dashboard import fleet_policy  # noqa: E402
 
 # Live training sessions (bootcamp cohorts) — pure decision logic lives in
 # dashboard/live_sessions.py (tested without Redis); endpoints below stay thin.
@@ -503,6 +504,42 @@ async def _require_writer(request: Request) -> dict:
                 "user": user,
                 "reason": f"User {user} is not a member of {GH_ORG}; "
                           "actions are restricted to org members.",
+            },
+        )
+    return role
+
+
+# Fleet-owner gate. Autoscaling spends money and can terminate hosts holding
+# live learner sessions, so it is narrower than "writer" (any org member):
+# only the GitHub logins in OPS_FLEET_OWNERS (comma-separated, in /home/ops/.env)
+# see the controls or may act on them. Falls back to the repo owner so the
+# feature is never accidentally open to the whole org when the var is unset.
+FLEET_OWNERS = {
+    u.strip().lower()
+    for u in os.environ.get("OPS_FLEET_OWNERS", "shinojosa").split(",")
+    if u.strip()
+}
+
+
+def _is_fleet_owner(request: Request) -> bool:
+    """True when the nginx-verified signed-in user may drive the fleet."""
+    user = (request.headers.get("x-auth-user") or "").strip().lower()
+    return bool(user) and user in FLEET_OWNERS
+
+
+async def _require_fleet_owner(request: Request) -> dict:
+    """Guard for every endpoint that can launch or terminate instances."""
+    role = await _require_writer(request)
+    if not _is_fleet_owner(request):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "forbidden",
+                "user": role.get("user"),
+                "reason": "fleet scaling is restricted to the fleet owners "
+                          "(OPS_FLEET_OWNERS); org membership alone is not "
+                          "enough because these actions cost money and can "
+                          "terminate hosts running live sessions.",
             },
         )
     return role
@@ -8283,6 +8320,312 @@ async def api_fleet_worker_stop(instance_id: str, request: Request):
         raise HTTPException(502, str(e))
     log.info("fleet worker stop by %s: %s", role["user"], instance_id)
     return {"status": "stopping", **result, "requested_by": role["user"]}
+
+
+# ── Autoscaler ──────────────────────────────────────────────────────────────
+# Decision logic lives in dashboard/fleet_policy.py (pure, unit-tested); AWS
+# calls live in dashboard/fleet.py. These endpoints only glue them together and
+# own the Redis state: the in-flight launch registry and the freeze switch.
+
+FLEET_INFLIGHT_PREFIX = "fleet:inflight:"
+FLEET_FROZEN_KEY = "fleet:frozen"
+# How long a launched instance may take to register before the reaper treats it
+# as failed. Measured warm-up: 6 slots 2m09s, 12 slots 4m35s — so 10 minutes is
+# generous for the current shapes and still bounded.
+FLEET_INFLIGHT_TTL_S = 600
+
+
+async def _fleet_inflight() -> list[dict]:
+    """Instances we have launched that have not yet registered as workers.
+
+    This registry is the whole anti-runaway mechanism. A launch takes minutes;
+    a decision tick takes seconds. Without counting in-flight capacity the same
+    deficit is re-decided every tick and the fleet multiplies.
+    """
+    out = []
+    async for key in pool.scan_iter(match=f"{FLEET_INFLIGHT_PREFIX}*", count=100):
+        rec = await pool.hgetall(key)
+        if rec:
+            rec["instance_id"] = key.split(":")[-1]
+            out.append(rec)
+    return out
+
+
+async def _fleet_workers() -> list[dict]:
+    """Every registered worker, normalized for the policy functions."""
+    now = datetime.now(timezone.utc).timestamp()
+    workers = []
+    async for key in pool.scan_iter(match="worker:*", count=100):
+        # Skip the per-worker side keys (worker:{id}:app_ports_free is a list).
+        if key.count(":") > 1:
+            continue
+        h = await pool.hgetall(key)
+        if h:
+            workers.append(fleet_policy.normalize_worker(key.split(":", 1)[1], h, now))
+    return workers
+
+
+async def _fleet_snapshot(instance_type: str) -> tuple[list[dict], list[dict], dict]:
+    workers = await _fleet_workers()
+    inflight = await _fleet_inflight()
+    per = fleet_policy.slots_for_instance(instance_type) or 1
+    return workers, inflight, fleet_policy.fleet_state(workers, inflight, per)
+
+
+@app.get("/api/fleet/autoscale/status")
+async def api_fleet_autoscale_status(request: Request,
+                                     instanceType: str = fleet_policy.DEFAULT_INSTANCE_TYPE,
+                                     region: str = fleet_policy.HOME_REGION):
+    """Current capacity, guardrail state and the options the UI offers.
+
+    Readable by any writer so the Workers tab can render honestly; only the
+    fleet owner sees the controls (``isOwner``) and only they may act.
+    """
+    await _require_writer(request)
+    workers, inflight, state = await _fleet_snapshot(instanceType)
+    frozen = bool(await pool.get(FLEET_FROZEN_KEY))
+    return {
+        "state": state,
+        "frozen": frozen,
+        "isOwner": _is_fleet_owner(request),
+        "regions": fleet_policy.REGIONS,
+        "region": region,
+        "homeRegion": fleet_policy.HOME_REGION,
+        "instanceType": instanceType,
+        "slotsPerInstance": fleet_policy.slots_for_instance(instanceType),
+        "instanceTypes": [
+            {"id": t, "slots": fleet_policy.slots_for_instance(t)}
+            for t in sorted(fleet_policy.INSTANCE_MEMORY_MB)
+            if fleet_policy.slots_for_instance(t) > 0
+        ],
+        "inflight": inflight,
+        "workers": workers,
+        "sessionModel": {
+            "committedMb": fleet_policy.SESSION_COMMITTED_MB,
+            "measuredOn": "amd001 / c5.2xlarge / kubernetes-101 full lab / 2026-08-12",
+        },
+    }
+
+
+@app.post("/api/fleet/autoscale/plan")
+async def api_fleet_autoscale_plan(request: Request):
+    """Dry run: what WOULD happen for a seat target, including cost.
+
+    Always available to the owner and never mutates anything — the UI calls it
+    on every keystroke of the seat field so the decision is visible before it
+    is taken.
+    """
+    await _require_fleet_owner(request)
+    body = await request.json()
+    seats = int(body.get("seats") or 0)
+    instance_type = body.get("instanceType") or fleet_policy.DEFAULT_INSTANCE_TYPE
+    region = body.get("region") or fleet_policy.HOME_REGION
+    hours = float(body.get("hours") or 5)
+
+    if not fleet_policy.is_known_region(region):
+        raise HTTPException(400, f"unknown region {region!r}")
+
+    workers, inflight, state = await _fleet_snapshot(instance_type)
+    frozen = bool(await pool.get(FLEET_FROZEN_KEY))
+    draining = [w for w in workers if w["draining"] and w["role"] != "master"]
+
+    try:
+        plan = fleet_policy.plan_scale_up(
+            seats, state, instance_type=instance_type,
+            workers_draining=draining, frozen=frozen,
+        )
+    except fleet_policy.PolicyRefusal as e:
+        return {"ok": False, "refused": str(e), "state": state}
+
+    down = fleet_policy.plan_scale_down(seats, state, workers)
+    prices = fleet_policy.ON_DEMAND_USD_PER_HOUR.get(region, {})
+    return {
+        "ok": True,
+        "plan": plan,
+        "scaleDown": down,
+        "state": state,
+        "region": await fleet.region_ready(region),
+        "cost": fleet_policy.estimate_cost(plan["launch"], instance_type, hours, prices),
+        "totalFleetCost": fleet_policy.estimate_cost(
+            state["workers_usable"] + plan["launch"], instance_type, hours, prices),
+    }
+
+
+@app.post("/api/fleet/autoscale/apply")
+async def api_fleet_autoscale_apply(request: Request):
+    """Execute a seat target: un-drain first, then launch what is still missing.
+
+    Re-plans server-side rather than trusting a plan posted by the browser —
+    capacity may have changed between the dry run and the click.
+    """
+    role = await _require_fleet_owner(request)
+    body = await request.json()
+    seats = int(body.get("seats") or 0)
+    instance_type = body.get("instanceType") or fleet_policy.DEFAULT_INSTANCE_TYPE
+    region = body.get("region") or fleet_policy.HOME_REGION
+
+    if not fleet_policy.is_known_region(region):
+        raise HTTPException(400, f"unknown region {region!r}")
+    readiness = await fleet.region_ready(region)
+    if not readiness["ready"]:
+        raise HTTPException(412, {
+            "error": "region not ready", "region": region,
+            "missing": readiness["missing"],
+        })
+
+    workers, inflight, state = await _fleet_snapshot(instance_type)
+    frozen = bool(await pool.get(FLEET_FROZEN_KEY))
+    draining = [w for w in workers if w["draining"] and w["role"] != "master"]
+
+    try:
+        plan = fleet_policy.plan_scale_up(
+            seats, state, instance_type=instance_type,
+            workers_draining=draining, frozen=frozen,
+        )
+    except fleet_policy.PolicyRefusal as e:
+        raise HTTPException(409, str(e))
+
+    # Step 1 — reclaim cordoned workers. Instant and free, so always first.
+    for worker_id in plan["undrain"]:
+        await pool.hset(f"worker:{worker_id}", "draining", "0")
+    if plan["undrain"]:
+        log.info("fleet un-cordoned by %s: %s", role["user"], plan["undrain"])
+
+    launched = []
+    if plan["launch"] > 0:
+        try:
+            launched = await fleet.scale_up(plan["launch"], instance_type=instance_type)
+        except fleet.FleetError as e:
+            raise HTTPException(502, str(e))
+        # Step 2 — record in-flight BEFORE returning, so the very next tick
+        # already counts this capacity and cannot launch it again.
+        per = fleet_policy.slots_for_instance(instance_type)
+        for inst in launched:
+            iid = inst.get("instance_id")
+            if not iid:
+                continue
+            key = f"{FLEET_INFLIGHT_PREFIX}{iid}"
+            await pool.hset(key, mapping={
+                "instance_id": iid,
+                "instance_type": instance_type,
+                "region": region,
+                "expected_slots": str(per),
+                "launched_at": datetime.now(timezone.utc).isoformat(),
+                "launched_by": role["user"],
+            })
+            await pool.expire(key, FLEET_INFLIGHT_TTL_S)
+        log.info("fleet scale-up by %s: %d × %s in %s (target %d seats)",
+                 role["user"], len(launched), instance_type, region, seats)
+
+    return {
+        "status": "applied", "plan": plan, "launched": launched,
+        "undrained": plan["undrain"], "requested_by": role["user"],
+    }
+
+
+@app.post("/api/fleet/autoscale/scale-down")
+async def api_fleet_autoscale_scale_down(request: Request):
+    """Cordon surplus workers. Never terminates — that is the reaper's job.
+
+    A session cannot be migrated, so an instance may only be terminated once it
+    is empty. Cordon marks it "take no new work"; the agent honours that within
+    one BLPOP timeout.
+    """
+    role = await _require_fleet_owner(request)
+    body = await request.json()
+    seats = int(body.get("seats") or 0)
+    instance_type = body.get("instanceType") or fleet_policy.DEFAULT_INSTANCE_TYPE
+
+    workers, _inflight, state = await _fleet_snapshot(instance_type)
+    plan = fleet_policy.plan_scale_down(seats, state, workers)
+    for worker_id in plan["cordon"]:
+        await pool.hset(f"worker:{worker_id}", mapping={
+            "draining": "1",
+            "drain_started_at": datetime.now(timezone.utc).isoformat(),
+        })
+    if plan["cordon"]:
+        log.info("fleet cordon by %s: %s", role["user"], plan["cordon"])
+    return {"status": "applied", **plan, "requested_by": role["user"]}
+
+
+@app.post("/api/fleet/autoscale/reap")
+async def api_fleet_autoscale_reap(request: Request):
+    """Terminate cordoned-and-empty workers, and clear failed launches.
+
+    Two independent leaks, both observed as real risks:
+      * a cordoned worker whose sessions have ended is pure cost;
+      * an instance whose cloud-init failed never registers, so nothing else in
+        the system knows it exists — it just bills.
+    """
+    role = await _require_fleet_owner(request)
+    workers = await _fleet_workers()
+    candidates = fleet_policy.terminatable(workers)
+
+    by_host = {w["worker_id"]: w.get("host") for w in workers}
+    fleet_instances = await fleet.list_fleet()
+    ip_to_instance = {i["private_ip"]: i["instance_id"]
+                      for i in fleet_instances if i.get("private_ip")}
+
+    terminated, skipped = [], []
+    for worker_id in candidates:
+        iid = ip_to_instance.get(by_host.get(worker_id))
+        if not iid:
+            skipped.append({"worker": worker_id, "reason": "no matching EC2 instance"})
+            continue
+        try:
+            # scale_down re-checks the orbital-role tag, so a bug here can never
+            # terminate the master or an unrelated instance.
+            await fleet.scale_down([iid])
+            terminated.append({"worker": worker_id, "instance_id": iid})
+            await pool.delete(f"worker:{worker_id}")
+        except fleet.FleetError as e:
+            skipped.append({"worker": worker_id, "reason": str(e)})
+
+    # Orphan sweep: in-flight entries past their TTL never registered.
+    orphans = []
+    for rec in await _fleet_inflight():
+        iid = rec.get("instance_id")
+        if iid and iid not in ip_to_instance.values():
+            orphans.append(iid)
+
+    if terminated:
+        log.info("fleet reap by %s: %s", role["user"], terminated)
+    return {"status": "reaped", "terminated": terminated,
+            "skipped": skipped, "inflight_unregistered": orphans,
+            "requested_by": role["user"]}
+
+
+@app.get("/api/fleet/credentials")
+async def api_fleet_credentials(request: Request,
+                                region: str = fleet_policy.HOME_REGION):
+    """Report whether AWS access works, without ever raising.
+
+    This is the button that answers "do you have credentials?" — so it must
+    return a readable answer when the answer is no, rather than a 502.
+    """
+    await _require_fleet_owner(request)
+    if not fleet_policy.is_known_region(region):
+        raise HTTPException(400, f"unknown region {region!r}")
+    creds = await fleet.check_credentials(region)
+    creds["regionReady"] = await fleet.region_ready(region)
+    return creds
+
+
+@app.post("/api/fleet/freeze")
+async def api_fleet_freeze(request: Request):
+    """Kill switch. While frozen, every scale-up is refused.
+
+    One click, no deploy — the thing you want to exist before you need it.
+    """
+    role = await _require_fleet_owner(request)
+    body = await request.json()
+    frozen = bool(body.get("frozen"))
+    if frozen:
+        await pool.set(FLEET_FROZEN_KEY, role["user"])
+    else:
+        await pool.delete(FLEET_FROZEN_KEY)
+    log.warning("fleet freeze %s by %s", "ON" if frozen else "OFF", role["user"])
+    return {"frozen": frozen, "by": role["user"]}
 
 
 def start():

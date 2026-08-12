@@ -1090,6 +1090,250 @@ async function loadWorkers() {
             <div class="label">${name}</div>
         </div>
     `).join('');
+
+    loadAutoscale();
+}
+
+// ── Fleet autoscaling (Workers tab) ─────────────────────────────────────────
+// The panel is rendered only when the server says the signed-in user is a fleet
+// owner. That is a UI convenience, NOT the security boundary — every mutating
+// endpoint re-checks server-side, because hiding a button protects nobody.
+
+let _fleetState = null;
+let _fleetPlanned = null;
+
+function fleetUi() {
+    return {
+        panel:   document.getElementById('autoscale-panel'),
+        summary: document.getElementById('autoscale-summary'),
+        seats:   document.getElementById('fleet-seats'),
+        region:  document.getElementById('fleet-region'),
+        inst:    document.getElementById('fleet-instance'),
+        out:     document.getElementById('autoscale-plan'),
+        creds:   document.getElementById('autoscale-creds'),
+        apply:   document.getElementById('fleet-apply-btn'),
+        freeze:  document.getElementById('fleet-freeze-btn'),
+        pill:    document.getElementById('freeze-pill'),
+    };
+}
+
+async function loadAutoscale() {
+    const ui = fleetUi();
+    if (!ui.panel) return;
+    const instanceType = ui.inst && ui.inst.value ? ui.inst.value : '';
+    const region = ui.region && ui.region.value ? ui.region.value : '';
+    const qs = new URLSearchParams();
+    if (instanceType) qs.set('instanceType', instanceType);
+    if (region) qs.set('region', region);
+
+    let data;
+    try {
+        const res = await fetch(`${API}/api/fleet/autoscale/status?${qs}`);
+        if (!res.ok) { ui.panel.hidden = true; return; }
+        data = await res.json();
+    } catch { ui.panel.hidden = true; return; }
+
+    _fleetState = data;
+    // Non-owners never see the controls at all — the fleet is not their tool.
+    ui.panel.hidden = !data.isOwner;
+    if (!data.isOwner) return;
+
+    if (ui.region && !ui.region.options.length) {
+        // Grouped by continent so the choice reads as "near which audience",
+        // which is the only thing that actually matters here.
+        const areas = [];
+        (data.regions || []).forEach(r => {
+            if (!areas.includes(r.area)) areas.push(r.area);
+        });
+        ui.region.innerHTML = areas.map(area => `
+            <optgroup label="${escapeHtml(area)}">
+                ${(data.regions || []).filter(r => r.area === area).map(r =>
+                    `<option value="${escapeHtml(r.id)}"${r.id === data.homeRegion ? ' selected' : ''}>${escapeHtml(r.label)} · ${escapeHtml(r.id)}</option>`
+                ).join('')}
+            </optgroup>`).join('');
+    }
+    if (ui.inst && !ui.inst.options.length) {
+        ui.inst.innerHTML = (data.instanceTypes || []).map(t =>
+            `<option value="${escapeHtml(t.id)}"${t.id === data.instanceType ? ' selected' : ''}>${escapeHtml(t.id)} · ${t.slots} slots</option>`
+        ).join('');
+    }
+
+    const s = data.state || {};
+    ui.summary.innerHTML = `
+        <span class="autoscale-metrics">
+            <span><b>${s.free_ready ?? 0}</b>free slots</span>
+            <span><b>${s.slots_active ?? 0}</b>in use</span>
+            <span><b>${s.workers_usable ?? 0}</b>workers</span>
+            ${s.workers_warming ? `<span><b class="warn">${s.workers_warming}</b>warming</span>` : ''}
+            ${s.workers_draining ? `<span><b class="warn">${s.workers_draining}</b>cordoned</span>` : ''}
+            ${s.inflight_launches ? `<span><b class="warn">${s.inflight_launches}</b>booting</span>` : ''}
+            ${s.workers_stale ? `<span><b class="bad">${s.workers_stale}</b>stale</span>` : ''}
+        </span>`;
+
+    ui.pill.hidden = !data.frozen;
+    ui.freeze.textContent = data.frozen ? 'Unfreeze' : 'Freeze';
+}
+
+function renderFleetPlan(data) {
+    const ui = fleetUi();
+    ui.out.hidden = false;
+    if (!data.ok) {
+        ui.out.innerHTML = `<span class="bad">✗ ${escapeHtml(data.refused || 'refused')}</span>`;
+        ui.apply.disabled = true;
+        return;
+    }
+    const p = data.plan, cost = data.cost || {}, region = data.region || {};
+    const parts = [];
+
+    if (!region.ready) {
+        // Named missing pieces, because "not ready" without the reason is the
+        // kind of message that costs an hour on the day.
+        parts.push(`<div class="bad">✗ ${escapeHtml(region.region)} is not launch-ready:
+            <ul>${(region.missing || []).map(m => `<li>${escapeHtml(m)}</li>`).join('')}</ul></div>`);
+    }
+
+    if (p.action === 'none') {
+        parts.push(`<div class="ok">✓ ${escapeHtml(p.reason)}</div>`);
+    } else {
+        parts.push(`<div><b>Plan:</b> ${escapeHtml(p.reason)}</div>`);
+        if (p.undrain && p.undrain.length) {
+            parts.push(`<div class="dim">Un-cordon first (instant, free): ${p.undrain.map(escapeHtml).join(', ')}</div>`);
+        }
+        if (p.launch > 0 && cost.known) {
+            parts.push(`<div class="dim">New instances: <b>$${cost.hourly_usd}/h</b> · <b>$${cost.total_usd}</b> for the window · <b>$${cost.daily_usd}</b> if left a full day</div>`);
+        } else if (p.launch > 0) {
+            parts.push(`<div class="warn">No price on file for this type — cost unknown</div>`);
+        }
+        if (p.capped_by) {
+            parts.push(`<div class="warn">⚠ capped by ${escapeHtml(p.capped_by)}</div>`);
+        }
+    }
+
+    const down = data.scaleDown || {};
+    if (down.action === 'cordon') {
+        parts.push(`<div class="dim">Surplus: ${escapeHtml(down.reason)}</div>`);
+    }
+    ui.out.innerHTML = parts.join('');
+    ui.apply.disabled = !(p.action === 'launch' || p.action === 'undrain') || !region.ready;
+    _fleetPlanned = { seats: Number(ui.seats.value), region: ui.region.value, instanceType: ui.inst.value };
+}
+
+async function fleetPost(path, body) {
+    const res = await fetch(`${API}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        const detail = data.detail || data;
+        throw new Error(typeof detail === 'string' ? detail : (detail.reason || JSON.stringify(detail)));
+    }
+    return data;
+}
+
+function fleetArgs() {
+    const ui = fleetUi();
+    return {
+        seats: Number(ui.seats.value) || 0,
+        region: ui.region.value,
+        instanceType: ui.inst.value,
+    };
+}
+
+function initAutoscaleControls() {
+    const ui = fleetUi();
+    if (!ui.panel) return;
+
+    document.getElementById('fleet-plan-btn')?.addEventListener('click', async () => {
+        try {
+            renderFleetPlan(await fleetPost('/api/fleet/autoscale/plan', fleetArgs()));
+        } catch (e) { showToast(`Plan failed: ${e.message}`); }
+    });
+
+    document.getElementById('fleet-apply-btn')?.addEventListener('click', async () => {
+        const a = fleetArgs();
+        // Launching costs money and takes minutes to undo — make the user say so.
+        if (!confirm(`Scale the fleet to secure ${a.seats} seats in ${a.region} using ${a.instanceType}?\n\nThis launches real EC2 instances.`)) return;
+        try {
+            const r = await fleetPost('/api/fleet/autoscale/apply', a);
+            showToast(`Launched ${r.launched.length}, un-cordoned ${r.undrained.length}`);
+            ui.apply.disabled = true;
+            loadWorkers();
+        } catch (e) { showToast(`Apply failed: ${e.message}`); }
+    });
+
+    document.getElementById('fleet-scaledown-btn')?.addEventListener('click', async () => {
+        try {
+            const r = await fleetPost('/api/fleet/autoscale/scale-down', fleetArgs());
+            showToast(r.cordon.length
+                ? `Cordoned ${r.cordon.length} worker(s) — they terminate once empty`
+                : `No change: ${r.reason}`);
+            loadWorkers();
+        } catch (e) { showToast(`Cordon failed: ${e.message}`); }
+    });
+
+    document.getElementById('fleet-reap-btn')?.addEventListener('click', async () => {
+        if (!confirm('Terminate every cordoned worker that has no sessions left?')) return;
+        try {
+            const r = await fleetPost('/api/fleet/autoscale/reap', {});
+            showToast(`Terminated ${r.terminated.length}, skipped ${r.skipped.length}`);
+            loadWorkers();
+        } catch (e) { showToast(`Reap failed: ${e.message}`); }
+    });
+
+    document.getElementById('fleet-freeze-btn')?.addEventListener('click', async () => {
+        const turningOn = !(_fleetState && _fleetState.frozen);
+        try {
+            await fleetPost('/api/fleet/freeze', { frozen: turningOn });
+            showToast(turningOn ? 'Fleet FROZEN — scale-ups refused' : 'Freeze cleared');
+            loadAutoscale();
+        } catch (e) { showToast(`Freeze failed: ${e.message}`); }
+    });
+
+    document.getElementById('fleet-creds-btn')?.addEventListener('click', async () => {
+        const box = document.getElementById('autoscale-creds');
+        box.hidden = false;
+        box.innerHTML = '<span class="dim">Checking…</span>';
+        try {
+            const q = new URLSearchParams({ region: ui.region.value });
+            const res = await fetch(`${API}/api/fleet/credentials?${q}`);
+            const c = await res.json();
+            if (!res.ok) throw new Error(c.detail?.reason || 'check failed');
+            if (!c.ok) {
+                // The whole point of this button: say plainly that there are
+                // none, so they can be pasted over SSH.
+                box.innerHTML = `<div class="bad">✗ No usable AWS credentials</div>
+                    <div class="dim">${escapeHtml(c.error || '')}</div>
+                    <div class="dim">Paste fresh credentials into <code>~/.aws/credentials</code> on the master, then re-check. Nothing needs restarting.</div>`;
+                return;
+            }
+            const quotaBits = Object.entries(c.quota || {}).map(([k, v]) =>
+                v.vcpus != null
+                    ? `${k}: <b>${v.vcpus}</b> vCPU`
+                    : `${k}: <span class="warn">unreadable</span>`
+            ).join(' · ');
+            const rr = c.regionReady || {};
+            box.innerHTML = `
+                <div class="ok">✓ Credentials valid</div>
+                <div class="dim">${escapeHtml(c.identity || '')} · account ${escapeHtml(c.account || '')}</div>
+                <div class="dim">vCPU quota — ${quotaBits || 'not reported'}</div>
+                <div class="${rr.ready ? 'dim' : 'warn'}">${escapeHtml(c.region)} ${rr.ready
+                    ? 'is launch-ready'
+                    : 'cannot launch yet: ' + (rr.missing || []).map(escapeHtml).join('; ')}</div>`;
+        } catch (e) {
+            box.innerHTML = `<span class="bad">✗ ${escapeHtml(e.message)}</span>`;
+        }
+    });
+
+    // Changing the shape invalidates a plan computed for the old one.
+    ['fleet-seats', 'fleet-region', 'fleet-instance'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            ui.apply.disabled = true;
+            document.getElementById('autoscale-plan').hidden = true;
+            if (id !== 'fleet-seats') loadAutoscale();
+        });
+    });
 }
 
 // ── Nightly View ────────────────────────────────────────────────────────────
@@ -3080,6 +3324,7 @@ function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
     checkHealth();
     loadFleet();
     loadFleetTriggerPanel();
+    initAutoscaleControls();  // bind before the first loadWorkers() render
     loadWorkers();
     loadNightly();
     loadNightlyRuns();

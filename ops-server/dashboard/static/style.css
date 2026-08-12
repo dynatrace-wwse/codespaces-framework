@@ -1507,3 +1507,93 @@ body.role-writer .tab-writer-only { display: inline-block; }
 .auto-partial  { color: var(--amber);  border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 12%, transparent); }
 .auto-none     { color: var(--text-3); border-color: var(--border-soft); }
 .auto-unknown  { color: var(--text-3); border-color: transparent; }
+
+/* ── Fleet autoscaling panel (Workers tab, fleet owners only) ─────────────── */
+.autoscale-panel {
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r);
+    padding: 14px 16px;
+    margin-bottom: 18px;
+}
+.autoscale-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+.autoscale-title { font-weight: 600; font-size: 0.92rem; color: var(--text); }
+.autoscale-sub   { font-size: 0.78rem; color: var(--text-2); }
+.autoscale-spacer { flex: 1 1 auto; }
+
+.autoscale-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.autoscale-row label {
+    font-size: 0.75rem;
+    color: var(--text-2);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+}
+.fleet-seats {
+    width: 72px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-sm);
+    padding: 4px 8px;
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+}
+.fleet-select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-sm);
+    padding: 4px 8px;
+    font-size: 0.8rem;
+}
+.fleet-seats:focus-visible,
+.fleet-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.freeze-pill {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    color: var(--red);
+    border: 1px solid rgba(251,113,133,.4);
+    background: rgba(251,113,133,.12);
+    border-radius: var(--r-sm);
+    padding: 2px 8px;
+}
+
+.autoscale-out {
+    margin-top: 12px;
+    padding: 11px 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--r-sm);
+    font-size: 0.8rem;
+    line-height: 1.55;
+    color: var(--text);
+}
+.autoscale-out .ok   { color: var(--green); }
+.autoscale-out .warn { color: var(--amber); }
+.autoscale-out .bad  { color: var(--red); }
+.autoscale-out .dim  { color: var(--text-2); }
+.autoscale-out b     { font-variant-numeric: tabular-nums; }
+.autoscale-out ul    { margin: 6px 0 0; padding-left: 18px; }
+.autoscale-out li    { margin-bottom: 3px; }
+.autoscale-metrics {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
+}
+.autoscale-metrics span { color: var(--text-2); font-size: 0.76rem; }
+.autoscale-metrics b { color: var(--text); font-size: 0.95rem; display: block; }

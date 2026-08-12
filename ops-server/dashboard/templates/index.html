@@ -576,6 +576,60 @@
 
         <!-- Workers View -->
         <section id="view-workers" class="view">
+            <!-- Autoscaling panel — rendered only for fleet owners
+                 (OPS_FLEET_OWNERS). Scaling spends money and can terminate
+                 hosts holding live sessions, so it is deliberately narrower
+                 than the org-member "writer" role used elsewhere. -->
+            <div class="autoscale-panel" id="autoscale-panel" hidden>
+                <div class="autoscale-head">
+                    <span class="autoscale-title">⚙ Fleet capacity</span>
+                    <span class="autoscale-sub" id="autoscale-summary">Loading fleet state…</span>
+                    <span class="autoscale-spacer"></span>
+                    <span class="freeze-pill" id="freeze-pill" hidden>❄ FROZEN</span>
+                    <button class="btn btn-small" id="fleet-creds-btn" data-action
+                            title="Check whether AWS credentials are present and valid right now">
+                        🔑 Check credentials
+                    </button>
+                </div>
+
+                <div class="autoscale-row">
+                    <label for="fleet-seats">Secure seats</label>
+                    <input type="number" id="fleet-seats" class="fleet-seats" min="0" max="500"
+                           value="70" title="Concurrent learner sessions to guarantee">
+
+                    <label for="fleet-region">Region</label>
+                    <select id="fleet-region" class="fleet-select"></select>
+
+                    <label for="fleet-instance">Instance</label>
+                    <select id="fleet-instance" class="fleet-select"></select>
+
+                    <button class="btn btn-small" id="fleet-plan-btn" data-action
+                            title="Dry run — shows what would be launched and what it costs">
+                        Plan
+                    </button>
+                    <button class="btn btn-small btn-primary" id="fleet-apply-btn" data-action disabled
+                            title="Un-drain cordoned workers first, then launch what is still missing">
+                        Apply
+                    </button>
+                    <span class="autoscale-spacer"></span>
+                    <button class="btn btn-small" id="fleet-scaledown-btn" data-action
+                            title="Cordon surplus workers — they stop taking new sessions and are terminated once empty">
+                        Cordon surplus
+                    </button>
+                    <button class="btn btn-small" id="fleet-reap-btn" data-action
+                            title="Terminate cordoned workers that have no sessions left">
+                        Reap empty
+                    </button>
+                    <button class="btn btn-small btn-danger" id="fleet-freeze-btn" data-action
+                            title="Kill switch — refuse every scale-up until cleared">
+                        Freeze
+                    </button>
+                </div>
+
+                <div class="autoscale-out" id="autoscale-plan" hidden></div>
+                <div class="autoscale-out" id="autoscale-creds" hidden></div>
+            </div>
+
             <div class="worker-grid" id="worker-grid">
                 <p class="loading">Loading workers…</p>
             </div>
