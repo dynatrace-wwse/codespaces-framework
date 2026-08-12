@@ -1718,6 +1718,11 @@ generateDynakube() {
   # mixed-case (e.g. Enablement-DTWiz-101), which the DynaKube validating webhook
   # rejects — silently breaking OneAgent injection. Lowercase for the Dynakube name.
   local base_name="$(echo "${RepositoryName:-$(hostname)}" | tr '[:upper:]' '[:lower:]')"
+  # Every training repo is called "enablement-<something>", so those 11 characters
+  # carry no information while eating the name budget below (they used to leave
+  # "e-" or "enablement-kuber" as the visible half). Strip the constant prefix for
+  # the DynaKube/cluster name only — networkZone below keeps the full repo name.
+  local short_name="${base_name#enablement-}"
   local cluster_name="$base_name"
   local session_id="$(getDtSessionId)"
   # The operator's validating webhook enforces a HARD DynaKube name limit
@@ -1729,14 +1734,31 @@ generateDynakube() {
   [[ "${DK_KSPM:-false}" == "true" && name_cap -gt 35 ]] && name_cap=35
   [[ "${DK_EXTENSIONS:-false}" == "true" && name_cap -gt 31 ]] && name_cap=31
   if [[ -n "$session_id" ]]; then
-    # Sacrifice repo chars before the session id.
-    local name_budget=$(( name_cap - ${#session_id} - 1 ))
-    (( name_budget < 1 )) && name_budget=1
-    local repo_part="${base_name:0:$name_budget}"
-    repo_part="${repo_part%-}"
-    cluster_name="${repo_part}-${session_id}"
-    cluster_name="${cluster_name:0:$name_cap}"
-    cluster_name="${cluster_name%-}"
+    # The session id MUST survive whole: every lab filters Grail with
+    # `endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}")`, so a truncated tail
+    # silently returns zero records instead of the learner's own data.
+    # Sacrifice repo chars — and never truncate the composed name afterwards.
+    # Orbital bounds the id to 26 chars (HOSTGROUP_LOCAL_MAX=17 + '-' + date),
+    # which leaves >= 10 repo chars at the fleet cap of 37.
+    if (( ${#session_id} > name_cap )); then
+      # Cannot be satisfied at all — say so instead of shipping a cut id that
+      # makes every Grail check in the training return nothing, silently.
+      printWarn "Session id '$session_id' (${#session_id} chars) does not fit the DynaKube name cap ($name_cap)"
+      printWarn "Grail per-user filters (endsWith k8s.cluster.name) will NOT match — falling back to a repo-scoped cluster name"
+      cluster_name="${base_name:0:$name_cap}"
+      cluster_name="${cluster_name%-}"
+    else
+      local name_budget=$(( name_cap - ${#session_id} - 1 ))
+      local repo_part=""
+      if (( name_budget > 0 )); then
+        repo_part="${short_name:0:$name_budget}"
+        repo_part="${repo_part%-}"
+      fi
+      # No trailing truncation here: repo_part + '-' + session_id is <= name_cap
+      # by construction, so the id always survives intact. A budget of 0 drops
+      # the repo half entirely — the id is what has to survive.
+      cluster_name="${repo_part:+${repo_part}-}${session_id}"
+    fi
   else
     cluster_name="${cluster_name:0:$name_cap}"
     cluster_name="${cluster_name%-}"

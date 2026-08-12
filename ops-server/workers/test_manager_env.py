@@ -89,6 +89,24 @@ def test_hostgroup_explicit_wins_over_derived(tmp_path):
     assert env["DT_HOSTGROUP"] == "alice-20260101"
 
 
+def test_hostgroup_long_local_part_is_bounded(tmp_path):
+    # The id is appended to the DynaKube name (cap 37) and every lab filters
+    # endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}") — an id that does not fit
+    # gets its tail cut and the learner's Grail check silently returns nothing.
+    env = _write(tmp_path, user="maria.jose.rodriguez.fernandez@dynatrace.com")
+    assert len(env["DT_HOSTGROUP"]) == 26          # 17 local + '-' + YYYYMMDD
+    assert env["DT_HOSTGROUP"].startswith("maria-jose-rodrig")
+
+
+def test_hostgroup_shared_prefix_collides_by_design(tmp_path):
+    # Documented limit of plain truncation (no hash): two learners whose local
+    # parts share the first 17 characters get the SAME id, and therefore merged
+    # telemetry. Pinned here so it is a known trade-off, not a surprise.
+    a = _write(tmp_path / "a", user="maria.jose.rodriguez.fernandez@dynatrace.com")
+    b = _write(tmp_path / "b", user="maria.jose.rodriguez.gomez@dynatrace.com")
+    assert a["DT_HOSTGROUP"] == b["DT_HOSTGROUP"]
+
+
 if __name__ == "__main__":
     import tempfile
     for name, fn in sorted(globals().items()):

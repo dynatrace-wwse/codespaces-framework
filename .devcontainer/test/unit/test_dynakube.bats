@@ -427,6 +427,62 @@ EOF
   [[ "$name" != *"-" ]]
 }
 
+# The contract every lab depends on: `endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}")`.
+# The composed name used to be truncated at the TAIL, which cut the session id off
+# and made that filter return zero records while the data was fine (SPEC-005).
+
+@test "generateDynakube: name ends with the WHOLE session id at every feature cap" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-opentelemetry-openpipeline"
+  # 26 chars — the longest id Orbital can now produce (17 local + '-' + date).
+  export DT_HOSTGROUP="abcdefghijklmnopq-20260812"
+
+  for features in "" "telemetry_ingest: true" "kspm: true" "extensions: true"; do
+    printf '%s\n' "$features" > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+    generateDynakube apponly
+    name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+    name="${name_line#  name: }"
+    [[ "$name" == *"abcdefghijklmnopq-20260812" ]]
+    [ "${#name}" -le 38 ]
+  done
+}
+
+@test "generateDynakube: the constant 'enablement-' prefix is dropped from the name only" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-101"
+  export DT_HOSTGROUP="tt-n-mk3p9aqz-20260812"
+
+  cat > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml" <<'EOF'
+telemetry_ingest: true
+EOF
+
+  generateDynakube apponly
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  # readable repo half + intact session id, instead of the old "e-tt-n-…"
+  [[ "$output" == *"name: kubernetes-101-tt-n-mk3p9aqz-20260812"* ]]
+  [[ "$output" == *"hostGroup: kubernetes-101-tt-n-mk3p9aqz-20260812"* ]] || true
+  # networkZone keeps the full repo name — repo-scoped identity, unchanged
+  [[ "$output" == *"networkZone: enablement-kubernetes-101"$'\n'* ]]
+}
+
+@test "generateDynakube: an over-long session id warns loudly instead of being cut" {
+  source_functions
+  export RepositoryName="enablement-kubernetes-101"
+  # 45 chars — the shape the old training-test identity produced
+  export DT_HOSTGROUP="training-test-manual-ingest-probe-1786501397-20260812"
+
+  run generateDynakube apponly
+  [[ "$output" == *"does not fit"* ]]
+  [[ "$output" == *"will NOT match"* ]]
+
+  name_line=$(grep -m1 '^  name: ' "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml")
+  name="${name_line#  name: }"
+  # falls back to the repo-scoped name; never ships a half-truncated session id
+  [[ "$name" != *"training-test-manual-ingest"* ]]
+  [ "${#name}" -le 38 ]
+}
+
 @test "generateDynakube: no session id keeps pre-1.9 repo-scoped identity" {
   source_functions
 

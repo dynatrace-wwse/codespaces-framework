@@ -142,17 +142,31 @@ def _new_job_id() -> str:
     return f"{_b36(int(time.time() * 1000))}-{secrets.token_hex(2)}"
 
 
+# Longest email local part kept in a session id. The budget chain, stated once:
+#   17 (local) + 1 ("-") + 8 (YYYYMMDD)  = 26-char session id
+#   26 + 1 + >= 10 repo chars            = the framework's 37-char DynaKube cap
+# The framework appends the id to the cluster name and every lab filters
+# `endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}")`, so an id that does not fit
+# used to get its tail cut and the learner's Grail check returned nothing.
+# Known limit: plain truncation, no hash — two learners whose local parts share
+# the first 17 characters get the same id, and therefore merged telemetry.
+HOSTGROUP_LOCAL_MAX = 17
+
+
 def _dt_hostgroup(user: str) -> str:
     """Per-user Grail-isolation id "<user>-<YYYYMMDD>", written as DT_HOSTGROUP.
 
     The framework's generateDynakube consumes it (getDtSessionId) so each
     session gets a unique DynaKube name + hostGroup inside a shared tenant —
     100 students can run the same training against one tenant and each filters
-    Grail to their own cluster. Email users keep only the local part; result is
-    RFC-1123-safe. (Duplicated in worker-agent/executor.py — separate deploy unit.)
+    Grail to their own cluster. Email users keep only the local part, bounded to
+    HOSTGROUP_LOCAL_MAX; result is RFC-1123-safe. (Duplicated in
+    worker-agent/executor.py — separate deploy unit — and in dashboard/app.py;
+    the app mirrors it once more in ui/app/training/utils/templateVars.ts.)
     """
     user = (user or "").split("@", 1)[0].lower()
     user = re.sub(r"[^a-z0-9-]+", "-", user).strip("-")
+    user = user[:HOSTGROUP_LOCAL_MAX].rstrip("-")
     if not user:
         return ""
     return f"{user}-{datetime.now(timezone.utc):%Y%m%d}"

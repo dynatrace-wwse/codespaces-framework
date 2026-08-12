@@ -21,8 +21,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from training_test_runner import (  # noqa: E402
     FILE_MARK,
+    evaluate_dql,
+    extract_dql_checks,
     extract_from_docs,
+    short_tag,
     split_doc_dump,
+    substitute_placeholders,
+    runner_user_id,
     validate_question,
 )
 
@@ -85,6 +90,22 @@ expect:
 """
 
 
+DOC_WITH_DQL = """# Section with a Grail assertion
+<!-- LAB_QUESTION
+type: dql-verification
+question: Verify your cluster's container logs are reaching Grail
+buttonText: Check logs in Grail
+dql: |
+  fetch logs, from:now()-15m
+  | filter endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}")
+  | limit 1
+expect:
+  operator: not-empty
+hint: "Logs take ~1-2 minutes to reach Grail."
+-->
+"""
+
+
 # ── pure-logic units ────────────────────────────────────────────────────────
 
 def test_extract_from_docs_good():
@@ -118,6 +139,55 @@ def test_validate_question_rules():
     assert "unknown question type" in validate_question({"type": "nope", "question": "q"})
     assert "exit-zero|contains|not-empty|gt" in validate_question(
         {"type": "shell-verification", "command": "c", "expect": {"operator": "gte", "value": "1"}})
+
+
+def test_short_tag_and_user_id_fit_the_hostgroup_budget():
+    # Orbital bounds the email local part to 17 chars (HOSTGROUP_LOCAL_MAX); a
+    # longer test identity loses its tail inside the DynaKube name and every
+    # endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}") in the training misses.
+    assert short_tag("nightly-20260506-020000") == "n"
+    assert short_tag("manual") == "m"
+    assert short_tag("") == "m"
+    assert short_tag("enablement-kubernetes-101") == "enab"
+
+    uid = runner_user_id("nightly-20260506-020000", 1786501397.0)
+    local = uid.split("@")[0]
+    assert uid.endswith("@orbital.internal")
+    assert local.startswith("tt-n-")
+    assert len(local) <= 17, local
+    # unique per run — the one-session-per-user guard must not dedupe onto a stale session
+    assert runner_user_id("manual", 1786501397.0) != runner_user_id("manual", 1786501398.0)
+
+
+def test_extract_dql_checks():
+    checks = extract_dql_checks([("01.md", DOC_WITH_DQL)])
+    assert len(checks) == 1
+    fname, label, dql, expect = checks[0]
+    assert (fname, label) == ("01.md", "Check logs in Grail")
+    assert dql.startswith("fetch logs")
+    assert expect == {"operator": "not-empty"}
+    # a block the importer would drop is not executed as a Grail check
+    assert extract_dql_checks([("02.md", DOC_BROKEN_QUIZ)]) == []
+
+
+def test_substitute_placeholders():
+    q = 'fetch logs | filter endsWith(k8s.cluster.name, "{{DT_SESSION_ID}}") | limit 1'
+    out = substitute_placeholders(q, {"DT_SESSION_ID": "tt-n-mk3p9aqz-20260812"})
+    assert '"tt-n-mk3p9aqz-20260812"' in out
+    # unknown placeholders stay literal rather than collapsing to "" — an empty
+    # endsWith matches EVERY cluster and would pass on a classmate's data
+    assert "{{JOB_ID}}" in substitute_placeholders("{{JOB_ID}}", {})
+
+
+def test_evaluate_dql_mirrors_the_app():
+    assert evaluate_dql([{"c": 1}], {"operator": "not-empty"}) is True
+    assert evaluate_dql([], {"operator": "not-empty"}) is False
+    assert evaluate_dql([], {"operator": "gt", "value": 0}) is False
+    assert evaluate_dql([{"count": 5}], {"operator": "gt", "value": 2}) is True
+    assert evaluate_dql([{"count": 1}], {"operator": "gt", "value": 2}) is False
+    assert evaluate_dql([{"ns": "todoapp"}], {"operator": "contains", "value": "todo"}) is True
+    assert evaluate_dql([{"a": 1, "ns": "todoapp"}],
+                        {"operator": "eq", "field": "ns", "value": "todoapp"}) is True
 
 
 def test_split_doc_dump():
