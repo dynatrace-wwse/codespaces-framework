@@ -290,6 +290,22 @@ def test_end_idempotent_when_ended():
     assert ls.apply_transition("ended", "end") == ("ended", False)
 
 
+def test_delete_allowed_before_start_and_after_finish():
+    """A finished workshop is a record the trainer may clear. Refusing "ended"
+    left every finished room in the trainer's list until the 7-day TTL."""
+    for state in ("scheduled", "open", "ended", "cancelled"):
+        assert ls.apply_transition(state, "delete") == ("deleted", True)
+
+
+def test_delete_refused_while_running():
+    """The one state that must stay undeletable — it would strand the cohort."""
+    try:
+        ls.apply_transition("running", "delete")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "running" in str(exc)
+
+
 def test_unknown_action_and_state_rejected():
     for state, action in (("open", "pause"), ("bogus", "start"), ("", "end")):
         try:

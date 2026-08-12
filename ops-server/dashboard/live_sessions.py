@@ -581,11 +581,15 @@ _TRANSITIONS = {
               "ended": ("ended", False)},
     "cancel": {"scheduled": ("cancelled", True), "open": ("cancelled", True),
                "cancelled": ("cancelled", False)},
-    # delete = hard-remove, allowed ONLY before a workshop has started. The
-    # target "deleted" is not a stored state (the entity + index are removed by
-    # the endpoint); apply_transition only validates legality. running/ended/
-    # cancelled are absent → apply_transition raises → endpoint returns 409.
-    "delete": {"scheduled": ("deleted", True), "open": ("deleted", True)},
+    # delete = hard-remove. Allowed before a workshop starts, and once it is
+    # finished (ended/cancelled) — a finished workshop is a record the trainer
+    # may clear, and refusing it left every ended room cluttering the trainer's
+    # list until the 7-day TTL. Only "running" is refused: deleting a live room
+    # would strand its cohort. The target "deleted" is not a stored state (the
+    # entity + index are removed by the endpoint); apply_transition only
+    # validates legality — running is absent → raises → endpoint returns 409.
+    "delete": {"scheduled": ("deleted", True), "open": ("deleted", True),
+               "ended": ("deleted", True), "cancelled": ("deleted", True)},
 }
 
 

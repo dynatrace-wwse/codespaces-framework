@@ -5763,11 +5763,11 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
 
 @app.delete("/api/live/sessions/{session_id}")
 async def api_live_session_delete(session_id: str, request: Request, trainerEmail: str = ""):
-    """Trainer hard-deletes a workshop that has NOT started — allowed only in
-    scheduled/open. 409 once running/ended/cancelled (a started or finished
-    workshop is history, not deletable; cancel/end + the 7-day TTL cover those).
-    403 on trainerEmail mismatch, 404 if already gone. Removes every key AND the
-    index entry, so the workshop vanishes for the whole cohort.
+    """Trainer hard-deletes a workshop — allowed before it starts
+    (scheduled/open) and once it is finished (ended/cancelled). 409 only while
+    running: deleting a live room would strand its cohort. 403 on trainerEmail
+    mismatch, 404 if already gone. Removes every key AND the index entry, so the
+    workshop vanishes for the whole cohort.
     Auth: service bearer or signed-in writer.
 
     Accepts trainerEmail as a QUERY param or in the BODY. Its three sibling
