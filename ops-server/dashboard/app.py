@@ -5632,10 +5632,17 @@ async def api_live_session_detail(session_id: str, request: Request, email: str 
     # The done-map is only read for a NAMED caller: provisionRequested is
     # per-caller, so an anonymous poll has nobody to answer it for.
     provision_done = await pool.hgetall(_live_provdone_key(session_id)) if named else None
-    # Tenants only matter on the trainer's board (joined rows) — skip the
-    # read for everyone whose payload would drop it in masking anyway.
-    tenants = (await pool.hgetall(_live_tenants_key(session_id))
-               if live_sessions.is_trainer(email, session) else None)
+    # The trainer's board needs every binding (the joined rows). A named learner
+    # needs exactly one: their OWN, so their app can tell "already provisioning
+    # here" from "bound somewhere else" — hence hget, not hgetall. Anonymous
+    # callers read nothing; there is nobody to answer it for.
+    if live_sessions.is_trainer(email, session):
+        tenants = await pool.hgetall(_live_tenants_key(session_id))
+    elif named:
+        mine = await pool.hget(_live_tenants_key(session_id), named)
+        tenants = {named: mine} if mine else None
+    else:
+        tenants = None
     detail = live_sessions.shape_detail(session_id, session, roster, joined, email,
                                         provision_done, tenants)
     # Service bearer alone must not unmask (BUG-MASK-1); the session trainer
@@ -5915,12 +5922,16 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
         int(session.get("maxSeats") or 0))
     if err:
         raise HTTPException(status_code=err[0], detail=err[1])
-    # Registration ONLY — a code join adds the email to the roster, exactly
-    # like a trainer typing it in. It deliberately does NOT check the learner
-    # in or record a tenant: the code may be entered on any tenant, and the
-    # learner still chooses where to RUN the workshop by clicking "Provision
-    # here" (which calls /join and binds the tenant, same as invited learners).
-    # One flow, both entry paths.
+    # Registration, not check-in — a code join adds the email to the roster,
+    # exactly like a trainer typing it in, and deliberately does NOT write the
+    # joined hash. Gates are unchanged: the learner is registered, not present.
+    #
+    # It DOES bind the tenant, because the code is entered from a tenant and
+    # that is the tenant the learner is sitting in. Withholding it left the
+    # trainer's board showing "—" for every self-registered learner until they
+    # opened the workshop and clicked, which reads as broken. The binding is not
+    # final: opening the workshop from somewhere else re-binds through /join
+    # (last write wins), same as an invited learner.
     #
     # A trainer is the exception: they are already a member by name, so the
     # code is just their way IN (a co-trainer handed the code rather than a
@@ -5932,9 +5943,12 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
                     session_id, session, roster,
                     await pool.hgetall(joined_key), email)}
     newly_registered = await pool.sadd(roster_key, email)
+    tenant = live_sessions.normalize_tenant(body.tenant)
+    if tenant:
+        await pool.hset(_live_tenants_key(session_id), email, tenant)
     if newly_registered:
         await _emit_live_event(session_id, live_sessions.EVENT_REGISTERED,
-                               email=email, detail="join code")
+                               email=email, detail="join code", tenant=tenant)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return {"sessionId": session_id,

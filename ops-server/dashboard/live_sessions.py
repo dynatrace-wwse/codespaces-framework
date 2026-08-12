@@ -758,7 +758,12 @@ def shape_detail(session_id, session, roster, joined, email,
     trainer-triggered provisioning, so it must answer "does the person holding
     THIS browser need an environment", never "does anyone". Callers that pass no
     `provision_done` (start/end/patch, which return the detail as an echo of a
-    write rather than as a poll) get False and never trigger a provision."""
+    write rather than as a poll) get False and never trigger a provision.
+
+    `myTenant` is the same idea for the tenant binding: the CALLER's own bound
+    tenant, so their app can tell "you are already provisioning here" from "you
+    bound a different tenant" without seeing anyone else's. Empty when they have
+    not checked in, or when the caller did not read the hash."""
     out = {
         "sessionId":    session_id,
         "title":        session.get("title", ""),
@@ -780,6 +785,7 @@ def shape_detail(session_id, session, roster, joined, email,
         # fires the pull-channel provision once per (session, requestedAt), so a
         # remount while the flag is still true cannot mint a second token pair.
         "provisionRequestedAt": session.get("provisionRequestedAt", ""),
+        "myTenant": (tenants or {}).get(normalize_email(email), ""),
     }
     out.update(_room_and_gate(session))
     out.update(workshop_fields(session, email))

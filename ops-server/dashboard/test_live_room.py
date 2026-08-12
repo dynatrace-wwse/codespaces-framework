@@ -67,6 +67,12 @@ class FakeRedis:
     async def smembers(self, key):
         return set(self.s.get(key, set()))
 
+    async def sadd(self, key, member):
+        target = self.s.setdefault(key, set())
+        before = len(target)
+        target.add(member)
+        return len(target) - before
+
     async def get(self, key):
         return self.k.get(key)
 
@@ -77,7 +83,7 @@ class FakeRedis:
     async def expire(self, key, ttl):
         return True
 
-    async def xadd(self, key, mapping):
+    async def xadd(self, key, mapping, maxlen=None, approximate=None):
         self.seq += 1
         entry_id = f"{1000 + self.seq}-0"
         self.x.setdefault(key, []).append((entry_id, dict(mapping)))
@@ -437,3 +443,76 @@ def test_the_detail_payload_answers_role_and_both_gates_in_one_call():
     body = _detail(TRAINER).json()
     for field in ("isTrainer", "hasJoined", "roomOpen", "gateAhead", "state"):
         assert field in body, f"{field} missing — the route would need a 2nd call"
+
+
+# ── myTenant: the caller's own binding, and nobody else's ────────────────────
+#
+# The workshop lobby asks one question the detail payload could not answer:
+# "am I already provisioning in the tenant I am looking at?" Without it the app
+# had to offer "Provision here instead" to every checked-in learner, including
+# the ones who were already in the right place.
+
+def test_a_learner_gets_their_own_bound_tenant():
+    a.pool.h[f"live:session:{SID}:tenants"] = {
+        LEARNER: "https://abc123.apps.dynatrace.com",
+        "someone.else@x.com": "https://zzz999.apps.dynatrace.com",
+    }
+    body = _detail(LEARNER).json()
+    assert body["myTenant"] == "https://abc123.apps.dynatrace.com"
+    # Scoped to the caller: a learner learns nothing about where anyone else is.
+    assert "zzz999" not in json.dumps(body)
+
+
+def test_a_learner_with_no_binding_gets_an_empty_my_tenant():
+    body = _detail(LEARNER).json()
+    assert body["myTenant"] == ""
+
+
+def test_a_trainer_still_gets_every_binding_plus_their_own():
+    a.pool.h[f"live:session:{SID}:tenants"] = {
+        LEARNER: "https://abc123.apps.dynatrace.com"}
+    body = _detail(TRAINER).json()
+    assert body["joined"] == [
+        {"email": LEARNER, "joinedAt": body["joined"][0]["joinedAt"],
+         "tenant": "https://abc123.apps.dynatrace.com"}]
+    assert body["myTenant"] == ""       # the trainer never checked in here
+
+
+# ── join-by-code binds the tenant it was typed in ────────────────────────────
+
+def _join_by_code(code="ABC123", email="newbie@x.com", tenant=""):
+    return client.post("/api/live/sessions/join-by-code", headers=BEARER,
+                       json={"code": code, "email": email, "tenant": tenant})
+
+
+def test_join_by_code_registers_and_records_where_the_learner_is():
+    """Registration, not check-in: the roster gains the email, `joined` does
+    not — but the tenant IS bound, so the trainer's registrant table shows
+    where each self-registered learner will run instead of a dash."""
+    a.pool.k["live:joincode:ABC123"] = SID
+    r = _join_by_code(tenant="https://abc123.apps.dynatrace.com/")
+    assert r.status_code == 200
+    assert "newbie@x.com" in a.pool.s[f"live:session:{SID}:roster"]
+    assert a.pool.h[f"live:session:{SID}:tenants"]["newbie@x.com"] == \
+        "https://abc123.apps.dynatrace.com"
+    # Registered, not present — the gates must not move.
+    assert "newbie@x.com" not in a.pool.h[f"live:session:{SID}:joined"]
+
+
+def test_join_by_code_without_a_tenant_binds_nothing():
+    """An older app that sends no tenant still registers — the field is
+    additive, not required."""
+    a.pool.k["live:joincode:ABC123"] = SID
+    assert _join_by_code().status_code == 200
+    assert "newbie@x.com" in a.pool.s[f"live:session:{SID}:roster"]
+    assert a.pool.h.get(f"live:session:{SID}:tenants", {}) == {}
+
+
+def test_join_by_code_by_a_trainer_neither_rosters_nor_binds():
+    """A trainer using the code is just their way IN. Rostering them would
+    demote them to a learner row and inflate the cohort count."""
+    a.pool.k["live:joincode:ABC123"] = SID
+    r = _join_by_code(email=TRAINER, tenant="https://abc123.apps.dynatrace.com")
+    assert r.status_code == 200
+    assert TRAINER not in a.pool.s.get(f"live:session:{SID}:roster", set())
+    assert a.pool.h.get(f"live:session:{SID}:tenants", {}) == {}

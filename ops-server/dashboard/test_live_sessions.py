@@ -445,6 +445,34 @@ def test_shape_detail_trainer_joined_rows_carry_the_checkin_tenant():
     ]
 
 
+def test_shape_detail_my_tenant_is_the_callers_own_binding():
+    """A learner must be able to tell "I am already provisioning here" from "I
+    bound somewhere else" — without seeing anybody else's tenant."""
+    joined = {"alice@x.com": "2026-07-14T10:00:00+00:00",
+              "bob@x.com": "2026-07-14T10:05:00+00:00"}
+    tenants = {"alice@x.com": "https://abc123.apps.dynatrace.com",
+               "bob@x.com": "https://zzz999.apps.dynatrace.com"}
+    out = ls.shape_detail("sid-1", _session(), set(joined), joined,
+                          " Alice@X.com ", tenants={"alice@x.com": tenants["alice@x.com"]})
+    assert out["myTenant"] == "https://abc123.apps.dynatrace.com"
+    # …and nothing about bob, who is not the caller.
+    assert "joined" not in out
+    assert "zzz999" not in repr(out)
+
+
+def test_shape_detail_my_tenant_empty_when_unbound_or_unread():
+    joined = {"alice@x.com": "2026-07-14T10:00:00+00:00"}
+    # Checked in before tenants were recorded.
+    assert ls.shape_detail("sid-1", _session(), set(joined), joined,
+                           "alice@x.com", tenants={})["myTenant"] == ""
+    # Write-echo callers pass no tenants hash at all.
+    assert ls.shape_detail("sid-1", _session(), set(joined), joined,
+                           "alice@x.com")["myTenant"] == ""
+    # Anonymous caller has nobody to answer it for.
+    assert ls.shape_detail("sid-1", _session(), set(joined), joined,
+                           "", tenants={"alice@x.com": "https://a.b"})["myTenant"] == ""
+
+
 def test_shape_detail_includes_all_scalar_fields():
     out = ls.shape_detail("sid-1", _session(state="ended", ref="feat/x"),
                           set(), {}, "learner@x.com")
