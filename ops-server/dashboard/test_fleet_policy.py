@@ -71,10 +71,13 @@ def test_r6a_is_cpu_bound_not_memory_bound():
     assert fp.limiting_factor("r6a.2xlarge") == "cpu"
 
 
-def test_planning_takes_the_lower_of_both_ceilings():
+def test_planning_takes_the_lowest_of_all_three_ceilings():
+    # Was "lower of both" until 2026-08-13, when a 30-session run on a shape
+    # memory and CPU both cleared returned 0 passes — the volume was the wall.
     for t in fp.INSTANCE_MEMORY_MB:
         if fp.slots_for_instance(t):
-            assert fp.slots_for_instance(t) == min(fp.memory_slots(t), fp.cpu_slots(t)), t
+            assert fp.slots_for_instance(t) == min(
+                fp.memory_slots(t), fp.cpu_slots(t), fp.disk_slots()), t
 
 
 def test_more_memory_than_cores_can_feed_is_wasted():
@@ -96,8 +99,8 @@ def test_anything_beats_compute_optimized():
 
 def test_rank_by_cost_prices_deliverable_slots_not_installed_ram():
     for row in fp.rank_by_cost("eu-west-2"):
-        assert row["slots"] == min(row["memory_slots"], row["cpu_slots"])
-        assert row["binds"] in ("memory", "cpu", "balanced")
+        assert row["slots"] == min(row["memory_slots"], row["cpu_slots"], fp.disk_slots())
+        assert row["binds"] in ("memory", "cpu", "disk", "balanced")
 
 
 def test_unknown_instance_type_refuses_rather_than_guesses():
@@ -389,12 +392,15 @@ def test_current_vs_proposed_fleet_cost_and_capacity():
     # ...while cost per slot collapses.
     assert (proposed["total_usd"] / proposed_slots) < 0.55 * (now["total_usd"] / now_slots)
 
-    # And the shape the CPU measurement actually favours: same daily spend as
-    # 3 x r6a.2xlarge, but 25% more usable seats, because m6a.4xlarge's cores
-    # can feed its RAM.
+    # 2 x m6a.4xlarge was expected to give 60 seats on the memory+CPU model.
+    # The 2026-08-13 disk measurement cut that to 36: the extra RAM and cores
+    # are real but stranded behind one 125 MB/s volume each. Still a large gain
+    # over 12, and 500 MB/s of provisioned throughput (~$15/mo per worker)
+    # restores the 60 — which is why the fix is a disk setting, not a bigger box.
     balanced = fp.estimate_cost(2, "m6a.4xlarge", 730.0, eu)
     balanced_slots = 2 * fp.slots_for_instance("m6a.4xlarge")
-    assert balanced_slots == 60 > proposed_slots
+    assert balanced_slots == 36
+    assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == 60
     assert abs(balanced["total_usd"] - proposed["total_usd"]) < 1.0
 
 
@@ -422,7 +428,7 @@ def test_instance_choices_are_costed_and_sized():
         assert c["slots"] > 0
         assert c["usd_per_session_hour"] > 0
         assert c["best_for"] and c["why"]
-        assert c["limited_by"] in ("memory", "cpu")
+        assert c["limited_by"] in ("memory", "cpu", "disk", "balanced")
 
 
 def test_exactly_one_recommended_and_it_is_the_cheapest_per_session():
@@ -430,7 +436,22 @@ def test_exactly_one_recommended_and_it_is_the_cheapest_per_session():
     rec = [c for c in choices if c["recommended"]]
     assert len(rec) == 1, "an ambiguous recommendation is worse than none"
     cheapest = min(choices, key=lambda c: c["usd_per_session_hour"])
-    assert rec[0]["type"] == cheapest["type"] == "m6a.4xlarge"
+    assert rec[0]["type"] == cheapest["type"]
+    # On baseline gp3 that is m6a.2xlarge, NOT the 4xlarge: two 2xlarges carry
+    # two 125 MB/s volumes (14 seats each) where one 4xlarge carries one (18),
+    # for the same money. The 4xlarge only wins once its volume is provisioned
+    # past baseline — see test_recommendation_follows_provisioned_throughput.
+    assert rec[0]["type"] == "m6a.2xlarge"
+
+
+def test_recommendation_follows_provisioned_throughput_not_a_hardcoded_flag():
+    # The literal in INSTANCE_CHOICES still marks m6a.4xlarge; the derived
+    # recommendation must ignore it. A stale hardcoded flag is exactly what
+    # promised 30 seats that a 30-session run could not deliver.
+    literal = [c["type"] for c in fp.INSTANCE_CHOICES if c.get("recommended")]
+    assert literal == ["m6a.4xlarge"]
+    derived = [c["type"] for c in fp.instance_choices("eu-west-2") if c["recommended"]]
+    assert derived != literal
 
 
 def test_choices_cover_three_families():
@@ -451,3 +472,53 @@ def test_choices_survive_a_region_with_no_price_table():
     assert len(choices) == 4
     assert all(c["usd_per_session_hour"] is None for c in choices)
     assert all(c["slots"] > 0 for c in choices)
+
+
+# ── the disk ceiling (measured 2026-08-13, three runs on one m6a.4xlarge) ────
+# N=12 → 29/60 retries used, 12/12 pass | N=20 → 53/60, 20/20 pass
+# N=30 → gate exhausted, 0/30 pass. Memory and CPU explain none of that.
+
+def test_disk_ceiling_matches_the_measured_runs():
+    # The model has to land between the run that passed with margin and the one
+    # that exhausted the gate — and it must not exceed the last passing run.
+    n = fp.disk_slots(125)
+    assert 12 < n <= 20, f"disk ceiling {n} contradicts the 12-pass / 20-pass / 30-fail runs"
+    assert n == 18
+
+
+def test_disk_ceiling_scales_with_volume_throughput_not_instance_size():
+    # The whole practical point: throughput is the cheap lever. 4x the disk
+    # must buy materially more than 4 extra seats.
+    assert fp.disk_slots(500) > 4 * fp.disk_slots(125)
+    assert fp.disk_slots(250) > fp.disk_slots(125)
+
+
+def test_disk_binds_first_on_the_default_shape():
+    # m6a.4xlarge: memory says 30, CPU says 32, disk says 18. Before this term
+    # existed the picker promised 30 and a 30-session run returned 0 passes.
+    assert fp.memory_slots("m6a.4xlarge") > 18
+    assert fp.cpu_slots("m6a.4xlarge") > 18
+    assert fp.slots_for_instance("m6a.4xlarge") == 18
+    assert fp.limiting_factor("m6a.4xlarge") == "disk"
+
+
+def test_disk_does_not_blanket_cap_smaller_shapes():
+    # A ceiling that binds everywhere is just a constant. These shapes run out
+    # of their own resource first and must keep their own limiting factor.
+    assert fp.limiting_factor("c5.2xlarge") == "memory"
+    assert fp.limiting_factor("m6a.2xlarge") == "memory"
+    assert fp.limiting_factor("r6a.2xlarge") == "cpu"
+
+
+def test_faster_disk_hands_the_ceiling_back_to_memory():
+    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == \
+        min(fp.memory_slots("m6a.4xlarge"), fp.cpu_slots("m6a.4xlarge"))
+    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=500) != "disk"
+
+
+def test_zero_or_negative_throughput_refuses_to_plan():
+    # Never guess high — an unknown volume must read as "cannot plan", the same
+    # contract as an unknown instance type.
+    assert fp.disk_slots(0) == 0
+    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=0) == 0
+    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=0) == "unknown"

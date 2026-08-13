@@ -81,6 +81,39 @@ LAB_INSTALL_CPU_SECONDS = 265
 LAB_READINESS_GATE_S = 600
 SESSIONS_PER_VCPU = 2.0
 
+# ── the DISK term (measured 2026-08-13 on m6a.4xlarge, 12 / 20 / 30 sessions) ─
+# Memory and CPU are still not the whole story. Three runs on the *same* box,
+# reading how much of the framework's own 60-retry gate each install consumed:
+#
+#   N=12 → worst session used 29/60 retries   (all 12 passed, 335 s mean)
+#   N=20 → worst session used 53/60 retries   (all 20 passed, 507 s mean)
+#   N=30 → gate exhausted, 0/30 passed        (857 s mean, stuck on ActiveGate)
+#
+# Neither memory nor CPU explains that. At N=30 memory peaked at 48.6 GiB of
+# 62.9 and CPU pressure only spiked late; what was pinned for the whole window
+# was the volume, at 125.2 MB/s against a gp3 baseline of exactly 125 — the
+# installs were queued behind each other writing the same container images.
+#
+# Retries used is linear in N (3.0 per session, i.e. 30 s each), which at
+# 125 MB/s implies ~3.75 GB of disk work per install — image pull plus the
+# read amplification of extracting it. That is a physical constant of the lab,
+# so the ceiling scales with the VOLUME's throughput, not with the instance:
+#
+#   N <= (gate·safety + intercept) / (LAB_INSTALL_DISK_MB / throughput)
+#
+# Consequence worth stating plainly: on baseline gp3 this binds *first* on
+# every shape we would actually buy, and raising volume throughput is far
+# cheaper than raising instance size.
+LAB_INSTALL_DISK_MB = 3750
+# gp3's default. Provisionable to 1000 MB/s at $0.040/MB/s-month.
+DEFAULT_VOLUME_THROUGHPUT_MBPS = 125
+# The gate is 600 s but planning to 100% of it means the median class fails.
+# 0.8 leaves ~2 minutes of slack for a slow image day or a noisy neighbour.
+GATE_SAFETY_FACTOR = 0.8
+# Fitted intercept (retries ≈ 3N − 7): the first install starts before any
+# contention, so it gets ~70 s of the gate for free.
+DISK_FIT_INTERCEPT_S = 70
+
 # Nominal usable RAM (MiB) as the OS reports it — i.e. after firmware/kernel
 # reserve. c5.2xlarge and r6a.2xlarge are measured; the rest follow the same
 # ~97.5% of nominal ratio.
@@ -163,31 +196,60 @@ def cpu_slots(instance_type: str) -> int:
     return int(vcpus * SESSIONS_PER_VCPU) if vcpus > 0 else 0
 
 
-def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR) -> int:
+def disk_slots(throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS) -> int:
+    """How many installs can share one volume and still clear the readiness gate.
+
+    Independent of the instance shape — it is a property of the *volume*. Two
+    workers on the same instance type but different gp3 throughput have
+    different ceilings, which is the whole point: 15 dollars a month of
+    provisioned throughput buys more seats than a bigger instance does.
+    """
+    if throughput_mbps <= 0:
+        return 0
+    seconds_each = LAB_INSTALL_DISK_MB / throughput_mbps
+    budget = LAB_READINESS_GATE_S * GATE_SAFETY_FACTOR + DISK_FIT_INTERCEPT_S
+    return max(0, int(budget / seconds_each))
+
+
+def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR,
+                       throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS) -> int:
     """How many concurrent full-lab sessions one instance should be planned for.
 
-    The lower of the memory ceiling and the CPU ceiling. Both are measured, and
-    which one binds depends on the shape: a c5.2xlarge runs out of RAM first
-    (6 vs 16), an r6a.2xlarge runs out of CPU first (16 vs 29). Planning on
-    memory alone is what would have oversold an r-family box by nearly 2×.
+    The lowest of three measured ceilings — memory, CPU, and disk — because
+    which one binds depends on the shape and the volume: a c5.2xlarge runs out
+    of RAM first (6 vs 16), an r6a.2xlarge runs out of CPU first (16 vs 29), and
+    on baseline gp3 an m6a.4xlarge runs out of *disk* first (18 vs 30 and 32).
+
+    Planning on memory alone would have oversold an r-family box by nearly 2×;
+    planning on memory and CPU alone did oversell the m6a by 30-vs-18, which a
+    30-session run then falsified with 0 passes.
 
     Returns 0 for an unknown type — callers must treat that as "refuse to plan"
     rather than guessing, because guessing high is how a class gets oversold.
     """
     mem_slots = memory_slots(instance_type, safety)
     cpu_cap = cpu_slots(instance_type)
-    if mem_slots <= 0 or cpu_cap <= 0:
+    disk_cap = disk_slots(throughput_mbps)
+    if mem_slots <= 0 or cpu_cap <= 0 or disk_cap <= 0:
         return 0
-    return min(mem_slots, cpu_cap)
+    return min(mem_slots, cpu_cap, disk_cap)
 
 
-def limiting_factor(instance_type: str) -> str:
+def limiting_factor(instance_type: str,
+                    throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS) -> str:
     """Which ceiling binds for this shape — shown in the UI so the operator can
-    see whether more RAM or more cores would actually buy anything."""
-    m, c = memory_slots(instance_type), cpu_slots(instance_type)
-    if m <= 0 or c <= 0:
+    see whether more RAM, more cores, or faster disk would actually buy
+    anything. On baseline gp3 the honest answer is almost always disk."""
+    caps = {
+        "memory": memory_slots(instance_type),
+        "cpu": cpu_slots(instance_type),
+        "disk": disk_slots(throughput_mbps),
+    }
+    if any(v <= 0 for v in caps.values()):
         return "unknown"
-    return "memory" if m < c else ("cpu" if c < m else "balanced")
+    low = min(caps.values())
+    binding = [k for k, v in caps.items() if v == low]
+    return binding[0] if len(binding) == 1 else "balanced"
 
 
 def instances_for_seats(seats: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
@@ -566,6 +628,17 @@ def instance_choices(region: str = HOME_REGION) -> list[dict]:
             "usd_per_session_hour": (round(price / slots, 4)
                                      if price and slots else None),
         })
+
+    # The recommendation is DERIVED, never the literal in INSTANCE_CHOICES.
+    # That literal said m6a.4xlarge while the disk ceiling was unmodelled, so
+    # the UI promised 30 seats a 30-session run could not deliver. Deriving it
+    # means the picker cannot disagree with the capacity model again — when
+    # provisioned throughput moves, the recommendation moves with it.
+    priced = [c for c in out if c["usd_per_session_hour"]]
+    if priced:
+        best = min(priced, key=lambda c: c["usd_per_session_hour"])["type"]
+        for c in out:
+            c["recommended"] = c["type"] == best
     return out
 
 
