@@ -36,6 +36,48 @@ WORKER_CAPACITY = int(os.environ.get("WORKER_CAPACITY", "6"))
 WORKER_COST_BUDGET = int(os.environ["WORKER_COST_BUDGET"]) if os.environ.get("WORKER_COST_BUDGET") else None
 WORKER_MAX_HEAVY = int(os.environ["WORKER_MAX_HEAVY"]) if os.environ.get("WORKER_MAX_HEAVY") else None
 
+# ── Pool membership ─────────────────────────────────────────────────────────
+# Which queue this worker takes work from. This is the ONLY thing that keeps a
+# self-service learner off a machine reserved for a workshop, and it is
+# deliberately implemented as queue *topology* rather than as a filter:
+#
+#   daily worker     → BLPOP queue:direct:{id}, queue:test:{arch}
+#   workshop worker  → BLPOP queue:direct:{id}, queue:pool:{POOL}
+#
+# A workshop worker never subscribes to the shared arch queue, so a self-service
+# job cannot reach it — not "is filtered out of it". A filter can have a bug; a
+# queue a process never reads from cannot deliver.
+#
+# "daily" is the shared, autoscaled pool that serves self-service. Any other
+# value names a dedicated pool (e.g. a workshop id), and several workers may
+# share it — they then load-balance over queue:pool:{POOL} for free, which
+# pinning by WORKER_ID could not do.
+WORKER_POOL = os.environ.get("WORKER_POOL", "daily").strip() or "daily"
+DAILY_POOL = "daily"
+
+
+def queue_keys(worker_id: str, arch: str, pool_name: str = "") -> list[str]:
+    """BLPOP key list for this worker, highest priority first.
+
+    ``queue:direct:{id}`` stays in front for both pool kinds: it is how a
+    capacity test or an operator targets one specific box, and that must keep
+    working regardless of pool membership.
+    """
+    pool = (pool_name or WORKER_POOL).strip() or DAILY_POOL
+    shared = f"queue:test:{arch}" if pool == DAILY_POOL else f"queue:pool:{pool}"
+    return [f"queue:direct:{worker_id}", shared]
+
+
+# Short git SHA of the code this worker is actually running, stamped into
+# /home/ops/.env by cloud-init after it syncs the checkout (see
+# dashboard/fleet.py:_build_user_data). Published on every heartbeat so fleet
+# drift is one glance rather than an SSH round-trip to each box.
+#
+# Empty means "nobody stamped it" — a hand-built worker, or a boot-time sync
+# that failed. Both are worth seeing, which is why this is not defaulted to
+# something reassuring.
+WORKER_CODE_REF = os.environ.get("WORKER_CODE_REF", "").strip()
+
 # ── Per-slot resource limits ────────────────────────────────────────────────
 # Slots run untrusted learner workloads (a full k3d cluster, and whatever the
 # lab tells the learner to install). Until now they were started with NO limits
@@ -67,6 +109,19 @@ WORKER_SLOT_MEMORY_RESERVATION_MB = int(os.environ.get("WORKER_SLOT_MEMORY_RESER
 # throttle exactly the k3d-creation burst and make every provision slower.
 # Shares only arbitrate *contention*, so idle CPU stays fully available.
 WORKER_SLOT_CPU_SHARES = int(os.environ.get("WORKER_SLOT_CPU_SHARES", "1024"))
+# Optional HARD ceiling in whole vCPUs (--cpus). 0 = off, which keeps the
+# reasoning above intact: by default nothing throttles.
+#
+# Shares alone bound a slot's share of a CONTESTED cpu, but place no limit at
+# all on an idle host — so one wedged slot can still drive host CPU pressure
+# for every one of its neighbours. That is the gap this closes, and the reason
+# it is a separate knob rather than a change to the default: set it GENEROUSLY.
+# Measured draw is 0.127 vCPU steady with a burst of roughly 1-2 cores during
+# k3d creation, so a ceiling of 4 on a 16-vCPU box is ~2x the worst legitimate
+# burst and still stops a runaway from taking a quarter of the machine.
+# Too tight a value re-creates precisely the throttling the shares-only design
+# set out to avoid.
+WORKER_SLOT_CPU_QUOTA = float(os.environ.get("WORKER_SLOT_CPU_QUOTA", "0") or 0)
 # A nested k3d cluster runs a few hundred processes; 4096 is far above normal
 # and still bounds a fork bomb.
 WORKER_SLOT_PIDS_LIMIT = int(os.environ.get("WORKER_SLOT_PIDS_LIMIT", "4096"))
@@ -94,6 +149,8 @@ def slot_limit_args() -> list[str]:
     ]
     if 0 < WORKER_SLOT_MEMORY_RESERVATION_MB < WORKER_SLOT_MEMORY_MB:
         args += ["--memory-reservation", f"{WORKER_SLOT_MEMORY_RESERVATION_MB}m"]
+    if WORKER_SLOT_CPU_QUOTA > 0:
+        args += ["--cpus", f"{WORKER_SLOT_CPU_QUOTA:g}"]
     return args
 # Private IP of this worker (auto-detected; override via WORKER_HOST env var).
 WORKER_HOST = os.environ.get("WORKER_HOST") or _detect_host_ip()

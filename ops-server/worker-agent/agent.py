@@ -51,7 +51,10 @@ from .config import (
     TEST_IMAGE,
     WORKER_SLOT_LIMITS,
     WORKER_SLOT_MEMORY_MB,
+    WORKER_POOL,
+    WORKER_CODE_REF,
     slot_limit_args,
+    queue_keys,
 )
 from .executor import (
     execute_integration_test,
@@ -881,6 +884,15 @@ class WorkerAgent:
             "slots_total": str(WORKER_CAPACITY),
             "host": WORKER_HOST,
             "ssh_host": WORKER_SSH_HOST or WORKER_HOST,
+            # Which queue this worker eats from. The scale planner needs it to
+            # avoid counting workshop seats as available self-service capacity.
+            "pool": WORKER_POOL,
+            # Short SHA of the code actually running here, stamped at boot.
+            # Empty = never stamped (hand-built box, or the boot sync failed);
+            # left visibly empty rather than defaulted to something reassuring,
+            # because a worker silently running month-old code is the failure
+            # this field exists to catch.
+            "code_ref": WORKER_CODE_REF,
         }
         while self._running:
             try:
@@ -924,9 +936,14 @@ class WorkerAgent:
 
         Also listens on queue:direct:{WORKER_ID} (higher priority) for jobs
         targeted at this specific worker (e.g. capacity stress tests).
+
+        WHICH shared queue depends on the pool (config.queue_keys). A worker in
+        the "daily" pool takes self-service work off queue:test:{arch}; a worker
+        in a workshop pool takes only that pool's queue and is therefore
+        unreachable by self-service traffic. That is the whole isolation
+        mechanism — see config.WORKER_POOL for why it is topology, not a filter.
         """
-        queue_key = f"queue:test:{WORKER_ARCH}"
-        direct_key = f"queue:direct:{WORKER_ID}"
+        direct_key, queue_key = queue_keys(WORKER_ID, WORKER_ARCH)
 
         # Don't claim jobs before a slot exists to run them in. Waiting on the
         # FIRST slot (not the whole pool) is what lets a warming worker start
