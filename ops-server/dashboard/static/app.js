@@ -100,6 +100,7 @@ function activateTab(view) {
     if (view === 'agentic') loadAgentic();
     if (view === 'framework') loadFramework();
     if (view === 'content') loadContent();
+    if (view === 'workshops') loadWorkshops();
     if (view === 'register') loadRegister();
 }
 
@@ -3433,9 +3434,14 @@ const csProfileOpts = (sel) =>
 
 function wireContent() {
     if (csWired) return; csWired = true;
-    document.querySelectorAll('.content-tab').forEach(t => t.addEventListener('click', () => {
-        document.querySelectorAll('.content-tab').forEach(x => x.classList.toggle('active', x === t));
-        document.querySelectorAll('.content-subview').forEach(v => { v.hidden = (v.id !== 'content-view-' + t.dataset.contentView); });
+    // Scoped to #view-content on purpose. The Workshops & Delivery tab reuses
+    // the same .content-tab/.content-subview classes for their styling, so an
+    // unscoped querySelectorAll here would toggle that tab's sub-views too and
+    // hide every panel on the page.
+    const root = document.getElementById('view-content');
+    root.querySelectorAll('.content-tab').forEach(t => t.addEventListener('click', () => {
+        root.querySelectorAll('.content-tab').forEach(x => x.classList.toggle('active', x === t));
+        root.querySelectorAll('.content-subview').forEach(v => { v.hidden = (v.id !== 'content-view-' + t.dataset.contentView); });
         if (t.dataset.contentView === 'trainings') csLoadSources();
     }));
     document.getElementById('cs-save-profile').addEventListener('click', csSaveProfile);
@@ -3643,6 +3649,346 @@ async function loadContent() {
     } catch (e) {
         document.getElementById('content-profiles').innerHTML = '<p class="content-hint">Failed to load content overview.</p>';
     }
+}
+
+// ── Workshops & Delivery tab ─────────────────────────────────────────────────
+// Orbital is the system of record for workshops (live:session:* in Redis); the
+// enablement app is a proxy over the same /api/live/* routes. This tab is a
+// cross-tenant admin surface over that existing store — the only NEW state is
+// the trainer registry.
+//
+// Writer-gated twice: nginx auth_request on /api/workshops/admin/, and
+// _require_writer in FastAPI. Hiding the tab is a convenience, not the boundary.
+
+const wsState = { workshops: [], trainers: [], month: null, editing: null };
+let wsWired = false;
+
+function wireWorkshops() {
+    if (wsWired) return; wsWired = true;
+    // Scoped to #view-workshops — see the note in wireContent().
+    const root = document.getElementById('view-workshops');
+    root.querySelectorAll('.content-tab').forEach(t => t.addEventListener('click', () => {
+        root.querySelectorAll('.content-tab').forEach(x => x.classList.toggle('active', x === t));
+        root.querySelectorAll('.content-subview').forEach(v => { v.hidden = (v.id !== 'ws-view-' + t.dataset.wsView); });
+        if (t.dataset.wsView === 'trainers') wsLoadTrainers();
+    }));
+    document.getElementById('ws-tr-add').addEventListener('click', wsAddTrainer);
+    document.getElementById('ws-tr-email').addEventListener('keydown', (e) => { if (e.key === 'Enter') wsAddTrainer(); });
+    document.querySelector('#ws-trainers tbody').addEventListener('click', (e) => {
+        const rm = e.target.closest('[data-ws-trdel]');
+        if (rm) wsRemoveTrainer(rm.dataset.wsTrdel);
+    });
+    document.getElementById('ws-reload').addEventListener('click', wsLoadSchedule);
+    document.getElementById('ws-filter-state').addEventListener('change', wsLoadSchedule);
+    document.getElementById('ws-cal-prev').addEventListener('click', () => wsShiftMonth(-1));
+    document.getElementById('ws-cal-next').addEventListener('click', () => wsShiftMonth(1));
+    document.getElementById('ws-cal-today').addEventListener('click', () => { wsState.month = null; wsRenderCalendar(); });
+    document.querySelector('#ws-table tbody').addEventListener('click', (e) => {
+        const row = e.target.closest('[data-ws-open]');
+        if (row) wsOpenEditor(row.dataset.wsOpen);
+    });
+    document.getElementById('ws-calendar').addEventListener('click', (e) => {
+        const chip = e.target.closest('[data-ws-open]');
+        if (chip) wsOpenEditor(chip.dataset.wsOpen);
+    });
+}
+
+async function loadWorkshops() {
+    wireWorkshops();
+    await Promise.all([wsLoadSchedule(), wsLoadTrainers()]);
+}
+
+// ── Trainers ─────────────────────────────────────────────────────────────────
+
+function wsTrainerMsg(text, ok) {
+    const el = document.getElementById('ws-tr-msg');
+    el.textContent = text || '';
+    el.style.color = ok ? 'var(--ok, #4ade80)' : 'var(--danger, #f87171)';
+}
+
+async function wsLoadTrainers() {
+    const tbody = document.querySelector('#ws-trainers tbody');
+    try {
+        const r = await fetch('/api/workshops/admin/trainers', { credentials: 'same-origin' });
+        if (!r.ok) {
+            tbody.innerHTML = '<tr><td colspan="6" class="content-hint">Sign in as an org member to manage trainers.</td></tr>';
+            return;
+        }
+        const j = await r.json();
+        wsState.trainers = j.trainers || [];
+        document.getElementById('ws-tr-count').textContent = `(${wsState.trainers.length})`;
+        tbody.innerHTML = wsState.trainers.length
+            ? wsState.trainers.map(t => `<tr>
+                <td>${escapeHtml(t.email || '')}</td>
+                <td>${escapeHtml(t.name || '')}</td>
+                <td>${escapeHtml(t.addedBy || '')}</td>
+                <td>${escapeHtml((t.addedAt || '').slice(0, 10))}</td>
+                <td>${escapeHtml(t.note || '')}</td>
+                <td><button class="btn btn-small btn-danger" data-action data-ws-trdel="${escapeHtml(t.email || '')}">Remove</button></td>
+              </tr>`).join('')
+            : '<tr><td colspan="6" class="content-hint">No trainers yet. Nobody can schedule a workshop until one is added.</td></tr>';
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" class="content-hint">Failed to load trainers.</td></tr>';
+    }
+}
+
+async function wsAddTrainer() {
+    const email = document.getElementById('ws-tr-email').value.trim();
+    if (!email) { wsTrainerMsg('An email is required.', false); return; }
+    wsTrainerMsg('', true);
+    const r = await fetch('/api/workshops/admin/trainers', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            email,
+            name: document.getElementById('ws-tr-name').value.trim(),
+            note: document.getElementById('ws-tr-note').value.trim(),
+        }),
+    });
+    if (r.ok) {
+        ['ws-tr-email', 'ws-tr-name', 'ws-tr-note'].forEach(id => { document.getElementById(id).value = ''; });
+        wsTrainerMsg(`✓ ${email} can now schedule workshops.`, true);
+        wsLoadTrainers();
+    } else {
+        const j = await r.json().catch(() => ({}));
+        wsTrainerMsg('✗ ' + (j.detail || 'add failed'), false);
+    }
+}
+
+async function wsRemoveTrainer(email) {
+    if (!confirm(`Remove ${email}? They will no longer be able to schedule workshops. Existing workshops they run are unaffected.`)) return;
+    const r = await fetch('/api/workshops/admin/trainers/' + encodeURIComponent(email), {
+        method: 'DELETE', credentials: 'same-origin',
+    });
+    if (r.ok) { wsTrainerMsg(`✓ ${email} removed.`, true); wsLoadTrainers(); }
+    else { const j = await r.json().catch(() => ({})); wsTrainerMsg('✗ ' + (j.detail || 'remove failed'), false); }
+}
+
+// ── Workshop schedule: calendar + table + editor ─────────────────────────────
+
+function wsWhen(w) {
+    if (!w.scheduledAt) return { day: (w.createdAt || '').slice(0, 10), label: '— not scheduled —' };
+    const day = w.scheduledAt.slice(0, 10);
+    const time = w.scheduledAt.slice(11, 16);
+    const tz = w.timezone ? ` ${w.timezone}` : '';
+    const dur = w.durationMinutes ? ` · ${w.durationMinutes}m` : '';
+    return { day, label: `${day} ${time}${tz}${dur}` };
+}
+
+function wsSeats(w) {
+    if (!w.maxSeats) return `${w.seatsTaken} / ∞`;
+    return `${w.seatsTaken} / ${w.maxSeats} (${w.seatsOpen} open)`;
+}
+
+function wsTenantLabel(url) {
+    if (!url) return '—';
+    try { return new URL(url).hostname.split('.')[0]; } catch (e) { return url; }
+}
+
+async function wsLoadSchedule() {
+    const cal = document.getElementById('ws-calendar');
+    const tbody = document.querySelector('#ws-table tbody');
+    const state = document.getElementById('ws-filter-state').value;
+    try {
+        const r = await fetch('/api/workshops/admin/schedule' + (state ? `?state=${encodeURIComponent(state)}` : ''),
+                              { credentials: 'same-origin' });
+        if (!r.ok) {
+            cal.innerHTML = '<p class="content-hint">Sign in as an org member to see workshops.</p>';
+            tbody.innerHTML = '';
+            return;
+        }
+        const j = await r.json();
+        wsState.workshops = j.workshops || [];
+        document.getElementById('ws-count').textContent =
+            `(${j.count}${j.total > j.count ? ` of ${j.total}` : ''})`;
+        wsRenderCalendar();
+        wsRenderTable();
+    } catch (e) {
+        cal.innerHTML = '<p class="content-hint">Failed to load workshops.</p>';
+    }
+}
+
+function wsRenderTable() {
+    const tbody = document.querySelector('#ws-table tbody');
+    if (!wsState.workshops.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="content-hint">No workshops match this filter.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = wsState.workshops.map(w => {
+        const when = wsWhen(w);
+        const co = w.coTrainers.length ? ` +${w.coTrainers.length}` : '';
+        return `<tr data-ws-open="${escapeHtml(w.sessionId)}" style="cursor:pointer">
+            <td>${escapeHtml(when.label)}</td>
+            <td>${escapeHtml(w.title)}<br><span style="opacity:.55;font-size:.75rem">${escapeHtml(w.trainingId)}</span></td>
+            <td>${escapeHtml(w.owner)}${co}</td>
+            <td>${escapeHtml(wsTenantLabel(w.ownerTenant))}</td>
+            <td>${escapeHtml(w.state)}</td>
+            <td>${escapeHtml(wsSeats(w))}</td>
+            <td>${w.registrants.length} reg · ${w.joinedCount} present</td>
+            <td><button class="btn btn-small btn-secondary" data-action data-ws-open="${escapeHtml(w.sessionId)}">Manage</button></td>
+        </tr>`;
+    }).join('');
+}
+
+function wsShiftMonth(delta) {
+    const base = wsState.month ? new Date(wsState.month + '-01T00:00:00Z') : new Date();
+    base.setUTCMonth(base.getUTCMonth() + delta);
+    wsState.month = `${base.getUTCFullYear()}-${String(base.getUTCMonth() + 1).padStart(2, '0')}`;
+    wsRenderCalendar();
+}
+
+function wsRenderCalendar() {
+    const cal = document.getElementById('ws-calendar');
+    const now = new Date();
+    const month = wsState.month
+        || `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    wsState.month = month;
+    const [y, m] = month.split('-').map(Number);
+    const first = new Date(Date.UTC(y, m - 1, 1));
+    const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    // Monday-first grid: JS getUTCDay() is Sunday-first.
+    const lead = (first.getUTCDay() + 6) % 7;
+    document.getElementById('ws-cal-label').textContent =
+        first.toLocaleString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+    const byDay = {};
+    wsState.workshops.forEach(w => {
+        const day = wsWhen(w).day;
+        if (day) (byDay[day] = byDay[day] || []).push(w);
+    });
+
+    let cells = '';
+    for (let i = 0; i < lead; i++) cells += '<td style="opacity:.25"></td>';
+    for (let d = 1; d <= days; d++) {
+        const iso = `${month}-${String(d).padStart(2, '0')}`;
+        const chips = (byDay[iso] || []).map(w =>
+            `<div data-ws-open="${escapeHtml(w.sessionId)}" title="${escapeHtml(w.title)} · ${escapeHtml(w.owner)} · ${escapeHtml(wsTenantLabel(w.ownerTenant))}"
+                  style="cursor:pointer;font-size:.68rem;margin-top:2px;padding:1px 4px;border-radius:4px;background:var(--surface-3,#1b2434);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                ${escapeHtml((w.scheduledAt || '').slice(11, 16) || '··')} ${escapeHtml(w.title)}
+             </div>`).join('');
+        cells += `<td style="vertical-align:top;height:64px;padding:4px">
+            <div style="font-size:.7rem;opacity:.6">${d}</div>${chips}</td>`;
+        if ((lead + d) % 7 === 0) cells += '</tr><tr>';
+    }
+    cal.innerHTML = `<table style="width:100%;table-layout:fixed">
+        <thead><tr>${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            .map(d => `<th style="font-size:.7rem;opacity:.6">${d}</th>`).join('')}</tr></thead>
+        <tbody><tr>${cells}</tr></tbody></table>`;
+}
+
+// ── Editor ───────────────────────────────────────────────────────────────────
+// Mutations reuse the EXISTING /api/live/* routes rather than adding admin
+// twins. Those routes gate on `trainerEmail` matching the stored team, so the
+// dashboard sends the workshop's own owner — honest about the fact that this
+// seam still trusts a caller-supplied email (see workshop-provisioning-open-items).
+
+function wsCloseEditor() {
+    const el = document.getElementById('ws-editor');
+    if (el) el.remove();
+    wsState.editing = null;
+}
+
+async function wsLiveAction(path, body, method) {
+    const r = await fetch('/api/live/sessions' + path, {
+        method: method || 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.detail || `${r.status}`);
+    }
+    return r.json().catch(() => ({}));
+}
+
+function wsOpenEditor(sessionId) {
+    const w = wsState.workshops.find(x => x.sessionId === sessionId);
+    if (!w) return;
+    wsCloseEditor();
+    wsState.editing = sessionId;
+    const ro = !w.editable;
+    const el = document.createElement('div');
+    el.id = 'ws-editor';
+    el.style = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;display:flex;align-items:center;justify-content:center;padding:20px';
+    el.innerHTML = `<div class="content-card" style="max-width:720px;width:100%;max-height:88vh;overflow:auto;margin:0">
+        <div style="display:flex;align-items:baseline;gap:10px">
+            <h3 style="margin:0;flex:1">${escapeHtml(w.title)}</h3>
+            <span style="opacity:.6;font-size:.75rem">${escapeHtml(w.sessionId)}</span>
+            <button class="btn btn-small btn-secondary" id="ws-ed-close">Close</button>
+        </div>
+        <p class="content-hint" style="margin:8px 0 12px">
+            ${escapeHtml(w.trainingId)} · ${escapeHtml(w.state)} · ${escapeHtml(wsTenantLabel(w.ownerTenant))}
+            · owner ${escapeHtml(w.owner)}${w.coTrainers.length ? ` · co-trainers ${escapeHtml(w.coTrainers.join(', '))}` : ''}
+            ${w.joinCode ? ` · code <code>${escapeHtml(w.joinCode)}</code>` : ''}
+        </p>
+        ${ro ? `<p class="content-hint" style="color:var(--warn,#fbbf24)">A ${escapeHtml(w.state)} workshop cannot be edited — the definition is frozen once it starts. Administration actions below still apply.</p>` : ''}
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px">
+            <label style="font-size:.75rem;opacity:.75">Title
+                <input type="text" id="ws-ed-title" value="${escapeHtml(w.title)}" ${ro ? 'disabled' : ''} style="width:100%"></label>
+            <label style="font-size:.75rem;opacity:.75">Scheduled at (ISO8601)
+                <input type="text" id="ws-ed-when" value="${escapeHtml(w.scheduledAt || '')}" placeholder="2026-09-01T09:00:00Z" ${ro ? 'disabled' : ''} style="width:100%"></label>
+            <label style="font-size:.75rem;opacity:.75">Timezone (IANA)
+                <input type="text" id="ws-ed-tz" value="${escapeHtml(w.timezone || '')}" placeholder="Europe/Berlin" ${ro ? 'disabled' : ''} style="width:100%"></label>
+            <label style="font-size:.75rem;opacity:.75">Duration (minutes)
+                <input type="number" id="ws-ed-dur" value="${escapeHtml(String(w.durationMinutes || ''))}" ${ro ? 'disabled' : ''} style="width:100%"></label>
+            <label style="font-size:.75rem;opacity:.75">Max seats
+                <input type="number" id="ws-ed-seats" value="${escapeHtml(String(w.maxSeats || ''))}" ${ro ? 'disabled' : ''} style="width:100%"></label>
+            <label style="font-size:.75rem;opacity:.75">Trainers (comma separated, first is owner)
+                <input type="text" id="ws-ed-trainers" value="${escapeHtml(w.trainers.join(', '))}" ${ro ? 'disabled' : ''} style="width:100%"></label>
+        </div>
+        <label style="font-size:.75rem;opacity:.75">Roster (${w.registrants.length} registered, ${w.joinedCount} present, ${w.boundCount} tenant-bound)
+            <textarea id="ws-ed-roster" rows="5" ${ro ? 'disabled' : ''} style="width:100%">${escapeHtml(w.registrants.join('\n'))}</textarea></label>
+        <div id="ws-ed-msg" style="font-size:12px;min-height:18px;margin:8px 0"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${ro ? '' : '<button class="btn btn-small" id="ws-ed-save" data-action>Save changes</button>'}
+            <span style="flex:1"></span>
+            <button class="btn btn-small btn-secondary" id="ws-ed-start" data-action>Start</button>
+            <button class="btn btn-small btn-secondary" id="ws-ed-end" data-action>End</button>
+            <button class="btn btn-small btn-danger" id="ws-ed-cancel" data-action>Cancel workshop</button>
+            <button class="btn btn-small btn-danger" id="ws-ed-delete" data-action>Delete</button>
+        </div>
+    </div>`;
+    document.body.appendChild(el);
+    el.addEventListener('click', (e) => { if (e.target === el) wsCloseEditor(); });
+    document.getElementById('ws-ed-close').addEventListener('click', wsCloseEditor);
+
+    const msg = (text, ok) => {
+        const m = document.getElementById('ws-ed-msg');
+        m.textContent = text;
+        m.style.color = ok ? 'var(--ok,#4ade80)' : 'var(--danger,#f87171)';
+    };
+    const run = async (fn, done) => {
+        try { await fn(); msg(done, true); await wsLoadSchedule(); wsCloseEditor(); }
+        catch (err) { msg('✗ ' + err.message, false); }
+    };
+
+    if (!ro) document.getElementById('ws-ed-save').addEventListener('click', () => run(async () => {
+        await wsLiveAction(`/${sessionId}`, {
+            trainerEmail: w.owner,
+            title: document.getElementById('ws-ed-title').value.trim(),
+            scheduledAt: document.getElementById('ws-ed-when').value.trim(),
+            timezone: document.getElementById('ws-ed-tz').value.trim(),
+            durationMinutes: document.getElementById('ws-ed-dur').value.trim(),
+            maxSeats: document.getElementById('ws-ed-seats').value.trim(),
+            trainers: document.getElementById('ws-ed-trainers').value.split(',').map(s => s.trim()).filter(Boolean),
+            roster: document.getElementById('ws-ed-roster').value.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean),
+        }, 'PATCH');
+    }, '✓ saved'));
+
+    document.getElementById('ws-ed-start').addEventListener('click', () =>
+        run(() => wsLiveAction(`/${sessionId}/start`, { trainerEmail: w.owner }), '✓ started'));
+    document.getElementById('ws-ed-end').addEventListener('click', () => {
+        if (!confirm(`End "${w.title}"? Learner environments are NOT terminated by this — use the app's board for that.`)) return;
+        run(() => wsLiveAction(`/${sessionId}/end`, { trainerEmail: w.owner }), '✓ ended');
+    });
+    document.getElementById('ws-ed-cancel').addEventListener('click', () => {
+        if (!confirm(`Cancel "${w.title}"? Registrants keep their registration but the workshop will not run.`)) return;
+        run(() => wsLiveAction(`/${sessionId}/cancel`, { trainerEmail: w.owner }), '✓ cancelled');
+    });
+    document.getElementById('ws-ed-delete').addEventListener('click', () => {
+        if (!confirm(`DELETE "${w.title}" permanently? This removes the workshop, its roster and its audit trail. This cannot be undone.`)) return;
+        run(() => wsLiveAction(`/${sessionId}`, { trainerEmail: w.owner }, 'DELETE'), '✓ deleted');
+    });
 }
 
 // ── Register Tenant tab (app deploy via platform token / COE auto) ────────────

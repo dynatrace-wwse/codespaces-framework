@@ -68,6 +68,12 @@ def mask_live_detail(item: dict) -> dict:
     out = mask_live_summary(item)
     out.pop("roster", None)
     out.pop("joined", None)
+    # Trainer-only, added with the tenant-binding split. `bindings` is strictly
+    # WORSE to leak than `joined`: it maps every learner's email to the tenant
+    # they will run in, and it covers people who never checked in. `seats`
+    # is dropped alongside it because it is part of the same trainer block.
+    out.pop("bindings", None)
+    out.pop("seats", None)
     return out
 
 
@@ -86,7 +92,13 @@ def mask_readiness(payload: dict) -> dict:
                          # Only when the row has one: a row without a tenant
                          # must not gain an empty field it never had.
                          **({"tenant": mask_tenant(row["tenant"])}
-                            if row.get("tenant") else {})}
+                            if row.get("tenant") else {}),
+                         # Same grounds as `tenant`: which tenant someone's
+                         # environment runs in is identifying. `attendance` and
+                         # `tenantMismatch` are not — they say nothing about
+                         # WHICH tenant — so they stay readable.
+                         **({"envTenant": mask_tenant(row["envTenant"])}
+                            if row.get("envTenant") else {})}
                         for row in payload.get("results", [])]}
 
 

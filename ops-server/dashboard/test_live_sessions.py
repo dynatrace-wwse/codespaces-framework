@@ -397,7 +397,7 @@ def test_shape_summary_learner():
         "trainers": [TRAINER], "trainerEmail": TRAINER,
         "joinedCount": 1, "rosterCount": 2,
         "createdAt": "2026-07-14T09:00:00+00:00", "startedAt": "",
-        "isTrainer": False, "hasJoined": True,
+        "isTrainer": False, "isOwner": False, "hasJoined": True,
         # Always present, never inferred from absence (EPIC-007).
         "roomOpen": False, "gateAhead": False,
     }
@@ -912,3 +912,99 @@ def test_class_pointer_of_reads_the_raw_session_hash():
     assert ls.class_pointer_of({}) == 1
     assert ls.class_pointer_of({"trainerStep": "0"}) == 1
     assert ls.class_pointer_of({"trainerStep": "7"}) == 7
+
+
+# ── Cross-tenant admin view (Workshops & Delivery tab) ───────────────────────
+
+def test_seat_summary_counts_registrations_not_check_ins():
+    """A seat is consumed by REGISTERING — that is what the join-by-code seat
+    check enforces — so `present` has to be reported separately."""
+    s = ls.seat_summary({"a@x.com", "b@x.com"}, {"a@x.com": "t"}, "10")
+    assert s == {"seatsTaken": 2, "maxSeats": 10, "seatsOpen": 8, "present": 1}
+
+
+def test_seat_summary_unlimited_is_none_not_zero():
+    """'Unlimited' and 'full' must not render the same way."""
+    assert ls.seat_summary({"a@x.com"}, {}, "")["seatsOpen"] is None
+    assert ls.seat_summary({"a@x.com"}, {}, None)["seatsOpen"] is None
+    assert ls.seat_summary({"a@x.com"}, {}, "0")["seatsOpen"] is None
+
+
+def test_seat_summary_never_reports_negative_free_seats():
+    # A roster edit can legitimately exceed maxSeats; the dashboard shows 0.
+    assert ls.seat_summary({"a@x.com", "b@x.com"}, {}, "1")["seatsOpen"] == 0
+
+
+def test_seat_summary_tolerates_junk_max_seats():
+    assert ls.seat_summary(set(), {}, "not-a-number")["maxSeats"] == 0
+
+
+def test_schedule_sort_key_prefers_when_it_happens():
+    assert ls.schedule_sort_key({"scheduledAt": "2026-09-01T09:00:00+00:00",
+                                 "createdAt": "2026-08-01T09:00:00+00:00"}) \
+        == "2026-09-01T09:00:00+00:00"
+
+
+def test_schedule_sort_key_falls_back_to_created():
+    assert ls.schedule_sort_key({"createdAt": "2026-08-01T09:00:00+00:00"}) \
+        == "2026-08-01T09:00:00+00:00"
+    assert ls.schedule_sort_key({}) == ""
+    assert ls.schedule_sort_key(None) == ""
+
+
+def _admin_session():
+    return {"title": "Kubernetes 101", "trainingId": "kubernetes-101",
+            "state": "scheduled", "trainers": '["lead@x.com", "co@x.com"]',
+            "ownerTenant": "https://geu80787.apps.dynatrace.com",
+            "createdAt": "2026-08-13T09:00:00+00:00",
+            "scheduledAt": "2026-09-01T09:00:00+00:00",
+            "maxSeats": "20", "joinCode": "ABC123"}
+
+
+def test_shape_admin_row_splits_owner_from_co_trainers():
+    row = ls.shape_admin_row("ws_1", _admin_session(), {"a@x.com"}, {}, {})
+    assert row["owner"] == "lead@x.com"
+    assert row["coTrainers"] == ["co@x.com"]
+    assert row["trainers"] == ["lead@x.com", "co@x.com"]
+
+
+def test_shape_admin_row_emits_owner_tenant():
+    """The ONLY payload that carries ownerTenant. workshop_fields deliberately
+    does not — a learner has no business knowing which tenant created a
+    workshop; this route is GitHub-org-member gated."""
+    row = ls.shape_admin_row("ws_1", _admin_session(), set(), {}, {})
+    assert row["ownerTenant"] == "https://geu80787.apps.dynatrace.com"
+    assert "ownerTenant" not in ls.workshop_fields(_admin_session(), "lead@x.com")
+
+
+def test_shape_admin_row_has_no_caller_identity_fields():
+    """This view has no 'me' — isTrainer/hasJoined would be meaningless."""
+    row = ls.shape_admin_row("ws_1", _admin_session(), set(), {}, {})
+    for absent in ("isTrainer", "hasJoined", "myTenant", "trainerEmail"):
+        assert absent not in row
+
+
+def test_shape_admin_row_sorts_registrants_and_counts_bindings():
+    row = ls.shape_admin_row("ws_1", _admin_session(),
+                             {"b@x.com", "a@x.com"},
+                             {"a@x.com": "t"},
+                             {"a@x.com": "https://sro97894.apps.dynatrace.com"})
+    assert row["registrants"] == ["a@x.com", "b@x.com"]
+    assert row["joinedCount"] == 1
+    assert row["boundCount"] == 1
+
+
+def test_shape_admin_row_editable_mirrors_the_patch_rule():
+    """PATCH refuses anything past `open` — the row must say so rather than
+    letting the dashboard offer an edit that will 409."""
+    for state, editable in (("scheduled", True), ("open", True),
+                            ("running", False), ("ended", False),
+                            ("cancelled", False)):
+        row = ls.shape_admin_row("ws_1", {**_admin_session(), "state": state},
+                                 set(), {}, {})
+        assert row["editable"] is editable, state
+
+
+def test_shape_admin_row_survives_a_teamless_session():
+    row = ls.shape_admin_row("ws_1", {"title": "x"}, set(), {}, {})
+    assert row["owner"] == "" and row["coTrainers"] == []

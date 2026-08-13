@@ -128,3 +128,14 @@ def test_sees_full_identities_anonymous_is_masked():
 def test_sees_full_identities_wrong_bearer_is_masked():
     r = _req({"Authorization": "Bearer wrong"})
     assert a._sees_full_identities(r, "") is False
+
+
+# ---------------------------------------------------------------------------
+# Same principle, applied to the Workshops & Delivery admin routes. Those read
+# EVERY tenant's workshops and rosters unmasked, so they use _require_writer
+# rather than _require_service_or_writer: the baked bearer that every app
+# install carries must not be a way in. Full coverage: test_workshops_admin.py.
+
+def test_service_bearer_cannot_read_workshops_admin():
+    r = client.get("/api/workshops/admin/trainers", headers=BEARER)
+    assert r.status_code == 401

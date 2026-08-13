@@ -171,17 +171,57 @@ def test_cancelled_and_ended_sessions_hidden_from_learners():
     assert ls.is_listed(_session(state="running"), roster, "alice@x.com")
 
 
-def test_delete_only_before_started():
-    """delete is legal ONLY in scheduled/open (not started); running/ended/
-    cancelled raise → endpoint returns 409."""
-    assert ls.apply_transition("scheduled", "delete") == ("deleted", True)
-    assert ls.apply_transition("open", "delete") == ("deleted", True)
-    for state in ("running", "ended", "cancelled"):
-        try:
-            ls.apply_transition(state, "delete")
-            raise AssertionError(f"expected ValueError for delete from {state}")
-        except ValueError:
-            pass
+def test_delete_blocked_only_while_running():
+    """delete is legal before it starts AND once it is finished; only `running`
+    raises → endpoint returns 409, because deleting a live room strands its
+    cohort. (This test previously asserted ended/cancelled also raised; the
+    route was deliberately widened to allow cleaning up finished workshops —
+    see api_live_session_delete's docstring — and the assertion went stale.)"""
+    for state in ("scheduled", "open", "ended", "cancelled"):
+        assert ls.apply_transition(state, "delete") == ("deleted", True), state
+    try:
+        ls.apply_transition("running", "delete")
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for delete from running")
+
+
+# ── Owner vs co-trainer ──────────────────────────────────────────────────────
+
+def test_is_owner_is_the_creator_only():
+    """trainers[0] is forced to the creator by validate_trainers on create AND
+    on PATCH, so this needs no migration: every existing workshop already has a
+    correct owner."""
+    sess = _session(trainers='["lead@x.com", "co@x.com"]')
+    assert ls.is_owner("lead@x.com", sess) is True
+    assert ls.is_owner("co@x.com", sess) is False
+    assert ls.is_owner("learner@x.com", sess) is False
+    assert ls.is_owner("", sess) is False
+    assert ls.is_owner("  LEAD@X.com ", sess) is True
+
+
+def test_co_trainer_keeps_every_other_authority():
+    """The whole point of the split: a co-trainer is a trainer everywhere that
+    matters, so exactly one gate distinguishes them."""
+    sess = _session(trainers='["lead@x.com", "co@x.com"]')
+    assert ls.is_trainer("co@x.com", sess) is True
+    assert ls.is_member(sess, set(), "co@x.com") is True
+    # Solutions are role-gated, and a co-trainer holds the role.
+    assert ls.solution_visible(3, sess, ls.is_trainer("co@x.com", sess)) is True
+
+
+def test_is_owner_on_a_teamless_session():
+    assert ls.is_owner("anyone@x.com", {}) is False
+
+
+def test_shapers_expose_is_owner():
+    sess = _session(trainers='["lead@x.com", "co@x.com"]')
+    lead = ls.shape_summary("ws_1", sess, set(), {}, "lead@x.com")
+    co = ls.shape_summary("ws_1", sess, set(), {}, "co@x.com")
+    assert lead["isOwner"] is True and lead["isTrainer"] is True
+    assert co["isOwner"] is False and co["isTrainer"] is True
+    detail = ls.shape_detail("ws_1", sess, set(), {}, "co@x.com")
+    assert detail["isOwner"] is False and detail["isTrainer"] is True
 
 
 # ── joinCode / workshop-field payload gating ─────────────────────────────────
