@@ -1,8 +1,42 @@
 # Known Issue: Astroshop In-Dashboard Proxy — Incomplete Navigation
 
-**Status:** Open  
+**Status:** Open for the `/apps/…` rewriting proxy — but no longer on the path the UI uses.  
 **Component:** `ops-server/dashboard/app.py` — `proxy_job_app` / `_rewrite_proxy_body`  
 **Symptom:** Astroshop loads partially but product images may not render and page may appear blank on initial load in some browsers/cache states.
+
+---
+
+## Superseded in practice: use the wildcard subdomain
+
+The app tab in the dashboard (`dashboard/static/app.js`, `_loadShellAppTabs` /
+`_loadLivelogAppTabs`) sets `frame.src = app.subdomain_url || app.proxy_url`, so a job whose
+apps have an `orbital_subdomain` never reaches the rewriting proxy below. The subdomain
+serves the app at `/` with **no rewriting at all**, so none of the URL classes in the table
+below can break — every `/_next/*`, `/images/*` and `/api/*` request resolves natively.
+
+That path was itself unusable until 2026-08-13, for an unrelated reason: the wildcard
+`server` block in `nginx/ops-server.conf` sent
+
+```nginx
+add_header X-Frame-Options "SAMEORIGIN" always;   # ← the bug
+```
+
+`{app}--{job_id}.autonomous-enablements…` and the dashboard's apex host are **different
+origins**, so `SAMEORIGIN` blocked the embed the block existed to serve:
+
+```
+Refused to display 'https://astroshop--<job_id>.autonomous-enablements.whydevslovedynatrace.com/'
+in a frame because it set 'X-Frame-Options' to 'sameorigin'.
+```
+
+It affected every wildcard-served app (todoapp failed identically), not just astroshop.
+`X-Frame-Options` has no cross-origin allowlist form — `ALLOW-FROM` is unsupported in every
+modern browser — so the header was replaced with a CSP `frame-ancestors` allowlist naming
+the apex host and the wildcard. Upstream astroshop sends no framing header of its own, so
+that nginx block is the only thing deciding who may frame it.
+
+Everything below still describes the `/apps/{job_id}/{app_name}/` rewriting proxy, which
+remains the fallback for jobs with no `orbital_subdomain`.
 
 ---
 
