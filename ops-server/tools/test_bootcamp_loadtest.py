@@ -155,3 +155,39 @@ if __name__ == "__main__":
                 print(f"  FAIL {name}: {e}")
     print(f"{'FAILED' if failures else 'OK'} ({failures} failures)")
     sys.exit(1 if failures else 0)
+
+
+# ── reconcile_tracked: a stale state file must not silently no-op a run ──────
+# 2026-08-13: a 10-day-old /tmp/bootcamp_loadtest_state.json (legacy shared
+# path, owned by another user) made every bot report "already tracked".
+# Nothing was provisioned; the run failed minutes later with 18/18 EXPIRED.
+
+def test_reconcile_drops_sessions_orbital_no_longer_has():
+    state = {"bot01@bootcamp.dev": {"jobId": "dead-1"},
+             "bot02@bootcamp.dev": {"jobId": "live-2"}}
+    live = {"bot02@bootcamp.dev": ["live-2"]}
+    kept, dropped = blt.reconcile_tracked(state, live)
+    assert kept == {"bot02@bootcamp.dev": {"jobId": "live-2"}}
+    assert dropped == ["bot01@bootcamp.dev"]
+
+
+def test_reconcile_drops_everything_when_orbital_has_nothing():
+    state = {blt.bot_email(i): {"jobId": f"stale-{i}"} for i in range(1, 16)}
+    kept, dropped = blt.reconcile_tracked(state, {})
+    assert kept == {}
+    assert len(dropped) == 15
+
+
+def test_reconcile_matches_across_bots_not_only_same_email():
+    # A jobId recycled onto a different bot is still live — keep it rather than
+    # provisioning a duplicate that would double-book a slot.
+    state = {"bot01@bootcamp.dev": {"jobId": "j-9"}}
+    kept, _ = blt.reconcile_tracked(state, {"bot07@bootcamp.dev": ["j-9"]})
+    assert kept == state
+
+
+def test_reconcile_survives_empty_and_malformed_state():
+    assert blt.reconcile_tracked({}, {"a": ["x"]}) == ({}, [])
+    assert blt.reconcile_tracked(None, None) == ({}, [])
+    kept, dropped = blt.reconcile_tracked({"bot01@bootcamp.dev": None}, {})
+    assert kept == {} and dropped == ["bot01@bootcamp.dev"]

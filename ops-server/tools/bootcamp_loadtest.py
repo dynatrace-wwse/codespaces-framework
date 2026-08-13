@@ -184,9 +184,41 @@ def save_state(state: dict):
 
 # ── Provisioning ─────────────────────────────────────────────────────────────
 
+def reconcile_tracked(state_sessions: dict, live: dict) -> tuple[dict, list]:
+    """Drop tracked sessions Orbital no longer knows about.
+
+    Teardown already treats Orbital as authoritative (``live_bot_sessions``);
+    provisioning used to trust the state file alone, which made a stale file a
+    silent no-op: every bot reported "already tracked", nothing was provisioned,
+    and the run failed minutes later with every session EXPIRED. The legacy
+    shared ``/tmp`` path made this worse — a file from a previous *week*, owned
+    by another user, was read as a fallback and could never be written back.
+
+    Returns ``(kept, dropped_emails)``.
+    """
+    live_ids = {jid for ids in (live or {}).values() for jid in ids}
+    kept, dropped = {}, []
+    for email, s in (state_sessions or {}).items():
+        if (s or {}).get("jobId") in live_ids:
+            kept[email] = s
+        else:
+            dropped.append(email)
+    return kept, dropped
+
+
 def provision(n: int) -> dict:
     state = load_state()
     sessions = state.setdefault("sessions", {})
+    if sessions:
+        try:
+            kept, dropped = reconcile_tracked(sessions, live_bot_sessions(max(n, len(sessions))))
+        except Exception as e:  # Orbital unreachable — trust the file rather than double-provision
+            print(f"  WARNING: could not reconcile state against Orbital ({e}) — trusting state file")
+        else:
+            if dropped:
+                print(f"  discarding {len(dropped)} tracked session(s) Orbital no longer has: "
+                      f"{', '.join(sorted(dropped))}")
+            state["sessions"] = sessions = kept
     for i in range(1, n + 1):
         email = bot_email(i)
         if email in sessions:
