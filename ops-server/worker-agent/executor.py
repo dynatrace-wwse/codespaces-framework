@@ -142,6 +142,31 @@ class SlotWorkspaceDirty(RuntimeError):
     """
 
 
+class SlotContainerGone(RuntimeError):
+    """The slot's outer Sysbox container is missing or has stopped.
+
+    A distinct failure from a dirty workspace and it must not be retried: no
+    number of ``docker exec`` attempts brings a dead container back. The slot
+    is released unhealthy so the pool rebuilds it.
+
+    Measured 2026-08-13: 4 of 60 provisions in a burst hit this, because the
+    pool can hand out a slot whose container died or is still being rebuilt
+    after a mass teardown. Conflating it with a dirty workspace cost three
+    pointless retries and reported the wrong cause.
+    """
+
+
+# Docker's own wording when the target of `docker exec` cannot be used. Matched
+# on stderr only — merging it into stdout is what made these read as directory
+# contents, i.e. as "the workspace is not empty".
+_CONTAINER_GONE = ("no such container", "is not running", "is not up")
+
+
+def _container_gone(stderr: str) -> bool:
+    s = stderr.lower()
+    return any(p in s for p in _CONTAINER_GONE)
+
+
 async def _clear_slot_repo_dir(slot: SysboxSlot, repo_name: str, attempts: int = 3,
                                timeout: float = 60):
     """Empty ``/workspaces/{repo_name}`` in a recycled slot, and *verify* it.
@@ -164,18 +189,28 @@ async def _clear_slot_repo_dir(slot: SysboxSlot, repo_name: str, attempts: int =
             "docker", "exec", slot.sb_name, "sh", "-c",
             # `|| true` on the listing: an absent directory is the success case.
             f"rm -rf /workspaces/{repo_name}; ls -A /workspaces/{repo_name} 2>/dev/null || true",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            # stdout and stderr are kept SEPARATE on purpose. Merging them makes
+            # docker's own "No such container" land where a directory listing is
+            # expected, so a dead slot reports itself as a dirty workspace.
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             last = f"docker exec timed out after {timeout:g}s"
         else:
+            stderr_txt = (err or b"").decode(errors="replace").strip()
+            if _container_gone(stderr_txt):
+                # Not retryable — no amount of exec brings a dead container back.
+                raise SlotContainerGone(
+                    f"slot {slot.index} ({slot.sb_name}): {stderr_txt[:200]}")
             last = (out or b"").decode(errors="replace").strip()
-            if not last:
+            if proc.returncode == 0 and not last:
                 break
+            if proc.returncode != 0 and not last:
+                last = stderr_txt or f"docker exec exited {proc.returncode}"
         if attempt < attempts:
             log.warning("Slot %d: workspace %s not empty after rm (attempt %d/%d): %s",
                         slot.index, repo_name, attempt, attempts, last[:200])

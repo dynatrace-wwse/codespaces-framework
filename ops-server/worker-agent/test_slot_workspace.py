@@ -40,10 +40,11 @@ class FakeSlot:
 class FakeProc:
     """Stands in for asyncio.create_subprocess_exec's return value."""
 
-    def __init__(self, stdout: bytes = b"", hang: bool = False):
+    def __init__(self, stdout: bytes = b"", hang: bool = False, returncode: int = 0):
         self._stdout = stdout
         self._hang = hang
         self.killed = False
+        self.returncode = returncode
 
     async def communicate(self):
         if self._hang:
@@ -212,3 +213,116 @@ if __name__ == "__main__":
             print(f"  FAIL {name}: {exc}")
     print("all passed" if not failures else f"{failures} failed")
     sys.exit(1 if failures else 0)
+
+
+# ── a dead slot is NOT a dirty workspace (2026-08-13, 4 of 60 provisions) ────
+# The first cut of _clear_slot_repo_dir merged stderr into stdout, so docker's
+# own "No such container" arrived where a directory listing was expected and a
+# dead slot reported itself as an un-emptyable workspace: three pointless
+# retries, then the wrong cause in the log.
+
+class FakeProcErr:
+    def __init__(self, stdout=b"", stderr=b"", rc=0):
+        self._o, self._e, self.returncode = stdout, stderr, rc
+
+    async def communicate(self):
+        return self._o, self._e
+
+    def kill(self):
+        pass
+
+    async def wait(self):
+        return self.returncode
+
+
+def _patch_err(outputs, calls=None):
+    seq = list(outputs)
+
+    async def fake_exec(*args, **kwargs):
+        if calls is not None:
+            calls.append(args)
+        return seq.pop(0) if seq else FakeProcErr()
+
+    return fake_exec
+
+
+def test_missing_container_raises_gone_not_dirty(tmp_path):
+    from .executor import SlotContainerGone
+    calls = []
+    orig = executor.asyncio.create_subprocess_exec
+    executor.asyncio.create_subprocess_exec = _patch_err(
+        [FakeProcErr(b"", b"Error response from daemon: No such container: sb-slot-amd001-22", 1)],
+        calls)
+    try:
+        raised = None
+        try:
+            _run(_clear_slot_repo_dir(FakeSlot(tmp_path, index=22), "enablement-kubernetes-101"))
+        except SlotContainerGone as exc:
+            raised = exc
+        except SlotWorkspaceDirty as exc:      # the bug being regression-tested
+            raised = exc
+    finally:
+        executor.asyncio.create_subprocess_exec = orig
+    assert type(raised).__name__ == "SlotContainerGone", \
+        f"a dead container must not be reported as a dirty workspace (got {type(raised).__name__})"
+    assert len(calls) == 1, "a dead container must not be retried — exec cannot revive it"
+
+
+def test_stopped_container_raises_gone(tmp_path):
+    from .executor import SlotContainerGone
+    orig = executor.asyncio.create_subprocess_exec
+    executor.asyncio.create_subprocess_exec = _patch_err(
+        [FakeProcErr(b"", b"Error response from daemon: container 63e9067 is not running", 1)])
+    try:
+        raised = None
+        try:
+            _run(_clear_slot_repo_dir(FakeSlot(tmp_path), "repo-z"))
+        except Exception as exc:
+            raised = exc
+    finally:
+        executor.asyncio.create_subprocess_exec = orig
+    assert isinstance(raised, SlotContainerGone)
+
+
+def test_stderr_noise_is_not_mistaken_for_directory_contents(tmp_path):
+    # Docker chatter on stderr while stdout is empty means the workspace IS
+    # empty. Merging the streams is what broke this.
+    orig = executor.asyncio.create_subprocess_exec
+    executor.asyncio.create_subprocess_exec = _patch_err(
+        [FakeProcErr(b"", b"WARNING: some unrelated docker chatter", 0)])
+    try:
+        repo_dir = _run(_clear_slot_repo_dir(FakeSlot(tmp_path), "repo-q"))
+    finally:
+        executor.asyncio.create_subprocess_exec = orig
+    assert repo_dir.is_dir()
+
+
+def test_real_leftovers_still_raise_dirty(tmp_path):
+    # The original bug must stay fixed: actual directory contents on stdout.
+    orig = executor.asyncio.create_subprocess_exec
+    executor.asyncio.create_subprocess_exec = _patch_err(
+        [FakeProcErr(b".git\nsrc\n", b"", 0) for _ in range(3)])
+    orig_sleep = executor.asyncio.sleep
+
+    async def no_sleep(_):
+        return None
+
+    executor.asyncio.sleep = no_sleep
+    try:
+        raised = None
+        try:
+            _run(_clear_slot_repo_dir(FakeSlot(tmp_path), "enablement-kubernetes-101"))
+        except Exception as exc:
+            raised = exc
+    finally:
+        executor.asyncio.create_subprocess_exec = orig
+        executor.asyncio.sleep = orig_sleep
+    assert isinstance(raised, SlotWorkspaceDirty)
+
+
+def test_container_gone_matcher():
+    from .executor import _container_gone
+    assert _container_gone("Error response from daemon: No such container: sb-slot-amd001-22")
+    assert _container_gone("Error response from daemon: container 63e9067 is not running")
+    assert not _container_gone("")
+    assert not _container_gone("warning: something else entirely")

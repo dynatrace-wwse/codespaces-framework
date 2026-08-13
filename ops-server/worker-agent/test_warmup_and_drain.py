@@ -33,7 +33,18 @@ from .executor import SysboxSlot
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _pool(capacity: int) -> SysboxPool:
-    return SysboxPool(capacity)
+    pool = SysboxPool(capacity)
+    # acquire() probes the slot's container with `docker inspect` before handing
+    # it out (see SysboxPool._slot_is_alive). These are pure queue-accounting
+    # tests with no containers behind the slots, so the probe would report every
+    # slot dead and send acquire() into a real `docker run` rebuild — turning a
+    # 0.4s suite into a 2-minute one that mutates the host. Stub it: liveness is
+    # covered by test_slot_workspace.py, this file tests the bookkeeping.
+    async def _always_alive(_slot):
+        return True
+
+    pool._slot_is_alive = _always_alive
+    return pool
 
 
 async def _mark_ready(pool: SysboxPool, slot: SysboxSlot) -> None:
@@ -205,3 +216,82 @@ if __name__ == "__main__":
                 print(f"  FAIL {name}: {e}")
     print(f"{'FAILED' if failures else 'OK'} ({failures} failures)")
     sys.exit(1 if failures else 0)
+
+
+# ── acquire() must not hand out a dead slot (2026-08-13, 4 of 60 provisions) ─
+# Being in the queue only proves the container was running when it was
+# *enqueued*. In a burst after a mass teardown, 4 of 60 jobs claimed a slot
+# whose container was already gone and failed for a reason that had nothing to
+# do with the learner's training.
+
+def test_acquire_rebuilds_a_dead_slot_and_returns_a_live_one():
+    pool = SysboxPool(2)
+    dead, alive = pool.slots[0], pool.slots[1]
+    rebuilt = []
+
+    async def _liveness(slot):
+        return slot is not dead
+
+    async def _init(slot):
+        rebuilt.append(slot)
+        return True                      # rebuilt, but deliberately NOT re-queued
+
+    pool._slot_is_alive = _liveness
+    pool._init_slot = _init
+
+    async def scenario():
+        await pool._queue.put(dead)
+        await pool._queue.put(alive)
+        return await pool.acquire()
+
+    got = asyncio.run(scenario())
+    assert got is alive, "a dead slot must never be handed to a job"
+    assert rebuilt == [dead], "the dead slot must be rebuilt, not silently dropped"
+
+
+def test_liveness_probe_fails_open_when_docker_itself_errors():
+    # A flaky docker CLI must not empty the pool. If the probe cannot run we
+    # report the slot alive and let the executor's own checks catch a real
+    # problem — refusing every slot would be a worse failure than the one being
+    # prevented. The fail-open lives inside the probe, so exercise the probe.
+    from . import agent as agent_mod
+    pool = SysboxPool(1)
+    orig = agent_mod.asyncio.create_subprocess_exec
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("docker daemon unreachable")
+
+    agent_mod.asyncio.create_subprocess_exec = _boom
+    try:
+        assert asyncio.run(pool._slot_is_alive(pool.slots[0])) is True
+    finally:
+        agent_mod.asyncio.create_subprocess_exec = orig
+
+
+def test_liveness_probe_reads_docker_inspect_state():
+    from . import agent as agent_mod
+    pool = SysboxPool(1)
+    orig = agent_mod.asyncio.create_subprocess_exec
+
+    class _P:
+        def __init__(self, out):
+            self._out = out
+
+        async def communicate(self):
+            return self._out, b""
+
+    def _stub(out):
+        async def _exec(*_a, **_k):
+            return _P(out)
+        return _exec
+
+    try:
+        agent_mod.asyncio.create_subprocess_exec = _stub(b"true\n")
+        assert asyncio.run(pool._slot_is_alive(pool.slots[0])) is True
+        agent_mod.asyncio.create_subprocess_exec = _stub(b"false\n")
+        assert asyncio.run(pool._slot_is_alive(pool.slots[0])) is False
+        # A missing container prints nothing on stdout — must read as dead.
+        agent_mod.asyncio.create_subprocess_exec = _stub(b"")
+        assert asyncio.run(pool._slot_is_alive(pool.slots[0])) is False
+    finally:
+        agent_mod.asyncio.create_subprocess_exec = orig

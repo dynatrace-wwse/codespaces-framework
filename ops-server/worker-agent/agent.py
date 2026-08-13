@@ -354,8 +354,43 @@ class SysboxPool:
         return True
 
     async def acquire(self) -> SysboxSlot:
-        """Block until a pre-warmed slot is available and return it."""
-        return await self._queue.get()
+        """Block until a pre-warmed slot is available and return it.
+
+        The slot is checked for liveness before it is handed out. Being in the
+        queue only proves the container was running when it was *enqueued* — it
+        can die, or still be mid-rebuild after a mass teardown, by the time a
+        job claims it. Measured 2026-08-13: 4 of 60 provisions in a burst got a
+        slot whose container was already gone ("No such container"), and each
+        one failed a learner's session for a reason that had nothing to do with
+        their training.
+
+        A dead slot is rebuilt and the next one tried, rather than handed to a
+        job that cannot possibly succeed with it.
+        """
+        while True:
+            slot = await self._queue.get()
+            if await self._slot_is_alive(slot):
+                return slot
+            log.warning("Slot %d (%s) was dead in the pool — rebuilding before use",
+                        slot.index, slot.sb_name)
+            # _init_slot re-enqueues on success; on failure the slot is dropped
+            # from the pool, which is the honest outcome — capacity shrinks
+            # rather than jobs failing against a slot that cannot work.
+            await self._init_slot(slot)
+
+    async def _slot_is_alive(self, slot: SysboxSlot) -> bool:
+        """True when the slot's outer container exists and is running."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "inspect", "-f", "{{.State.Running}}", slot.sb_name,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except Exception:
+            # Never fail closed on a probe error — a flaky docker CLI must not
+            # empty the pool. The executor's own checks still guard the job.
+            return True
+        return (out or b"").decode(errors="replace").strip() == "true"
 
     def free_slots(self) -> int:
         """Warm slots not currently claimed by a job."""
