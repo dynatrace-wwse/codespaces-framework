@@ -133,6 +133,72 @@ async def _free_app_port(redis_pool, port: int | None) -> None:
         log.warning("Failed to free app proxy port %s: %s", port, e)
 
 
+class SlotWorkspaceDirty(RuntimeError):
+    """A recycled slot's workspace could not be emptied before cloning.
+
+    Raised so the caller releases the slot as *unhealthy* (forcing a full
+    re-init) instead of letting ``git clone`` fail with the far less obvious
+    "destination path already exists and is not an empty directory".
+    """
+
+
+async def _clear_slot_repo_dir(slot: SysboxSlot, repo_name: str, attempts: int = 3,
+                               timeout: float = 60):
+    """Empty ``/workspaces/{repo_name}`` in a recycled slot, and *verify* it.
+
+    Measured 2026-08-13: 3 of 15 provisions onto recycled slots failed here.
+    ``SysboxPool.release(healthy=True)`` wipes inner docker state but never the
+    workspace, so this is the only cleanup a reused slot gets — and it used to
+    discard the ``rm``'s exit code and pass ``ignore_errors=True`` to rmtree,
+    so a failure was invisible until the clone blew up two steps later.
+
+    The failure is a race, not a permission problem: the previous job's inner
+    ``dt`` container bind-mounts this very directory, and while that mount is
+    still going away ``rm -rf`` gets EBUSY on the mountpoint. Retrying with a
+    short backoff clears it; verifying afterwards means we never clone into a
+    directory we only *assume* is empty.
+    """
+    last = ""
+    for attempt in range(1, attempts + 1):
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "exec", slot.sb_name, "sh", "-c",
+            # `|| true` on the listing: an absent directory is the success case.
+            f"rm -rf /workspaces/{repo_name}; ls -A /workspaces/{repo_name} 2>/dev/null || true",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            last = f"docker exec timed out after {timeout:g}s"
+        else:
+            last = (out or b"").decode(errors="replace").strip()
+            if not last:
+                break
+        if attempt < attempts:
+            log.warning("Slot %d: workspace %s not empty after rm (attempt %d/%d): %s",
+                        slot.index, repo_name, attempt, attempts, last[:200])
+            await asyncio.sleep(2 * attempt)
+    else:
+        raise SlotWorkspaceDirty(
+            f"slot {slot.index}: /workspaces/{repo_name} still not empty after "
+            f"{attempts} attempts: {last[:200]}")
+
+    # Host-side sweep for anything the container could not see. Errors are NOT
+    # ignored here: a leftover the container already reported as gone means the
+    # host and container disagree about this path, which is worth failing on.
+    repo_dir = slot.workspace / repo_name
+    if repo_dir.exists():
+        try:
+            shutil.rmtree(repo_dir)
+        except OSError as exc:
+            raise SlotWorkspaceDirty(
+                f"slot {slot.index}: host could not remove {repo_dir}: {exc}") from exc
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    return repo_dir
+
+
 async def execute_integration_test(
     job: dict,
     redis_pool=None,
@@ -155,18 +221,9 @@ async def execute_integration_test(
     log_file  = LOGS_DIR / f"{job_id}.log"
 
     if slot:
-        # Clone into the slot's persistent workspace directory.
-        repo_dir = slot.workspace / repo_name
-        # Clean via docker exec so container-owned files (uid 1000) are removable.
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", slot.sb_name, "sh", "-c",
-            f"rm -rf /workspaces/{repo_name}",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir, ignore_errors=True)
-        repo_dir.mkdir(parents=True, exist_ok=True)
+        # Clone into the slot's persistent workspace directory. Cleaning it is
+        # verified, not assumed — see _clear_slot_repo_dir.
+        repo_dir = await _clear_slot_repo_dir(slot, repo_name)
         work_dir = None
     else:
         # Legacy path: per-job working directory.
@@ -600,17 +657,9 @@ async def execute_daemon(
     log_file  = LOGS_DIR / f"{job_id}.log"
 
     if slot:
-        repo_dir = slot.workspace / repo_name
-        # Clean via docker exec so container-owned files (uid 1000) are removable.
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", slot.sb_name, "sh", "-c",
-            f"rm -rf /workspaces/{repo_name}",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir, ignore_errors=True)
-        repo_dir.mkdir(parents=True, exist_ok=True)
+        # This is the learner-facing path — a dirty recycled slot here is a
+        # dead training session, so the clean is verified before we clone.
+        repo_dir = await _clear_slot_repo_dir(slot, repo_name)
         work_dir = None
     else:
         work_dir = WORKDIR / job_id

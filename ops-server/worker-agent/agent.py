@@ -398,6 +398,17 @@ class SysboxPool:
              "docker ps -aq | xargs -r docker rm -f 2>/dev/null; true"],
             ["docker", "exec", slot.sb_name, "docker", "volume", "prune", "-f"],
             ["docker", "exec", slot.sb_name, "docker", "network", "prune", "-f"],
+            # Empty the workspace here, while we hold the slot and nobody is
+            # waiting on it. Until 2026-08-13 this was left entirely to the next
+            # job's pre-clone rm, which raced the inner `dt` container's
+            # bind-mount teardown and failed ~20% of the time under a burst —
+            # the learner saw "destination path already exists and is not an
+            # empty directory". `rm -fv dt` above has already released the
+            # mount by the time we get here, so this is the cheap moment to do
+            # it. The executor still verifies before cloning; that is now a
+            # safety net rather than the only line of defence.
+            ["docker", "exec", slot.sb_name, "sh", "-c",
+             "rm -rf /workspaces/* /workspaces/.[!.]* 2>/dev/null; true"],
         ]:
             try:
                 proc = await asyncio.create_subprocess_exec(
