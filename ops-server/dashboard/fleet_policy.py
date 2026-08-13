@@ -114,6 +114,44 @@ GATE_SAFETY_FACTOR = 0.8
 # contention, so it gets ~70 s of the gate for free.
 DISK_FIT_INTERCEPT_S = 70
 
+# ── the IOPS term (measured 2026-08-13, the run that falsified "throughput
+#    alone gets you 30") ─────────────────────────────────────────────────────
+# The bandwidth model above predicted that raising the volume from 125 to
+# 500 MB/s would lift an m6a.4xlarge from 18 to 73 (i.e. memory would bind at
+# 30). Both workers were raised to 500 and 30 sessions were run again:
+#
+#   30 sessions @ 500 MB/s  →  8/30 passed, 22 exhausted the 60-retry gate
+#
+# Better than the 0/30 at 125, and the bandwidth ceiling really was lifted
+# (peak 523 MB/s observed, versus a hard pin at 125.2 before) — but nowhere
+# near 30. Throughput was NECESSARY AND NOT SUFFICIENT, because the install has
+# two disk phases with different shapes:
+#
+#   phase 1  image pull + extract   large sequential  → bandwidth-bound
+#   phase 2  ActiveGate JVM start,  small random      → IOPS-bound
+#            container + k8s API
+#
+# During phase 2 the volume sat at ~3,381 IOPS against 3,000 provisioned, with
+# r_await 7.6-8.3 ms and only ~50 MB/s of actual bandwidth — the signature of
+# IOPS starvation, not bandwidth starvation. The consequence is a death spiral,
+# not merely slowness: the ActiveGate boots too slowly to answer its own
+# readiness probe, kubelet kills the container, and the restart discards all
+# boot progress. Correlation over the 30 sessions was near-total:
+#
+#   0 ActiveGate restarts → 5 of 5   PASSED
+#   1+ restarts           → 3 of 25  passed
+#
+# So IOPS is a fourth independent ceiling. Deriving the per-session cost from
+# the two runs that bracket it (3,000 IOPS carried 18 but not 30):
+IOPS_PER_SESSION = 165
+# gp3's free baseline. Provisionable to 16,000 at $0.005/IOPS-month above 3,000
+# — so lifting a worker to 30 seats costs ~2,000 extra IOPS, about $10/month.
+# NOTE: that projection is UNMEASURED, and this block exists because the last
+# unmeasured projection here was wrong. AWS also enforces a ~6 hour cooldown
+# between modifications of the same volume, so it cannot be tested immediately
+# after a throughput change.
+DEFAULT_VOLUME_IOPS = 3000
+
 # Nominal usable RAM (MiB) as the OS reports it — i.e. after firmware/kernel
 # reserve. c5.2xlarge and r6a.2xlarge are measured; the rest follow the same
 # ~97.5% of nominal ratio.
@@ -211,39 +249,66 @@ def disk_slots(throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS) -> int:
     return max(0, int(budget / seconds_each))
 
 
+def iops_slots(iops: float = DEFAULT_VOLUME_IOPS) -> int:
+    """How many installs one volume's IOPS budget can carry through the gate.
+
+    Separate from :func:`disk_slots` because they are different resources and
+    they bind in different phases of the same install — bandwidth while the
+    image is pulled and extracted, IOPS while the ActiveGate JVM starts. Raising
+    only one leaves the other in place, which is exactly what the 500 MB/s run
+    demonstrated: the bandwidth pin lifted (523 MB/s peak, up from a hard 125.2)
+    and the pass rate still came out 8/30.
+    """
+    if iops <= 0:
+        return 0
+    return max(0, int(iops / IOPS_PER_SESSION))
+
+
 def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR,
-                       throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS) -> int:
+                       throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS,
+                       iops: float = DEFAULT_VOLUME_IOPS) -> int:
     """How many concurrent full-lab sessions one instance should be planned for.
 
-    The lowest of three measured ceilings — memory, CPU, and disk — because
-    which one binds depends on the shape and the volume: a c5.2xlarge runs out
-    of RAM first (6 vs 16), an r6a.2xlarge runs out of CPU first (16 vs 29), and
-    on baseline gp3 an m6a.4xlarge runs out of *disk* first (18 vs 30 and 32).
+    The lowest of four measured ceilings — memory, CPU, disk bandwidth and disk
+    IOPS — because which one binds depends on the shape AND on the volume: a
+    c5.2xlarge runs out of RAM first (6 vs 16), an r6a.2xlarge runs out of CPU
+    first (16 vs 29), and an m6a.4xlarge on a stock gp3 volume runs out of
+    *disk* first — bandwidth and IOPS arriving at the same 18.
 
-    Planning on memory alone would have oversold an r-family box by nearly 2×;
-    planning on memory and CPU alone did oversell the m6a by 30-vs-18, which a
-    30-session run then falsified with 0 passes.
+    Every term here was added because the previous model oversold a box and a
+    load test caught it. Memory alone oversold the r-family by nearly 2×. Memory
+    and CPU oversold the m6a 30-vs-18, falsified by a 30-session run with 0
+    passes. Memory, CPU and bandwidth then predicted that 500 MB/s would restore
+    30 — falsified in turn at 8/30. Treat any number this function produces for
+    an untested throughput/IOPS combination as a hypothesis, not a plan.
 
     Returns 0 for an unknown type — callers must treat that as "refuse to plan"
     rather than guessing, because guessing high is how a class gets oversold.
     """
-    mem_slots = memory_slots(instance_type, safety)
-    cpu_cap = cpu_slots(instance_type)
-    disk_cap = disk_slots(throughput_mbps)
-    if mem_slots <= 0 or cpu_cap <= 0 or disk_cap <= 0:
+    caps = (
+        memory_slots(instance_type, safety),
+        cpu_slots(instance_type),
+        disk_slots(throughput_mbps),
+        iops_slots(iops),
+    )
+    if any(c <= 0 for c in caps):
         return 0
-    return min(mem_slots, cpu_cap, disk_cap)
+    return min(caps)
 
 
 def limiting_factor(instance_type: str,
-                    throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS) -> str:
+                    throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS,
+                    iops: float = DEFAULT_VOLUME_IOPS) -> str:
     """Which ceiling binds for this shape — shown in the UI so the operator can
-    see whether more RAM, more cores, or faster disk would actually buy
-    anything. On baseline gp3 the honest answer is almost always disk."""
+    see whether more RAM, more cores, more bandwidth or more IOPS would actually
+    buy anything. Bandwidth and IOPS are reported separately on purpose: raising
+    one and not the other buys much less than the arithmetic suggests, which is
+    the specific mistake the 500 MB/s run exposed."""
     caps = {
         "memory": memory_slots(instance_type),
         "cpu": cpu_slots(instance_type),
-        "disk": disk_slots(throughput_mbps),
+        "disk-bandwidth": disk_slots(throughput_mbps),
+        "disk-iops": iops_slots(iops),
     }
     if any(v <= 0 for v in caps.values()):
         return "unknown"
@@ -659,6 +724,11 @@ def rank_by_cost(region: str, hours: float = 1.0) -> list[dict]:
             "slots": slots,
             "memory_slots": memory_slots(t),
             "cpu_slots": cpu_slots(t),
+            # Both disk terms are surfaced because they are what actually binds
+            # on every shape worth buying, and an operator comparing shapes
+            # cannot see that from memory and CPU alone.
+            "disk_bandwidth_slots": disk_slots(),
+            "disk_iops_slots": iops_slots(),
             "binds": limiting_factor(t),
             "usd_per_hour": unit,
             "usd_per_session_hour": round(unit / slots, 5),

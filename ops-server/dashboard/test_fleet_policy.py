@@ -394,13 +394,19 @@ def test_current_vs_proposed_fleet_cost_and_capacity():
 
     # 2 x m6a.4xlarge was expected to give 60 seats on the memory+CPU model.
     # The 2026-08-13 disk measurement cut that to 36: the extra RAM and cores
-    # are real but stranded behind one 125 MB/s volume each. Still a large gain
-    # over 12, and 500 MB/s of provisioned throughput (~$15/mo per worker)
-    # restores the 60 — which is why the fix is a disk setting, not a bigger box.
+    # are real but stranded behind one stock gp3 volume each.
+    #
+    # A first correction claimed 500 MB/s of provisioned throughput restored the
+    # 60. That was then MEASURED and came out 8/30 — bandwidth was necessary and
+    # not sufficient, because IOPS stayed at the 3,000 baseline. 36 stands until
+    # a run with both dimensions raised says otherwise.
     balanced = fp.estimate_cost(2, "m6a.4xlarge", 730.0, eu)
     balanced_slots = 2 * fp.slots_for_instance("m6a.4xlarge")
     assert balanced_slots == 36
-    assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == 60
+    # Throughput alone buys nothing: 8/30 measured.
+    assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == 36
+    # Both dimensions raised is what the 60 would need — still a projection.
+    assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500, iops=5000) == 60
     assert abs(balanced["total_usd"] - proposed["total_usd"]) < 1.0
 
 
@@ -499,7 +505,11 @@ def test_disk_binds_first_on_the_default_shape():
     assert fp.memory_slots("m6a.4xlarge") > 18
     assert fp.cpu_slots("m6a.4xlarge") > 18
     assert fp.slots_for_instance("m6a.4xlarge") == 18
-    assert fp.limiting_factor("m6a.4xlarge") == "disk"
+    # On a stock gp3 volume both disk dimensions land on 18 at once, so neither
+    # is singled out. Raising only one leaves the other at 18 — measured.
+    assert fp.limiting_factor("m6a.4xlarge") == "balanced"
+    assert fp.disk_slots(fp.DEFAULT_VOLUME_THROUGHPUT_MBPS) == 18
+    assert fp.iops_slots(fp.DEFAULT_VOLUME_IOPS) == 18
 
 
 def test_disk_does_not_blanket_cap_smaller_shapes():
@@ -510,10 +520,35 @@ def test_disk_does_not_blanket_cap_smaller_shapes():
     assert fp.limiting_factor("r6a.2xlarge") == "cpu"
 
 
-def test_faster_disk_hands_the_ceiling_back_to_memory():
-    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == \
+def test_faster_disk_alone_does_not_hand_the_ceiling_back_to_memory():
+    """MEASURED 2026-08-13, and it falsified the previous version of this test.
+
+    Both workers were raised 125 → 500 MB/s and 30 sessions were run again:
+    8/30 passed, 22 exhausted the gate. The bandwidth pin really did lift
+    (523 MB/s peak, up from a hard 125.2) — but IOPS stayed at the 3,000
+    baseline and became the next ceiling, at the same 18. Raising one disk
+    dimension and not the other buys nothing.
+    """
+    assert fp.disk_slots(500) > 30                      # bandwidth no longer binds
+    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == 18
+    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=500) == "disk-iops"
+
+
+def test_raising_both_disk_dimensions_reaches_the_memory_ceiling():
+    """PROJECTION, not a measurement — flagged as such deliberately, because the
+    last unmeasured projection in this file was wrong by 22 sessions."""
+    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500, iops=5000) == \
         min(fp.memory_slots("m6a.4xlarge"), fp.cpu_slots("m6a.4xlarge"))
-    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=500) != "disk"
+
+
+def test_iops_and_bandwidth_are_independent_ceilings():
+    # Different resources, binding in different phases of the same install:
+    # bandwidth while the image is pulled and extracted, IOPS while the
+    # ActiveGate JVM starts. Neither may be inferred from the other.
+    assert fp.iops_slots(3000) == 18
+    assert fp.iops_slots(0) == 0
+    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500, iops=0) == 0
+    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=500, iops=0) == "unknown"
 
 
 def test_zero_or_negative_throughput_refuses_to_plan():
