@@ -78,6 +78,7 @@ app.include_router(codespace_router)
 # EC2 spot-worker fleet scaling (aws CLI, no boto3) — see dashboard/fleet.py.
 from dashboard import fleet  # noqa: E402
 from dashboard import fleet_policy  # noqa: E402
+from dashboard import pools  # noqa: E402
 
 # Live training sessions (bootcamp cohorts) — pure decision logic lives in
 # dashboard/live_sessions.py (tested without Redis); endpoints below stay thin.
@@ -401,6 +402,17 @@ async def startup():
         asyncio.get_running_loop().create_task(content_sync.sync_loop())
     except Exception as exc:
         log.warning("content sync start failed (continuing without): %s", exc)
+
+    # Drains paced provisions onto their queues. Unlike the telemetry loops
+    # above this one is load-bearing: if it does not run, jobs parked in
+    # queue:pending:* stay there and a trainer sees what looks like a hung
+    # fleet. It is still started defensively so a failure here cannot stop the
+    # dashboard booting -- but it logs at ERROR, not WARNING, because the
+    # consequence is learners never being provisioned.
+    try:
+        asyncio.get_running_loop().create_task(pools.pacer_loop(pool))
+    except Exception as exc:
+        log.error("PROVISION PACER FAILED TO START — paced jobs will not drain: %s", exc)
 
 
 @app.on_event("shutdown")
@@ -1488,6 +1500,18 @@ async def api_builds_running(request: Request):
         queues[arch] = await pool.llen(f"queue:test:{arch}")
     queues["agent"] = await pool.llen("queue:agent")
     queues["sync"]  = await pool.llen("queue:sync")
+    # Pool queues and their pending backlogs. Without these a paced provision is
+    # invisible: the job is neither running nor on a queue anyone displays, so a
+    # drip looks identical to a fleet that has silently stopped accepting work.
+    async for key in pool.scan_iter(match="queue:pool:*", count=100):
+        queues[key] = await pool.llen(key)
+    pending = {}
+    async for key in pool.scan_iter(match="queue:pending:*", count=100):
+        depth = await pool.llen(key)
+        if depth:
+            pending[key[len("queue:pending:"):]] = depth
+    if pending:
+        queues["pending"] = pending
 
     running = []
     async for key in pool.scan_iter(match="job:running:*", count=500):
@@ -4538,10 +4562,24 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
 
     await pool.hset(f"job:running:{job_id}", mapping=redis_meta)
     await pool.expire(f"job:running:{job_id}", int(timedelta(hours=session_hours).total_seconds()))
-    await pool.rpush("queue:test:amd64", json.dumps(job))
+    # Single admission point for EVERY learner session, which is why both the
+    # pool routing and the drip live here rather than in provision-all. A
+    # same-tenant roster arrives through provision-all's server-side loop;
+    # foreign-tenant learners arrive one at a time from their own tenants when
+    # their app notices provisionRequestedAt. Pacing the one place they both
+    # reach covers 70 independent clients that no trainer-side code can reach.
+    target = await pools.target_queue(pool, ws_id, "amd64")
+    admission = await pools.enqueue_paced(pool, target, job)
+    if not admission["admitted"]:
+        log.info("provision %s parked at position %d on %s",
+                 job_id, admission["position"], target)
 
     return {
         "jobId":            job_id,
+        # Honest queue position rather than an unexplained spinner: a learner
+        # dripped behind 20 others should be told so.
+        "queuePosition":    admission["position"],
+        "queue":            target,
         "wsUrl":            f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
         "expiresAt":        expires_at,
         "status":           "provisioning",
