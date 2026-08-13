@@ -411,3 +411,43 @@ if __name__ == "__main__":
                 print(f"  FAIL {name}: {e}")
     print(f"{'FAILED' if failures else 'OK'} ({failures} failures)")
     sys.exit(1 if failures else 0)
+
+
+# --- curated instance picker -------------------------------------------------
+
+def test_instance_choices_are_costed_and_sized():
+    choices = fp.instance_choices("eu-west-2")
+    assert len(choices) == 4
+    for c in choices:
+        assert c["slots"] > 0
+        assert c["usd_per_session_hour"] > 0
+        assert c["best_for"] and c["why"]
+        assert c["limited_by"] in ("memory", "cpu")
+
+
+def test_exactly_one_recommended_and_it_is_the_cheapest_per_session():
+    choices = fp.instance_choices("eu-west-2")
+    rec = [c for c in choices if c["recommended"]]
+    assert len(rec) == 1, "an ambiguous recommendation is worse than none"
+    cheapest = min(choices, key=lambda c: c["usd_per_session_hour"])
+    assert rec[0]["type"] == cheapest["type"] == "m6a.4xlarge"
+
+
+def test_choices_cover_three_families():
+    fams = {c["family"] for c in fp.instance_choices("eu-west-2")}
+    assert fams == {"General purpose", "Memory optimized", "Compute optimized"}
+
+
+def test_memory_optimized_is_cpu_limited_for_this_workload():
+    """The measured surprise, pinned: r6a has RAM its cores cannot feed."""
+    choices = {c["type"]: c for c in fp.instance_choices("eu-west-2")}
+    assert choices["r6a.2xlarge"]["limited_by"] == "cpu"
+    assert choices["c5.2xlarge"]["limited_by"] == "memory"
+
+
+def test_choices_survive_a_region_with_no_price_table():
+    """A missing price must not hide a valid instance type."""
+    choices = fp.instance_choices("us-east-1")
+    assert len(choices) == 4
+    assert all(c["usd_per_session_hour"] is None for c in choices)
+    assert all(c["slots"] > 0 for c in choices)

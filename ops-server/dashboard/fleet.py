@@ -57,6 +57,13 @@ MASTER_REDIS_HOST = "172.31.36.172"
 PROJECT_TAG = "autonomous-enablements"
 SPOT_WORKER_NAME = "orbital-worker-spot"
 WORKER_ROLE_TAG = "worker"           # value of the orbital-role tag
+
+# The IAM boundary. The master runs under the OrbitalFleetAutoscaler instance
+# profile, whose policy scopes every mutating EC2 action to instances carrying
+# this tag. Changing either half without the other breaks autoscaling; dropping
+# it entirely would widen the role's blast radius to the whole account.
+FLEET_TAG_KEY = "ManagedBy"
+FLEET_TAG_VALUE = "orbital-autoscaler"
 WORKER_NAME_PREFIX = "autonomous-enablements-worker"
 
 # Hard safety limit: never launch more than this many instances per call.
@@ -117,7 +124,8 @@ def _validate_scale_count(count: int) -> int:
 
 
 def _build_user_data(redis_host: str = MASTER_REDIS_HOST,
-                     capacity: int | None = None) -> str:
+                     capacity: int | None = None,
+                     lifetime_minutes: int = 0) -> str:
     """Cloud-init user-data shell script for a fresh worker.
 
     - Stops the baked agent FIRST. The golden AMI was baked from a live worker,
@@ -134,6 +142,18 @@ def _build_user_data(redis_host: str = MASTER_REDIS_HOST,
       count its memory actually supports instead of the AMI's baked-in figure.
     - Starts ops-worker-agent so it registers with the correct identity.
     """
+    lifetime_block = ""
+    if lifetime_minutes > 0:
+        # `shutdown -h +N` is a kernel-level timer armed at boot. Once set it
+        # needs nothing from us: not Orbital, not Redis, not a valid AWS
+        # credential, not even a working network. Paired with
+        # --instance-initiated-shutdown-behavior terminate, the instance
+        # disappears at the deadline whatever else has failed.
+        lifetime_block = f"""
+# Self-destruct: hard stop after {lifetime_minutes} minutes, no external dependency.
+shutdown -h +{lifetime_minutes} "orbital: scheduled fleet lifetime reached" || true
+echo "orbital: self-terminate armed for +{lifetime_minutes}m" >> /var/log/orbital-worker-init.log
+"""
     capacity_block = ""
     if capacity:
         capacity_block = f"""
@@ -188,7 +208,7 @@ else
 fi
 
 systemctl start ops-worker-agent
-"""
+{lifetime_block}"""
 
 
 def _encode_user_data(script: str) -> str:
@@ -384,12 +404,25 @@ async def list_fleet() -> list[dict]:
     return sorted(merged.values(), key=lambda r: (r["name"], r["instance_id"]))
 
 
-async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE) -> list[dict]:
-    """Launch ``count`` spot workers from the golden AMI (hard cap 4).
+async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
+                   purchasing: str = "spot", lifetime_minutes: int = 0) -> list[dict]:
+    """Launch ``count`` workers from the golden AMI (hard cap 4).
 
     Subnet, security groups and key-name are resolved at call time from the
     live worker-1 instance so launches always match production networking.
     Raises ValueError on a bad/over-cap count, FleetError on AWS failures.
+
+    ``purchasing`` is ``"spot"`` (default, disposable capacity) or
+    ``"on-demand"``. Spot instances can be reclaimed with a 2-minute warning,
+    which costs a learner their session because a Sysbox session cannot be
+    migrated — so run *events* on-demand and everything else on spot.
+
+    ``lifetime_minutes``, when > 0, arms a self-destruct inside the instance:
+    ``shutdown -h`` at that offset, combined with a terminate-on-shutdown
+    behaviour. This deliberately does NOT depend on Orbital, on this process,
+    on any AWS scheduler, or on a credential that outlives the launch — the
+    box kills itself even if everything else here is dead or expired. It is
+    the only cost guarantee that survives total failure of the control plane.
     """
     count = _validate_scale_count(count)
 
@@ -409,6 +442,9 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE) -> li
             "security groups (is it terminated?)"
         )
 
+    purchasing = (purchasing or "spot").strip().lower()
+    if purchasing not in ("spot", "on-demand"):
+        raise ValueError(f"purchasing must be 'spot' or 'on-demand', got {purchasing!r}")
     market_options = json.dumps({
         "MarketType": "spot",
         "SpotOptions": {"SpotInstanceType": "one-time"},
@@ -417,6 +453,11 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE) -> li
         "ResourceType=instance,Tags=["
         f"{{Key=Name,Value={SPOT_WORKER_NAME}}},"
         f"{{Key=project,Value={PROJECT_TAG}}},"
+        # MANDATORY. The OrbitalFleetAutoscaler IAM role may only launch, stop,
+        # start or terminate instances carrying this exact tag; without it every
+        # call fails UnauthorizedOperation. It is also the blast-radius guarantee
+        # that the role can never touch an instance it did not create.
+        f"{{Key={FLEET_TAG_KEY},Value={FLEET_TAG_VALUE}}},"
         f"{{Key=orbital-role,Value={WORKER_ROLE_TAG}}}]"
     )
 
@@ -427,10 +468,16 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE) -> li
         "--instance-type", instance_type,
         "--subnet-id", subnet_id,
         "--security-group-ids", *sg_ids,
-        "--instance-market-options", market_options,
         "--tag-specifications", tag_spec,
-        "--user-data", _encode_user_data(_build_user_data()),
+        "--user-data", _encode_user_data(_build_user_data(lifetime_minutes=lifetime_minutes)),
     ]
+    if purchasing == "spot":
+        args += ["--instance-market-options", market_options]
+    if lifetime_minutes > 0:
+        # Belt to the user-data's braces: if the box ever halts for any reason,
+        # it terminates rather than lingering as a stopped instance we still
+        # pay EBS on and still have to remember to clean up.
+        args += ["--instance-initiated-shutdown-behavior", "terminate"]
     if key_name:
         args += ["--key-name", key_name]
 

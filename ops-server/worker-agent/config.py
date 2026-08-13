@@ -52,7 +52,14 @@ WORKER_MAX_HEAVY = int(os.environ["WORKER_MAX_HEAVY"]) if os.environ.get("WORKER
 WORKER_SLOT_LIMITS = os.environ.get("WORKER_SLOT_LIMITS", "0").strip().lower() in ("1", "true", "yes")
 # Hard ceiling per slot. OOM-kills inside the slot's own cgroup, so a runaway
 # takes out one learner's cluster instead of the whole worker.
-WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "3072"))
+#
+# 4096, NOT the session's committed 1,609 MiB. This is a runaway guard, not a
+# packing device: a k8s-101 session's *transient* peak during the operator and
+# DynaKube steps was measured at 2.2-3.1 GiB (2026-08-12), so a 3 GiB cap sits
+# right on top of normal behaviour and would OOM-kill healthy labs. Capacity is
+# planned from committed memory (see fleet_policy.SESSION_COMMITTED_MB); this
+# number only has to be above any legitimate peak and below "ate the worker".
+WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "4096"))
 # Soft floor: under host pressure the kernel reclaims from slots above this
 # first, so a heavy neighbour is squeezed before a well-behaved one.
 WORKER_SLOT_MEMORY_RESERVATION_MB = int(os.environ.get("WORKER_SLOT_MEMORY_RESERVATION_MB", "2048"))

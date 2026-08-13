@@ -1153,10 +1153,26 @@ async function loadAutoscale() {
             </optgroup>`).join('');
     }
     if (ui.inst && !ui.inst.options.length) {
-        ui.inst.innerHTML = (data.instanceTypes || []).map(t =>
-            `<option value="${escapeHtml(t.id)}"${t.id === data.instanceType ? ' selected' : ''}>${escapeHtml(t.id)} · ${t.slots} slots</option>`
-        ).join('');
+        const choices = data.instanceTypes || [];
+        // Group by AWS family so the trade-off is visible in the list itself
+        // rather than something you have to already know.
+        const families = [];
+        choices.forEach(t => { if (!families.includes(t.family)) families.push(t.family); });
+        ui.inst.innerHTML = families.map(fam => `
+            <optgroup label="${escapeHtml(fam)}">
+                ${choices.filter(t => t.family === fam).map(t => {
+                    const price = t.usd_per_session_hour != null
+                        ? ` · $${t.usd_per_session_hour.toFixed(4)}/session-h` : '';
+                    const star = t.recommended ? ' ★' : '';
+                    return `<option value="${escapeHtml(t.type)}"${t.type === data.instanceType ? ' selected' : ''}>`
+                         + `${escapeHtml(t.type)} · ${t.slots} slots${price}${star}</option>`;
+                }).join('')}
+            </optgroup>`).join('');
+        window.__fleetChoices = choices;
+        renderInstanceNote();
     }
+
+    renderInstanceNote();
 
     const s = data.state || {};
     ui.summary.innerHTML = `
@@ -1241,9 +1257,29 @@ function fleetArgs() {
     };
 }
 
+/* Explain the selected shape in words next to the picker. "30 slots" alone
+   does not tell you WHY, and the why is what stops someone buying RAM the
+   cores cannot feed. */
+function renderInstanceNote() {
+    const note = document.getElementById('fleet-instance-note');
+    const sel = document.getElementById('fleet-instance');
+    if (!note || !sel) return;
+    const choice = (window.__fleetChoices || []).find(t => t.type === sel.value);
+    if (!choice) { note.innerHTML = ''; return; }
+    const limit = choice.limited_by === 'cpu'
+        ? 'CPU runs out first' : 'memory runs out first';
+    note.innerHTML = `
+        <span class="inst-family">${escapeHtml(choice.family)}${choice.recommended ? ' · recommended' : ''}</span>
+        <span class="inst-best">${escapeHtml(choice.best_for)}</span>
+        <span class="inst-why">${escapeHtml(choice.why)}</span>
+        <span class="inst-limit">${choice.slots} sessions per instance — ${limit}.</span>`;
+}
+
 function initAutoscaleControls() {
     const ui = fleetUi();
     if (!ui.panel) return;
+
+    document.getElementById('fleet-instance')?.addEventListener('change', renderInstanceNote);
 
     document.getElementById('fleet-plan-btn')?.addEventListener('click', async () => {
         try {

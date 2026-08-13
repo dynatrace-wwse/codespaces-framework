@@ -70,9 +70,13 @@ def test_truthy_spellings_enable():
 def test_default_envelope_matches_measurement():
     args = _args(WORKER_SLOT_LIMITS="1")
     pairs = dict(zip(args[::2], args[1::2]))
-    # 3 GiB ≈ 1.9× the 1.61 GiB measured committed footprint, and above the
-    # worst observed transient peak (3.1 GiB) — a runaway guard, not a squeeze.
-    assert pairs["--memory"] == "3072m"
+    # 4 GiB ≈ 2.5× the 1.61 GiB measured committed footprint, and genuinely
+    # above the worst observed transient peak of 3.1 GiB during the operator /
+    # DynaKube steps. The previous default of 3072m claimed to clear that peak
+    # but 3072 MiB *is* 3.0 GiB — it sat just under it, so a healthy lab at
+    # full stretch could be OOM-killed by its own guard rail. Capacity is
+    # planned from committed memory, never from this number.
+    assert pairs["--memory"] == "4096m"
     assert pairs["--memory-reservation"] == "2048m"
     assert pairs["--pids-limit"] == "4096"
     assert pairs["--cpu-shares"] == "1024"

@@ -8393,11 +8393,10 @@ async def api_fleet_autoscale_status(request: Request,
         "homeRegion": fleet_policy.HOME_REGION,
         "instanceType": instanceType,
         "slotsPerInstance": fleet_policy.slots_for_instance(instanceType),
-        "instanceTypes": [
-            {"id": t, "slots": fleet_policy.slots_for_instance(t)}
-            for t in sorted(fleet_policy.INSTANCE_MEMORY_MB)
-            if fleet_policy.slots_for_instance(t) > 0
-        ],
+        # A curated shortlist, not every shape we can price. Offering the full
+        # matrix invites picking on RAM alone, which is how we ended up
+        # recommending r6a before measuring it.
+        "instanceTypes": fleet_policy.instance_choices(region),
         "inflight": inflight,
         "workers": workers,
         "sessionModel": {

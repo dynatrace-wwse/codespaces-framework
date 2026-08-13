@@ -131,12 +131,39 @@ def test_user_data_uses_imdsv2_token():
     assert "169.254.169.254/latest/meta-data/instance-id" in script
 
 
-def test_user_data_master_redis_and_restart():
+def test_user_data_master_redis_and_agent_lifecycle():
     script = fleet._build_user_data()
     assert fleet.MASTER_REDIS_HOST in script          # 172.31.36.172
     assert "MASTER_REDIS_URL" in script
-    assert "systemctl restart ops-worker-agent" in script
     assert script.startswith("#!/bin/bash")
+    # The agent must be STOPPED before its identity is rewritten and STARTED
+    # after -- a plain `restart` at the end would let the AMI-inherited
+    # identity heartbeat (as the worker the image was baked from) in the
+    # window before the rewrite lands.
+    stop_at = script.index("systemctl stop ops-worker-agent")
+    start_at = script.index("systemctl start ops-worker-agent")
+    worker_id_at = script.index("WORKER_ID=")
+    assert stop_at < worker_id_at < start_at
+
+
+def test_user_data_lifetime_arms_self_termination():
+    """A scheduled-lifetime worker must be able to kill itself with no help."""
+    armed = fleet._build_user_data(lifetime_minutes=1440)
+    assert "shutdown -h +1440" in armed
+    # Default must NOT arm a self-destruct -- a pet worker that silently
+    # halted itself would be a far worse bug than one that outlives its window.
+    assert "shutdown -h" not in fleet._build_user_data()
+
+
+def test_user_data_capacity_override():
+    assert "WORKER_CAPACITY=30" in fleet._build_user_data(capacity=30)
+
+
+def test_fleet_tag_constants_match_iam_policy():
+    """These exact strings are what the OrbitalFleetAutoscaler IAM policy
+    conditions on. If they drift, every launch fails UnauthorizedOperation."""
+    assert fleet.FLEET_TAG_KEY == "ManagedBy"
+    assert fleet.FLEET_TAG_VALUE == "orbital-autoscaler"
 
 
 def test_user_data_encodes_to_base64_roundtrip():

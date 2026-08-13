@@ -501,6 +501,74 @@ ON_DEMAND_USD_PER_HOUR = {
 }
 
 
+# The picker deliberately offers four shapes across three families rather than
+# every type AWS sells. Each entry says what it is GOOD AT, because the naive
+# reading ("more RAM must be better") is exactly what led us to r6a, whose cores
+# cannot feed its memory for this workload -- measured 2026-08-12, 30 sessions
+# sat at 98% CPU pressure with 21 GiB of RAM still free.
+#
+# `family` is AWS's own classification, not our nickname for it: m6a really is
+# "general purpose". We call out separately what it is best suited for here,
+# so the UI can be useful without being wrong.
+INSTANCE_CHOICES = [
+    {
+        "type": "m6a.4xlarge",
+        "family": "General purpose",
+        "best_for": "Best cost per session — the default for bootcamps",
+        "why": "RAM and cores run out at nearly the same point, so nothing is wasted.",
+        "recommended": True,
+    },
+    {
+        "type": "m6a.2xlarge",
+        "family": "General purpose",
+        "best_for": "Same balance, half the box — for small cohorts",
+        "why": "Same ratio as m6a.4xlarge; pick it when a full one would sit idle.",
+        "recommended": False,
+    },
+    {
+        "type": "r6a.2xlarge",
+        "family": "Memory optimized",
+        "best_for": "Labs that need much more RAM per session than k8s-101",
+        "why": "Most RAM per core, but for today's labs the CPU caps it first — "
+               "you pay for memory you cannot reach.",
+        "recommended": False,
+    },
+    {
+        "type": "c5.2xlarge",
+        "family": "Compute optimized",
+        "best_for": "CPU-bound work with small memory needs",
+        "why": "Most cores per GiB. Worst choice for k8s-101: memory runs out at "
+               "6 sessions while most of the CPU sits idle.",
+        "recommended": False,
+    },
+]
+
+
+def instance_choices(region: str = HOME_REGION) -> list[dict]:
+    """The curated picker list, each entry costed and sized for this region.
+
+    Returns the same shapes in the same order every time so the UI is stable;
+    entries whose price we do not know for ``region`` are still returned, with
+    ``usd_per_hour`` None, rather than silently dropped -- a missing price is a
+    gap in our table, not a reason to hide a valid instance type.
+    """
+    prices = ON_DEMAND_USD_PER_HOUR.get(region, {})
+    out = []
+    for choice in INSTANCE_CHOICES:
+        t = choice["type"]
+        slots = slots_for_instance(t)
+        price = prices.get(t)
+        out.append({
+            **choice,
+            "slots": slots,
+            "limited_by": limiting_factor(t),
+            "usd_per_hour": price,
+            "usd_per_session_hour": (round(price / slots, 4)
+                                     if price and slots else None),
+        })
+    return out
+
+
 def rank_by_cost(region: str, hours: float = 1.0) -> list[dict]:
     """Instance types ranked by $/session-hour, cheapest first.
 

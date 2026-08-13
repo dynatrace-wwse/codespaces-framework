@@ -1597,3 +1597,30 @@ body.role-writer .tab-writer-only { display: inline-block; }
 }
 .autoscale-metrics span { color: var(--text-2); font-size: 0.76rem; }
 .autoscale-metrics b { color: var(--text); font-size: 0.95rem; display: block; }
+
+/* Instance picker explanation — sits beside the select so the trade-off is
+   readable before you spend money, not after. */
+.inst-note {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    margin-top: 4px;
+    border-left: 3px solid var(--accent, #4a9eff);
+    background: rgba(74, 158, 255, 0.06);
+    border-radius: 3px;
+    font-size: 12px;
+    line-height: 1.45;
+    max-width: 42ch;
+}
+.inst-note .inst-family {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10px;
+    opacity: 0.75;
+}
+.inst-note .inst-best { font-weight: 600; }
+.inst-note .inst-why,
+.inst-note .inst-limit { opacity: 0.8; }
+.inst-note .inst-limit { font-variant-numeric: tabular-nums; }
