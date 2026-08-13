@@ -48,6 +48,19 @@ MASTER_REDIS_BY_REGION = {
 # WORKER_ID and restarts it — a few seconds of duplicate registration that the
 # real amd001's next heartbeat overwrites.
 WORKER_AMI = "ami-01c331ae9b0054602"
+# The AMI bakes a 300 GiB gp3 root at the FREE BASELINE 125 MiB/s, and disk
+# throughput is the measured binding ceiling on a lab install (~3.75 GB of
+# pull+extract per session): at 125 MiB/s an m6a.4xlarge tops out at ~18
+# simultaneous installs, at 500 it is memory-bound at 30. Launching from the
+# AMI unmodified therefore births every autoscaled worker at 60% of the
+# capacity the picker promises for it. Override it at RunInstances — this
+# needs no IAM change (the role's RunInstances already covers volume/*), and
+# it is strictly better than ModifyVolume-after-launch, which would race the
+# worker registering itself as ready with its full nominal capacity.
+WORKER_ROOT_DEVICE = "/dev/sda1"
+WORKER_ROOT_SIZE_GB = 300
+WORKER_ROOT_THROUGHPUT_MBPS = 500    # gp3 max 1000; needs >=2000 IOPS (0.25 MiB/s per IOPS)
+WORKER_ROOT_IOPS = 3000
 # worker-1 — template instance whose subnet / security groups / key-name are
 # resolved dynamically at scale-up time so networking never drifts from prod.
 TEMPLATE_INSTANCE_ID = "i-02b773319c758fe40"
@@ -214,6 +227,25 @@ systemctl start ops-worker-agent
 def _encode_user_data(script: str) -> str:
     """Base64-encode user-data (aws CLI v2 expects blobs pre-encoded)."""
     return base64.b64encode(script.encode()).decode()
+
+
+def _root_block_device() -> str:
+    """Root volume override for RunInstances, as a CLI JSON blob.
+
+    Exists solely to raise gp3 throughput above the AMI's baked 125 MiB/s —
+    see WORKER_ROOT_THROUGHPUT_MBPS. DeleteOnTermination stays true so a
+    terminated spot worker never leaves a 300 GiB volume behind to pay for.
+    """
+    return json.dumps([{
+        "DeviceName": WORKER_ROOT_DEVICE,
+        "Ebs": {
+            "VolumeType": "gp3",
+            "VolumeSize": WORKER_ROOT_SIZE_GB,
+            "Iops": WORKER_ROOT_IOPS,
+            "Throughput": WORKER_ROOT_THROUGHPUT_MBPS,
+            "DeleteOnTermination": True,
+        },
+    }])
 
 
 def _tags_of(instance: dict) -> dict:
@@ -469,6 +501,7 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         "--subnet-id", subnet_id,
         "--security-group-ids", *sg_ids,
         "--tag-specifications", tag_spec,
+        "--block-device-mappings", _root_block_device(),
         "--user-data", _encode_user_data(_build_user_data(lifetime_minutes=lifetime_minutes)),
     ]
     if purchasing == "spot":

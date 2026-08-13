@@ -12,6 +12,7 @@ Runnable two ways:
 """
 
 import base64
+import json
 
 from dashboard import fleet
 
@@ -164,6 +165,35 @@ def test_fleet_tag_constants_match_iam_policy():
     conditions on. If they drift, every launch fails UnauthorizedOperation."""
     assert fleet.FLEET_TAG_KEY == "ManagedBy"
     assert fleet.FLEET_TAG_VALUE == "orbital-autoscaler"
+
+
+# ── Root volume override ─────────────────────────────────────────────────────
+
+def test_root_block_device_raises_throughput_above_ami_baseline():
+    """The AMI bakes gp3 at the free 125 MiB/s baseline, and disk throughput is
+    the measured binding ceiling on simultaneous lab installs. A worker born at
+    125 delivers ~18 seats where the picker promises 30."""
+    bdm = json.loads(fleet._root_block_device())
+    assert len(bdm) == 1
+    ebs = bdm[0]["Ebs"]
+    assert bdm[0]["DeviceName"] == fleet.WORKER_ROOT_DEVICE
+    assert ebs["VolumeType"] == "gp3"
+    assert ebs["Throughput"] == fleet.WORKER_ROOT_THROUGHPUT_MBPS > 125
+
+
+def test_root_block_device_iops_can_sustain_the_throughput():
+    """gp3 caps throughput at 0.25 MiB/s per provisioned IOPS. Asking for more
+    than the IOPS can carry is rejected by RunInstances at launch."""
+    ebs = json.loads(fleet._root_block_device())[0]["Ebs"]
+    assert ebs["Throughput"] <= ebs["Iops"] * 0.25
+    assert ebs["Throughput"] <= 1000        # gp3 hard maximum
+
+
+def test_root_block_device_deletes_on_termination():
+    """A terminated spot worker must not leave a 300 GiB volume we still pay for."""
+    ebs = json.loads(fleet._root_block_device())[0]["Ebs"]
+    assert ebs["DeleteOnTermination"] is True
+    assert ebs["VolumeSize"] == fleet.WORKER_ROOT_SIZE_GB
 
 
 def test_user_data_encodes_to_base64_roundtrip():
