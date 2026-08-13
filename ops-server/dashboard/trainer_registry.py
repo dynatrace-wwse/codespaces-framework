@@ -76,18 +76,6 @@ def shape_entry(email: str, *, name: str = "", added_by: str = "",
     return fields
 
 
-def seed_emails(raw) -> list[str]:
-    """Parse OPS_TRAINER_SEED — a comma-separated list. Invalid entries are
-    dropped rather than raising: a typo in an env var must not stop boot."""
-    out, seen = [], set()
-    for chunk in (raw or "").split(","):
-        normalized = normalize_email(chunk)
-        if is_valid_email(normalized) and normalized not in seen:
-            seen.add(normalized)
-            out.append(normalized)
-    return out
-
-
 # ── Async Redis helpers ──────────────────────────────────────────────────────
 
 async def is_trainer(pool, email) -> bool:
@@ -143,23 +131,3 @@ async def remove_entry(pool, email) -> bool:
     removed = bool(await pool.srem(INDEX_KEY, normalized))
     await pool.delete(registry_key(normalized))
     return removed
-
-
-async def seed(pool, emails) -> int:
-    """Idempotent boot seed. Only ever ADDS — an operator who removed someone
-    through the UI must not have them reappear on the next restart... except
-    for a genuinely empty registry, which is the case this exists for (fresh
-    install, or a Redis wipe). Returns the number of entries created."""
-    wanted = [e for e in (emails or []) if is_valid_email(e)]
-    if not wanted:
-        return 0
-    if await pool.scard(INDEX_KEY):
-        return 0
-    created = 0
-    for email in wanted:
-        await pool.hset(registry_key(email), mapping=shape_entry(
-            email, added_by="seed", note="seeded at startup"))
-        await pool.sadd(INDEX_KEY, email)
-        created += 1
-    log.info("trainer registry seeded with %d entries", created)
-    return created

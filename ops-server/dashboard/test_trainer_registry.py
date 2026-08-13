@@ -3,9 +3,9 @@
 Two halves, same approach as test_tenant_registry.py:
   - pure shaping (no Redis, no FastAPI);
   - the async helpers over an in-process fake, because the interesting
-    behaviour lives there: re-add keeps the original attribution, remove drops
-    the INDEX before the hash, and seed refuses to resurrect people an operator
-    deleted.
+    behaviour lives there: re-add keeps the original attribution, and remove
+    drops the INDEX before the hash so a half-failed delete cannot leave
+    someone still passing the gate.
 
 Runnable:
   - pytest:     python3 -m pytest dashboard/test_trainer_registry.py
@@ -99,16 +99,6 @@ def test_shape_entry_keeps_attribution():
     assert f["note"] == "COE"
 
 
-def test_seed_emails_parses_dedupes_and_drops_junk():
-    raw = f" {SERGIO} , {ASAD},, nonsense , {SERGIO.upper()} "
-    assert tr.seed_emails(raw) == [SERGIO, ASAD]
-
-
-def test_seed_emails_empty_input():
-    assert tr.seed_emails("") == []
-    assert tr.seed_emails(None) == []
-
-
 # ── Async helpers ────────────────────────────────────────────────────────────
 
 def test_add_then_is_trainer():
@@ -193,34 +183,6 @@ def test_list_entries_sorted_and_survives_a_missing_hash():
             ASAD, "orphan@dynatrace.com", SERGIO]
         assert entries[0]["name"] == "Asad"
         assert entries[1] == {"email": "orphan@dynatrace.com"}
-
-    run(go())
-
-
-def test_seed_only_fills_an_empty_registry():
-    fake = FakeRedis()
-
-    async def go():
-        assert await tr.seed(fake, [SERGIO, ASAD]) == 2
-        assert await tr.is_trainer(fake, SERGIO) is True
-        # Operator removes one, restart re-runs the seed: it must NOT come back.
-        await tr.remove_entry(fake, SERGIO)
-        assert await tr.seed(fake, [SERGIO, ASAD]) == 0
-        assert await tr.is_trainer(fake, SERGIO) is False
-        # ...but emptying it completely is the lock-out case seeding exists for.
-        await tr.remove_entry(fake, ASAD)
-        assert await tr.seed(fake, [SERGIO, ASAD]) == 2
-
-    run(go())
-
-
-def test_seed_noop_without_config():
-    fake = FakeRedis()
-
-    async def go():
-        assert await tr.seed(fake, []) == 0
-        assert await tr.seed(fake, None) == 0
-        assert fake.s == {}
 
     run(go())
 

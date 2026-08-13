@@ -402,17 +402,6 @@ async def startup():
     except Exception as exc:
         log.warning("content sync start failed (continuing without): %s", exc)
 
-    # Seed the trainer registry from OPS_TRAINER_SEED so a fresh install (or a
-    # Redis wipe) has someone who can schedule a workshop. Only seeds when the
-    # registry is EMPTY, so entries removed through the UI stay removed — the
-    # exception being a registry emptied completely, which is exactly the
-    # lock-yourself-out case this guards against.
-    try:
-        from dashboard import trainer_registry as _tr
-        await _tr.seed(pool, _tr.seed_emails(os.environ.get("OPS_TRAINER_SEED", "")))
-    except Exception as exc:
-        log.warning("trainer registry seed failed (continuing without): %s", exc)
-
 
 @app.on_event("shutdown")
 async def shutdown():
