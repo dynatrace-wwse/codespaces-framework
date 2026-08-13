@@ -1277,3 +1277,62 @@ def test_realm_hosts_do_not_mutate_the_shared_baseline():
     before = list(dep.OUTBOUND_HOSTS)
     dep._outbound_hosts_for("https://ydi9582h.sprint.apps.dynatracelabs.com")
     assert dep.OUTBOUND_HOSTS == before
+
+
+# --- concurrent deploys must not share the build tree ------------------------
+
+def test_concurrent_deploys_serialise_on_the_build_tree():
+    """Two deploys must never run `dt-app` in APP_REPO_DIR at the same time.
+
+    The tree is shared: _sync_repo() resets it, _stamp_ui_version() rewrites a
+    file in it, and the build writes dist/. Overlap does not merely queue, it
+    can hand one tenant a bundle built from another tenant's state. This test
+    fails loudly if the lock is ever removed for "throughput".
+    """
+    overlap = {"max": 0, "cur": 0}
+
+    class FakeProc:
+        returncode = 0
+        async def communicate(self):
+            overlap["cur"] += 1
+            overlap["max"] = max(overlap["max"], overlap["cur"])
+            await asyncio.sleep(0.05)          # hold the tree
+            overlap["cur"] -= 1
+            return (b"deployed", b"")
+        async def wait(self):
+            return 0
+        def kill(self):
+            pass
+
+    async def fake_exec(*a, **kw):
+        return FakeProc()
+
+    saved_exec = asyncio.create_subprocess_exec
+    saved_stamp = dep._stamp_ui_version
+    saved_exists = dep.Path.exists
+    asyncio.create_subprocess_exec = fake_exec
+    async def _no_stamp(env): return "v-test"
+    dep._stamp_ui_version = _no_stamp
+    dep.Path.exists = lambda self: True
+    try:
+        async def go():
+            await asyncio.gather(*[
+                dep._run_deploy("tok", f"https://t{i}.example.com") for i in range(6)
+            ])
+        asyncio.run(go())
+    finally:
+        asyncio.create_subprocess_exec = saved_exec
+        dep._stamp_ui_version = saved_stamp
+        dep.Path.exists = saved_exists
+
+    assert overlap["max"] == 1, (
+        f"{overlap['max']} deploys ran in the shared checkout at once — "
+        "the build-tree lock is not holding"
+    )
+
+
+def test_upload_concurrency_defaults_to_serial():
+    """Parallel upload is opt-in. It is only safe once the built bundle is
+    proven tenant-independent; defaulting it on would risk shipping one
+    tenant's environment URL to another."""
+    assert dep.DEPLOY_UPLOAD_CONCURRENCY == 1

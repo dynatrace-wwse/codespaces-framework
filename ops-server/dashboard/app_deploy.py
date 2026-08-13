@@ -511,10 +511,34 @@ async def _stamp_ui_version(env: dict) -> str:
     return out.decode(errors="replace").strip()
 
 
+# Every deploy runs `dt-app` in ONE shared checkout (APP_REPO_DIR): _sync_repo()
+# does a `git reset --hard` in it, _stamp_ui_version() rewrites a file in it, and
+# the build writes into its dist/. Two deploys at once therefore do not merely
+# queue -- they interleave inside the same working tree, and the failure mode is
+# a tenant receiving a bundle built from someone else's state. There was no
+# guard of any kind here, so a bootcamp morning where many tenants self-update
+# at once was a silent-corruption risk, not a slow-but-correct one.
+#
+# The lock is the correctness fix and it is deliberately a hard serialisation of
+# everything that touches the tree. Throughput is a separate problem: `dt-app
+# deploy --skip-build` exists, so the real answer for N tenants is to build once
+# and upload N times in parallel. That is NOT enabled here, because it is only
+# safe if the built bundle is genuinely tenant-independent -- DT_APP_ENVIRONMENT_URL
+# is present in the build env, and shipping tenant A's URL inside tenant B's
+# bundle would be a worse bug than slowness. Verify that first, then raise
+# DEPLOY_UPLOAD_CONCURRENCY.
+_DEPLOY_TREE_LOCK = asyncio.Lock()
+DEPLOY_UPLOAD_CONCURRENCY = int(os.environ.get("DEPLOY_UPLOAD_CONCURRENCY", "1"))
+
+
 async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     """Shell `dt-app deploy` with the delegated token as DT_APP_PLATFORM_TOKEN (dt-app builds,
     signs and POSTs the archive to the registry — correct by construction). Token is passed via
-    the child env only, never logged."""
+    the child env only, never logged.
+
+    Serialised on ``_DEPLOY_TREE_LOCK``: the build mutates a shared checkout, so
+    concurrent callers must not overlap. A caller that waits is reported as
+    waiting, not as failed -- the wait is bounded by DEPLOY_TIMEOUT per holder."""
     binary = Path(APP_REPO_DIR) / "node_modules" / ".bin" / "dt-app"
     if not binary.exists():
         return 127, f"dt-app not found in {APP_REPO_DIR} (is the app repo checked out with node_modules?)"
@@ -523,15 +547,27 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
            # node lives in /usr/local/bin (symlink); ensure it's on PATH for the systemd service
            "PATH": "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", ""),
            "HOME": os.environ.get("HOME", "/home/ops")}
-    await _stamp_ui_version(env)
-    proc = await asyncio.create_subprocess_exec(
-        str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return 124, "deploy timed out"
+    waited_from = asyncio.get_event_loop().time()
+    async with _DEPLOY_TREE_LOCK:
+        waited = asyncio.get_event_loop().time() - waited_from
+        if waited > 1.0:
+            log.info("deploy for %s waited %.1fs for the build tree", tenant_url, waited)
+        await _stamp_ui_version(env)
+        proc = await asyncio.create_subprocess_exec(
+            str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            # Reap the killed child inside the lock; releasing while it still
+            # holds file handles in the tree would hand the next deploy a
+            # half-written dist/.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                log.error("deploy child for %s did not die after kill", tenant_url)
+            return 124, "deploy timed out"
     return proc.returncode or 0, out.decode(errors="replace")[-1500:]
 
 
