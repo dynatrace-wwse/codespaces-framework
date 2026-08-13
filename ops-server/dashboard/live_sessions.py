@@ -344,10 +344,14 @@ EVENT_PROVISION_STARTED = "provision-started"
 EVENT_PROVISION_FAILED = "provision-failed"
 EVENT_STARTED = "started"
 EVENT_ENDED = "ended"
+EVENT_BOUND = "bound"
+EVENT_REBOUND = "rebound"
+EVENT_ENV_TERMINATED = "env-terminated"
 
 EVENT_KINDS = (
     EVENT_JOINED, EVENT_REGISTERED, EVENT_PROVISION_REQUESTED, EVENT_PROVISION_ACCEPTED,
     EVENT_PROVISION_STARTED, EVENT_PROVISION_FAILED, EVENT_STARTED, EVENT_ENDED,
+    EVENT_BOUND, EVENT_REBOUND, EVENT_ENV_TERMINATED,
 )
 
 # Cap the stream. A 300-seat workshop emits several events per learner, and an
@@ -523,6 +527,23 @@ def is_trainer(email, session) -> bool:
     return bool(e) and e in trainers_of(session)
 
 
+def is_owner(email, session) -> bool:
+    """True only for the workshop's CREATOR — trainers[0].
+
+    The single asymmetry in the trainer team. Co-trainers hold identical
+    authority for delivery — edit, start, open the room, provision, terminate a
+    learner's environment, pace, broadcast, reveal solutions — because a
+    co-trainer who cannot act is not a co-trainer, and "the trainer is not
+    available" is the exact case they exist for. What they cannot do is DELETE
+    the workshop, which is irreversible and destroys other people's work.
+
+    Note this says nothing about who may CREATE workshops: that is the global
+    trainer registry (dashboard/trainer_registry.py), a different list.
+    """
+    e = normalize_email(email)
+    return bool(e) and e == lead_trainer(session)
+
+
 def on_roster(email, roster) -> bool:
     """True when the email is on the roster (stored lowercase)."""
     return normalize_email(email) in set(roster or ())
@@ -547,6 +568,103 @@ def join_error(state, email, roster, session=None):
     if state == "cancelled":
         return 409, "session has been cancelled"
     return None
+
+
+# ── Tenant binding (which tenant will provision this learner) ────────────────
+#
+# Binding used to be a side effect of "Provision here" — a button whose label
+# promised an action it did not perform (it checked you in and recorded your
+# tenant; it started nothing). Most learners never pressed it, which is the
+# root of "the trainer provisioned everyone and this student still has
+# nothing".
+#
+# Binding is now automatic on first lobby entry, and it is deliberately NOT the
+# same fact as attendance:
+#
+#   registered  on the roster                      (:roster)
+#   bound       we know where to provision them     (:tenants + :boundat)
+#   present     actually in an open/running room    (:joined)
+#
+# Binding can happen days before the workshop, so collapsing it into `joined`
+# would report someone who glanced at the lobby on Monday as present at
+# Friday's session, and inflate the seat maths the trainer plans against.
+#
+# FIRST WRITE WINS. A learner who opens the workshop from a second tenant must
+# not be silently moved: they see where they are bound and change it with an
+# explicit click. The single exception is provision-ack, which records where an
+# environment ACTUALLY landed — ground truth beats intent.
+
+BIND_BOUND = "bound"        # nothing was bound; this call bound it
+BIND_KEPT = "kept"          # a binding existed; left alone (first write wins)
+BIND_REBOUND = "rebound"    # explicit change, or ground truth from an ack
+
+
+def bind_error(state, email, roster, session=None):
+    """Return (http_status, detail) blocking a bind, or None when allowed.
+
+    Membership is the same rule as join_error — the trainer team always
+    qualifies, roster members qualify — but the STATE rule is looser on
+    purpose: binding is not attendance, so it is allowed with the room closed
+    and the workshop days away. That is the whole point; it is what lets a
+    learner's tenant be known before anyone opens the classroom.
+
+    Only a finished workshop refuses: there is nothing left to provision.
+    """
+    if not on_roster(email, roster) and not is_trainer(email, session or {}):
+        return 403, "email is not on the session roster"
+    if state == "ended":
+        return 409, "session has ended"
+    if state == "cancelled":
+        return 409, "session has been cancelled"
+    return None
+
+
+def bind_outcome(existing_tenant, new_tenant, rebind=False) -> str:
+    """Decide what a bind request does. Keyed off the TENANT, never a timestamp,
+    so a binding made before `boundAt` existed still counts as a binding."""
+    existing = normalize_tenant(existing_tenant)
+    new = normalize_tenant(new_tenant)
+    if not new:
+        return BIND_KEPT          # nothing usable offered; never clear a binding
+    if not existing:
+        return BIND_BOUND
+    if existing == new:
+        return BIND_KEPT          # already here; not a change worth auditing
+    return BIND_REBOUND if rebind else BIND_KEPT
+
+
+ATTENDANCE_NONE = ""
+ATTENDANCE_REGISTERED = "registered"
+ATTENDANCE_BOUND = "bound"
+ATTENDANCE_PRESENT = "present"
+
+
+def attendance_state(email, roster, joined, tenants) -> str:
+    """How far this learner has got. Highest reached wins, because the states
+    are cumulative: being present implies being bound implies being registered,
+    and reporting the lowest would hide progress the trainer needs to see."""
+    e = normalize_email(email)
+    if not e:
+        return ATTENDANCE_NONE
+    if e in (joined or {}):
+        return ATTENDANCE_PRESENT
+    if (tenants or {}).get(e):
+        return ATTENDANCE_BOUND
+    if e in set(roster or ()):
+        return ATTENDANCE_REGISTERED
+    return ATTENDANCE_NONE
+
+
+def env_tenant_mismatch(env_tenant, bound_tenant) -> bool:
+    """True when a learner's running environment is on a different tenant than
+    the one they are bound to — the "joined the wrong tenant" flag.
+
+    False when either side is unknown: an absent value is not evidence of a
+    mismatch, and flagging one would cry wolf on every un-provisioned learner.
+    """
+    env = normalize_tenant(env_tenant)
+    bound = normalize_tenant(bound_tenant)
+    return bool(env and bound and env != bound)
 
 
 def join_by_code_error(state, email, roster, max_seats):
@@ -737,6 +855,10 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
         "createdAt":    session.get("createdAt", ""),
         "startedAt":    session.get("startedAt", ""),
         "isTrainer":    is_trainer(e, session),
+        # Owner vs co-trainer. Absent on an older Orbital → the client reads it
+        # as false and hides Delete, which is the safe direction for an
+        # irreversible action during a deploy window.
+        "isOwner":      is_owner(e, session),
         "hasJoined":    e in (joined or {}),
     }
     out.update(_room_and_gate(session))
@@ -745,7 +867,7 @@ def shape_summary(session_id, session, roster, joined, email) -> dict:
 
 
 def shape_detail(session_id, session, roster, joined, email,
-                 provision_done=None, tenants=None) -> dict:
+                 provision_done=None, tenants=None, bound_at=None) -> dict:
     """Full session state (GET /api/live/sessions/{id}).
 
     Everyone gets the scalar fields + joined/roster counts; the roster and
@@ -778,6 +900,8 @@ def shape_detail(session_id, session, roster, joined, email,
         "joinedCount":  len(joined or {}),
         "rosterCount":  len(roster or ()),
         "isTrainer":    is_trainer(email, session),
+        # See shape_summary: absent on an older Orbital → Delete stays hidden.
+        "isOwner":      is_owner(email, session),
         "hasJoined":    normalize_email(email) in (joined or {}),
         "provisionRequested": provision_request_pending(
             session, email, provision_done),
@@ -786,6 +910,15 @@ def shape_detail(session_id, session, roster, joined, email,
         # remount while the flag is still true cannot mint a second token pair.
         "provisionRequestedAt": session.get("provisionRequestedAt", ""),
         "myTenant": (tenants or {}).get(normalize_email(email), ""),
+        # When the caller's tenant was bound. '' for bindings made before this
+        # field existed — the lobby shows its message without a date.
+        "boundAt": (bound_at or {}).get(normalize_email(email), ""),
+        # How the caller's own provision request settled ('' = not settled, or
+        # never requested). Together with myTenant this is the wrong-tenant
+        # signal: bound elsewhere AND settled means an environment exists over
+        # there, so the lobby offers "ask your trainer" instead of a re-bind
+        # button that would strand it. Free — the route already reads provdone.
+        "myProvisionStatus": (provision_done or {}).get(normalize_email(email), ""),
     }
     out.update(_room_and_gate(session))
     out.update(workshop_fields(session, email))
@@ -794,6 +927,12 @@ def shape_detail(session_id, session, roster, joined, email,
         out["joined"] = [{"email": k, "joinedAt": v,
                           "tenant": (tenants or {}).get(k, "")}
                          for k, v in sorted((joined or {}).items())]
+        # Bindings cover people who have NOT checked in — the whole point of
+        # splitting the two — so this is not derivable from `joined`.
+        out["bindings"] = [{"email": k, "tenant": v,
+                            "boundAt": (bound_at or {}).get(k, "")}
+                           for k, v in sorted((tenants or {}).items())]
+        out["seats"] = seat_summary(roster, joined, session.get("maxSeats"))
     return out
 
 
@@ -858,6 +997,82 @@ def failed_job_email(record, roster, training_id, since="") -> str | None:
     if since and record.get("finished_at", "") < since:
         return None
     return email
+
+
+# ── Cross-tenant admin view (Workshops & Delivery tab) ───────────────────────
+#
+# Everything above answers "what may THIS person see about a workshop they are
+# part of". The three functions below answer a different question — "what is
+# every tenant running, and when" — for the ops dashboard, which is gated on a
+# signed-in GitHub org member rather than on workshop membership. They take no
+# caller email, and they are never masked: see the docstring on the route.
+
+def seat_summary(roster, joined, max_seats) -> dict:
+    """Seat accounting for one workshop.
+
+    `seatsOpen` is None when maxSeats is absent, NOT 0. "Unlimited" and "full"
+    are different claims and a dashboard must not render them the same way.
+
+    Seats are counted against the ROSTER (registered), not `joined`: a seat is
+    consumed by registering, which is exactly what the join-by-code seat check
+    enforces. `present` reports check-ins separately.
+    """
+    try:
+        cap = int(max_seats or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    taken = len(roster or ())
+    return {
+        "seatsTaken": taken,
+        "maxSeats": cap,
+        "seatsOpen": max(cap - taken, 0) if cap else None,
+        "present": len(joined or {}),
+    }
+
+
+def schedule_sort_key(session) -> str:
+    """Calendar ordering: when the workshop HAPPENS, falling back to when it was
+    created. Both are ISO8601, so a plain string sort is chronological."""
+    return (session or {}).get("scheduledAt") or (session or {}).get("createdAt") or ""
+
+
+def shape_admin_row(session_id, session, roster, joined, tenants=None) -> dict:
+    """One row of the cross-tenant admin table.
+
+    Deliberately different from shape_summary:
+      * no caller email — this view has no "me", so no isTrainer/hasJoined;
+      * `owner` and `coTrainers` are split out, because the admin table's job is
+        to say who is accountable for a workshop, and the owner is the only one
+        who can delete it (see is_owner);
+      * `ownerTenant` is emitted HERE ONLY. It stays out of workshop_fields on
+        purpose: a learner has no business knowing which tenant a workshop was
+        created from, and this route is org-member-gated.
+    """
+    team = trainers_of(session)
+    return {
+        "sessionId": session_id,
+        "title": session.get("title", ""),
+        "trainingId": session.get("trainingId", ""),
+        "state": session.get("state", ""),
+        "owner": team[0] if team else "",
+        "coTrainers": team[1:],
+        "trainers": team,
+        "ownerTenant": session.get("ownerTenant", ""),
+        "scheduledAt": session.get("scheduledAt", ""),
+        "timezone": session.get("timezone", ""),
+        "durationMinutes": session.get("durationMinutes", ""),
+        "createdAt": session.get("createdAt", ""),
+        "startedAt": session.get("startedAt", ""),
+        "endedAt": session.get("endedAt", ""),
+        "cancelledAt": session.get("cancelledAt", ""),
+        "joinCode": session.get("joinCode", ""),
+        "roomOpen": room_open(session),
+        "registrants": sorted(roster or ()),
+        "joinedCount": len(joined or {}),
+        "boundCount": len(tenants or {}),
+        "editable": session.get("state", "") in ("scheduled", "open"),
+        **seat_summary(roster, joined, session.get("maxSeats")),
+    }
 
 
 def capacity_summary(workers, active_counts, needed) -> dict:

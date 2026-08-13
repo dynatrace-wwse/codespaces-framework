@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=26">
+    <link rel="stylesheet" href="/static/style.css?v=27">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -55,6 +55,7 @@
             <button class="tab" data-view="framework">Framework</button>
             <button class="tab" data-view="nightly">Nightly</button>
             <button class="tab tab-writer-only" data-view="content" id="tab-content">Content Service</button>
+            <button class="tab tab-writer-only" data-view="workshops" id="tab-workshops">Workshops &amp; Delivery</button>
             <button class="tab" data-view="register" id="tab-register">Register Tenant</button>
             <button class="tab tab-help" id="help-btn" title="Help &amp; keyboard shortcuts (?)">?</button>
         </div>
@@ -824,6 +825,74 @@
             </div>
         </section>
 
+        <!-- Workshops & Delivery — mission control for every tenant's workshops.
+             Writer-gated in nginx AND in FastAPI (_require_writer); the class
+             below only hides the tab, it is not the security boundary. -->
+        <section id="view-workshops" class="view">
+            <nav class="content-subnav">
+                <button class="content-tab active" data-ws-view="schedule">Workshops</button>
+                <button class="content-tab" data-ws-view="trainers">Trainers</button>
+            </nav>
+
+            <!-- Schedule sub-view (calendar + table) -->
+            <div id="ws-view-schedule" class="content-subview">
+                <p class="content-hint">Every workshop across every tenant. Click a row to edit or administer it. Creating workshops stays in the enablement app, where a trainer picks a training from their own tenant's catalogue.</p>
+                <div class="content-card">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                        <button id="ws-cal-prev" class="btn btn-small btn-secondary">‹</button>
+                        <strong id="ws-cal-label" style="min-width:170px;text-align:center">—</strong>
+                        <button id="ws-cal-next" class="btn btn-small btn-secondary">›</button>
+                        <button id="ws-cal-today" class="btn btn-small btn-secondary">Today</button>
+                        <span style="flex:1"></span>
+                        <label style="font-size:12px;opacity:.75">State
+                            <select id="ws-filter-state">
+                                <option value="">all</option>
+                                <option value="scheduled">scheduled</option>
+                                <option value="open">open</option>
+                                <option value="running">running</option>
+                                <option value="ended">ended</option>
+                                <option value="cancelled">cancelled</option>
+                            </select>
+                        </label>
+                        <button id="ws-reload" class="btn btn-small btn-secondary">Reload</button>
+                    </div>
+                    <div id="ws-calendar"><p class="loading">Loading workshops…</p></div>
+                </div>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">All workshops <span id="ws-count" style="opacity:.6;font-weight:400"></span></h3>
+                    <table id="ws-table">
+                        <thead><tr>
+                            <th>When</th><th>Title</th><th>Trainer</th><th>Tenant</th>
+                            <th>State</th><th>Seats</th><th>Registrants</th><th></th>
+                        </tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Trainers sub-view -->
+            <div id="ws-view-trainers" class="content-subview" hidden>
+                <p class="content-hint">Only people on this list can schedule a workshop, and only they can turn on the tenant-wide solutions toggle. This is not the same as being an admin, and it grants nothing inside a workshop — authority there is workshop membership.</p>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">Add a trainer</h3>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                        <input type="email" id="ws-tr-email" placeholder="name@dynatrace.com" style="width:260px">
+                        <input type="text" id="ws-tr-name" placeholder="display name (optional)" style="width:200px">
+                        <input type="text" id="ws-tr-note" placeholder="note (optional)" style="width:200px">
+                        <button id="ws-tr-add" class="btn btn-small" data-action>Add trainer</button>
+                    </div>
+                    <div id="ws-tr-msg" style="font-size:12px;min-height:16px"></div>
+                </div>
+                <div class="content-card">
+                    <h3 style="margin:0 0 10px">Registered trainers <span id="ws-tr-count" style="opacity:.6;font-weight:400"></span></h3>
+                    <table id="ws-trainers">
+                        <thead><tr><th>Email</th><th>Name</th><th>Added by</th><th>Added</th><th>Note</th><th></th></tr></thead>
+                        <tbody><tr><td colspan="6" class="loading">Loading trainers…</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
         <section id="view-register" class="view">
             <div class="content-card">
                 <h3 style="margin:0 0 8px">Account OAuth client <span style="font-size:0.72rem;background:#1f6feb;color:#fff;border-radius:10px;padding:2px 8px;vertical-align:middle">bootstrap install only</span></h3>
@@ -1007,6 +1076,6 @@ redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=30"></script>
+    <script src="/static/app.js?v=31"></script>
 </body>
 </html>

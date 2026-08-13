@@ -402,6 +402,17 @@ async def startup():
     except Exception as exc:
         log.warning("content sync start failed (continuing without): %s", exc)
 
+    # Seed the trainer registry from OPS_TRAINER_SEED so a fresh install (or a
+    # Redis wipe) has someone who can schedule a workshop. Only seeds when the
+    # registry is EMPTY, so entries removed through the UI stay removed — the
+    # exception being a registry emptied completely, which is exactly the
+    # lock-yourself-out case this guards against.
+    try:
+        from dashboard import trainer_registry as _tr
+        await _tr.seed(pool, _tr.seed_emails(os.environ.get("OPS_TRAINER_SEED", "")))
+    except Exception as exc:
+        log.warning("trainer registry seed failed (continuing without): %s", exc)
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -673,6 +684,93 @@ async def _require_arena_auth(request: Request) -> None:
 # (content delivery). Both endpoints are auth-gated → entries returned unmasked.
 
 from dashboard import tenant_registry  # noqa: E402
+
+# Who may SCHEDULE a workshop (dashboard/trainer_registry.py). Separate from
+# both workshop membership and the app's content-instructor gate — see that
+# module's header for why the three are deliberately not the same list.
+from dashboard import trainer_registry  # noqa: E402
+
+
+# ── Workshops & Delivery admin ───────────────────────────────────────────────
+# These routes back the ops dashboard's "Workshops & Delivery" tab. They are
+# _require_writer, NOT _require_service_or_writer, and that difference is the
+# whole security model: the app ships a baked service bearer that every install
+# holds, so accepting it here would let any tenant's app read every other
+# tenant's roster. _require_writer demands X-Auth-User, which only nginx sets
+# after an oauth2-proxy auth_request — hence a real, signed-in org member.
+#
+# A consequence worth stating rather than rediscovering: on these routes
+# _sees_full_identities() is True by construction, so payloads are returned
+# UNMASKED on purpose. Do not add masking here; add it if a route ever loses
+# the writer gate.
+
+@app.get("/api/workshops/admin/trainers")
+async def api_workshops_admin_trainers(request: Request):
+    """Every registered trainer, with attribution."""
+    await _require_writer(request)
+    entries = await trainer_registry.list_entries(pool)
+    return {"trainers": entries, "count": len(entries)}
+
+
+@app.post("/api/workshops/admin/trainers")
+async def api_workshops_admin_trainer_add(request: Request):
+    """Add (or re-attribute) a trainer. Idempotent: re-adding keeps the
+    original addedAt/addedBy, because a re-add is not a new grant."""
+    role = await _require_writer(request)
+    body = await request.json()
+    try:
+        entry = await trainer_registry.add_entry(
+            pool, body.get("email"),
+            name=body.get("name") or "",
+            added_by=role.get("user") or "",
+            note=body.get("note") or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "trainer": entry}
+
+
+@app.delete("/api/workshops/admin/trainers/{email}")
+async def api_workshops_admin_trainer_remove(request: Request, email: str):
+    """Remove a trainer. 404 when they were not registered, so the UI can tell
+    "already gone" from "removed just now"."""
+    await _require_writer(request)
+    removed = await trainer_registry.remove_entry(pool, email)
+    if not removed:
+        raise HTTPException(status_code=404, detail="not a registered trainer")
+    return {"ok": True, "removed": live_sessions.normalize_email(email)}
+
+
+@app.get("/api/workshops/admin/schedule")
+async def api_workshops_admin_schedule(request: Request, state: str = "",
+                                       limit: int = 500):
+    """Every workshop on every tenant, ordered by when it HAPPENS.
+
+    Ordering is done here rather than by a second Redis zset. `live:sessions:index`
+    is scored by createdAt, and a scheduledAt zset would need maintaining at four
+    write sites against a field that is optional AND mutable — while saving only
+    the ZRANGE, not the per-row HGETALL/SCARD/HLEN that actually dominate. If
+    this ever outgrows a sort, _walk_workshop_index() is the one place to change.
+
+    Returned UNMASKED on purpose: _require_writer means a signed-in GitHub org
+    member, for whom _sees_full_identities() is True by construction. Do not add
+    masking here — add it if this route ever loses the writer gate.
+    """
+    await _require_writer(request)
+    wanted_states = {s.strip() for s in (state or "").split(",") if s.strip()}
+    rows = []
+    async for session_id, session in _walk_workshop_index():
+        if wanted_states and session.get("state", "") not in wanted_states:
+            continue
+        _, roster_key, joined_key = _live_keys(session_id)
+        rows.append(live_sessions.shape_admin_row(
+            session_id, session,
+            await pool.smembers(roster_key),
+            await pool.hgetall(joined_key),
+            await pool.hgetall(_live_tenants_key(session_id))))
+    rows.sort(key=lambda r: r.get("scheduledAt") or r.get("createdAt") or "")
+    capped = rows[:max(1, min(limit, 1000))]
+    return {"workshops": capped, "count": len(capped), "total": len(rows),
+            "generatedAt": datetime.now(timezone.utc).isoformat()}
 
 
 @app.post("/api/tenants/register-identity")
@@ -5274,6 +5372,32 @@ async def _arena_exec_run(job_id: str, meta: dict, body: ArenaExecRequest) -> di
     return result
 
 
+async def _revoke_job_tokens(job_id: str, meta: dict) -> None:
+    """Best-effort revocation of the DT tokens a job was provisioned with.
+
+    Only tokens minted from a credential ORBITAL WAS HANDED are revocable here.
+    App-minted tokens are revoked by the app, which holds the only credential
+    that can — which is why every app-side caller of a terminate route must
+    also call reclaimJobTokens. Never raises: a revocation failure must not
+    stop a teardown.
+    """
+    if not (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
+            and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
+        return
+    from provisioning import DTTokenProvisioner
+    try:
+        token_ids = json.loads(meta["dt_token_ids"])
+        provisioner = DTTokenProvisioner(
+            tenant_url=meta["dt_tenant_url"],
+            api_token=meta.get("dt_auth_token", ""),
+            oauth_client_id=meta.get("dt_oauth_client_id", ""),
+            oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+        )
+        asyncio.create_task(provisioner.revoke_tokens(token_ids))
+    except Exception as exc:
+        log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+
+
 @app.post("/api/arena/sessions/{job_id}/terminate")
 async def api_arena_terminate(job_id: str, request: Request):
     """Terminate a training session from the Arena app (no oauth2-proxy auth required).
@@ -5295,24 +5419,8 @@ async def api_arena_terminate(job_id: str, request: Request):
         )
         raise HTTPException(404, detail)
 
-    # Best-effort: revoke provisioned DT tokens
     meta = await pool.hgetall(f"job:running:{job_id}")
-    # Only tokens minted from a credential the CALLER supplied are revocable here. App-minted
-    # tokens are revoked by the app itself — Orbital holds no tenant credential.
-    if (meta.get("dt_token_ids") and meta.get("dt_tenant_url")
-            and (meta.get("dt_auth_token") or meta.get("dt_oauth_client_id"))):
-        from provisioning import DTTokenProvisioner
-        try:
-            token_ids = json.loads(meta["dt_token_ids"])
-            provisioner = DTTokenProvisioner(
-                tenant_url=meta["dt_tenant_url"],
-                api_token=meta.get("dt_auth_token", ""),
-                oauth_client_id=meta.get("dt_oauth_client_id", ""),
-                oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
-            )
-            asyncio.create_task(provisioner.revoke_tokens(token_ids))
-        except Exception as exc:
-            log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+    await _revoke_job_tokens(job_id, meta)
 
     # Mark terminating IMMEDIATELY so the UI sees the session gone right away — the
     # worker's container teardown is slow, but session-status/find-session treat a
@@ -5338,10 +5446,72 @@ def _live_keys(session_id: str) -> tuple[str, str, str]:
     return base, f"{base}:roster", f"{base}:joined"
 
 
+LIVE_INDEX_KEY = "live:sessions:index"
+
+
+async def _walk_workshop_index():
+    """Yield (session_id, session_hash) for every indexed workshop, newest first.
+
+    Also SELF-HEALS the index. `live:sessions:index` is ZREM'd on a hard delete
+    (_delete_live_session_keys) but not when an ended workshop's keys reach
+    their TTL, so expired members accumulate without bound. Every caller
+    already skipped a member whose hash had gone; dropping it here makes that
+    skip permanent instead of paying for it on every list call forever.
+    """
+    for session_id in await pool.zrevrange(LIVE_INDEX_KEY, 0, -1):
+        session = await pool.hgetall(f"live:session:{session_id}")
+        if not session:
+            await pool.zrem(LIVE_INDEX_KEY, session_id)
+            continue
+        yield session_id, session
+
+
 def _live_tenants_key(session_id: str) -> str:
-    """Hash email -> normalized tenant URL the learner joined FROM (cross-
-    tenant workshops). Entries absent for pre-fix joins — always optional."""
+    """Hash email -> normalized tenant URL that will PROVISION this learner.
+
+    Written only through _bind_tenant(). Historically this was "the tenant the
+    learner joined from", updated on every join; it is now a deliberate,
+    first-write-wins binding — see live_sessions' tenant-binding section."""
     return f"live:session:{session_id}:tenants"
+
+
+def _live_boundat_key(session_id: str) -> str:
+    """Hash email -> ISO8601 of when the provisioning tenant was bound.
+
+    A parallel hash rather than re-encoding :tenants, so every existing reader
+    of that hash (provision-all, provision-ack, readiness, detail) keeps
+    working byte-for-byte. Absent for bindings made before this existed —
+    bind_outcome keys off the tenant, never the timestamp, for that reason.
+    """
+    return f"live:session:{session_id}:boundat"
+
+
+async def _bind_tenant(session_id: str, email: str, tenant: str, *,
+                       rebind: bool = False) -> tuple[str, str]:
+    """THE one place a provisioning tenant is written. Returns (outcome, tenant).
+
+    First write wins unless `rebind` is set, so walking into a second tenant
+    never silently moves a learner. `rebind=True` means either the learner
+    explicitly asked, or provision-ack is recording where an environment
+    actually landed — ground truth outranks intent.
+    """
+    email = live_sessions.normalize_email(email)
+    tenant = live_sessions.normalize_tenant(tenant)
+    tkey = _live_tenants_key(session_id)
+    boundat_key = _live_boundat_key(session_id)
+    existing = await pool.hget(tkey, email) or ""
+    outcome = live_sessions.bind_outcome(existing, tenant, rebind=rebind)
+    if outcome in (live_sessions.BIND_BOUND, live_sessions.BIND_REBOUND):
+        await pool.hset(tkey, email, tenant)
+        await pool.hset(boundat_key, email,
+                        datetime.now(timezone.utc).isoformat())
+        await _emit_live_event(
+            session_id,
+            live_sessions.EVENT_BOUND if outcome == live_sessions.BIND_BOUND
+            else live_sessions.EVENT_REBOUND,
+            email=email, tenant=tenant)
+        return outcome, tenant
+    return outcome, live_sessions.normalize_tenant(existing)
 
 
 def _live_provdone_key(session_id: str) -> str:
@@ -5402,6 +5572,16 @@ class LiveSessionJoin(BaseModel):
     # Learner's own tenant URL — stamped SERVER-side by the app function
     # (never trusted from the browser). Optional: legacy callers omit it.
     tenant: str = ""
+
+
+class LiveSessionBind(BaseModel):
+    email: str = ""
+    # Learner's own tenant URL (see LiveSessionJoin.tenant).
+    tenant: str = ""
+    # False (default) = "bind me if I am not bound yet" — the automatic call the
+    # lobby makes on entry. True = the learner explicitly asked to move their
+    # provisioning to the tenant they are looking at right now.
+    rebind: bool = False
 
 
 class LiveSessionTrainerAction(BaseModel):
@@ -5574,11 +5754,8 @@ async def api_live_sessions_list(request: Request, email: str = "", tenant: str 
     # member / no-caller automation.
     full_admin = _sees_full_identities(request, email)
     sessions = []
-    for session_id in await pool.zrevrange("live:sessions:index", 0, -1):
-        sess_key, roster_key, joined_key = _live_keys(session_id)
-        session = await pool.hgetall(sess_key)
-        if not session:
-            continue  # expired after `ended` — tolerate the stale index member
+    async for session_id, session in _walk_workshop_index():
+        _, roster_key, joined_key = _live_keys(session_id)
         roster = await pool.smembers(roster_key)
         if not live_sessions.is_listed(session, roster, email, tenant):
             continue
@@ -5587,7 +5764,13 @@ async def api_live_sessions_list(request: Request, email: str = "", tenant: str 
             session_id, session, roster, joined, email)
         full = full_admin or live_sessions.is_trainer(email, session)
         sessions.append(item if full else masking.mask_live_summary(item))
-    return {"sessions": sessions, "count": len(sessions)}
+    # May this caller SCHEDULE a workshop? The app's boot aggregate already
+    # calls this route, so answering here costs one SISMEMBER and saves the app
+    # a second round-trip on every boot. Never masked: it is the caller's own
+    # fact about themselves, exactly like `myTenant` in shape_detail.
+    caller_is_trainer = await trainer_registry.is_trainer(pool, email)
+    return {"sessions": sessions, "count": len(sessions),
+            "callerIsTrainer": caller_is_trainer}
 
 
 @app.get("/api/live/sessions/past")
@@ -5611,13 +5794,10 @@ async def api_live_sessions_past(request: Request, email: str = "", tenant: str 
         raise HTTPException(status_code=400, detail="a valid email query parameter is required")
     full_admin = _sees_full_identities(request, email)
     sessions = []
-    for session_id in await pool.zrevrange("live:sessions:index", 0, -1):
+    async for session_id, session in _walk_workshop_index():
         if len(sessions) >= max(1, min(limit, 100)):
             break
-        sess_key, roster_key, joined_key = _live_keys(session_id)
-        session = await pool.hgetall(sess_key)
-        if not session:
-            continue  # TTL-expired: the index tolerates stale members
+        _, roster_key, joined_key = _live_keys(session_id)
         roster = await pool.smembers(roster_key)
         if not live_sessions.is_past(session, roster, email, tenant):
             continue
@@ -5673,15 +5853,21 @@ async def api_live_session_detail(session_id: str, request: Request, email: str 
     # needs exactly one: their OWN, so their app can tell "already provisioning
     # here" from "bound somewhere else" — hence hget, not hgetall. Anonymous
     # callers read nothing; there is nobody to answer it for.
+    # boundAt rides exactly the same scoping as tenants — same key shape, same
+    # three cases — so the two never disagree about who may see what.
     if live_sessions.is_trainer(email, session):
         tenants = await pool.hgetall(_live_tenants_key(session_id))
+        bound_at = await pool.hgetall(_live_boundat_key(session_id))
     elif named:
         mine = await pool.hget(_live_tenants_key(session_id), named)
         tenants = {named: mine} if mine else None
+        mine_at = await pool.hget(_live_boundat_key(session_id), named)
+        bound_at = {named: mine_at} if mine_at else None
     else:
         tenants = None
+        bound_at = None
     detail = live_sessions.shape_detail(session_id, session, roster, joined, email,
-                                        provision_done, tenants)
+                                        provision_done, tenants, bound_at)
     # Service bearer alone must not unmask (BUG-MASK-1); the session trainer
     # (caller email == trainerEmail) or a real org member does.
     caller = live_sessions.normalize_email(email)
@@ -5708,11 +5894,12 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
         raise HTTPException(status_code=err[0], detail=err[1])
     first_join = await pool.hsetnx(joined_key, email,
                                    datetime.now(timezone.utc).isoformat())
-    # Cross-tenant workshops: remember which tenant the learner joined FROM
-    # (last join wins — a re-join from another tenant updates it).
-    tenant = live_sessions.normalize_tenant(body.tenant)
-    if tenant:
-        await pool.hset(_live_tenants_key(session_id), email, tenant)
+    # Bind the provisioning tenant, FIRST WRITE WINS. This used to be
+    # last-join-wins, which meant opening the workshop from a second tenant
+    # silently moved a learner who already had (or was about to get) an
+    # environment somewhere else. Changing it is now an explicit act — see
+    # /bind with rebind:true.
+    _, tenant = await _bind_tenant(session_id, email, body.tenant)
     # Audit + the trainer's arrival toast. Only on the FIRST join, or a learner
     # reloading their tab would re-notify the trainer on every refresh.
     if first_join:
@@ -5720,6 +5907,46 @@ async def api_live_session_join(session_id: str, body: LiveSessionJoin):
                                email=email, tenant=tenant)
     return {"state": session.get("state", ""),
             "joinedCount": await pool.hlen(joined_key)}
+
+
+@app.post("/api/live/sessions/{session_id}/bind")
+async def api_live_session_bind(session_id: str, body: LiveSessionBind,
+                                request: Request):
+    """Bind (or explicitly re-bind) the tenant that will provision this learner.
+
+    This is what replaced the "Provision here" button. The lobby calls it
+    automatically on entry with rebind=false, so a learner who clicks nothing
+    is still bound; the button survives only as the rebind=true control shown
+    when they are bound somewhere else.
+
+    Allowed with the room CLOSED and the workshop days away — binding is not
+    attendance and does not touch :joined. Only ended/cancelled refuse.
+
+    Auth: service bearer or signed-in writer (same as join-by-code — learners
+    reach it through the app's authed proxy, which stamps `tenant` server-side).
+    """
+    await _require_service_or_writer(request)
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    sess_key, roster_key, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    roster = await pool.smembers(roster_key)
+    err = live_sessions.bind_error(session.get("state", ""), email, roster, session)
+    if err:
+        raise HTTPException(status_code=err[0], detail=err[1])
+    outcome, tenant = await _bind_tenant(session_id, email, body.tenant,
+                                         rebind=bool(body.rebind))
+    return {
+        "tenant": tenant,
+        "boundAt": await pool.hget(_live_boundat_key(session_id), email) or "",
+        "outcome": outcome,
+        # Whether the tenant the caller is sitting in is the bound one. The
+        # lobby renders three different messages off this plus `tenant`.
+        "boundHere": bool(tenant) and tenant == live_sessions.normalize_tenant(body.tenant),
+    }
 
 
 @app.post("/api/live/sessions/{session_id}/start")
@@ -5844,8 +6071,14 @@ async def api_live_session_delete(session_id: str, request: Request, trainerEmai
     session = await pool.hgetall(sess_key)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found or expired")
-    if not live_sessions.is_trainer(trainerEmail, session):
-        raise HTTPException(status_code=403, detail="trainerEmail does not match this session's trainer")
+    # OWNER only — the one authority a co-trainer does not share. Deleting is
+    # irreversible and destroys the roster and audit trail of a workshop
+    # somebody else created; every other trainer action is deliberately shared.
+    if not live_sessions.is_owner(trainerEmail, session):
+        detail = ("only the workshop owner may delete it"
+                  if live_sessions.is_trainer(trainerEmail, session)
+                  else "trainerEmail does not match this session's trainer")
+        raise HTTPException(status_code=403, detail=detail)
     try:
         live_sessions.apply_transition(session.get("state", ""), "delete")
     except ValueError as exc:
@@ -5980,9 +6213,11 @@ async def api_live_session_join_by_code(body: LiveSessionJoinByCode, request: Re
                     session_id, session, roster,
                     await pool.hgetall(joined_key), email)}
     newly_registered = await pool.sadd(roster_key, email)
-    tenant = live_sessions.normalize_tenant(body.tenant)
-    if tenant:
-        await pool.hset(_live_tenants_key(session_id), email, tenant)
+    # Entering a code IS the "provision me here" signal — the learner typed it
+    # while sitting in a tenant. First write wins, so a learner who registers
+    # from one tenant and later pastes the same code in another keeps their
+    # original binding until they explicitly change it.
+    _, tenant = await _bind_tenant(session_id, email, body.tenant)
     if newly_registered:
         await _emit_live_event(session_id, live_sessions.EVENT_REGISTERED,
                                email=email, detail="join code", tenant=tenant)
@@ -6165,9 +6400,11 @@ async def api_live_session_provision_ack(session_id: str,
     # The tenant that actually executed the request IS the learner's binding —
     # persist it so the trainer's board shows where the environment lives, not
     # just where the learner first checked in.
-    ack_tenant = live_sessions.normalize_tenant(body.tenant)
-    if ack_tenant:
-        await pool.hset(_live_tenants_key(session_id), email, ack_tenant)
+    # rebind=True on purpose — the ONE caller allowed to override an existing
+    # binding without the learner asking. Everywhere else binding is first-write-
+    # wins intent; here it is ground truth about where an environment actually
+    # landed, and the board must show the truth.
+    await _bind_tenant(session_id, email, body.tenant, rebind=True)
     failed = status == "failed" or bool(body.error)
     await _emit_live_event(
         session_id,
@@ -6306,6 +6543,57 @@ async def api_live_session_update(session_id: str, body: LiveSessionUpdate, requ
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
 
 
+async def _workshop_jobs(session_id: str, session: dict,
+                         emails) -> list[tuple[str, str, dict]]:
+    """Running arena jobs belonging to this workshop, for these learners.
+
+    Returns [(redis_key, job_id, meta)].
+
+    Matching prefers `workshop_id`, which every job has carried since it was
+    stamped at provision time. The (arena_user, training_id) fallback exists
+    only for environments started before that, and it is the reason the old
+    cohort-wide terminate could reach a learner's environment from a DIFFERENT
+    workshop of the same training. For a single named learner that would be a
+    real bug — same person, same training, wrong room — so the id match is
+    what makes the per-learner routes safe.
+    """
+    wanted = {live_sessions.normalize_email(e) for e in (emails or ()) if e}
+    training_id = (session.get("trainingId") or "").strip()
+    out: list[tuple[str, str, dict]] = []
+    async for key in pool.scan_iter(match="job:running:enablement-*"):
+        meta = await pool.hgetall(key)
+        if not meta:
+            continue
+        if live_sessions.normalize_email(meta.get("arena_user")) not in wanted:
+            continue
+        job_workshop = (meta.get("workshop_id") or "").strip()
+        if job_workshop:
+            if job_workshop != session_id:
+                continue
+        elif (meta.get("training_id") or "").strip() != training_id:
+            continue
+        out.append((key, meta.get("job_id") or key.rsplit(":", 1)[-1], meta))
+    return out
+
+
+async def _terminate_jobs(jobs) -> tuple[list[str], int]:
+    """Terminate the given jobs, revoking what Orbital can revoke.
+
+    Idempotent: a job already marked terminating is counted as skipped rather
+    than re-published, so a trainer mashing the button does not queue N kills.
+    """
+    terminated, skipped = [], 0
+    for key, job_id, meta in jobs:
+        if meta.get("terminating") == "1":
+            skipped += 1
+            continue
+        await _revoke_job_tokens(job_id, meta)
+        await pool.hset(key, "terminating", "1")
+        await pool.publish("ops:terminate", job_id)
+        terminated.append(job_id)
+    return terminated, skipped
+
+
 @app.post("/api/live/sessions/{session_id}/terminate-all")
 async def api_live_session_terminate_all(session_id: str, body: LiveSessionTrainerAction):
     """Terminate every environment provisioned for this workshop.
@@ -6330,28 +6618,143 @@ async def api_live_session_terminate_all(session_id: str, body: LiveSessionTrain
 
     participants = {live_sessions.normalize_email(e) for e in await pool.smembers(roster_key)}
     participants.add(trainer)
-    training_id = (session.get("trainingId") or "").strip()
 
-    terminated, skipped = [], 0
-    async for key in pool.scan_iter(match="job:running:enablement-*"):
-        meta = await pool.hgetall(key)
-        if not meta:
-            continue
-        if (meta.get("training_id") or "").strip() != training_id:
-            continue
-        if live_sessions.normalize_email(meta.get("arena_user")) not in participants:
-            continue
-        job_id = meta.get("job_id") or key.rsplit(":", 1)[-1]
-        if meta.get("terminating") == "1":
-            skipped += 1
-            continue
-        await pool.hset(key, "terminating", "1")
-        await pool.publish("ops:terminate", job_id)
-        terminated.append(job_id)
+    jobs = await _workshop_jobs(session_id, session, participants)
+    terminated, skipped = await _terminate_jobs(jobs)
     log.info("live: terminate-all %s → %d terminated, %d already terminating",
              session_id, len(terminated), skipped)
     return {"terminated": terminated, "count": len(terminated),
             "alreadyTerminating": skipped}
+
+
+class LiveSessionLearnerEnv(BaseModel):
+    trainerEmail: str = ""
+    # Reprovision only: the tenant to build in. The app stamps its own tenant
+    # server-side; when it differs from the learner's binding the request goes
+    # through the pull channel instead, exactly as provision-all does.
+    tenant: str = ""
+    perUser: dict = {}
+
+
+async def _learner_env_gate(session_id: str, email: str, trainer_email: str):
+    """Shared preamble for the per-learner env routes: resolve + authorize.
+
+    Gate is is_trainer, NOT is_owner — a co-trainer troubleshooting a stuck
+    learner is the case these buttons exist for, and "wait for the owner" is
+    not an answer while a room is running.
+    """
+    email = live_sessions.normalize_email(email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    sess_key, roster_key, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not live_sessions.is_trainer(trainer_email, session):
+        raise HTTPException(status_code=403,
+                            detail="trainerEmail does not match this session's trainer")
+    return email, session, roster_key
+
+
+@app.post("/api/live/sessions/{session_id}/learner/{email}/terminate")
+async def api_live_learner_terminate(session_id: str, email: str,
+                                     body: LiveSessionLearnerEnv,
+                                     request: Request):
+    """Terminate ONE learner's environment for this workshop.
+
+    Until now the only tool was terminate-all, so "this one student's tenant is
+    wrong" cost the whole cohort their environments. Freeing a single learner is
+    also what lets them be re-bound and provisioned somewhere else.
+
+    Scoped by workshop_id (see _workshop_jobs), so a learner's environment from
+    a different workshop of the same training is never touched. Idempotent.
+    """
+    await _require_service_or_writer(request)
+    email, session, _ = await _learner_env_gate(session_id, email, body.trainerEmail)
+    jobs = await _workshop_jobs(session_id, session, {email})
+    terminated, skipped = await _terminate_jobs(jobs)
+    if terminated:
+        await _emit_live_event(session_id, live_sessions.EVENT_ENV_TERMINATED,
+                               email=email, actor=body.trainerEmail,
+                               detail=",".join(terminated)[:200])
+    log.info("live: learner terminate %s/%s → %d terminated, %d already terminating",
+             session_id, email, len(terminated), skipped)
+    return {"terminated": terminated, "count": len(terminated),
+            "alreadyTerminating": skipped}
+
+
+@app.post("/api/live/sessions/{session_id}/learner/{email}/reprovision")
+async def api_live_learner_reprovision(session_id: str, email: str,
+                                       body: LiveSessionLearnerEnv,
+                                       request: Request):
+    """Terminate this learner's environment and build them a fresh one.
+
+    The recovery path for a provision that half-worked. It deliberately reuses
+    provision-all's single-learner logic rather than a parallel implementation:
+    if the learner is bound to a tenant this caller cannot mint for, the result
+    is `requested` and their own tenant's app picks it up on its next poll —
+    the same pull channel, no new mechanism.
+    """
+    await _require_service_or_writer(request)
+    email, session, _ = await _learner_env_gate(session_id, email, body.trainerEmail)
+    provdone_key = _live_provdone_key(session_id)
+
+    jobs = await _workshop_jobs(session_id, session, {email})
+    terminated, _ = await _terminate_jobs(jobs)
+    if terminated:
+        await _emit_live_event(session_id, live_sessions.EVENT_ENV_TERMINATED,
+                               email=email, actor=body.trainerEmail,
+                               detail=",".join(terminated)[:200])
+
+    bound = await pool.hget(_live_tenants_key(session_id), email) or ""
+    joined = await pool.hgetall(_live_keys(session_id)[2])
+    skip = live_sessions.provision_skip_status(email in joined, bound, body.tenant)
+    if skip:
+        # Their own tenant has to do it. Clear the settled marker and re-arm the
+        # request flag — the learner's app acts on (session, provisionRequestedAt).
+        await pool.hdel(provdone_key, email)
+        await pool.hset(_live_keys(session_id)[0], mapping={
+            "provisionRequestedAt": datetime.now(timezone.utc).isoformat(),
+            "provisionRequestedBy": live_sessions.normalize_email(body.trainerEmail),
+        })
+        await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_REQUESTED,
+                               email=email, actor=body.trainerEmail,
+                               tenant=bound, detail="reprovision")
+        return {"terminated": terminated, "status": "requested", "reason": skip,
+                "tenant": bound,
+                "message": live_sessions.PROVISION_REQUESTED_MESSAGE}
+
+    tenant_for_env = (body.tenant or "").rstrip("/")
+    per = body.perUser.get(email) or body.perUser.get(email.lower()) or {}
+    try:
+        provisioned = await api_arena_provision(ArenaProvisionRequest(
+            trainingId=session.get("trainingId", ""),
+            userId=email,
+            tenantUrl=tenant_for_env,
+            ref=session.get("ref", ""),
+            dtEnv=per.get("dtEnv") or {},
+            dtTokenIds=per.get("dtTokenIds") or [],
+            sessionHours=workshop_session_hours(session),
+        ), request)
+    except HTTPException as exc:
+        await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_FAILED,
+                               email=email, actor=body.trainerEmail,
+                               tenant=tenant_for_env, detail=str(exc.detail))
+        return {"terminated": terminated, "status": "error",
+                "error": str(exc.detail)[:200]}
+    except Exception as exc:
+        await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_FAILED,
+                               email=email, actor=body.trainerEmail,
+                               tenant=tenant_for_env, detail=str(exc))
+        return {"terminated": terminated, "status": "error", "error": str(exc)[:200]}
+
+    status = "already-active" if provisioned.get("deduped") else "queued"
+    await pool.hset(provdone_key, email, status)
+    await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_STARTED,
+                           email=email, tenant=tenant_for_env,
+                           actor=body.trainerEmail, detail=f"reprovision:{status}")
+    return {"terminated": terminated, "status": status,
+            "jobId": provisioned.get("jobId", ""), "tenant": tenant_for_env}
 
 
 @app.get("/api/live/sessions/{session_id}/readiness")
@@ -6447,6 +6850,26 @@ async def api_live_session_readiness(session_id: str, request: Request,
                                 joined_tenants.get(email, ""), tenant,
                                 requested=live_sessions.provision_request_pending(
                                     session, email, provision_done))})
+    # Two fields the board needs that are not derivable client-side:
+    #   attendance     registered | bound | present — the split between "we know
+    #                  where to provision them" and "they are actually here".
+    #   envTenant/     where the environment ACTUALLY runs, and whether that
+    #   tenantMismatch disagrees with the binding. This works because
+    #                  job:running:* is a GLOBAL keyspace: Orbital sees every
+    #                  tenant's jobs, so it can spot a learner who walked into
+    #                  the wrong classroom. Resolution is the trainer's call —
+    #                  nothing is torn down automatically.
+    for row in results:
+        email = row["email"]
+        row["attendance"] = ("trainer" if row.get("role") == "trainer"
+                             else live_sessions.attendance_state(
+                                 email, roster, joined, joined_tenants))
+        meta = running_by_email.get(email)
+        env_tenant = live_sessions.normalize_tenant(meta.get("arena_tenant")) if meta else ""
+        if env_tenant:
+            row["envTenant"] = env_tenant
+        row["tenantMismatch"] = live_sessions.env_tenant_mismatch(
+            env_tenant, row.get("tenant", ""))
     payload = {"results": results}
     # trainerEmail is caller-supplied — anonymous callers who know it must
     # not harvest the roster; they get masked emails (states stay visible).
@@ -6636,6 +7059,7 @@ async def _expire_live_session_keys(session_id: str, session: dict):
     without a pad, chat or join code."""
     sections_key, qa_key, _ = _pad_keys(session_id)
     keys = [*_live_keys(session_id), _live_tenants_key(session_id),
+            _live_boundat_key(session_id),
             _live_provdone_key(session_id), _live_events_key(session_id),
             sections_key, qa_key, *_room_keys(session_id)]
     if session.get("joinCode"):
@@ -6651,6 +7075,7 @@ async def _delete_live_session_keys(session_id: str, session: dict):
     from every list. delete on a missing key is a no-op."""
     sections_key, qa_key, export_key = _pad_keys(session_id)
     keys = [*_live_keys(session_id), _live_tenants_key(session_id),
+            _live_boundat_key(session_id),
             _live_provdone_key(session_id), _live_events_key(session_id),
             sections_key, qa_key, export_key, *_room_keys(session_id),
             # Delete is pre-start only, so a completion record should not exist
