@@ -490,7 +490,8 @@ async def list_fleet() -> list[dict]:
 
 async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
                    purchasing: str = "spot", lifetime_minutes: int = 0,
-                   pool: str = "daily", capacity: int | None = None) -> list[dict]:
+                   pool: str = "daily", capacity: int | None = None,
+                   code_branch: str = "main") -> list[dict]:
     """Launch ``count`` workers from the golden AMI (hard cap 4).
 
     Subnet, security groups and key-name are resolved at call time from the
@@ -567,7 +568,8 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         "--tag-specifications", tag_spec,
         "--block-device-mappings", _root_block_device(),
         "--user-data", _encode_user_data(_build_user_data(
-            lifetime_minutes=lifetime_minutes, pool=pool, capacity=capacity)),
+            lifetime_minutes=lifetime_minutes, pool=pool, capacity=capacity,
+            code_branch=code_branch)),
     ]
     if purchasing == "spot":
         args += ["--instance-market-options", market_options]

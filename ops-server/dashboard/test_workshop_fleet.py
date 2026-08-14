@@ -193,3 +193,45 @@ def test_no_workers_is_reported_not_crashed():
     d = wf.daily_scale_decision([], {})
     assert d["scale_up"] == 0
     assert "no daily workers" in d["why"]
+
+
+# ── rollout guards ──────────────────────────────────────────────────────────
+# The loop launches and terminates EC2 on its own, against a Redis that already
+# held 33 historical workshops (one of them running) when it was written. These
+# pin the two guards that stop a first tick from acting on all of them.
+
+def test_allowlist_narrows_to_named_workshops(monkeypatch):
+    monkeypatch.setattr(wf, "CONTROL_LOOP_WORKSHOPS", "ws_a,ws_b")
+    assert wf.manages("ws_a") is True
+    assert wf.manages("ws_b") is True
+    assert wf.manages("ws_real_cohort") is False, \
+        "a rehearsal must not touch a cohort that happens to be running"
+
+
+def test_star_manages_everything(monkeypatch):
+    monkeypatch.setattr(wf, "CONTROL_LOOP_WORKSHOPS", "*")
+    assert wf.manages("anything") is True
+
+
+def test_blank_allowlist_manages_everything(monkeypatch):
+    """Empty must mean 'no restriction', not 'nothing' — an operator clearing
+    the variable is removing a filter, not disabling the loop. Disabling is
+    CONTROL_LOOP_ENABLED, and the two must not be confusable."""
+    monkeypatch.setattr(wf, "CONTROL_LOOP_WORKSHOPS", "")
+    assert wf.manages("anything") is True
+
+
+def test_allowlist_ignores_whitespace(monkeypatch):
+    monkeypatch.setattr(wf, "CONTROL_LOOP_WORKSHOPS", " ws_a , ws_b ")
+    assert wf.manages("ws_a") and wf.manages("ws_b")
+
+
+def test_apply_defaults_to_off():
+    """Dry run is the default on purpose: a control loop that spends money on
+    its first tick should require an explicit opt-in. It is a LOUD no-op —
+    startup warns and every skipped action logs DRY-RUN — unlike the drain
+    cordon, which was a silent one."""
+    import os
+    assert os.environ.get("CONTROL_LOOP_APPLY") in (None, "", "0"), \
+        "this test documents the default; unset the env var to run it"
+    assert wf.CONTROL_LOOP_APPLY is False

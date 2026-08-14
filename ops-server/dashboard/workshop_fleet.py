@@ -81,6 +81,29 @@ CONTROL_TICK_S = float(os.environ.get("CONTROL_TICK_S", "30"))
 CONTROL_LOOP_ENABLED = os.environ.get("CONTROL_LOOP_ENABLED", "1").strip().lower() \
     in ("1", "true", "yes")
 
+# ── Rollout guards ──────────────────────────────────────────────────────────
+# This loop launches and terminates EC2 instances on its own. Enabling it
+# against a Redis that already holds 33 historical workshops would have it act
+# on all of them within one tick — so it starts in DRY RUN and says what it
+# would have done. Flip CONTROL_LOOP_APPLY=1 once the log reads correctly.
+#
+# This is a deliberate no-op default, not an accidental one: the log line at
+# startup states it plainly, and every skipped action is logged with the word
+# DRY-RUN. A silent no-op would be the drain-cordon bug over again.
+CONTROL_LOOP_APPLY = os.environ.get("CONTROL_LOOP_APPLY", "0").strip().lower() \
+    in ("1", "true", "yes")
+# Comma-separated workshop ids the loop may manage; "*" means all of them.
+# Narrow this during a rehearsal so one test workshop can be driven end to end
+# without touching a real cohort that happens to be running.
+CONTROL_LOOP_WORKSHOPS = os.environ.get("CONTROL_LOOP_WORKSHOPS", "*").strip()
+
+
+def manages(ws_id: str) -> bool:
+    if CONTROL_LOOP_WORKSHOPS in ("*", ""):
+        return True
+    allowed = {w.strip() for w in CONTROL_LOOP_WORKSHOPS.split(",") if w.strip()}
+    return ws_id in allowed
+
 # Planning safety on top of the profile arithmetic. 0.55 turns the 30 seats the
 # memory model allows on an m6a.4xlarge into 20 -- an explicit instruction
 # rather than a hedge: "I would rather provision 20 per machine than fit 30
@@ -504,14 +527,30 @@ async def tick(redis) -> dict:
             session = await redis.hgetall(f"live:session:{ws_id}")
             if not session:
                 continue
+            if not manages(ws_id):
+                continue
             rec = await _fleet_record(redis, ws_id)
             state = rec.get("state")
 
             if state in (None, "", "failed") and due_for_prewarm(session, now):
-                await provision_workshop_fleet(redis, ws_id, session)
+                if CONTROL_LOOP_APPLY:
+                    await provision_workshop_fleet(redis, ws_id, session)
+                else:
+                    seats = await _roster_size(redis, ws_id)
+                    profile = await repo_profiles.load(
+                        redis, session.get("trainingId") or "")
+                    plan = plan_workshop_capacity(seats, profile)
+                    log.info("DRY-RUN workshop %s (%s): would launch %d × %s "
+                             "for %d seats — %s", ws_id, session.get("title", ""),
+                             plan["workers"], WORKSHOP_INSTANCE_TYPE, seats,
+                             plan["reason"])
                 summary["prewarmed"].append(ws_id)
             elif state in (WARMING, READY) and due_for_teardown(session, now):
-                await teardown_workshop_fleet(redis, ws_id)
+                if CONTROL_LOOP_APPLY:
+                    await teardown_workshop_fleet(redis, ws_id)
+                else:
+                    log.info("DRY-RUN workshop %s: would tear down %s",
+                             ws_id, rec.get("instances") or "(no instances)")
                 summary["torn_down"].append(ws_id)
         except Exception as exc:
             # One malformed workshop must not stop the loop serving the others.
@@ -529,6 +568,13 @@ async def tick(redis) -> dict:
 
         decision = daily_scale_decision(workers, ticks)
         summary["daily"] = decision
+
+        if not CONTROL_LOOP_APPLY:
+            if decision["scale_up"] or decision["shrink"] or decision["brake"]:
+                log.info("DRY-RUN daily: would scale_up=%d shrink=%s brake=%s — %s",
+                         decision["scale_up"], decision["shrink"],
+                         decision["brake"], decision["why"])
+            return summary
 
         for wid in decision["shrink"]:
             # Withdraw the seats this worker cannot actually back. Capacity is
@@ -575,9 +621,12 @@ async def control_loop(redis) -> None:
         log.info("Control loop disabled (CONTROL_LOOP_ENABLED=0)")
         return
     log.info("Control loop: prewarm %d min ahead, teardown %d min after, tick %.0fs, "
-             "workshop seats ×%.2f safety",
+             "workshop seats ×%.2f safety, workshops=%s",
              PREWARM_LEAD_MINUTES, TEARDOWN_GRACE_MINUTES, CONTROL_TICK_S,
-             WORKSHOP_SEAT_SAFETY)
+             WORKSHOP_SEAT_SAFETY, CONTROL_LOOP_WORKSHOPS)
+    if not CONTROL_LOOP_APPLY:
+        log.warning("Control loop is in DRY RUN — it will log what it would do "
+                    "and launch NOTHING. Set CONTROL_LOOP_APPLY=1 to act.")
     while True:
         try:
             await tick(redis)
