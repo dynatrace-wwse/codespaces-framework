@@ -11,7 +11,7 @@ running under capacity, never a workshop that oversells.
 import asyncio
 import json
 
-from dashboard import capacity_units
+from shared import capacity_units
 from dashboard import repo_profiles as rp
 
 

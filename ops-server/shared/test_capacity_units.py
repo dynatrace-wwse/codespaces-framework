@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from dashboard import capacity_units as cu
+from shared import capacity_units as cu
 
 
 class TestInstanceUnits(unittest.TestCase):

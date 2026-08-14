@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import logging
 
-from dashboard import capacity_units
+from shared import capacity_units
 
 log = logging.getLogger(__name__)
 

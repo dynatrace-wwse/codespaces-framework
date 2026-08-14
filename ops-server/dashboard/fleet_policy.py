@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import math
 
-from dashboard import capacity_units
+from shared import capacity_units
 
 # ── measured constants (MiB) ────────────────────────────────────────────────
 # Committed (unreclaimable) memory a full Kubernetes-101 session holds.

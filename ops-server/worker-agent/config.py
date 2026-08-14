@@ -59,23 +59,23 @@ INSTANCE_TYPE = os.environ.get("WORKER_INSTANCE_TYPE") or _instance_type()
 def _units_for_instance(instance_type: str) -> int:
     """``capacity_units.units_for_instance``, loaded by PATH not by package.
 
-    ``from dashboard.capacity_units import ...`` looks obvious and is not
-    reliable here: whether ``dashboard`` is importable depends on how the agent
-    happened to be started and on what is on sys.path. Measured 2026-08-14 —
-    two workers of the identical instance type, started the same way, derived 20
-    and 6, because the import raised on one of them and the fallback swallowed
-    it. A silent fallback to a *smaller* number is the benign direction, but it
-    is still a machine quietly worth a third of what it cost.
+    The table lives in ``shared/`` because a worker is a sparse checkout that
+    does NOT clone ``ops-server/dashboard`` — measured 2026-08-14, two workers
+    of the identical instance type derived 20 and 6, because one of them simply
+    had no copy of the file and the fallback swallowed the error. A silent
+    fallback to a *smaller* number is the benign direction, but it is still a
+    machine quietly worth a third of what it cost.
 
-    Loading the file relative to this one has no such dependency, and it works
-    identically on an autoscaled worker built from the golden AMI.
+    Loading by path rather than by package name removes the second half of that
+    dependency: it no longer matters how the agent was started or what is on
+    sys.path, only that the sparse pattern includes ``ops-server/shared/**``.
     """
     try:
         import importlib.util
         import pathlib
 
         path = (pathlib.Path(__file__).resolve().parent.parent
-                / "dashboard" / "capacity_units.py")
+                / "shared" / "capacity_units.py")
         spec = importlib.util.spec_from_file_location("_capacity_units", path)
         if spec is None or spec.loader is None:
             return 0
@@ -184,7 +184,7 @@ WORKER_SLOT_LIMITS = os.environ.get("WORKER_SLOT_LIMITS", "0").strip().lower() i
 # packing device: a k8s-101 session's *transient* peak during the operator and
 # DynaKube steps was measured at 2.2-3.1 GiB (2026-08-12), so a 3 GiB cap sits
 # right on top of normal behaviour and would OOM-kill healthy labs. Capacity is
-# planned from units (see dashboard/capacity_units.py); this number only has to
+# planned from units (see shared/capacity_units.py); this number only has to
 # be above any legitimate peak and below "ate the worker".
 #
 # Raised from 4096 on 2026-08-14. The DAILY pool is heterogeneous, so its cap

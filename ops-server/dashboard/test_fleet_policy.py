@@ -465,7 +465,7 @@ def test_recommendation_is_derived_from_the_unit_table_not_a_hardcoded_flag():
     """A stale hardcoded flag is exactly what promised 30 seats that a
     30-session run could not deliver. The recommendation must move when the
     measured capacity moves, so this changes the table and checks it follows."""
-    from dashboard import capacity_units as cu
+    from shared import capacity_units as cu
 
     original = dict(cu.INSTANCE_UNITS)
     try:

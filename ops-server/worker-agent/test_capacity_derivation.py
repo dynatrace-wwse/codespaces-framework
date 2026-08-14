@@ -5,8 +5,8 @@ Run: /home/ops/ops-venv/bin/python -m worker-agent.test_capacity_derivation
 The bug this pins: both daily workers were m6a.4xlarge advertising 30 while
 every measurement said 20, because the 30 was typed into a file. The fix
 derives it — and the fix's own first attempt then silently derived 6 on one of
-two identical machines, because it reached the unit table through a package
-import whose availability depended on how the agent was started.
+two identical machines, because it read the unit table out of ``dashboard``,
+which a worker's sparse checkout does not contain.
 """
 
 import importlib
@@ -20,16 +20,14 @@ config = importlib.import_module("worker-agent.config")
 
 class TestUnitLookup(unittest.TestCase):
 
-    def test_loader_does_not_depend_on_the_dashboard_package_being_importable(self):
-        """Loading by file path, not by package name.
+    def test_loader_does_not_need_the_dashboard_package_at_all(self):
+        """A worker's sparse checkout has no ``ops-server/dashboard``.
 
-        Measured 2026-08-14: ``import dashboard.capacity_units`` raised
-        ModuleNotFoundError on amd002 and succeeded on amd001, same instance
-        type, same service, same command line.
+        Measured 2026-08-14: amd002 derived 6 instead of 20 because the file it
+        was reading simply was not on that machine.
         """
         saved = sys.modules.pop("dashboard", None)
-        blocker = object()   # something that is definitely not a package
-        sys.modules["dashboard"] = blocker
+        sys.modules["dashboard"] = object()   # definitely not a package
         try:
             self.assertEqual(config._units_for_instance("m6a.4xlarge"), 20)
         finally:
@@ -37,9 +35,17 @@ class TestUnitLookup(unittest.TestCase):
             if saved is not None:
                 sys.modules["dashboard"] = saved
 
+    def test_the_table_is_in_shared_where_a_worker_can_see_it(self):
+        """Pins the location, because moving it back into ``dashboard`` would
+        pass every unit test on the master and quietly halve a worker."""
+        from pathlib import Path as _P
+        root = _P(config.__file__).resolve().parent.parent
+        self.assertTrue((root / "shared" / "capacity_units.py").exists())
+        self.assertFalse((root / "dashboard" / "capacity_units.py").exists())
+
     def test_agrees_with_the_planner(self):
         """The worker and the dashboard must not disagree about one machine."""
-        from dashboard import capacity_units as cu
+        from shared import capacity_units as cu
         for t in ("m6a.4xlarge", "m6a.2xlarge", "c5.2xlarge", "r6a.2xlarge"):
             self.assertEqual(config._units_for_instance(t),
                              cu.units_for_instance(t), t)
