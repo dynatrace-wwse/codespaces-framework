@@ -384,3 +384,22 @@ if __name__ == "__main__":
             finally:
                 teardown_function(fn)
     print("all live-provisioning tests passed")
+
+
+# ── workshop tagging on the trainer's provision path ────────────────────────
+# Caught by the first live rehearsal: provision-all built its
+# ArenaProvisionRequest without workshopId, so trainer-provisioned learners
+# reached the arena path untagged. Their sessions were then invisible to
+# workshop-scoped operations, and pool routing sent them to the shared arch
+# queue -- onto daily machines, while the workshop's own dedicated workers sat
+# idle. The learner-pull path always passed it; only the trainer's path did not.
+
+def test_provision_all_tags_sessions_with_their_workshop():
+    import inspect
+    from dashboard import app as app_mod
+    src = inspect.getsource(app_mod.api_live_session_provision_all)
+    assert "workshopId=session_id" in src, (
+        "provision-all must tag each session with its workshop, or pool routing "
+        "and workshop-scoped teardown both silently miss trainer-provisioned "
+        "learners"
+    )

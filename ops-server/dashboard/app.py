@@ -6362,6 +6362,15 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                 # otherwise a 120-minute workshop reaps every learner's
                 # environment exactly as the session ends.
                 sessionHours=workshop_session_hours(session),
+                # Trainer-provisioned learners were reaching the arena path with
+                # NO workshop id, so their sessions were never tagged with the
+                # workshop that created them. Two consequences, both silent:
+                # workshop-scoped operations (per-learner stop/rebuild, teardown)
+                # could not see them, and pool routing sent them to the shared
+                # arch queue — onto daily machines — while the workshop's own
+                # dedicated workers sat idle. The pull path always passed this;
+                # only the trainer's own "provision all" did not.
+                workshopId=session_id,
             ), request)
             status = "already-active" if provisioned.get("deduped") else "queued"
             # Settle the request for this learner: their own app must not
