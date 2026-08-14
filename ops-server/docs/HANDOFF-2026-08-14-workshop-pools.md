@@ -171,14 +171,22 @@ teardown-under-load; the 30-at-once session teardown still wants its own run.
 
 ## Still owed
 
-1. **Measure Astroshop at steady state**, with the lab deployed (post-create understates
-   by ~half). It sets the daily pool's generic slot cap and replaces the manifest-derived
-   estimate.
-2. **Turn the control loop on for real** — read a few dry-run ticks, then
+1. **Fix the arena OAuth mint URL, then measure Astroshop.** The measurement is BLOCKED,
+   not skipped: `provisioning/dt_token_provisioner.py:33` posts the client-credentials
+   grant to the tenant host instead of `sso.dynatrace.com`, so no harness can provision a
+   real environment. Written up in `docs/known-issues/arena-oauth-mint-sso-url.md`.
+   The same blocker means **the reaper has not been validated under load** — sessions
+   without tokens die at `postCreateCommand` and never reach the wait the reaper replaces.
+   Both want a real environment; fix the mint first and they come together.
+2. **Raise the daily pool's slot cap** from a flat 4,096 MiB. Astroshop declares 6,320 MiB
+   of pod limits, so 8,192 is defensible on the declared figures alone, without waiting for
+   the steady-state measurement. The workshop path is already safe — an unprofiled repo
+   gets a 12 GiB cap.
+3. **Turn the control loop on for real** — read a few dry-run ticks, then
    `CONTROL_LOOP_APPLY=1` and widen `CONTROL_LOOP_WORKSHOPS`.
-3. **Merge to main**, so autoscaled workers get this code from their own boot sync rather
+4. **Merge to main**, so autoscaled workers get this code from their own boot sync rather
    than needing `WORKER_CODE_BRANCH`.
-4. **Deploy build-once/upload-many** — proven safe (two builds with different
+5. **Deploy build-once/upload-many** — proven safe (two builds with different
    `DT_APP_ENVIRONMENT_URL` are byte-identical), turns ~87 min of live registration into ~3.
-5. **nginx**: gzip for JSON (only `text/html` is compressed today), upstream keepalive,
+6. **nginx**: gzip for JSON (only `text/html` is compressed today), upstream keepalive,
    and back the 4 s lab log poll off to 8 s during a workshop.
