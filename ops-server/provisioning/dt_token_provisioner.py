@@ -25,12 +25,16 @@ from typing import Optional
 
 import httpx
 
+from .sso import discover_token_url
 from .token_specs import TokenSpec
 
 log = logging.getLogger("ops-provisioning")
 
 _TOKEN_API = "{tenant}/api/v2/apiTokens"
-_OAUTH_TOKEN_URL = "{tenant}/sso/oauth2/token"
+# NOT "{tenant}/sso/oauth2/token" — the grant goes to the SSO host, which is a
+# different origin from the tenant. Posting it to the tenant returns 301 and the
+# session then dies at postCreateCommand with no DT_OPERATOR_TOKEN. See
+# provisioning/sso.py and docs/known-issues/arena-oauth-mint-sso-url.md.
 _OAUTH_SCOPES = "token:write offline_access"
 
 
@@ -56,6 +60,8 @@ class DTTokenProvisioner:
         api_token: str = "",
         oauth_client_id: str = "",
         oauth_client_secret: str = "",
+        oauth_resource: str = "",
+        oauth_token_url: str = "",
     ):
         self.tenant_url = tenant_url.rstrip("/")
         # The classic environment API (/api/v2/apiTokens) lives on the classic
@@ -71,6 +77,10 @@ class DTTokenProvisioner:
         self._api_token = api_token
         self._oauth_client_id = oauth_client_id
         self._oauth_client_secret = oauth_client_secret
+        self._oauth_resource = oauth_resource
+        # Empty means "discover on first mint". Passing it explicitly is for
+        # callers that already know (and for tests, which must not hit network).
+        self._oauth_token_url = oauth_token_url
         self._bearer: Optional[str] = None
         self._bearer_expiry: Optional[datetime] = None
 
@@ -90,14 +100,28 @@ class DTTokenProvisioner:
                 "Content-Type": "application/json"}
 
     async def _refresh_bearer(self):
-        url = _OAUTH_TOKEN_URL.format(tenant=self.tenant_url)
+        url = self._oauth_token_url or await discover_token_url(self.tenant_url)
+        # Cache it: the discovery is a network round trip and the answer cannot
+        # change for the life of a provisioner, which is one session.
+        self._oauth_token_url = url
+        form = {
+            "grant_type": "client_credentials",
+            "client_id": self._oauth_client_id,
+            "client_secret": self._oauth_client_secret,
+            "scope": _OAUTH_SCOPES,
+        }
+        # Account-scoped clients need the account URN as `resource`; app-installed
+        # clients do not have one and must not send an empty string.
+        if self._oauth_resource:
+            form["resource"] = self._oauth_resource
         async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(url, data={
-                "grant_type": "client_credentials",
-                "client_id": self._oauth_client_id,
-                "client_secret": self._oauth_client_secret,
-                "scope": _OAUTH_SCOPES,
-            })
+            r = await client.post(url, data=form)
+            if r.status_code >= 400:
+                # The body is the only thing that separates a wrong scope from a
+                # wrong resource — both are 400. Without it the caller sees a
+                # bare status and guesses.
+                log.error("OAuth mint HTTP %s at %s: %s",
+                          r.status_code, url, r.text[:300])
             r.raise_for_status()
             data = r.json()
             self._bearer = data["access_token"]

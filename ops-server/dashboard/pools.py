@@ -111,18 +111,46 @@ async def target_queue(redis, ws_id: str, arch: str = "amd64") -> str:
 
 
 # ── Paced admission ─────────────────────────────────────────────────────────
-# Defaults chosen from the measured failure, not from taste: 30 simultaneous
-# installs exhausted a 600 s gate, 20 used 53 of 60 retries, 12 used 29. The
-# aim is to keep the number of installs *starting together* well under ten.
+# The rate is derived from the measured failure, not chosen by taste. On one
+# m6a.4xlarge: 30 simultaneous installs exhausted the 600 s gate (0 passes), 20
+# used 53 of 60 retries, 12 used 29. The binding resource during a burst is the
+# worker's own volume — bandwidth while images are pulled, IOPS while the
+# ActiveGate JVM starts — and ~18 concurrent installs is where a stock gp3
+# volume stops keeping up.
 #
-# 2 every 30 s drips 30 sessions over roughly 7 minutes. Burst 2 means a pair of
-# learners arriving at once is still instant.
+# So the drip is expressed PER WORKER, and the rate for a queue is that figure
+# times the number of workers actually serving it. This is the property that
+# makes the same setting correct for a one-machine workshop and a five-machine
+# bootcamp: the burst each volume sees is the same either way, while a bigger
+# pool fills proportionally faster.
+#
+#   1.5 installs/min/worker x ~8 min per install  ≈  12 in flight per worker
+#
+# Twelve is the largest N measured to finish comfortably (29 of 60 retries),
+# with margin under the ~18 where the volume starts losing. That margin is the
+# point: it is cheaper to admit a learner forty seconds later than to have the
+# whole room's ActiveGates restart-loop.
 PACE_ENABLED = os.environ.get("PACE_ENABLED", "1").strip().lower() in ("1", "true", "yes")
-PACE_BATCH = int(os.environ.get("PACE_BATCH", "2"))
-PACE_INTERVAL_S = float(os.environ.get("PACE_INTERVAL_S", "30"))
+PACE_PER_WORKER_PER_MIN = float(os.environ.get("PACE_PER_WORKER_PER_MIN", "1.5"))
+# Burst allowance per worker. A lone learner arriving at a quiet moment must be
+# admitted instantly — a fixed timer would tax the common case to fix the rare
+# one — but the burst must stay small enough that it is not itself the problem.
+PACE_BURST_PER_WORKER = int(os.environ.get("PACE_BURST_PER_WORKER", "2"))
+# Floor, for the window where a pool's workers have not registered yet. Without
+# it a queue whose workers are still booting would have a rate of zero and
+# nothing would ever drain.
+PACE_MIN_WORKERS = int(os.environ.get("PACE_MIN_WORKERS", "1"))
+# Legacy fixed-rate overrides. When either is set explicitly they win and the
+# per-worker derivation is bypassed, so an operator can still pin a rate.
+PACE_BATCH = int(os.environ["PACE_BATCH"]) if os.environ.get("PACE_BATCH") else 0
+PACE_INTERVAL_S = float(os.environ["PACE_INTERVAL_S"]) if os.environ.get("PACE_INTERVAL_S") else 0.0
 # How often the drainer looks at the pending lists. Independent of the refill
 # interval: a short tick makes the drip smooth, the bucket controls the rate.
 PACE_TICK_S = float(os.environ.get("PACE_TICK_S", "5"))
+# How long a worker count is trusted before it is re-read. Short enough that a
+# newly-warm worker speeds the drip up within a tick or two, long enough that
+# the pacer is not scanning Redis every five seconds.
+WORKER_COUNT_TTL_S = float(os.environ.get("PACE_WORKER_COUNT_TTL_S", "30"))
 
 
 class TokenBucket:
@@ -138,6 +166,23 @@ class TokenBucket:
         self.interval = max(0.1, interval)
         self._tokens = float(self.capacity)
         self._last = time.monotonic()
+
+    def retune(self, capacity: int, interval: float) -> None:
+        """Change the rate without losing accumulated tokens.
+
+        Called when a pool gains or loses a worker. Tokens already earned are
+        kept (clamped to the new capacity) so a worker joining mid-drip speeds
+        the queue up rather than resetting it, and a worker leaving does not
+        hand out a free burst.
+        """
+        capacity = max(1, capacity)
+        interval = max(0.1, interval)
+        if capacity == self.capacity and interval == self.interval:
+            return
+        self._refill()
+        self.capacity = capacity
+        self.interval = interval
+        self._tokens = min(self._tokens, float(capacity))
 
     def _refill(self) -> None:
         now = time.monotonic()
@@ -163,11 +208,81 @@ class TokenBucket:
 # shared self-service queue drip independently -- a busy workshop must not
 # throttle a single self-service learner on entirely different machines.
 _buckets: dict[str, TokenBucket] = {}
+# target -> (worker_count, monotonic deadline)
+_worker_counts: dict[str, tuple[int, float]] = {}
 
 
-def bucket_for(target: str) -> TokenBucket:
+def rate_for_workers(workers: int) -> tuple[int, float]:
+    """(burst, interval) for a queue served by ``workers`` machines.
+
+    Expressed as "burst tokens per interval", which is what TokenBucket wants.
+    The sustained rate is ``burst / interval``; the burst is what a lone learner
+    arriving at a quiet moment gets instantly.
+    """
+    if PACE_BATCH and PACE_INTERVAL_S:
+        return PACE_BATCH, PACE_INTERVAL_S
+    workers = max(PACE_MIN_WORKERS, workers)
+    burst = max(1, PACE_BURST_PER_WORKER * workers)
+    per_min = max(0.01, PACE_PER_WORKER_PER_MIN * workers)
+    return burst, burst / per_min * 60.0
+
+
+def pool_of_target(target: str) -> str:
+    """Which pool a queue key belongs to. "" when it is not a queue we pace."""
+    if target.startswith("queue:pool:"):
+        return target[len("queue:pool:"):]
+    if target.startswith("queue:test:"):
+        return DAILY_POOL
+    return ""
+
+
+async def workers_serving(redis, target: str) -> int:
+    """How many live workers consume ``target``.
+
+    Counts by the same pool identity the workers register with, so this cannot
+    disagree with the routing. A worker with no ``pool`` field is an older agent
+    and belongs to daily, which is what it was doing before pools existed.
+
+    Fails OPEN at ``PACE_MIN_WORKERS``: a Redis hiccup must slow the drip, never
+    stop it, because a stopped drip looks to a trainer exactly like a hung fleet.
+    """
+    now = time.monotonic()
+    cached = _worker_counts.get(target)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    pool = pool_of_target(target)
+    count = 0
+    try:
+        async for key in redis.scan_iter(match="worker:*", count=200):
+            # `worker:pressure`-style counters once collided with this scan, so
+            # only hashes that actually describe a worker are counted.
+            h = await redis.hgetall(key)
+            if not isinstance(h, dict) or "capacity" not in h:
+                continue
+            if (h.get("role") or "") == "master":
+                continue
+            if str(h.get("draining") or "0").strip().lower() in ("1", "true", "yes"):
+                continue
+            if ((h.get("pool") or DAILY_POOL).strip() or DAILY_POOL) != pool:
+                continue
+            count += 1
+    except Exception as exc:                                  # pragma: no cover
+        log.warning("worker count for %s failed: %s — pacing as %d",
+                    target, exc, PACE_MIN_WORKERS)
+        count = PACE_MIN_WORKERS
+
+    count = max(PACE_MIN_WORKERS, count)
+    _worker_counts[target] = (count, now + WORKER_COUNT_TTL_S)
+    return count
+
+
+def bucket_for(target: str, workers: int = PACE_MIN_WORKERS) -> TokenBucket:
+    burst, interval = rate_for_workers(workers)
     if target not in _buckets:
-        _buckets[target] = TokenBucket(PACE_BATCH, PACE_INTERVAL_S)
+        _buckets[target] = TokenBucket(burst, interval)
+    else:
+        _buckets[target].retune(burst, interval)
     return _buckets[target]
 
 
@@ -188,7 +303,8 @@ async def enqueue_paced(redis, target: str, job: dict) -> dict:
 
     pending = pending_key(target)
     waiting = await redis.llen(pending)
-    if waiting == 0 and bucket_for(target).take(1):
+    workers = await workers_serving(redis, target)
+    if waiting == 0 and bucket_for(target, workers).take(1):
         await redis.rpush(target, payload)
         return {"admitted": True, "position": 0, "queue": target}
 
@@ -203,7 +319,9 @@ async def drain_pending(redis, target: str) -> int:
     mid-drain can neither duplicate a job nor drop one.
     """
     pending = pending_key(target)
-    allowed = bucket_for(target).take(PACE_BATCH)
+    workers = await workers_serving(redis, target)
+    bucket = bucket_for(target, workers)
+    allowed = bucket.take(bucket.capacity)
     moved = 0
     for _ in range(allowed):
         if not await redis.lmove(pending, target, "LEFT", "RIGHT"):
@@ -232,16 +350,22 @@ async def pacer_loop(redis) -> None:
     if not PACE_ENABLED:
         log.info("Provision pacer disabled (PACE_ENABLED=0)")
         return
-    log.info("Provision pacer: %d job(s) per %.0fs per queue, tick %.0fs",
-             PACE_BATCH, PACE_INTERVAL_S, PACE_TICK_S)
+    if PACE_BATCH and PACE_INTERVAL_S:
+        log.info("Provision pacer: PINNED at %d job(s) per %.0fs per queue, "
+                 "tick %.0fs", PACE_BATCH, PACE_INTERVAL_S, PACE_TICK_S)
+    else:
+        log.info("Provision pacer: %.2f job(s)/min per worker (burst %d), "
+                 "tick %.0fs", PACE_PER_WORKER_PER_MIN, PACE_BURST_PER_WORKER,
+                 PACE_TICK_S)
     while True:
         try:
             for target in await known_targets(redis):
                 moved = await drain_pending(redis, target)
                 if moved:
                     depth = await redis.llen(pending_key(target))
-                    log.info("pacer: admitted %d to %s, %d still waiting",
-                             moved, target, depth)
+                    log.info("pacer: admitted %d to %s (%d worker(s)), "
+                             "%d still waiting", moved, target,
+                             await workers_serving(redis, target), depth)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                              # pragma: no cover

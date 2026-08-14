@@ -29,7 +29,61 @@ def _arch_family() -> str:
 _WORKER_INSTANCE = os.environ.get("WORKER_INSTANCE") or uuid.uuid4().hex[:3]
 WORKER_ID = os.environ.get("WORKER_ID", f"w{_arch_family()}{_WORKER_INSTANCE}")
 WORKER_ARCH = os.environ.get("WORKER_ARCH", "arm64" if platform.machine() in ("aarch64", "arm64") else "amd64")
-WORKER_CAPACITY = int(os.environ.get("WORKER_CAPACITY", "6"))
+
+def _instance_type() -> str:
+    """This box's EC2 instance type, via IMDSv2. "" when not on EC2.
+
+    Two seconds of timeout total: a worker that cannot reach IMDS must still
+    start, it just falls back to the configured capacity.
+    """
+    try:
+        import urllib.request
+
+        def _fetch(url: str, headers: dict, method: str = "GET") -> str:
+            req = urllib.request.Request(url, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=1) as r:
+                return r.read().decode().strip()
+
+        token = _fetch("http://169.254.169.254/latest/api/token",
+                       {"X-aws-ec2-metadata-token-ttl-seconds": "60"}, "PUT")
+        return _fetch("http://169.254.169.254/latest/meta-data/instance-type",
+                      {"X-aws-ec2-metadata-token": token})
+    except Exception:
+        return ""
+
+
+INSTANCE_TYPE = os.environ.get("WORKER_INSTANCE_TYPE") or _instance_type()
+
+
+def _derive_capacity() -> int:
+    """Slots this box should advertise.
+
+    An explicit ``WORKER_CAPACITY`` always wins — the workshop planner sets it
+    per launch, and an operator must be able to pin a box for a capacity test.
+    Otherwise it comes from the unit model, so the number a machine advertises
+    and the number the planner assumed cannot drift apart. They had: both daily
+    workers were m6a.4xlarge advertising 30 while every measurement said 20, and
+    nothing in the system could notice, because the 30 was typed into a file.
+
+    Falls back to 6 — the smallest shape's figure — when the instance type is
+    unknown. Advertising too few slots costs money; advertising too many costs
+    a class.
+    """
+    explicit = os.environ.get("WORKER_CAPACITY")
+    if explicit:
+        return int(explicit)
+    if INSTANCE_TYPE:
+        try:
+            from dashboard.capacity_units import units_for_instance
+            derived = units_for_instance(INSTANCE_TYPE)
+            if derived > 0:
+                return derived
+        except Exception:                                     # pragma: no cover
+            pass
+    return 6
+
+
+WORKER_CAPACITY = _derive_capacity()
 # Weighted scheduler overrides (optional; derived from WORKER_CAPACITY when unset).
 # WORKER_COST_BUDGET  — total in-flight cost units the worker admits at once.
 # WORKER_MAX_HEAVY    — max concurrent heavy-lane jobs (e.g. dt-cnfs).
@@ -95,13 +149,20 @@ WORKER_SLOT_LIMITS = os.environ.get("WORKER_SLOT_LIMITS", "0").strip().lower() i
 # Hard ceiling per slot. OOM-kills inside the slot's own cgroup, so a runaway
 # takes out one learner's cluster instead of the whole worker.
 #
-# 4096, NOT the session's committed 1,609 MiB. This is a runaway guard, not a
+# 8192, NOT the session's committed 1,609 MiB. This is a runaway guard, not a
 # packing device: a k8s-101 session's *transient* peak during the operator and
 # DynaKube steps was measured at 2.2-3.1 GiB (2026-08-12), so a 3 GiB cap sits
 # right on top of normal behaviour and would OOM-kill healthy labs. Capacity is
-# planned from committed memory (see fleet_policy.SESSION_COMMITTED_MB); this
-# number only has to be above any legitimate peak and below "ate the worker".
-WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "4096"))
+# planned from units (see dashboard/capacity_units.py); this number only has to
+# be above any legitimate peak and below "ate the worker".
+#
+# Raised from 4096 on 2026-08-14. The DAILY pool is heterogeneous, so its cap
+# has to clear the heaviest training that can land on it, not the one we
+# measured: Astroshop declares 6,320 MiB of pod limits across ten components,
+# which means a correct Astroshop session was being killed for being the size
+# it is designed to be. A dedicated workshop pool gets a cap sized from its own
+# repo's units instead (``capacity_units.slot_memory_cap_mb``).
+WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "8192"))
 # Soft floor: under host pressure the kernel reclaims from slots above this
 # first, so a heavy neighbour is squeezed before a well-behaved one.
 WORKER_SLOT_MEMORY_RESERVATION_MB = int(os.environ.get("WORKER_SLOT_MEMORY_RESERVATION_MB", "2048"))

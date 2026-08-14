@@ -94,13 +94,22 @@ def test_anything_beats_compute_optimized():
     # The cost thesis survives the CPU correction: c5 is still worst.
     ranked = fp.rank_by_cost("eu-west-2")
     assert ranked[-1]["instance_type"] == "c5.2xlarge"
-    assert ranked[0]["usd_per_session_hour"] < 0.5 * ranked[-1]["usd_per_session_hour"]
+    # 0.59x on the unit model (m6a 0.0400 vs c5 0.0673). The gap narrowed when
+    # planning moved off the four-ceiling arithmetic, because that arithmetic
+    # penalised the bigger shape for sharing one volume — a start-rate limit
+    # that paced admission now handles, not a holding limit.
+    assert ranked[0]["usd_per_session_hour"] < 0.7 * ranked[-1]["usd_per_session_hour"]
 
 
 def test_rank_by_cost_prices_deliverable_slots_not_installed_ram():
     for row in fp.rank_by_cost("eu-west-2"):
-        assert row["slots"] == min(row["memory_slots"], row["cpu_slots"], fp.disk_slots())
-        assert row["binds"] in ("memory", "cpu", "disk", "balanced")
+        # Prices what you are PLANNED to get, not the ceiling arithmetic. The
+        # ceilings are still reported alongside, because "raising IOPS would
+        # buy seats" is advice an operator can act on.
+        assert row["slots"] == fp.planned_slots(row["instance_type"])
+        assert row["memory_slots"] > 0 and row["cpu_slots"] > 0
+        assert row["binds"] in ("memory", "cpu", "disk-bandwidth", "disk-iops",
+                                "balanced")
 
 
 def test_unknown_instance_type_refuses_rather_than_guesses():
@@ -110,10 +119,10 @@ def test_unknown_instance_type_refuses_rather_than_guesses():
 
 
 def test_instances_for_seats_includes_redundancy():
-    per = fp.slots_for_instance("r6a.2xlarge")          # 16 (CPU-bound)
-    assert per == 16
-    assert fp.instances_for_seats(70, "r6a.2xlarge") == 5 + 1
-    assert fp.instances_for_seats(70, "r6a.2xlarge", redundancy=False) == 5
+    per = fp.planned_slots("r6a.2xlarge")               # 10 units
+    assert per == 10
+    assert fp.instances_for_seats(70, "r6a.2xlarge") == 7 + 1
+    assert fp.instances_for_seats(70, "r6a.2xlarge", redundancy=False) == 7
     # N+1 must genuinely cover the loss of one host.
     assert (fp.instances_for_seats(70, "r6a.2xlarge") - 1) * per >= 70
 
@@ -208,12 +217,12 @@ def test_no_action_when_target_already_met():
 
 
 def test_launch_count_derived_from_measured_density():
-    # 70 seats, nothing running, 16 usable slots per r6a.2xlarge → 5.
+    # 70 seats, nothing running, 10 planned slots per r6a.2xlarge → 7.
     plan = fp.plan_scale_up(70, _state([]), instance_type="r6a.2xlarge",
                             per_call_cap=10)
     assert plan["action"] == "launch"
-    assert plan["launch"] == 5
-    assert plan["per_instance"] == 16
+    assert plan["launch"] == 7
+    assert plan["per_instance"] == 10
 
 
 def test_undrain_is_preferred_over_launching():
@@ -443,21 +452,36 @@ def test_exactly_one_recommended_and_it_is_the_cheapest_per_session():
     assert len(rec) == 1, "an ambiguous recommendation is worse than none"
     cheapest = min(choices, key=lambda c: c["usd_per_session_hour"])
     assert rec[0]["type"] == cheapest["type"]
-    # On baseline gp3 that is m6a.2xlarge, NOT the 4xlarge: two 2xlarges carry
-    # two 125 MB/s volumes (14 seats each) where one 4xlarge carries one (18),
-    # for the same money. The 4xlarge only wins once its volume is provisioned
-    # past baseline — see test_recommendation_follows_provisioned_throughput.
-    assert rec[0]["type"] == "m6a.2xlarge"
+    # A 4xlarge is worth exactly two 2xlarges and costs exactly twice as much,
+    # so the two tie on cost per session. min() breaks the tie by list order and
+    # picks the 4xlarge, which is the right default: half as many machines to
+    # warm, register and tear down for the same money.
+    assert rec[0]["type"] == "m6a.4xlarge"
+    two = {c["type"]: c for c in choices}["m6a.2xlarge"]
+    assert rec[0]["usd_per_session_hour"] == two["usd_per_session_hour"]
 
 
-def test_recommendation_follows_provisioned_throughput_not_a_hardcoded_flag():
-    # The literal in INSTANCE_CHOICES still marks m6a.4xlarge; the derived
-    # recommendation must ignore it. A stale hardcoded flag is exactly what
-    # promised 30 seats that a 30-session run could not deliver.
-    literal = [c["type"] for c in fp.INSTANCE_CHOICES if c.get("recommended")]
-    assert literal == ["m6a.4xlarge"]
-    derived = [c["type"] for c in fp.instance_choices("eu-west-2") if c["recommended"]]
-    assert derived != literal
+def test_recommendation_is_derived_from_the_unit_table_not_a_hardcoded_flag():
+    """A stale hardcoded flag is exactly what promised 30 seats that a
+    30-session run could not deliver. The recommendation must move when the
+    measured capacity moves, so this changes the table and checks it follows."""
+    from dashboard import capacity_units as cu
+
+    original = dict(cu.INSTANCE_UNITS)
+    try:
+        # Halve the 4xlarge's worth. It now costs twice as much per session as
+        # the 2xlarge, and the recommendation must abandon it.
+        cu.INSTANCE_UNITS["m6a.4xlarge"] = 10
+        derived = [c["type"] for c in fp.instance_choices("eu-west-2")
+                   if c["recommended"]]
+        assert derived == ["m6a.2xlarge"], derived
+    finally:
+        cu.INSTANCE_UNITS.clear()
+        cu.INSTANCE_UNITS.update(original)
+
+    # And back to the real table, exactly one recommendation.
+    assert len([c for c in fp.instance_choices("eu-west-2")
+                if c["recommended"]]) == 1
 
 
 def test_choices_cover_three_families():

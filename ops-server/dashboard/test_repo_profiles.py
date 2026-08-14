@@ -11,6 +11,7 @@ running under capacity, never a workshop that oversells.
 import asyncio
 import json
 
+from dashboard import capacity_units
 from dashboard import repo_profiles as rp
 
 
@@ -148,7 +149,10 @@ def test_cap_sits_above_the_transient_peak_not_at_steady_state():
     and DynaKube steps. A cap at the committed figure would kill healthy labs."""
     cap = rp.slot_memory_cap_mb(rp.K8S_101)
     assert cap >= 3100, "must clear the worst observed transient peak"
-    assert cap == 4096, "and should reproduce the hand-chosen production value"
+    # Raised from 4096 to 8192 on 2026-08-14. The daily pool is heterogeneous,
+    # so its slot cap has to clear the heaviest training that can land on it —
+    # Astroshop declares 6,320 MiB — not the one we happened to measure.
+    assert cap == 8192
 
 
 def test_a_heavy_repo_gets_a_bigger_cap():
@@ -161,4 +165,4 @@ def test_cap_never_drops_below_the_historical_floor():
     """Lowering an existing worker's cap on the strength of a profile would
     trade a runaway guard for a new source of OOM kills."""
     feather = rp.RepoProfile("tiny", steady_memory_mb=200, steady_cpu=0.01)
-    assert rp.slot_memory_cap_mb(feather) == rp.SLOT_CAP_FLOOR_MB
+    assert rp.slot_memory_cap_mb(feather) == capacity_units.SLOT_CAP_FLOOR_MB

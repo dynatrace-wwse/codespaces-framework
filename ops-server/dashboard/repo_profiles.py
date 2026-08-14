@@ -37,7 +37,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+
+from dashboard import capacity_units
 
 log = logging.getLogger(__name__)
 
@@ -192,64 +193,51 @@ async def publish(redis, repo: str, profile: RepoProfile) -> None:
                      json.dumps(profile.as_dict()))
 
 
+def units(profile: RepoProfile) -> int:
+    """How many capacity units one session of this repo costs.
+
+    The published table in ``capacity_units`` wins when the repo is in it — that
+    is the number someone measured and wrote down deliberately. A profile that
+    exists only as a memory figure is converted, rounding UP so a repo needing
+    1.1 units is planned as 2 rather than silently oversold.
+    """
+    named = capacity_units.units_for_repo_static(profile.repo)
+    if named != capacity_units.UNPROFILED_UNITS:
+        return named
+    return max(1, -(-int(profile.steady_memory_mb) // capacity_units.UNIT_MEMORY_MB))
+
+
 def seats_per_worker(profile: RepoProfile, instance_type: str,
                      safety: float = 0.8) -> int:
     """Seats one instance should be planned for, for THIS repo.
 
-    Memory and CPU only. The disk ceilings in ``fleet_policy`` describe how many
-    installs can run *simultaneously* and still clear the readiness gate — a
-    concurrency limit, which the provisioning drip now handles separately. This
-    is the steady-state holding capacity, which is the number a trainer needs
-    when asking "how many machines for seventy people".
+    Delegates to the unit model — ``instance units // repo units``. The
+    ``safety`` argument is accepted and ignored: safety is baked into the unit
+    table itself (the m6a.4xlarge anchor is the largest count observed to pass,
+    not the arithmetic ceiling), and a second multiplier on top of it was how
+    the same margin ended up applied twice in some paths and not at all in
+    others. Kept in the signature so existing callers do not have to change.
 
     Returns 0 for an unknown instance type. Callers must treat that as "refuse
     to plan" rather than guessing: guessing high is how a class gets oversold.
     """
-    from dashboard import fleet_policy
-
-    mem = fleet_policy.INSTANCE_MEMORY_MB.get(instance_type, 0)
-    vcpus = fleet_policy.INSTANCE_VCPUS.get(instance_type, 0)
-    if mem <= 0 or vcpus <= 0:
-        return 0
-    usable = mem - fleet_policy.HOST_BASE_OVERHEAD_MB - fleet_policy.HOST_CACHE_RESERVE_MB
-    if usable <= 0:
-        return 0
-    by_memory = int((usable / profile.steady_memory_mb) * safety)
-    # Steady-state CPU, not the install burst -- an idle-but-occupied session
-    # draws almost nothing, which is exactly why CPU utilisation is a poor
-    # occupancy signal and why this term rarely binds.
-    by_cpu = int(vcpus / profile.steady_cpu) if profile.steady_cpu > 0 else by_memory
-    return max(0, min(by_memory, by_cpu))
-
-
-# A slot's ceiling must sit ABOVE any legitimate peak, not at the steady-state
-# figure. Capacity planning uses committed memory; this is a runaway guard.
-# k8s-101 commits 1,609 MiB but peaks at 2.2-3.1 GiB transiently during the
-# operator and DynaKube steps, so a cap at the committed figure would OOM-kill
-# perfectly healthy labs. 2.5x reproduces the hand-chosen 4096 for k8s-101.
-SLOT_CAP_MULTIPLIER = float(os.environ.get("SLOT_CAP_MULTIPLIER", "2.5"))
-SLOT_CAP_FLOOR_MB = 4096
+    return capacity_units.seats_per_instance(instance_type, units(profile))
 
 
 def slot_memory_cap_mb(profile: RepoProfile) -> int:
-    """Per-slot hard memory ceiling for this repo.
-
-    Never below the historical 4096 floor: lowering an existing worker's cap on
-    the strength of a profile would trade a runaway guard for a new source of
-    OOM kills, which is the wrong direction to be wrong in.
-    """
-    return max(SLOT_CAP_FLOOR_MB,
-               int(profile.steady_memory_mb * SLOT_CAP_MULTIPLIER))
+    """Per-slot hard memory ceiling for this repo — the *limit* to the unit
+    model's *request*. See ``capacity_units.slot_memory_cap_mb``."""
+    return capacity_units.slot_memory_cap_mb(units(profile))
 
 
 def workers_for_seats(seats: int, profile: RepoProfile, instance_type: str,
-                      safety: float = 0.8) -> int:
+                      safety: float = 0.8, redundancy: int = 0) -> int:
     """Instances needed to hold ``seats`` sessions of this repo.
 
     Rounds UP, always. A workshop one seat short is a person without an
-    environment in front of a room.
+    environment in front of a room. ``redundancy`` defaults to 0 here because
+    the workshop planner adds its own spare machine explicitly; pass 1 to get a
+    plan that survives losing a host.
     """
-    per = seats_per_worker(profile, instance_type, safety)
-    if per <= 0:
-        return 0
-    return -(-max(0, seats) // per)
+    return capacity_units.instances_for_seats(
+        seats, instance_type, units(profile), redundancy=redundancy)

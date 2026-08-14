@@ -1,0 +1,87 @@
+"""Where a tenant's SSO lives — one resolver, shared by every minting path.
+
+A Dynatrace OAuth client-credentials grant is posted to the *SSO* host, which is
+NOT the tenant host. Formatting the tenant URL into a token endpoint produces a
+301 and a mint that fails in a way that reads like a credential problem:
+
+    Redirect response '301 Moved Permanently' for url
+    'https://sro97894.apps.dynatrace.com/sso/oauth2/token'
+
+That defect lived in ``dt_token_provisioner`` from the start and was invisible
+because the app normally mints with its own identity — only a scripted caller
+(a load test, a measurement harness) ever reached the code. This module exists
+so there is exactly one answer to "which SSO host", reachable from both
+``dashboard.app_deploy`` and ``provisioning`` without either importing the other.
+
+Resolution order, most authoritative first:
+
+1. **Ask the tenant.** ``HEAD /platform/oauth2/authorization/dynatrace-sso``
+   redirects to its own SSO origin. This is the only source that stays correct
+   when a new realm appears.
+2. **Known-domain map.** The probe needs a network round trip and the tenant to
+   be up. When it fails, a labs tenant must NOT silently fall back to the
+   production SSO — that mints against the wrong realm and fails with a
+   confusing 400. The suffix map keeps sprint/dev honest offline.
+3. **Production SSO**, for everything else.
+"""
+
+from __future__ import annotations
+
+import logging
+from urllib.parse import urlparse
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+DEFAULT_SSO = "https://sso.dynatrace.com"
+
+# Longest suffix wins, so the more specific labs domains are matched before any
+# broader one that might be added later.
+SSO_BY_DOMAIN_SUFFIX = {
+    ".sprint.apps.dynatracelabs.com": "https://sso-sprint.dynatracelabs.com",
+    ".sprint.dynatracelabs.com": "https://sso-sprint.dynatracelabs.com",
+    ".dev.apps.dynatracelabs.com": "https://sso-dev.dynatracelabs.com",
+    ".dev.dynatracelabs.com": "https://sso-dev.dynatracelabs.com",
+}
+
+TOKEN_PATH = "/sso/oauth2/token"
+
+
+def _host(tenant_url: str) -> str:
+    u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
+    return u.netloc
+
+
+def sso_for_known_domain(tenant_url: str) -> str:
+    """SSO origin from the tenant's domain alone — no network.
+
+    Used as the fallback when the probe cannot run, and directly by tests.
+    """
+    host = _host(tenant_url).lower()
+    for suffix in sorted(SSO_BY_DOMAIN_SUFFIX, key=len, reverse=True):
+        if host.endswith(suffix):
+            return SSO_BY_DOMAIN_SUFFIX[suffix]
+    return DEFAULT_SSO
+
+
+async def discover_sso(tenant_url: str) -> str:
+    """The tenant's SSO origin (no path). Never raises."""
+    try:
+        u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
+        probe = f"{u.scheme}://{u.netloc}/platform/oauth2/authorization/dynatrace-sso"
+        async with httpx.AsyncClient(timeout=8, follow_redirects=False) as c:
+            r = await c.head(probe)
+            loc = r.headers.get("location")
+            if 300 <= r.status_code < 400 and loc:
+                p = urlparse(loc)
+                if p.scheme and p.netloc:
+                    return f"{p.scheme}://{p.netloc}"
+    except Exception as exc:
+        log.warning("SSO discovery failed for %s: %s", tenant_url, exc)
+    return sso_for_known_domain(tenant_url)
+
+
+async def discover_token_url(tenant_url: str) -> str:
+    """Full client-credentials token endpoint for ``tenant_url``."""
+    return f"{await discover_sso(tenant_url)}{TOKEN_PATH}"

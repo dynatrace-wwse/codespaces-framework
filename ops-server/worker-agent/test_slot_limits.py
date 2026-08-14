@@ -70,13 +70,18 @@ def test_truthy_spellings_enable():
 def test_default_envelope_matches_measurement():
     args = _args(WORKER_SLOT_LIMITS="1")
     pairs = dict(zip(args[::2], args[1::2]))
-    # 4 GiB ≈ 2.5× the 1.61 GiB measured committed footprint, and genuinely
-    # above the worst observed transient peak of 3.1 GiB during the operator /
-    # DynaKube steps. The previous default of 3072m claimed to clear that peak
-    # but 3072 MiB *is* 3.0 GiB — it sat just under it, so a healthy lab at
-    # full stretch could be OOM-killed by its own guard rail. Capacity is
-    # planned from committed memory, never from this number.
-    assert pairs["--memory"] == "4096m"
+    # 8 GiB. The history matters, because this number has been wrong twice in
+    # the same direction: 3072m claimed to clear the 3.1 GiB transient peak of
+    # the operator / DynaKube steps and sat just under it, so a healthy lab at
+    # full stretch was OOM-killed by its own guard rail; 4096m then cleared
+    # k8s-101 but sat *below* Astroshop's 6,320 MiB of declared pod limits, so
+    # a correct Astroshop session was killed for being the size it is designed
+    # to be. The daily pool is heterogeneous, so its cap has to clear the
+    # heaviest training that can land on it, not the one we measured.
+    #
+    # Capacity is planned from units, never from this number — this is the
+    # *limit* to the unit model's *request*.
+    assert pairs["--memory"] == "8192m"
     assert pairs["--memory-reservation"] == "2048m"
     assert pairs["--pids-limit"] == "4096"
     assert pairs["--cpu-shares"] == "1024"

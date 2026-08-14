@@ -1634,6 +1634,7 @@ async def api_terminate_job(job_id: str, request: Request):
                 api_token=meta.get("dt_auth_token", ""),
                 oauth_client_id=meta.get("dt_oauth_client_id", ""),
                 oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+                oauth_resource=meta.get("dt_oauth_resource", ""),
             )
             asyncio.create_task(provisioner.revoke_tokens(token_ids))
             log.info("Revoking %d DT token(s) for session %s", len(token_ids), job_id)
@@ -4281,6 +4282,9 @@ class ArenaProvisionRequest(BaseModel):
     # Auth for token provisioning: OAuth2 (preferred, app-installed flow) OR existing API token.
     oauthClientId: str = ""
     oauthClientSecret: str = ""
+    # Account URN, for account-scoped clients. App-installed clients have none,
+    # and sending an empty `resource` is itself a 400 — so this stays optional.
+    oauthResource: str = ""
     apiToken: str = ""          # existing token with apiTokens.write scope
     # Preferred (multi-tenancy): the app self-mints per-tenant tokens and passes the
     # VALUES here, so Orbital never holds a tenant minting credential. The app owns
@@ -4460,6 +4464,7 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
                 api_token=body.apiToken,
                 oauth_client_id=body.oauthClientId,
                 oauth_client_secret=body.oauthClientSecret,
+                oauth_resource=body.oauthResource,
             )
             specs = await load_token_specs(repo_nwo, ref=session_ref)
             result = await provisioner.create_tokens(
@@ -4569,6 +4574,8 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
         elif body.oauthClientId:
             redis_meta["dt_oauth_client_id"] = body.oauthClientId
             redis_meta["dt_oauth_client_secret"] = body.oauthClientSecret
+            if body.oauthResource:
+                redis_meta["dt_oauth_resource"] = body.oauthResource
 
     await pool.hset(f"job:running:{job_id}", mapping=redis_meta)
     await pool.expire(f"job:running:{job_id}", int(timedelta(hours=session_hours).total_seconds()))
@@ -5429,6 +5436,7 @@ async def _revoke_job_tokens(job_id: str, meta: dict) -> None:
             api_token=meta.get("dt_auth_token", ""),
             oauth_client_id=meta.get("dt_oauth_client_id", ""),
             oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+            oauth_resource=meta.get("dt_oauth_resource", ""),
         )
         asyncio.create_task(provisioner.revoke_tokens(token_ids))
     except Exception as exc:
@@ -8839,7 +8847,7 @@ async def _fleet_workers() -> list[dict]:
 async def _fleet_snapshot(instance_type: str) -> tuple[list[dict], list[dict], dict]:
     workers = await _fleet_workers()
     inflight = await _fleet_inflight()
-    per = fleet_policy.slots_for_instance(instance_type) or 1
+    per = fleet_policy.planned_slots(instance_type) or 1
     return workers, inflight, fleet_policy.fleet_state(workers, inflight, per)
 
 
@@ -8863,7 +8871,7 @@ async def api_fleet_autoscale_status(request: Request,
         "region": region,
         "homeRegion": fleet_policy.HOME_REGION,
         "instanceType": instanceType,
-        "slotsPerInstance": fleet_policy.slots_for_instance(instanceType),
+        "slotsPerInstance": fleet_policy.planned_slots(instanceType),
         # A curated shortlist, not every shape we can price. Offering the full
         # matrix invites picking on RAM alone, which is how we ended up
         # recommending r6a before measuring it.
@@ -8969,7 +8977,7 @@ async def api_fleet_autoscale_apply(request: Request):
             raise HTTPException(502, str(e))
         # Step 2 — record in-flight BEFORE returning, so the very next tick
         # already counts this capacity and cannot launch it again.
-        per = fleet_policy.slots_for_instance(instance_type)
+        per = fleet_policy.planned_slots(instance_type)
         for inst in launched:
             iid = inst.get("instance_id")
             if not iid:
