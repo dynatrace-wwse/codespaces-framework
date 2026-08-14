@@ -53,6 +53,11 @@ from .config import (
     WORKER_SLOT_MEMORY_MB,
     WORKER_POOL,
     WORKER_CODE_REF,
+    WARM_CONCURRENCY,
+    WARM_MAX_ATTEMPTS,
+    WARM_RETRY_BASE_S,
+    TEARDOWN_CONCURRENCY,
+    TEARDOWN_STAGGER_S,
     slot_limit_args,
     queue_keys,
 )
@@ -64,6 +69,13 @@ from .executor import (
     _pipe_image_to_sysbox,
 )
 from .scheduler import WeightedScheduler, classify
+from .reaper import (
+    ContainerReaper,
+    docker_list_running,
+    docker_kill_escalating,
+    container_id_of,
+    ABANDONED,
+)
 
 LOCK_TTL_SECONDS = 7200
 
@@ -214,6 +226,10 @@ class SysboxPool:
         # figure (a 12-slot pool takes ~4.5 min to warm; the old code advertised
         # all 12 from second zero).
         self.ready_count = 0
+        # Slots that never came up. Published on the heartbeat so a short pool
+        # is visible from the master instead of being absorbed into a
+        # reassuring "fully warm" line.
+        self.degraded = 0
         # Set as soon as the FIRST slot is usable, so job consumption can begin
         # ~2 min before the pool finishes instead of waiting for the last slot.
         self.first_ready = asyncio.Event()
@@ -221,18 +237,70 @@ class SysboxPool:
         self.warm_complete = asyncio.Event()
 
     async def init(self) -> int:
-        """Start all slots concurrently. Returns the number of ready slots."""
-        results = await asyncio.gather(
-            *(self._init_slot(s) for s in self.slots),
-            return_exceptions=True,
-        )
-        ready = sum(1 for r in results if r is True)
+        """Warm every slot. Returns the number that came up ready.
+
+        Two changes from the naive gather this replaces, both from the same
+        measured incident (amd001, 2026-08-13). A recovery restart reported::
+
+            SysboxPool: 18/30 slots ready
+            Worker fully warm after 342s
+
+        Eighteen running, eight stuck in ``created``, four never created —
+        and the worker then served learners at 60% capacity while claiming to
+        be complete. A second restart with a calm dockerd gave 30/30, so
+        nothing was wrong with the slots: firing thirty container creations at
+        one instant while dockerd was still under teardown pressure simply
+        failed for twelve of them.
+
+        1. **Bounded concurrency.** Warming in waves removes the burst that
+           caused the failures rather than only coping with them. It is the
+           same reasoning as the provisioning drip: this does not need to be
+           fast, it needs to work.
+        2. **Retry, then report honestly.** Failed slots are retried with
+           backoff, and whatever is still short is published as
+           ``slots_degraded`` instead of being silently absorbed. A worker
+           running at 60% must never look identical to one running at 100%.
+        """
+        pending = list(self.slots)
+        ready_slots: set[int] = set()
+        for attempt in range(1, WARM_MAX_ATTEMPTS + 1):
+            gate = asyncio.Semaphore(WARM_CONCURRENCY)
+
+            async def _guarded(s):
+                async with gate:
+                    return await self._init_slot(s)
+
+            results = await asyncio.gather(
+                *(_guarded(s) for s in pending), return_exceptions=True)
+            failed = []
+            for slot, res in zip(pending, results):
+                if res is True:
+                    ready_slots.add(slot.index)
+                else:
+                    failed.append(slot)
+            if not failed:
+                break
+            if attempt < WARM_MAX_ATTEMPTS:
+                delay = WARM_RETRY_BASE_S * attempt
+                log.warning(
+                    "SysboxPool: %d/%d slots failed to warm on attempt %d — "
+                    "retrying in %ds", len(failed), self._capacity, attempt, delay)
+                await asyncio.sleep(delay)
+            pending = failed
+
+        ready = len(ready_slots)
+        self.degraded = self._capacity - ready
         self.warm_complete.set()
         if not ready:
             # Nothing warmed. Unblock consumers so they can exit/retry rather
             # than hang forever on first_ready.
             self.first_ready.set()
-        log.info("SysboxPool: %d/%d slots ready", ready, self._capacity)
+        if self.degraded:
+            log.error("SysboxPool DEGRADED: %d/%d slots ready after %d attempts "
+                      "— %d slot(s) unavailable",
+                      ready, self._capacity, WARM_MAX_ATTEMPTS, self.degraded)
+        else:
+            log.info("SysboxPool: %d/%d slots ready", ready, self._capacity)
         return ready
 
     async def _init_slot(self, slot: SysboxSlot) -> bool:
@@ -524,6 +592,17 @@ class WorkerAgent:
         self.sysbox_pool = SysboxPool(WORKER_CAPACITY)
         # Maps job_id → SysboxSlot so _kill_job_container can find the right container.
         self._job_slots: dict[str, SysboxSlot] = {}
+        # One poller replacing a blocked `docker wait` per job. See reaper.py for
+        # the outage this removes: a failing `docker rm -fv` used to leave the
+        # wait blocked forever, so active_jobs never shrank and the worker
+        # advertised 0 free slots while holding 30 healthy ones.
+        self.reaper = ContainerReaper(docker_list_running, docker_kill_escalating)
+        # job_id → container ID, captured at start. IDs, never slot names: names
+        # are recycled, so a stale watch on a name can follow a later session.
+        self._job_containers: dict[str, str] = {}
+        # Jobs the reaper gave up killing. Their slots are unusable and must be
+        # rebuilt rather than returned to the pool.
+        self._abandoned_jobs: set[str] = set()
         # Warm-up telemetry: monotonic start, and seconds-to-fully-warm once the
         # pool finishes. The fleet controller needs a measured T_boot to size how
         # far ahead of demand it must launch.
@@ -566,6 +645,11 @@ class WorkerAgent:
             )
         else:
             log.info("Slot resource limits OFF (set WORKER_SLOT_LIMITS=1 to enable)")
+
+        # Start the reaper BEFORE any job can be accepted. A job whose watch has
+        # nobody polling for it is precisely the blocked-forever state this
+        # replaces, so there must be no window where one exists without the other.
+        self.reaper.start()
 
         log.info("Initializing Sysbox pool (%d slots)...", WORKER_CAPACITY)
         self._warm_task = asyncio.create_task(self.sysbox_pool.init())
@@ -624,8 +708,20 @@ class WorkerAgent:
         wrong-name kill look successful while the daemon kept running.
 
         Returns True if a container was actually removed.
+
+        The return value is NO LONGER load-bearing. It used to be the entire
+        mechanism: killing the container was what made the executor's
+        ``docker wait`` return, so a failed kill meant a job blocked forever and
+        a slot that was never reclaimed. Now the reaper is told the *intent*
+        first, and it guarantees the job is freed whether or not any of this
+        works. What follows is the fast path, not the only path.
         """
         self._terminated_jobs.add(job_id)
+        # Record intent before attempting anything. If this process dies between
+        # here and the rm, the reaper still owns the outcome.
+        cid = self._job_containers.get(job_id)
+        if cid:
+            self.reaper.request_terminate(cid)
         slot = self._job_slots.get(job_id)
         if rec is None:
             try:
@@ -653,8 +749,45 @@ class WorkerAgent:
                                 sb_name, proc.returncode, err_text[:200])
             except Exception as e:
                 log.warning("Failed to kill %s (%s): %s", job_id, sb_name, e)
-        log.warning("Terminate %s: no live container among %s (already gone?)", job_id, names)
+        # Reaching here used to be the end of the story, and the job hung. Now it
+        # only means the fast path did not land: either the container really is
+        # gone (the reaper notices on its next tick and resolves the wait
+        # cleanly) or Docker is refusing to remove it (the reaper retries with
+        # escalation and, failing that, frees the job anyway).
+        if cid:
+            log.warning("Terminate %s: rm did not land for %s — reaper owns it now",
+                        job_id, cid[:12])
+        else:
+            log.warning("Terminate %s: no live container among %s (already gone?)",
+                        job_id, names)
         return False
+
+    async def _kill_staggered(self, job_ids: list[str]) -> None:
+        """Terminate many jobs without firing every ``docker rm`` at once.
+
+        The trigger for the reaping bug was roughly thirty simultaneous
+        ``docker rm -fv`` on nested Sysbox containers; a single terminate has
+        never reproduced it. The reaper makes a wedged teardown survivable,
+        and this makes it rare — both are needed. Staggering alone would leave
+        the bug latent for the next Docker hiccup; the reaper alone would mean
+        wedging the daemon on every workshop teardown and rebuilding slots that
+        did not need rebuilding.
+
+        Failures are swallowed per job on purpose: one container refusing to die
+        must not stop the other twenty-nine from being asked.
+        """
+        if not job_ids:
+            return
+        log.info("Staggered teardown of %d job(s): %d at a time, %.1fs apart",
+                 len(job_ids), TEARDOWN_CONCURRENCY, TEARDOWN_STAGGER_S)
+        for start in range(0, len(job_ids), TEARDOWN_CONCURRENCY):
+            batch = job_ids[start:start + TEARDOWN_CONCURRENCY]
+            await asyncio.gather(
+                *(self._kill_job_container(jid) for jid in batch),
+                return_exceptions=True,
+            )
+            if start + TEARDOWN_CONCURRENCY < len(job_ids):
+                await asyncio.sleep(TEARDOWN_STAGGER_S)
 
     async def _terminate_reconciler(self):
         """Durable safety net for terminations the pub/sub path missed.
@@ -731,10 +864,7 @@ class WorkerAgent:
             "Received %s — terminating %d active job(s)", sig.name, len(self.active_jobs)
         )
         ids = list(self.active_jobs.keys())
-        await asyncio.gather(
-            *(self._kill_job_container(jid) for jid in ids),
-            return_exceptions=True,
-        )
+        await self._kill_staggered(ids)
         for _ in range(30):
             if not self.active_jobs:
                 break
@@ -902,7 +1032,15 @@ class WorkerAgent:
                 # Record time-to-fully-warm exactly once, when the pool finishes.
                 if not self._time_to_ready_s and self.sysbox_pool.warm_complete.is_set():
                     self._time_to_ready_s = int(time.monotonic() - self._start_monotonic)
-                    log.info("Worker fully warm after %ds", self._time_to_ready_s)
+                    # "Fully warm" is a claim, and it was being made at 18/30.
+                    # Only say it when it is true.
+                    if self.sysbox_pool.degraded:
+                        log.error("Worker warm after %ds but DEGRADED: %d/%d slots "
+                                  "— %d unavailable",
+                                  self._time_to_ready_s, ready, WORKER_CAPACITY,
+                                  self.sysbox_pool.degraded)
+                    else:
+                        log.info("Worker fully warm after %ds", self._time_to_ready_s)
                 if self._draining:
                     status = "draining"
                 elif not self.sysbox_pool.warm_complete.is_set():
@@ -920,6 +1058,14 @@ class WorkerAgent:
                     "slots_free": str(max(0, ready - active)),
                     "time_to_ready_s": str(self._time_to_ready_s),
                     "active_jobs": str(active),
+                    # Slots that never warmed. Non-zero means this worker is
+                    # selling fewer seats than its capacity implies, which the
+                    # scale planner must see rather than infer.
+                    "slots_degraded": str(self.sysbox_pool.degraded),
+                    # Containers the reaper is waiting on. A number that keeps
+                    # climbing while active_jobs does not is the fingerprint of
+                    # the leak this replaced.
+                    "reaper_watching": str(self.reaper.watched_count),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "status": status,
                     **{k: str(v) for k, v in self.scheduler.stats().items()},
@@ -1047,7 +1193,10 @@ class WorkerAgent:
 
             try:
                 if job.get("type") == "daemon":
-                    result = await execute_daemon(job, redis_pool=self.pool, slot=slot)
+                    result = await execute_daemon(
+                        job, redis_pool=self.pool, slot=slot, reaper=self.reaper,
+                        on_container=lambda cid, _j=job_id: self._job_containers.__setitem__(_j, cid),
+                    )
                 else:
                     result = await execute_integration_test(job, redis_pool=self.pool, slot=slot)
                 job["result"] = result
@@ -1072,7 +1221,23 @@ class WorkerAgent:
                 # We must release as unhealthy so _init_slot gets a fresh container;
                 # otherwise the dead slot re-enters the pool and the next git clone fails.
                 was_terminated = job_id in self._terminated_jobs
-                await self.sysbox_pool.release(slot, healthy=healthy and not was_terminated)
+                # A slot the reaper gave up on holds a container Docker will not
+                # remove. Returning it to the pool would hand the next learner a
+                # dead slot, so it is always released unhealthy for a rebuild.
+                # One lost slot is the deliberate price of never stranding the
+                # whole worker.
+                was_abandoned = bool(job.get("slot_abandoned"))
+                if was_abandoned:
+                    self._abandoned_jobs.add(job_id)
+                    log.error("Job %s released an abandoned slot (%s) for rebuild",
+                              job_id, slot.sb_name)
+                await self.sysbox_pool.release(
+                    slot, healthy=healthy and not was_terminated and not was_abandoned)
+                # Container-id bookkeeping ends with the job; the reaper has
+                # already forgotten it, and leaving it would grow unbounded.
+                cid = self._job_containers.pop(job_id, None)
+                if cid:
+                    self.reaper.forget(cid)
 
                 if was_terminated:
                     job["status"] = "terminated"

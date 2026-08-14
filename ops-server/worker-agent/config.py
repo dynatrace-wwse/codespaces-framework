@@ -126,6 +126,28 @@ WORKER_SLOT_CPU_QUOTA = float(os.environ.get("WORKER_SLOT_CPU_QUOTA", "0") or 0)
 # and still bounds a fork bomb.
 WORKER_SLOT_PIDS_LIMIT = int(os.environ.get("WORKER_SLOT_PIDS_LIMIT", "4096"))
 
+# ── Warm-up pacing ──────────────────────────────────────────────────────────
+# Slots used to be created all at once. On 2026-08-13 a restart taken while
+# dockerd was still under teardown pressure produced 18/30 -- eight containers
+# stuck in `created`, four never created -- and the pool logged "Worker fully
+# warm" anyway. A second restart with a calm daemon gave 30/30, so the slots
+# were fine; the instantaneous fan-out was not.
+#
+# 6 at a time warms 30 slots in five waves. Slower than the burst when the
+# burst works, and vastly faster than the burst when it does not.
+WARM_CONCURRENCY = int(os.environ.get("WARM_CONCURRENCY", "6"))
+WARM_MAX_ATTEMPTS = int(os.environ.get("WARM_MAX_ATTEMPTS", "3"))
+WARM_RETRY_BASE_S = int(os.environ.get("WARM_RETRY_BASE_S", "10"))
+
+# Teardown is dripped for the same reason and at the same kind of rate: the
+# trigger for the reaping bug was ~30 simultaneous `docker rm -fv` on nested
+# Sysbox containers. The reaper makes a wedged teardown survivable; staggering
+# makes it rare. Both are needed -- staggering alone leaves the bug latent for
+# the next Docker hiccup, and the reaper alone means wedging the daemon on
+# every workshop teardown.
+TEARDOWN_CONCURRENCY = int(os.environ.get("TEARDOWN_CONCURRENCY", "4"))
+TEARDOWN_STAGGER_S = float(os.environ.get("TEARDOWN_STAGGER_S", "1.0"))
+
 
 def slot_limit_args() -> list[str]:
     """docker run flags enforcing the per-slot resource envelope.
