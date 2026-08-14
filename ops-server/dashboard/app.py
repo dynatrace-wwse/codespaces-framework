@@ -1605,7 +1605,7 @@ async def api_terminate_job(job_id: str, request: Request):
             log.info("Revoking %d DT token(s) for session %s", len(token_ids), job_id)
         except Exception as exc:
             log.warning("Could not initiate token revocation for %s: %s",
-                    masking.scrub_for_log(job_id), masking.scrub_for_log(exc))
+                        masking.scrub_for_log(job_id), masking.scrub_for_log(exc))
 
     # Codespace jobs have no Sysbox worker to signal — delete the Codespace directly
     # (as the learner, via their stored GitHub token) instead of publishing ops:terminate.
