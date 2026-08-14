@@ -35,6 +35,7 @@ test_trainer_registry.py; the async helpers below are thin wrappers.
 import logging
 from datetime import datetime, timezone
 
+from dashboard import masking
 from dashboard.live_sessions import is_valid_email, normalize_email
 
 log = logging.getLogger("ops-dashboard.trainer-registry")
@@ -87,7 +88,8 @@ async def is_trainer(pool, email) -> bool:
     try:
         return bool(await pool.sismember(INDEX_KEY, normalized))
     except Exception as exc:
-        log.warning("trainer-registry lookup failed for %s: %s", normalized, exc)
+        log.warning("trainer-registry lookup failed for %s: %s",
+                    masking.scrub_for_log(normalized), masking.scrub_for_log(exc))
         return False
 
 

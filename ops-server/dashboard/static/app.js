@@ -234,7 +234,7 @@ async function loadFleet() {
                     <option value="amd64">amd64</option>
                 </select>
                 <button class="btn btn-small" data-action
-                        onclick="triggerBuildFromRow('${repo.repo}', '${safeRepo}', this)">
+                        onclick="triggerBuildFromRow('${escapeJsAttr(repo.repo)}', '${safeRepo}', this)">
                     Trigger
                 </button>
                 </div>
@@ -620,8 +620,36 @@ function ansi256(n) {
     return `rgb(${v},${v},${v})`;
 }
 
+// Every dynamic value in this dashboard goes through here before it reaches
+// innerHTML. Escaping only `& < >` was enough while values were interpolated
+// as element TEXT, but most of them now land inside quoted attributes
+// (`value="…"`, `title="…"`, `data-ws-open="…"`), and a workshop title or a
+// trainer note is free text somebody else typed. A `"` closes the attribute
+// early and the rest of the value is parsed as markup — stored XSS with no
+// `<` in sight. Quotes are escaped here rather than at each call site so a
+// new attribute cannot forget it.
 function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// For values interpolated into a JS string literal inside an inline handler
+// (`onclick="fn('${…}')"`). escapeHtml is NOT enough there: the HTML parser
+// decodes `&#39;` back to `'` before the JS parser ever sees it, so the quote
+// still breaks out of the string. Escape for JS first, then for HTML — and
+// only for `&"<>`, so the JS backslashes survive decoding intact.
+function escapeJsAttr(s) {
+    return String(s ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 function ansiToHtml(text) {
@@ -3175,7 +3203,7 @@ function renderAgentFailed(limit = 10) {
             <td>${dur}</td>
             <td>${logLink}</td>
             <td><button class="btn btn-small btn-agent" data-action
-                onclick="triggerAgentFixCI('${safeJobId}','${safeRepo}','${safeBranch}','${safeArch}','${safeStep}',this)"
+                onclick="triggerAgentFixCI('${escapeJsAttr(r.job_id || '')}','${escapeJsAttr(r.repo)}','${escapeJsAttr(r.branch || '')}','${escapeJsAttr(r.arch || '')}','${escapeJsAttr(failedStep)}',this)"
                 title="Ask Claude to analyse and fix this failure">Fix with AI</button></td>
         </tr>`;
     }).join('');

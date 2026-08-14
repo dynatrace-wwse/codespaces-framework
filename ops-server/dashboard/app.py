@@ -1604,7 +1604,8 @@ async def api_terminate_job(job_id: str, request: Request):
             asyncio.create_task(provisioner.revoke_tokens(token_ids))
             log.info("Revoking %d DT token(s) for session %s", len(token_ids), job_id)
         except Exception as exc:
-            log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+            log.warning("Could not initiate token revocation for %s: %s",
+                    masking.scrub_for_log(job_id), masking.scrub_for_log(exc))
 
     # Codespace jobs have no Sysbox worker to signal — delete the Codespace directly
     # (as the learner, via their stored GitHub token) instead of publishing ops:terminate.
@@ -5356,7 +5357,8 @@ async def _arena_exec_run(job_id: str, meta: dict, body: ArenaExecRequest) -> di
         await pool.ltrim(log_key, -500, -1)
         await pool.expire(log_key, 86400)
     except Exception as log_err:
-        log.warning("Could not write exec-log for %s: %s", job_id, log_err)
+        log.warning("Could not write exec-log for %s: %s",
+                    masking.scrub_for_log(job_id), masking.scrub_for_log(log_err))
 
     return result
 
@@ -5384,7 +5386,8 @@ async def _revoke_job_tokens(job_id: str, meta: dict) -> None:
         )
         asyncio.create_task(provisioner.revoke_tokens(token_ids))
     except Exception as exc:
-        log.warning("Could not initiate token revocation for %s: %s", job_id, exc)
+        log.warning("Could not initiate token revocation for %s: %s",
+                    masking.scrub_for_log(job_id), masking.scrub_for_log(exc))
 
 
 @app.post("/api/arena/sessions/{job_id}/terminate")
@@ -6667,7 +6670,8 @@ async def api_live_learner_terminate(session_id: str, email: str,
                                email=email, actor=body.trainerEmail,
                                detail=",".join(terminated)[:200])
     log.info("live: learner terminate %s/%s → %d terminated, %d already terminating",
-             session_id, email, len(terminated), skipped)
+             masking.scrub_for_log(session_id), masking.scrub_for_log(email),
+             len(terminated), skipped)
     return {"terminated": terminated, "count": len(terminated),
             "alreadyTerminating": skipped}
 
@@ -6732,10 +6736,21 @@ async def api_live_learner_reprovision(session_id: str, email: str,
         return {"terminated": terminated, "status": "error",
                 "error": str(exc.detail)[:200]}
     except Exception as exc:
+        # HTTPException.detail above is our own text and stays as-is. This
+        # branch is an *unexpected* failure, and str(exc) on one of those is
+        # whatever the failing library chose to say — a DSN, an internal
+        # hostname, a fragment of a token. It goes to the journal, where ops
+        # can read it; the trainer gets the exception class, which is enough
+        # to tell "the tenant refused us" from "Redis is down" without
+        # shipping internals to a browser.
+        log.exception("live: reprovision failed for %s/%s",
+                      masking.scrub_for_log(session_id), masking.scrub_for_log(email))
         await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_FAILED,
                                email=email, actor=body.trainerEmail,
-                               tenant=tenant_for_env, detail=str(exc))
-        return {"terminated": terminated, "status": "error", "error": str(exc)[:200]}
+                               tenant=tenant_for_env,
+                               detail=f"{type(exc).__name__} — see Orbital logs")
+        return {"terminated": terminated, "status": "error",
+                "error": f"Provisioning failed ({type(exc).__name__}) — see Orbital logs"}
 
     status = "already-active" if provisioned.get("deduped") else "queued"
     await pool.hset(provdone_key, email, status)
