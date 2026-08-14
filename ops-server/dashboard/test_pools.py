@@ -373,3 +373,25 @@ def test_an_operator_can_still_pin_the_rate():
         assert pools.rate_for_workers(9) == (3, 90.0)
     finally:
         pools.PACE_BATCH, pools.PACE_INTERVAL_S = saved
+
+
+def test_a_wrongtype_key_costs_that_key_not_the_whole_count():
+    """MEASURED 2026-08-14, and it made the fleet-scaled drip a no-op.
+
+    `worker:{id}:app_ports_free` is a LIST. HGETALL on it raises WRONGTYPE,
+    which aborted the entire scan, so every queue paced at the one-worker rate
+    no matter how many machines were serving it. Benign in direction — it drips
+    slower, never faster — which is exactly why nothing caught it.
+    """
+    class WithAList(FakeRedis):
+        async def hgetall(self, key):
+            if key.endswith(":app_ports_free"):
+                raise RuntimeError(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value")
+            return dict(self.h.get(key, {}))
+
+    r = WithAList()
+    r.add_workers(3)
+    for i in range(3):
+        r.l[f"worker:wdaily{i}:app_ports_free"] = ["32001", "32002"]
+    assert asyncio.run(pools.workers_serving(r, "queue:test:amd64")) == 3

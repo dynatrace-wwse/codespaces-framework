@@ -255,9 +255,22 @@ async def workers_serving(redis, target: str) -> int:
     count = 0
     try:
         async for key in redis.scan_iter(match="worker:*", count=200):
-            # `worker:pressure`-style counters once collided with this scan, so
-            # only hashes that actually describe a worker are counted.
-            h = await redis.hgetall(key)
+            # The `worker:` namespace holds more than worker hashes:
+            # `worker:{id}:app_ports_free` is a LIST, and HGETALL on it raises
+            # WRONGTYPE. Measured 2026-08-14 — one such key aborted the whole
+            # scan, so every queue paced at the one-worker rate no matter how
+            # many machines were serving it. Benign in direction, and it meant
+            # the fleet-scaled drip never actually worked. Guard per key, so a
+            # stray key costs that key and not the count.
+            if key.count(":") > 1:
+                continue
+            try:
+                h = await redis.hgetall(key)
+            except Exception as exc:
+                log.debug("skipping %s in worker scan: %s", key, exc)
+                continue
+            # `worker:pressure`-style counters once lived in this namespace too,
+            # so only hashes that actually describe a worker are counted.
             if not isinstance(h, dict) or "capacity" not in h:
                 continue
             if (h.get("role") or "") == "master":

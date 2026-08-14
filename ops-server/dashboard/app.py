@@ -6023,6 +6023,24 @@ async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
 
 
+async def _stop_workshop_sessions(session_id: str) -> int:
+    """Terminate every environment belonging to a workshop. Never raises.
+
+    A failure here must not fail the trainer's end/cancel call: the workshop is
+    over either way, and a 500 would leave the board saying it is still running.
+    It is logged loudly instead, because leaked environments hold seats that the
+    next workshop's capacity plan has already spent.
+    """
+    try:
+        from dashboard import workshop_fleet
+        return await workshop_fleet.terminate_workshop_sessions(pool, session_id)
+    except Exception as exc:
+        log.error("workshop %s: could not terminate its sessions: %s — "
+                  "environments may be left running until their TTL expires",
+                  session_id, exc)
+        return 0
+
+
 @app.post("/api/live/sessions/{session_id}/end")
 async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, request: Request):
     """Trainer ends the session: state → ended, freezes the board, and sets a
@@ -6046,7 +6064,15 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, 
             "state": new_state, "endedAt": session["endedAt"]})
         await _store_pad_export(session_id, session)
         await _store_completion_record(session_id, session)
-        log.info("Live session %s ended by %s", session_id, body.trainerEmail)
+        # Ending the workshop has to stop its environments. Until 2026-08-14
+        # nothing here did: the only caller of the teardown was the control
+        # loop, which is off by default and fires on the clock rather than on
+        # the trainer's action. Measured on a 12-seat load test — end returned
+        # 200 and all 12 sessions were still running ten minutes later, holding
+        # seats the next workshop's plan had already counted.
+        stopped = await _stop_workshop_sessions(session_id)
+        log.info("Live session %s ended by %s — %d session(s) terminated",
+                 session_id, body.trainerEmail, stopped)
         # Emitted BEFORE the TTL fan-out below, which includes the events
         # stream — writing it after would set a TTL and then extend the key.
         await _emit_live_event(session_id, live_sessions.EVENT_ENDED,
@@ -6083,7 +6109,9 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
             "state": new_state, "cancelledAt": session["cancelledAt"]})
         await _store_pad_export(session_id, session)
         await _store_completion_record(session_id, session)
-        log.info("Live session %s cancelled by %s", session_id, body.trainerEmail)
+        stopped = await _stop_workshop_sessions(session_id)
+        log.info("Live session %s cancelled by %s — %d session(s) terminated",
+                 session_id, body.trainerEmail, stopped)
     await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)

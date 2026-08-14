@@ -303,3 +303,63 @@ def test_seventy_seats_sits_exactly_on_the_cap():
     from dashboard import fleet
     assert wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")["workers"] \
         == fleet.MAX_SCALE_UP
+
+
+# ── ending a workshop must stop its environments ────────────────────────────
+
+class _JobsRedis:
+    """Just enough Redis: job:running hashes, a typed scan, and publishes."""
+
+    def __init__(self, jobs: dict[str, dict]):
+        self.h = {f"job:running:{jid}": dict(rec) for jid, rec in jobs.items()}
+        # A LIST in the same namespace, because the worker scan met one of these
+        # and aborted. This one is a different namespace but the lesson stands.
+        self.l = {"job:running:index": ["noise"]}
+        self.published: list[str] = []
+
+    async def scan_iter(self, match="*", count=500):
+        prefix = match.rstrip("*")
+        for key in list(self.h) + list(self.l):
+            if key.startswith(prefix):
+                yield key
+
+    async def type(self, key):
+        return "hash" if key in self.h else "list"
+
+    async def hgetall(self, key):
+        return dict(self.h.get(key, {}))
+
+    async def hset(self, key, field, value):
+        self.h.setdefault(key, {})[field] = value
+
+    async def publish(self, channel, msg):
+        self.published.append(msg)
+
+
+def test_ending_a_workshop_terminates_only_its_own_sessions():
+    """MEASURED 2026-08-14: end returned 200 and all 12 sessions were still
+    running ten minutes later. A seat held by an ended workshop is a seat the
+    next workshop's plan already counted, so this is load-bearing for the whole
+    capacity model, not a tidiness issue."""
+    import asyncio
+
+    r = _JobsRedis({
+        "job-a": {"workshop_id": "ws_mine", "repo": "x"},
+        "job-b": {"workshop_id": "ws_mine", "repo": "x"},
+        "job-c": {"workshop_id": "ws_other", "repo": "x"},
+        "job-d": {"repo": "x"},                      # self-service, no workshop
+    })
+    n = asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine"))
+    assert n == 2
+    assert sorted(r.published) == ["job-a", "job-b"]
+    # The durable flag is what survives a worker that is restarting; the
+    # publish alone is fire-and-forget.
+    assert r.h["job:running:job-a"]["terminating"] == "1"
+    assert "terminating" not in r.h["job:running:job-c"]
+    assert "terminating" not in r.h["job:running:job-d"]
+
+
+def test_terminating_an_empty_workshop_is_a_no_op_not_an_error():
+    import asyncio
+    r = _JobsRedis({})
+    assert asyncio.run(wf.terminate_workshop_sessions(r, "ws_nobody")) == 0

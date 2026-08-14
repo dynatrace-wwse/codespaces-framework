@@ -554,6 +554,23 @@ async def _pool_worker_ids(redis, pool_name: str) -> list[str]:
     return out
 
 
+async def terminate_workshop_sessions(redis, ws_id: str) -> int:
+    """Public name for :func:`_terminate_workshop_sessions`.
+
+    Ending a workshop has to stop its environments, and until 2026-08-14 the
+    only caller was the control loop's scheduled teardown — which is off by
+    default and driven by the clock, not by the trainer. So a trainer pressing
+    "end" got a 200, a completion record, and twelve learner environments still
+    running: measured on a 12-seat load test, still 12/12 active ten minutes
+    after the end call returned.
+
+    That is not merely untidy. A seat held by an ended workshop is a seat the
+    next workshop's capacity plan already counted on, so the whole unit model
+    is only as honest as this function being called.
+    """
+    return await _terminate_workshop_sessions(redis, ws_id)
+
+
 async def _terminate_workshop_sessions(redis, ws_id: str) -> int:
     """Ask every session belonging to this workshop to stop.
 
