@@ -150,7 +150,15 @@ every worker go silent on restart.
 | 2 | Launched worker runs current agent code | **PASS (mechanism)** — synced and stamped `WORKER_CODE_REF` at boot. It synced `main`, because the dashboard was two commits behind `WORKER_CODE_BRANCH` at launch time |
 | 3 | provision-all admits in phases | **PASS** — 2 admitted immediately, then 1 per ~15 s: `pacer: admitted 1 to queue:pool:ws-…, 5 still waiting` → `4` → `3` → `2` → `1` → `0` |
 | 4 | Self-service never lands on workshop machines | **PASS, with the bug it caught** (see below) |
-| 5 | Teardown returns the machines | pending at time of writing — fires 01:06 |
+| 5 | Teardown returns the machines | **PASS, and it is the strongest result** — `terminated i-06d62eaee3a5794e5` at 01:06:23 while the record still read `instances: []`. The machine was found ONLY by the `tag:orbital-pool` fallback; without that fix it would have leaked silently |
+
+Post-run: 0 stray `docker wait`, 0 orphaned `job:running:*`, 0 pending queues, 0 pool
+queues left, amd001 back to 30/30 with `slots_degraded=0`, pool binding unbound.
+
+**One caveat on assertion 5.** The bot sessions died at `postCreateCommand` in ~4 s
+(no tokens — see the mint bug), so they never reached the `docker wait` the reaper
+replaces. This run exercised *instance* teardown, not teardown-under-load. The reaper
+itself remains unvalidated live and still wants a run with real environments.
 
 **Assertion 4 is the one worth reading.** In round one all eight workshop learners landed
 on the DAILY worker while the workshop's own machine sat idle at 20/20 — because
