@@ -613,6 +613,10 @@ class WorkerAgent:
         # sets worker:{id} draining=1 on scale-down; until this existed the
         # agent kept claiming jobs onto a host about to be terminated.
         self._draining = False
+        # Temporary back-pressure from the control loop under sustained CPU
+        # pressure. Distinct from _draining: a brake is cleared when the box
+        # cools, a cordon precedes termination.
+        self._braked = False
 
     async def start(self):
         """Connect to master Redis, register, initialize pool, and start consuming."""
@@ -937,19 +941,34 @@ class WorkerAgent:
         unreachable the worker keeps serving, because a transient blip must not
         quietly idle the fleet. Un-cordoning is just as immediate, which is what
         makes "un-drain instead of launching" a viable scale-up shortcut.
+
+        Also reads ``admission_brake``, set by the control loop when this worker
+        is under sustained CPU pressure. It has the same effect on intake as a
+        cordon but a different meaning and lifetime: a cordon precedes
+        termination and is permanent, a brake is temporary back-pressure that
+        the loop clears as soon as the box cools. Keeping them distinct matters
+        because a braked worker must NOT look like one being scaled down.
         """
         try:
-            raw = await self.pool.hget(f"worker:{WORKER_ID}", "draining")
+            raw, brake_raw = await self.pool.hmget(
+                f"worker:{WORKER_ID}", "draining", "admission_brake")
         except Exception:
-            return self._draining
+            return self._draining or self._braked
         draining = str(raw or "0").strip().lower() in ("1", "true", "yes")
+        braked = str(brake_raw or "0").strip().lower() in ("1", "true", "yes")
         if draining != self._draining:
             log.info("Cordon %s — %s",
                      "SET" if draining else "CLEARED",
                      "no new jobs will be claimed" if draining
                      else "resuming normal job intake")
+        if braked != self._braked:
+            log.info("Admission brake %s — %s",
+                     "SET" if braked else "CLEARED",
+                     "pausing new jobs until pressure clears (existing sessions "
+                     "keep running)" if braked else "resuming normal job intake")
         self._draining = draining
-        return draining
+        self._braked = braked
+        return draining or braked
 
     @staticmethod
     def _collect_metrics() -> dict:

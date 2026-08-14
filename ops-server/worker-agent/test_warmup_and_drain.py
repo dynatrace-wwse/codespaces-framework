@@ -60,8 +60,9 @@ async def _mark_ready(pool: SysboxPool, slot: SysboxSlot) -> None:
 class _FakeRedis:
     """Minimal stand-in for the redis.asyncio client used by _refresh_draining."""
 
-    def __init__(self, value=None, raises: bool = False):
+    def __init__(self, value=None, raises: bool = False, brake=None):
         self.value = value
+        self.brake = brake
         self.raises = raises
         self.calls = 0
 
@@ -71,6 +72,12 @@ class _FakeRedis:
             raise ConnectionError("redis unreachable")
         return self.value
 
+    async def hmget(self, key, *fields):
+        self.calls += 1
+        if self.raises:
+            raise ConnectionError("redis unreachable")
+        return [self.value if f == "draining" else self.brake for f in fields]
+
 
 class _Agent:
     """Just enough of WorkerAgent to exercise _refresh_draining unchanged."""
@@ -78,6 +85,7 @@ class _Agent:
     def __init__(self, redis_client):
         self.pool = redis_client
         self._draining = False
+        self._braked = False
 
     # bind the real implementation
     from .agent import WorkerAgent as _WA
@@ -357,3 +365,38 @@ def test_liveness_probe_reads_docker_inspect_state():
         assert asyncio.run(pool._slot_is_alive(pool.slots[0])) is False
     finally:
         agent_mod.asyncio.create_subprocess_exec = orig
+
+
+# ── admission brake ──────────────────────────────────────────────────────────
+# The control loop sets admission_brake on a worker under sustained CPU
+# pressure. A flag nothing reads is worse than no flag at all -- the drain
+# cordon was exactly that until 2026-08-12 -- so these pin that it bites.
+
+def test_admission_brake_stops_new_intake():
+    agent = _Agent(_FakeRedis("0", brake="1"))
+    assert asyncio.run(agent._refresh_draining()) is True
+    assert agent._braked is True
+    assert agent._draining is False, "a brake must not masquerade as a cordon"
+
+
+def test_brake_clears_when_the_worker_cools():
+    agent = _Agent(_FakeRedis("0", brake="1"))
+    assert asyncio.run(agent._refresh_draining()) is True
+    agent.pool.brake = "0"
+    assert asyncio.run(agent._refresh_draining()) is False
+    assert agent._braked is False
+
+
+def test_cordon_and_brake_are_tracked_separately():
+    """Distinct lifetimes: a cordon precedes termination, a brake is temporary
+    back-pressure. A braked worker must not look like one being scaled down."""
+    agent = _Agent(_FakeRedis("1", brake="0"))
+    assert asyncio.run(agent._refresh_draining()) is True
+    assert agent._draining is True and agent._braked is False
+
+
+def test_brake_fails_open_on_a_redis_blip():
+    """Same reasoning as the cordon: a transient blip must not quietly idle
+    the fleet."""
+    agent = _Agent(_FakeRedis(raises=True))
+    assert asyncio.run(agent._refresh_draining()) is False
