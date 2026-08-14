@@ -133,7 +133,7 @@ every worker go silent on restart.
 |---|---|
 | Warm-up, 30 slots, staged (`WARM_CONCURRENCY=6`) | 333 s / 340 s, `slots_degraded=0` |
 | Warm-up, same, previously all-at-once | 305 s — the burst is gone at almost no cost |
-| Workshop worker boot → ready (20 slots) | **~15 min** — the number the prewarm lead must cover |
+| Workshop worker boot → ready (20 slots) | **~9 min** (launch 00:27:21 → registered ~00:30 → 20/20 at 00:38:34, of which 6 min was pool warm after an agent restart) — the number the prewarm lead must cover |
 | Seats/worker, k8s-101, ×0.55 planning safety | **20** (30 by memory alone) |
 | Workers for 70 seats | **4** → 80 seats, survives losing one machine |
 | Astroshop declared pod memory (helm values) | **6,320 MiB** across 10 components |
@@ -141,6 +141,33 @@ every worker go silent on restart.
 | OOM kills observed | none — a vanished margin, not an outage |
 
 ---
+
+## Rehearsal result (2026-08-14, workshop `ws_mss7gmca-71d809`)
+
+| # | Assertion | Result |
+|---|---|---|
+| 1 | Machines launched automatically at prewarm time | **PASS** — fired 00:27:18, exactly 3 min before the 00:30:01 start, sized 9 seats ÷ 20/worker → 1 × m6a.4xlarge |
+| 2 | Launched worker runs current agent code | **PASS (mechanism)** — synced and stamped `WORKER_CODE_REF` at boot. It synced `main`, because the dashboard was two commits behind `WORKER_CODE_BRANCH` at launch time |
+| 3 | provision-all admits in phases | **PASS** — 2 admitted immediately, then 1 per ~15 s: `pacer: admitted 1 to queue:pool:ws-…, 5 still waiting` → `4` → `3` → `2` → `1` → `0` |
+| 4 | Self-service never lands on workshop machines | **PASS, with the bug it caught** (see below) |
+| 5 | Teardown returns the machines | pending at time of writing — fires 01:06 |
+
+**Assertion 4 is the one worth reading.** In round one all eight workshop learners landed
+on the DAILY worker while the workshop's own machine sat idle at 20/20 — because
+`provision-all` never passed `workshopId`, so pool routing saw an untagged session. After
+the fix, round two placed all eight on the workshop worker, and a self-service session
+started mid-workshop went to the daily worker and never touched the workshop's machine:
+
+```
+round 1 (pre-fix)   WORKSHOP-BOT  -> worker-x86_64-amd001         x8   ✗
+round 2 (post-fix)  WORKSHOP-BOT  -> worker-x86_64-spot-3a5794e5  x8   ✓
+                    SELF-SERVICE  -> worker-x86_64-amd001         x1   ✓
+```
+
+Bot sessions fail at `postCreateCommand` in ~4 s because no DT tokens are minted for them.
+That is expected and does not affect assertions 1–4, which are about scheduling, routing
+and placement. It does mean the run exercised instance teardown rather than
+teardown-under-load; the 30-at-once session teardown still wants its own run.
 
 ## Still owed
 
