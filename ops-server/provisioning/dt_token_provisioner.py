@@ -30,7 +30,11 @@ from .token_specs import TokenSpec
 
 log = logging.getLogger("ops-provisioning")
 
-_TOKEN_API = "{tenant}/api/v2/apiTokens"
+# Classic environment API, on the live domain. Takes `Api-Token dt0c01…`.
+_CLASSIC_TOKEN_API = "{tenant}/api/v2/apiTokens"
+# The same API behind the platform proxy, on the apps domain. Takes a Bearer
+# (a dt0s16 platform token, or an OAuth client bearer). See token_api.
+_PROXY_TOKEN_API = "{tenant}/platform/classic/environment-api/v2/apiTokens"
 # NOT "{tenant}/sso/oauth2/token" — the grant goes to the SSO host, which is a
 # different origin from the tenant. Posting it to the tenant returns 301 and the
 # session then dies at postCreateCommand with no DT_OPERATOR_TOKEN. See
@@ -87,9 +91,43 @@ class DTTokenProvisioner:
         if not api_token and not (oauth_client_id and oauth_client_secret):
             raise ValueError("Provide either api_token or oauth_client_id + oauth_client_secret")
 
+    @property
+    def is_classic_token(self) -> bool:
+        """Whether the supplied credential is a classic ``dt0c01`` API token.
+
+        Everything else — a gen3 ``dt0s16`` platform token, or a bearer minted
+        from an OAuth client — is an OAuth-family credential and has to go
+        through the platform proxy instead. See :attr:`token_api`.
+        """
+        return self._api_token.startswith("dt0c01")
+
+    @property
+    def token_api(self) -> str:
+        """Where to POST to create a token, for THIS credential.
+
+        There are two endpoints and they accept different credentials, which is
+        not obvious and cost a measurement run:
+
+        * ``{live}/api/v2/apiTokens`` — the classic environment API. Takes an
+          ``Api-Token dt0c01…`` header. A platform token gets 401 here
+          ("Token exchange failed").
+        * ``{tenant}/platform/classic/environment-api/v2/apiTokens`` — the same
+          API behind the platform proxy. Takes a ``Bearer`` — a ``dt0s16``
+          platform token or an OAuth client bearer. This is the ONLY endpoint
+          that works for the credentials Orbital actually holds.
+
+        Sending the right token to the wrong one of these looks exactly like a
+        permissions problem, so it is chosen from the credential rather than
+        configured.
+        """
+        if self.is_classic_token:
+            return _CLASSIC_TOKEN_API.format(tenant=self.classic_url)
+        return _PROXY_TOKEN_API.format(tenant=self.tenant_url)
+
     async def _auth_headers(self) -> dict[str, str]:
         if self._api_token:
-            return {"Authorization": f"Api-Token {self._api_token}",
+            scheme = "Api-Token" if self.is_classic_token else "Bearer"
+            return {"Authorization": f"{scheme} {self._api_token}",
                     "Content-Type": "application/json"}
 
         now = datetime.now(timezone.utc)
@@ -150,7 +188,7 @@ class DTTokenProvisioner:
         prefix = f"enbl-{repo_short}-{user_short}"
 
         headers = await self._auth_headers()
-        token_api = _TOKEN_API.format(tenant=self.classic_url)
+        token_api = self.token_api
 
         env: dict[str, str] = {}
         token_ids: list[str] = []
@@ -197,7 +235,7 @@ class DTTokenProvisioner:
         if not token_ids:
             return
         headers = await self._auth_headers()
-        token_api = _TOKEN_API.format(tenant=self.classic_url)
+        token_api = self.token_api
 
         async with httpx.AsyncClient(timeout=15) as client:
             for tid in token_ids:

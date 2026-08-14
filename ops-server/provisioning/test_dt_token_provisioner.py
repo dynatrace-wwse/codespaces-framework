@@ -110,21 +110,52 @@ def test_create_tokens_oauth_mode_refreshes_bearer():
     def h(method, url, **kw):
         if method == "POST" and url.endswith("/sso/oauth2/token"):
             return _Resp(200, {"access_token": "BEARER123", "expires_in": 3600})
-        if method == "POST" and url.endswith("/api/v2/apiTokens"):
+        if method == "POST" and url.endswith("/apiTokens"):
             return _Resp(201, {"id": "id-x", "token": "dt0c01.X"})
         return _Resp(404)
     restore, calls = _install_fake(h)
     try:
+        # sso_url passed explicitly so the test does not depend on discovery
+        # reaching the network. The real default resolves it per tenant.
         p = DTTokenProvisioner("https://geu80787.apps.dynatrace.com",
-                               oauth_client_id="cid", oauth_client_secret="sec")
+                               oauth_client_id="cid", oauth_client_secret="sec",
+                               oauth_token_url="https://sso.dynatrace.com/sso/oauth2/token")
         result = asyncio.run(p.create_tokens("org/repo", "bob@dynatrace.com", SPECS[:1]))
     finally:
         restore()
     # SSO called first, then apiTokens with the bearer
-    assert calls[0][1].endswith("/sso/oauth2/token")
-    create = [c for c in calls if c[1].endswith("/api/v2/apiTokens")][0]
+    assert calls[0][1] == "https://sso.dynatrace.com/sso/oauth2/token", \
+        "the grant goes to SSO, never to the tenant — a tenant host 301s"
+    create = [c for c in calls if c[1].endswith("/apiTokens")][0]
     assert create[2]["headers"]["Authorization"] == "Bearer BEARER123"
     assert result.env["DT_OPERATOR_TOKEN"] == "dt0c01.X"
+
+
+def test_the_endpoint_is_chosen_from_the_credential():
+    """Two endpoints, two credential families. Sending the right token to the
+    wrong one looks exactly like a permissions problem, and did: a dt0s16
+    platform token gets 401 on the live host and 201 on the proxy."""
+    classic = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
+                                 api_token="dt0c01.ADMIN")
+    assert classic.is_classic_token
+    assert classic.token_api == "https://sro97894.live.dynatrace.com/api/v2/apiTokens"
+
+    platform = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
+                                  api_token="dt0s16.SOMETHING")
+    assert not platform.is_classic_token
+    assert platform.token_api == ("https://sro97894.apps.dynatrace.com"
+                                  "/platform/classic/environment-api/v2/apiTokens")
+
+    oauth = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
+                               oauth_client_id="cid", oauth_client_secret="sec")
+    assert oauth.token_api.endswith("/platform/classic/environment-api/v2/apiTokens")
+
+
+def test_a_platform_token_is_sent_as_a_bearer_not_as_an_api_token():
+    p = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
+                           api_token="dt0s16.SOMETHING")
+    hdr = asyncio.run(p._auth_headers())
+    assert hdr["Authorization"] == "Bearer dt0s16.SOMETHING"
 
 
 def test_create_tokens_revokes_on_partial_failure():
