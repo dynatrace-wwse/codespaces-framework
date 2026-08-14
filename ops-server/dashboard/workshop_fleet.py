@@ -132,7 +132,11 @@ CPU_BRAKE_THRESHOLD = float(os.environ.get("CPU_BRAKE_THRESHOLD", "0.70"))
 PRESSURE_SUSTAIN_TICKS = int(os.environ.get("PRESSURE_SUSTAIN_TICKS", "4"))
 
 FLEET_KEY = "workshop:fleet"          # hash: ws_id -> json record
-PRESSURE_KEY = "worker:pressure"      # hash: worker_id -> consecutive tick count
+# NOT "worker:pressure" — that matched the worker:* scan used by /api/workers
+# and by _daily_workers, so the pressure counter itself was listed as a worker
+# ("pressure  status=None  None/None") and would have been fed to the scale
+# planner as a box with no free seats. Caught live on the first apply run.
+PRESSURE_KEY = "fleet:pressure"       # hash: worker_id -> consecutive tick count
 
 # Workshop fleet lifecycle.
 WARMING, READY, DRAINING, DONE = "warming", "ready", "draining", "done"
