@@ -114,6 +114,10 @@ WORKSHOP_INSTANCE_TYPE = os.environ.get("WORKSHOP_INSTANCE_TYPE", "m6a.4xlarge")
 # Workshops run on-demand, never spot. A spot reclamation costs a learner their
 # session with two minutes' notice and a Sysbox session cannot be migrated.
 WORKSHOP_PURCHASING = os.environ.get("WORKSHOP_PURCHASING", "on-demand")
+# Branch a launched worker syncs its agent code from. "main" in production;
+# overridable so fleet changes can be validated on a real launched worker
+# before being merged, rather than proving the code by shipping it.
+WORKER_CODE_BRANCH = os.environ.get("WORKER_CODE_BRANCH", "main")
 
 # Daily pool.
 DAILY_MIN_FREE_SEATS = int(os.environ.get("DAILY_MIN_FREE_SEATS", "4"))
@@ -394,6 +398,11 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
             purchasing=WORKSHOP_PURCHASING,
             pool=pool_name,
             capacity=plan["seats_per_worker"],
+            # A workshop worker serves one repo, so its slots can be capped for
+            # that repo specifically rather than at a flat figure chosen for
+            # the lightest one.
+            slot_memory_mb=repo_profiles.slot_memory_cap_mb(profile),
+            code_branch=WORKER_CODE_BRANCH,
         )
         rec["instances"] = [i.get("InstanceId") for i in launched if i.get("InstanceId")]
     except Exception as exc:

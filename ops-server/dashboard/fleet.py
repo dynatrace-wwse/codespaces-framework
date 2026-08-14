@@ -140,7 +140,8 @@ def _build_user_data(redis_host: str = MASTER_REDIS_HOST,
                      capacity: int | None = None,
                      lifetime_minutes: int = 0,
                      pool: str = "daily",
-                     code_branch: str = "main") -> str:
+                     code_branch: str = "main",
+                     slot_memory_mb: int | None = None) -> str:
     """Cloud-init user-data shell script for a fresh worker.
 
     - Stops the baked agent FIRST. The golden AMI was baked from a live worker,
@@ -189,6 +190,33 @@ if grep -q '^WORKER_CAPACITY=' "$ENV_FILE"; then
   sed -i "s|^WORKER_CAPACITY=.*|WORKER_CAPACITY={capacity}|" "$ENV_FILE"
 else
   echo "WORKER_CAPACITY={capacity}" >> "$ENV_FILE"
+fi
+"""
+    # Per-slot memory ceiling, sized from the repo this worker will serve.
+    #
+    # The flat 4096 MiB default is right for Kubernetes-101 (1,609 MiB
+    # committed, 2.2-3.1 GiB transient peak) and is NOT right for everything:
+    # Astroshop's helm values alone declare 6,320 MiB of pod limits, so a slot
+    # capped at 4 GiB has no headroom for its own declared workload. A cap set
+    # too LOW is as damaging as none at all -- it OOM-kills a healthy lab
+    # mid-install and the learner sees a broken step, not a resource message.
+    #
+    # This only works because a workshop worker serves ONE repo. The daily pool
+    # is mixed, so its cap must stay generic and must be sized for the heaviest
+    # repo it may be asked to run.
+    slot_memory_block = ""
+    if slot_memory_mb:
+        slot_memory_block = f"""
+# Per-slot memory ceiling for this pool's repo.
+if grep -q '^WORKER_SLOT_MEMORY_MB=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_SLOT_MEMORY_MB=.*|WORKER_SLOT_MEMORY_MB={slot_memory_mb}|" "$ENV_FILE"
+else
+  echo "WORKER_SLOT_MEMORY_MB={slot_memory_mb}" >> "$ENV_FILE"
+fi
+if grep -q '^WORKER_SLOT_LIMITS=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_SLOT_LIMITS=.*|WORKER_SLOT_LIMITS=1|" "$ENV_FILE"
+else
+  echo "WORKER_SLOT_LIMITS=1" >> "$ENV_FILE"
 fi
 """
     return f"""#!/bin/bash
@@ -254,7 +282,7 @@ if grep -q '^WORKER_SSH_HOST=' "$ENV_FILE"; then
 else
   echo "WORKER_SSH_HOST=${{PRIVATE_IP}}" >> "$ENV_FILE"
 fi
-{capacity_block}
+{capacity_block}{slot_memory_block}
 # Pool membership decides which queue this worker consumes. "daily" takes
 # shared self-service work; anything else takes ONLY queue:pool:{{that name}},
 # which is what keeps a self-service learner off a workshop's machines.
@@ -491,7 +519,8 @@ async def list_fleet() -> list[dict]:
 async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
                    purchasing: str = "spot", lifetime_minutes: int = 0,
                    pool: str = "daily", capacity: int | None = None,
-                   code_branch: str = "main") -> list[dict]:
+                   code_branch: str = "main",
+                   slot_memory_mb: int | None = None) -> list[dict]:
     """Launch ``count`` workers from the golden AMI (hard cap 4).
 
     Subnet, security groups and key-name are resolved at call time from the
@@ -569,7 +598,7 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         "--block-device-mappings", _root_block_device(),
         "--user-data", _encode_user_data(_build_user_data(
             lifetime_minutes=lifetime_minutes, pool=pool, capacity=capacity,
-            code_branch=code_branch)),
+            code_branch=code_branch, slot_memory_mb=slot_memory_mb)),
     ]
     if purchasing == "spot":
         args += ["--instance-market-options", market_options]

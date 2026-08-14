@@ -137,3 +137,28 @@ def test_a_genuinely_unknown_repo_is_still_heavy():
 
 def test_empty_repo_is_heavy_not_crashed():
     assert asyncio.run(rp.load(FakeRedis(), "")).estimated is True
+
+
+# ── slot memory cap ─────────────────────────────────────────────────────────
+# A cap set too LOW is as damaging as none at all: it OOM-kills a healthy lab
+# mid-install and the learner sees a broken step rather than a resource error.
+
+def test_cap_sits_above_the_transient_peak_not_at_steady_state():
+    """k8s-101 commits 1,609 MiB but peaks at 2.2-3.1 GiB during the operator
+    and DynaKube steps. A cap at the committed figure would kill healthy labs."""
+    cap = rp.slot_memory_cap_mb(rp.K8S_101)
+    assert cap >= 3100, "must clear the worst observed transient peak"
+    assert cap == 4096, "and should reproduce the hand-chosen production value"
+
+
+def test_a_heavy_repo_gets_a_bigger_cap():
+    """Astroshop's helm values declare 6,320 MiB of pod limits — a flat 4 GiB
+    slot leaves its own declared workload no headroom."""
+    assert rp.slot_memory_cap_mb(rp.HEAVY_DEFAULT) > rp.slot_memory_cap_mb(rp.K8S_101)
+
+
+def test_cap_never_drops_below_the_historical_floor():
+    """Lowering an existing worker's cap on the strength of a profile would
+    trade a runaway guard for a new source of OOM kills."""
+    feather = rp.RepoProfile("tiny", steady_memory_mb=200, steady_cpu=0.01)
+    assert rp.slot_memory_cap_mb(feather) == rp.SLOT_CAP_FLOOR_MB

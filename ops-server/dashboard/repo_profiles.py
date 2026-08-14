@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +220,26 @@ def seats_per_worker(profile: RepoProfile, instance_type: str,
     # occupancy signal and why this term rarely binds.
     by_cpu = int(vcpus / profile.steady_cpu) if profile.steady_cpu > 0 else by_memory
     return max(0, min(by_memory, by_cpu))
+
+
+# A slot's ceiling must sit ABOVE any legitimate peak, not at the steady-state
+# figure. Capacity planning uses committed memory; this is a runaway guard.
+# k8s-101 commits 1,609 MiB but peaks at 2.2-3.1 GiB transiently during the
+# operator and DynaKube steps, so a cap at the committed figure would OOM-kill
+# perfectly healthy labs. 2.5x reproduces the hand-chosen 4096 for k8s-101.
+SLOT_CAP_MULTIPLIER = float(os.environ.get("SLOT_CAP_MULTIPLIER", "2.5"))
+SLOT_CAP_FLOOR_MB = 4096
+
+
+def slot_memory_cap_mb(profile: RepoProfile) -> int:
+    """Per-slot hard memory ceiling for this repo.
+
+    Never below the historical 4096 floor: lowering an existing worker's cap on
+    the strength of a profile would trade a runaway guard for a new source of
+    OOM kills, which is the wrong direction to be wrong in.
+    """
+    return max(SLOT_CAP_FLOOR_MB,
+               int(profile.steady_memory_mb * SLOT_CAP_MULTIPLIER))
 
 
 def workers_for_seats(seats: int, profile: RepoProfile, instance_type: str,
