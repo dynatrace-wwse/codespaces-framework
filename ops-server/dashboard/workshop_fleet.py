@@ -484,6 +484,29 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     return rec
 
 
+async def _pool_workers_ready(redis, pool_name: str) -> int:
+    """How many of this pool's workers report ready with a full slot pool.
+
+    ``slots_degraded`` is deliberately part of the test: a worker that came up
+    short is not "ready" for a workshop that was sized on its full seat count.
+    """
+    if not pool_name:
+        return 0
+    ready = 0
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if h.get("pool") != pool_name:
+            continue
+        if h.get("status") == "ready" and int(h.get("slots_degraded", 0) or 0) == 0:
+            ready += 1
+    return ready
+
+
 async def _instances_tagged(pool_name: str) -> list[str]:
     """Live EC2 instance ids carrying this pool's tag.
 
@@ -592,6 +615,22 @@ async def tick(redis) -> dict:
                 continue
             rec = await _fleet_record(redis, ws_id)
             state = rec.get("state")
+
+            # WARMING → READY once the pool's workers actually report ready.
+            # Without this the record sits at "warming" for the whole workshop,
+            # so the one field an operator reads to answer "are the machines up
+            # yet" never answers it. Teardown worked anyway (it accepts either
+            # state), which is exactly why the gap was easy to miss.
+            if state == WARMING:
+                pool_name = rec.get("pool", "")
+                ready = await _pool_workers_ready(redis, pool_name)
+                if ready:
+                    rec["state"] = READY
+                    rec["ready_at"] = now.isoformat()
+                    rec["ready_workers"] = ready
+                    await _save_fleet_record(redis, ws_id, rec)
+                    state = READY
+                    log.info("workshop %s: %d worker(s) ready", ws_id, ready)
 
             if state in (None, "", "failed") and due_for_prewarm(session, now):
                 if CONTROL_LOOP_APPLY:
