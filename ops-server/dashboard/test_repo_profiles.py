@@ -97,3 +97,43 @@ def test_publish_round_trips():
     back = asyncio.run(rp.load(r, "demo-astroshop-problems"))
     assert back.steady_memory_mb == 5200
     assert back.measured_on == "2026-08-14"
+
+
+# ── name resolution ─────────────────────────────────────────────────────────
+# Caught live on 2026-08-14: a running workshop stored trainingId
+# "kubernetes-101" while the repo is "enablement-kubernetes-101", so the
+# profile missed and EVERY workshop was sized as heavy. Safe, but a silent 3x
+# over-provision that nobody would question, because falling back is supposed
+# to be the unusual path.
+
+def test_catalog_id_resolves_to_the_repo_profile():
+    p = asyncio.run(rp.load(FakeRedis(), "kubernetes-101"))
+    assert p.steady_memory_mb == 1609
+    assert p.estimated is False, "the real profile must be found, not the default"
+
+
+def test_repo_url_resolves():
+    p = asyncio.run(rp.load(
+        FakeRedis(), "https://github.com/dynatrace-wwse/enablement-kubernetes-101"))
+    assert p.steady_memory_mb == 1609
+
+
+def test_git_suffix_and_trailing_slash_are_tolerated():
+    for form in ("https://github.com/x/enablement-kubernetes-101.git",
+                 "https://github.com/x/enablement-kubernetes-101/"):
+        assert asyncio.run(rp.load(FakeRedis(), form)).steady_memory_mb == 1609
+
+
+def test_candidates_try_both_directions():
+    assert "enablement-kubernetes-101" in rp.candidate_names("kubernetes-101")
+    assert "kubernetes-101" in rp.candidate_names("enablement-kubernetes-101")
+
+
+def test_a_genuinely_unknown_repo_is_still_heavy():
+    """Aliasing must widen the search, not start matching things it shouldn't."""
+    p = asyncio.run(rp.load(FakeRedis(), "enablement-brand-new-thing"))
+    assert p.estimated is True
+
+
+def test_empty_repo_is_heavy_not_crashed():
+    assert asyncio.run(rp.load(FakeRedis(), "")).estimated is True

@@ -169,6 +169,18 @@ def due_for_prewarm(session: dict, now: datetime,
     return now >= start - timedelta(minutes=lead_minutes)
 
 
+def workshop_repo(session: dict) -> str:
+    """Which repo a workshop delivers, for profile lookup.
+
+    ``repoUrl`` is preferred because it is the unambiguous one. ``trainingId``
+    is a catalog id and does NOT match the repo name — a live workshop stores
+    ``kubernetes-101`` for ``enablement-kubernetes-101`` — so relying on it
+    alone silently sent every workshop to the heavy default.
+    """
+    return (session.get("repoUrl") or session.get("trainingId")
+            or session.get("repo") or "")
+
+
 def workshop_end(session: dict):
     start = parse_iso(session.get("scheduledAt", ""))
     if start is None:
@@ -343,7 +355,7 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
     if existing and existing.get("state") in (WARMING, READY):
         return existing
 
-    repo = session.get("trainingId") or session.get("repo") or ""
+    repo = workshop_repo(session)
     seats = await _roster_size(redis, ws_id)
     profile = await repo_profiles.load(redis, repo)
     plan = plan_workshop_capacity(seats, profile)
@@ -537,8 +549,7 @@ async def tick(redis) -> dict:
                     await provision_workshop_fleet(redis, ws_id, session)
                 else:
                     seats = await _roster_size(redis, ws_id)
-                    profile = await repo_profiles.load(
-                        redis, session.get("trainingId") or "")
+                    profile = await repo_profiles.load(redis, workshop_repo(session))
                     plan = plan_workshop_capacity(seats, profile)
                     log.info("DRY-RUN workshop %s (%s): would launch %d × %s "
                              "for %d seats — %s", ws_id, session.get("title", ""),

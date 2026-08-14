@@ -116,8 +116,29 @@ BUILTIN: dict[str, RepoProfile] = {
 
 
 def _short_name(repo: str) -> str:
-    """Accepts 'owner/name' or 'name'."""
-    return (repo or "").strip().split("/")[-1]
+    """Accepts 'owner/name', a full GitHub URL, or a bare name."""
+    name = (repo or "").strip().rstrip("/").split("/")[-1]
+    return name[:-4] if name.endswith(".git") else name
+
+
+def candidate_names(repo: str) -> list[str]:
+    """Names to try, most specific first.
+
+    A workshop stores ``trainingId`` as ``kubernetes-101`` while the repo is
+    ``enablement-kubernetes-101``. Measured live: without this, EVERY workshop
+    missed its profile and was sized as heavy — safe, but a silent 3x
+    over-provision that nobody would have questioned because the fallback is
+    supposed to be the unusual path.
+    """
+    name = _short_name(repo)
+    if not name:
+        return []
+    out = [name]
+    if not name.startswith("enablement-"):
+        out.append(f"enablement-{name}")
+    else:
+        out.append(name[len("enablement-"):])
+    return out
 
 
 async def load(redis, repo: str) -> RepoProfile:
@@ -127,12 +148,19 @@ async def load(redis, repo: str) -> RepoProfile:
     malformed override falls through to the safe path rather than being
     partially applied — a half-read profile is how you oversell a box.
     """
-    name = _short_name(repo)
-    try:
-        raw = await redis.hget(PROFILE_KEY, name)
-    except Exception as exc:                                  # pragma: no cover
-        log.warning("profile lookup failed for %s: %s", name, exc)
-        raw = None
+    names = candidate_names(repo)
+    name = names[0] if names else ""
+    raw = None
+    for candidate in names:
+        try:
+            raw = await redis.hget(PROFILE_KEY, candidate)
+        except Exception as exc:                              # pragma: no cover
+            log.warning("profile lookup failed for %s: %s", candidate, exc)
+            raw = None
+            break
+        if raw:
+            name = candidate
+            break
     if raw:
         try:
             data = json.loads(raw)
@@ -149,10 +177,11 @@ async def load(redis, repo: str) -> RepoProfile:
         except (ValueError, KeyError, TypeError) as exc:
             log.warning("malformed profile for %s (%s) — using safe default",
                         name, exc)
-    if name in BUILTIN:
-        return BUILTIN[name]
-    log.info("no profile for %s — treating as heavy (%d MiB/session)",
-             name, HEAVY_DEFAULT.steady_memory_mb)
+    for candidate in names:
+        if candidate in BUILTIN:
+            return BUILTIN[candidate]
+    log.info("no profile for %s (tried %s) — treating as heavy (%d MiB/session)",
+             repo, ", ".join(names) or "nothing", HEAVY_DEFAULT.steady_memory_mb)
     return HEAVY_DEFAULT
 
 

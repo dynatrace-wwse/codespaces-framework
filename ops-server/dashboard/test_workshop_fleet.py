@@ -235,3 +235,19 @@ def test_apply_defaults_to_off():
     assert os.environ.get("CONTROL_LOOP_APPLY") in (None, "", "0"), \
         "this test documents the default; unset the env var to run it"
     assert wf.CONTROL_LOOP_APPLY is False
+
+
+def test_workshop_repo_prefers_the_unambiguous_url():
+    """trainingId is a catalog id, not a repo name. Live data has
+    trainingId=kubernetes-101 alongside repoUrl=.../enablement-kubernetes-101."""
+    s = {"trainingId": "kubernetes-101",
+         "repoUrl": "https://github.com/dynatrace-wwse/enablement-kubernetes-101"}
+    assert wf.workshop_repo(s).endswith("enablement-kubernetes-101")
+
+
+def test_workshop_repo_falls_back_to_training_id():
+    assert wf.workshop_repo({"trainingId": "kubernetes-101"}) == "kubernetes-101"
+
+
+def test_workshop_repo_of_an_empty_session_is_blank_not_an_error():
+    assert wf.workshop_repo({}) == ""
