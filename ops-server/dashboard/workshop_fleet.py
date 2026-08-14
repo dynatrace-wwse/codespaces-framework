@@ -404,7 +404,14 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
             slot_memory_mb=repo_profiles.slot_memory_cap_mb(profile),
             code_branch=WORKER_CODE_BRANCH,
         )
-        rec["instances"] = [i.get("InstanceId") for i in launched if i.get("InstanceId")]
+        # scale_up returns snake_case ``instance_id``; accept both spellings so a
+        # future change to either side cannot silently empty this list. It was
+        # ``InstanceId`` only, which produced an empty list on every launch and
+        # therefore a teardown that terminated nothing — invisible in unit tests
+        # because they never call the real scale_up.
+        rec["instances"] = [i.get("instance_id") or i.get("InstanceId")
+                            for i in launched
+                            if i.get("instance_id") or i.get("InstanceId")]
     except Exception as exc:
         # Leave the binding in place. Learners queue on the pool rather than
         # leaking onto the daily workers, and the next tick retries the launch.
@@ -445,7 +452,14 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     terminated = await _terminate_workshop_sessions(redis, ws_id)
     log.info("workshop %s: requested termination of %d session(s)", ws_id, terminated)
 
-    instances = rec.get("instances") or []
+    # The record is a convenience, NOT the source of truth. Instances are tagged
+    # with their pool at launch, so ask EC2 what actually exists rather than
+    # trusting a list that a bug, a lost write or a restart could have emptied.
+    # This is the difference between a workshop that gives its machines back and
+    # one that leaks them silently — and the record WAS empty on the first live
+    # run, so this path is load-bearing, not belt-and-braces.
+    instances = sorted(set(rec.get("instances") or []) |
+                       set(await _instances_tagged(rec.get("pool", ""))))
     if instances:
         try:
             # scale_down refuses anything not tagged orbital-role=worker, so a
@@ -464,6 +478,28 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     rec["ended_at"] = datetime.now(timezone.utc).isoformat()
     await _save_fleet_record(redis, ws_id, rec)
     return rec
+
+
+async def _instances_tagged(pool_name: str) -> list[str]:
+    """Live EC2 instance ids carrying this pool's tag.
+
+    Deliberately queries AWS rather than Redis: when a workshop's machines need
+    giving back, the question is "what is actually still running", and Redis is
+    the component most likely to be the reason the record is wrong.
+    """
+    if not pool_name:
+        return []
+    from dashboard import fleet
+    try:
+        data = await fleet._aws(
+            "ec2", "describe-instances",
+            "--filters", f"Name=tag:orbital-pool,Values={pool_name}",
+            "Name=instance-state-name,Values=pending,running,stopping,stopped")
+    except Exception as exc:
+        log.warning("could not list instances for pool %s: %s", pool_name, exc)
+        return []
+    return [i.get("InstanceId") for r in (data or {}).get("Reservations", [])
+            for i in r.get("Instances", []) if i.get("InstanceId")]
 
 
 async def _pool_worker_ids(redis, pool_name: str) -> list[str]:

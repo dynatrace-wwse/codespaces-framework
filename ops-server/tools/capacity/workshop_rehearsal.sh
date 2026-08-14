@@ -30,6 +30,11 @@ OUT="${OUT:-/tmp/workshop-rehearsal-$(date +%H%M%S)}"
 mkdir -p "$OUT"
 
 RP=$(sudo grep -oP '^REDIS_PASSWORD=\K.*' /home/ops/.env)
+# Live-session writes are gated by _require_service_or_writer: the Orbital
+# service bearer or a signed-in org member. A script has neither unless it
+# reads the bearer, and the 401 body says so plainly.
+OT=$(sudo grep -oP '^ORBITAL_TOKEN=\K.*' /home/ops/.env | head -1)
+AUTH="Authorization: Bearer ${OT}"
 r() { redis-cli -a "$RP" --no-auth-warning "$@"; }
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*" | tee -a "$OUT/log"; }
@@ -37,13 +42,15 @@ note() { printf '   %s\n' "$*" | tee -a "$OUT/log"; }
 
 # ── 1. state of the fleet before we start ───────────────────────────────────
 say "Fleet before"
-curl -s "$ORBITAL/api/workers" | python3 -c '
+curl -s "$ORBITAL/api/workers" | python3 -c "
 import json,sys
-for w in json.load(sys.stdin)["workers"]:
-    if w.get("arch") == "amd64" or w.get("role") == "master":
-        print(f"   {w.get(\"worker_id\"):34} pool={w.get(\"pool\",\"?\"):18} "
-              f"{w.get(\"status\"):9} {w.get(\"slots_ready\")}/{w.get(\"slots_total\")} "
-              f"code={w.get(\"code_ref\") or \"(unstamped)\"}")' | tee -a "$OUT/log"
+for w in json.load(sys.stdin)['workers']:
+    if w.get('arch') == 'amd64' or w.get('role') == 'master':
+        print('   %-34s pool=%-18s %-9s %s/%s code=%s' % (
+            w.get('worker_id'), w.get('pool','?'), w.get('status'),
+            w.get('slots_ready'), w.get('slots_total'),
+            w.get('code_ref') or '(unstamped)'))
+" | tee -a "$OUT/log"
 
 # ── 2. create the workshop, scheduled a few minutes out ─────────────────────
 say "Creating workshop"
@@ -57,7 +64,7 @@ from datetime import datetime,timedelta,timezone
 print((datetime.now(timezone.utc)+timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%S.000Z'))")
 
 CREATE=$(curl -s -X POST "$ORBITAL/api/live/sessions" \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' -H "$AUTH" \
   -d "{\"title\":\"REHEARSAL $(date +%H:%M)\",
        \"trainingId\":\"kubernetes-101\",
        \"trainerEmail\":\"$TRAINER\",
@@ -86,10 +93,14 @@ joined=0
 for i in $(seq 0 $((ROSTER_SIZE - 1))); do
   email=$(printf 'bot%02d@rehearsal.invalid' "$i")
   resp=$(curl -s -X POST "$ORBITAL/api/live/sessions/$WS/join" \
-    -H 'Content-Type: application/json' \
+    -H 'Content-Type: application/json' -H "$AUTH" \
     -d "{\"email\":\"$email\",\"tenant\":\"$TENANT\"}")
   echo "$resp" >> "$OUT/joins.jsonl"
-  case "$resp" in *'"joined"'*|*'"ok"'*|*joinedAt*) joined=$((joined+1)) ;; esac
+  # The join endpoint answers {"state":"open","joinedCount":N} — no "joined"
+  # key, no "ok". Pattern-matching for those reported 0/8 while all eight had
+  # in fact joined, which is a worse failure than a real one: it would have
+  # sent the operator hunting a scheduling bug that did not exist.
+  case "$resp" in *joinedCount*) joined=$((joined+1)) ;; esac
 done
 note "joined $joined/$ROSTER_SIZE"
 [ "$joined" = "$ROSTER_SIZE" ] || note "WARNING: not everyone joined — provision-all will skip the rest"

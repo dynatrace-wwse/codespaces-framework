@@ -251,3 +251,29 @@ def test_workshop_repo_falls_back_to_training_id():
 
 def test_workshop_repo_of_an_empty_session_is_blank_not_an_error():
     assert wf.workshop_repo({}) == ""
+
+
+# ── instance bookkeeping ────────────────────────────────────────────────────
+# Caught only by a live launch: scale_up returns snake_case "instance_id" while
+# the record was reading "InstanceId", so every workshop recorded an EMPTY
+# instance list and teardown terminated nothing. Unit tests could not see it —
+# they never call the real scale_up — which is exactly why the rehearsal exists.
+
+def _ids(launched):
+    return [i.get("instance_id") or i.get("InstanceId")
+            for i in launched if i.get("instance_id") or i.get("InstanceId")]
+
+
+def test_instance_ids_are_read_from_the_shape_scale_up_actually_returns():
+    assert _ids([{"instance_id": "i-abc", "type": "m6a.4xlarge"}]) == ["i-abc"]
+
+
+def test_both_spellings_are_accepted():
+    """Neither side should be able to silently empty this list again."""
+    assert _ids([{"InstanceId": "i-1"}, {"instance_id": "i-2"}]) == ["i-1", "i-2"]
+
+
+def test_entries_without_an_id_are_dropped_not_recorded_as_none():
+    """A None in the list would reach scale_down and be refused as an
+    untaggable instance, taking the whole teardown down with it."""
+    assert _ids([{"type": "m6a.4xlarge"}, {"instance_id": "i-ok"}]) == ["i-ok"]
