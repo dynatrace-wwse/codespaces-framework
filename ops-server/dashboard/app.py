@@ -414,6 +414,16 @@ async def startup():
     except Exception as exc:
         log.error("PROVISION PACER FAILED TO START — paced jobs will not drain: %s", exc)
 
+    # Workshop prewarm/teardown on a schedule + daily-pool autoscale. Before
+    # this, scaling was four endpoints a human clicked; nothing read a calendar
+    # and nothing watched utilisation.
+    try:
+        from dashboard import workshop_fleet
+        asyncio.get_running_loop().create_task(workshop_fleet.control_loop(pool))
+    except Exception as exc:
+        log.error("CONTROL LOOP FAILED TO START — workshops will not get "
+                  "machines automatically: %s", exc)
+
 
 @app.on_event("shutdown")
 async def shutdown():
