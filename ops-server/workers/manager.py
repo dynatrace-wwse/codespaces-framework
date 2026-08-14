@@ -103,11 +103,33 @@ def _dead_worker_candidate(rec: dict, job_id: str, active_jobs) -> bool:
     hold so the app announces "ready" with no shell, and disables idle/expiry
     reaping and History. GitHub owns the Codespace lifecycle; ``_expiry_reaper``
     is what cleans these up, as its own docstring says.
+
+    A **job that has not been claimed yet is never a candidate** either, and for
+    the same reason: ``api_arena_provision`` writes ``worker_id="queued"`` as a
+    placeholder before the job is enqueued, and there is no worker registered
+    under that name — so the record was reaped seconds after it was written.
+
+    That race was almost invisible while a job sat in the queue for a second or
+    two. Paced admission holds a learner for minutes, and then it fired on
+    EVERY parked learner. Measured 2026-08-14 on a 12-seat load test: the two
+    learners admitted in the opening burst kept their records, and all ten who
+    waited behind the pacer lost theirs. The worker recreated a bare record
+    when it eventually picked the job up, so nothing looked broken — the
+    session came up and the learner could work.
+
+    What was lost was everything Orbital knew about it, silently:
+    ``workshop_id`` (so ending the workshop terminates nothing),
+    ``dt_token_ids`` (so terminate cannot revoke — a token leak),
+    ``expires_at`` (so the environment gets the worker's 24 h default instead of
+    the workshop's lifetime), and ``arena_user`` (so the session is no longer
+    attributable to the learner).
     """
     if rec.get("provider") == "codespace":
         return False
     worker_id = rec.get("worker_id", "")
-    return bool(worker_id and worker_id != "master" and job_id not in active_jobs)
+    if worker_id in ("", "queued"):
+        return False
+    return bool(worker_id != "master" and job_id not in active_jobs)
 
 
 def _branch_of(job: dict) -> str:
