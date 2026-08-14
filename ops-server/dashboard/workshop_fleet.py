@@ -579,6 +579,7 @@ async def _terminate_workshop_sessions(redis, ws_id: str) -> int:
     disconnected: the pub/sub message is fire-and-forget, the flag is not.
     """
     count = 0
+    job_ids: set[str] = set()
     async for key in redis.scan_iter(match="job:running:*", count=500):
         try:
             if await redis.type(key) != "hash":
@@ -587,12 +588,55 @@ async def _terminate_workshop_sessions(redis, ws_id: str) -> int:
             if rec.get("workshop_id") != ws_id:
                 continue
             job_id = key.split("job:running:", 1)[1]
+            job_ids.add(job_id)
             await redis.hset(key, "terminating", "1")
             await redis.publish("ops:terminate", job_id)
             count += 1
         except Exception as exc:
             log.warning("workshop %s: could not terminate %s: %s", ws_id, key, exc)
+
+    count += await _drop_queued_jobs(redis, ws_id, job_ids)
     return count
+
+
+async def _drop_queued_jobs(redis, ws_id: str, job_ids: set[str]) -> int:
+    """Remove the workshop's not-yet-started jobs from the queues.
+
+    Flagging ``terminating`` only reaches a job a worker has already claimed.
+    Paced admission means a workshop can end with learners still parked, and
+    those payloads would be admitted afterwards and build environments for a
+    workshop nobody is attending — measured 2026-08-14: a workshop ended with
+    three learners still in the pending list.
+
+    Matched by job id rather than by payload content, because the queued
+    payload carries no workshop id — only the ``job:running`` record does.
+    """
+    if not job_ids:
+        return 0
+    dropped = 0
+    patterns = ("queue:pending:*", "queue:pool:*", "queue:test:*",
+                "queue:direct:*")
+    for pattern in patterns:
+        async for key in redis.scan_iter(match=pattern, count=200):
+            try:
+                if await redis.type(key) != "list":
+                    continue
+                for payload in await redis.lrange(key, 0, -1):
+                    try:
+                        job_id = json.loads(payload).get("job_id", "")
+                    except (ValueError, TypeError):
+                        continue
+                    if job_id in job_ids:
+                        # LREM by exact value: the payload is unique, and this
+                        # cannot disturb another learner's position in the queue.
+                        removed = await redis.lrem(key, 1, payload)
+                        if removed:
+                            dropped += removed
+                            log.info("workshop %s: dropped queued job %s from %s",
+                                     ws_id, job_id, key)
+            except Exception as exc:
+                log.warning("workshop %s: could not scan %s: %s", ws_id, key, exc)
+    return dropped
 
 
 async def _daily_workers(redis) -> list[dict]:

@@ -99,6 +99,17 @@ async def running_jobs(client: httpx.AsyncClient) -> list[dict]:
     return d if isinstance(d, list) else d.get("running", d.get("builds", []))
 
 
+def is_started(job: dict) -> bool:
+    """A record is not a running session until a worker has claimed it.
+
+    api_arena_provision writes worker_id="queued" before enqueueing, so a job
+    parked behind the pacer appears in /api/builds/running immediately. Counting
+    those reported 12/12 up eleven seconds after provision-all, which is faster
+    than a k3d cluster can possibly start.
+    """
+    return (job.get("worker_id") or "") not in ("", "queued")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seats", type=int, default=12)
@@ -218,7 +229,8 @@ async def main() -> int:
             up: set[str] = set()
             last = -1
             while time.time() < deadline and len(up) < len(jobs):
-                live = {j.get("job_id"): j for j in await running_jobs(client)}
+                live = {j.get("job_id"): j for j in await running_jobs(client)
+                        if is_started(j)}
                 up = {j for j in jobs.values() if j in live}
                 pend = int(redis_cli("LLEN", f"queue:pending:{target}") or 0)
                 if len(up) != last:
@@ -229,7 +241,8 @@ async def main() -> int:
                     break
                 await asyncio.sleep(20)
 
-            live = {j.get("job_id"): j for j in await running_jobs(client)}
+            live = {j.get("job_id"): j for j in await running_jobs(client)
+                    if is_started(j)}
             placement = Counter(live[j].get("worker_id", "?")
                                 for j in jobs.values() if j in live)
             log(f"placement: {dict(placement)}")
@@ -254,9 +267,15 @@ async def main() -> int:
                 log("ending workshop (terminates every session)")
                 await client.post(f"{ORBITAL}/api/live/sessions/{ws}/end",
                                   headers=auth, json={"trainerEmail": TRAINER})
-                # Teardown is asynchronous; give it room, then check the fleet
-                # is genuinely healthy rather than merely quiet.
-                await asyncio.sleep(90)
+                # Teardown is asynchronous. Poll rather than guess a duration:
+                # a fixed 90 s wait failed a run that was in fact fine, and
+                # would equally have passed one that was not.
+                deadline = time.time() + 420
+                while time.time() < deadline:
+                    after = await workers(client)
+                    if all(int(w.get("active_jobs") or 0) == 0 for w in after):
+                        break
+                    await asyncio.sleep(15)
                 after = await workers(client)
                 for w in after:
                     log(f"  {w['worker_id']:28} "
@@ -264,12 +283,16 @@ async def main() -> int:
                         f"free={w.get('slots_free')} active={w.get('active_jobs')} "
                         f"reaper_watching={w.get('reaper_watching')} "
                         f"{w.get('status')}")
+                leftover = int(redis_cli("LLEN", f"queue:pending:{target}") or 0)
                 healthy = all(
                     int(w.get("slots_free") or 0) == int(w.get("slots_total") or 0)
                     and int(w.get("active_jobs") or 0) == 0
                     for w in after)
-                check("5. fleet healthy after teardown", healthy,
-                      "every worker back to full free slots, nothing stuck")
+                check("5. fleet healthy after teardown", healthy and leftover == 0,
+                      f"{leftover} job(s) still parked; "
+                      + ", ".join(f"{w['worker_id']} {w.get('slots_free')}/"
+                                  f"{w.get('slots_total')} free"
+                                  for w in after))
 
                 for tk in minted:
                     await prov.revoke_tokens(tk.token_ids)

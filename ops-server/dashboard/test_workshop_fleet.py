@@ -363,3 +363,63 @@ def test_terminating_an_empty_workshop_is_a_no_op_not_an_error():
     import asyncio
     r = _JobsRedis({})
     assert asyncio.run(wf.terminate_workshop_sessions(r, "ws_nobody")) == 0
+
+
+class _QueuedRedis(_JobsRedis):
+    """Adds the queue lists a parked learner sits in."""
+
+    def __init__(self, jobs, queues):
+        super().__init__(jobs)
+        self.l = dict(queues)
+
+    async def lrange(self, key, start, stop):
+        items = self.l.get(key, [])
+        return items[start:] if stop == -1 else items[start:stop + 1]
+
+    async def lrem(self, key, count, value):
+        items = self.l.get(key, [])
+        if value in items:
+            items.remove(value)
+            return 1
+        return 0
+
+
+def _payload(job_id):
+    import json as _json
+    return _json.dumps({"job_id": job_id, "repo": "x", "type": "daemon"})
+
+
+def test_ending_a_workshop_drops_its_learners_who_never_started():
+    """MEASURED 2026-08-14: a workshop ended with three learners still parked
+    behind the pacer. Flagging `terminating` only reaches a job a worker has
+    already claimed, so those three would have been admitted afterwards and
+    built environments for a workshop nobody was attending."""
+    import asyncio
+
+    r = _QueuedRedis(
+        jobs={
+            "job-a": {"workshop_id": "ws_mine", "worker_id": "queued"},
+            "job-b": {"workshop_id": "ws_mine", "worker_id": "wamd001"},
+            "job-c": {"workshop_id": "ws_other", "worker_id": "queued"},
+        },
+        queues={
+            "queue:pending:queue:test:amd64": [_payload("job-a"), _payload("job-c")],
+            "queue:test:amd64": [_payload("job-z")],
+        },
+    )
+    n = asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine"))
+    # 2 records flagged + 1 queued payload dropped
+    assert n == 3
+    remaining = r.l["queue:pending:queue:test:amd64"]
+    assert len(remaining) == 1, "another workshop's learner must not be dropped"
+    assert "job-c" in remaining[0]
+    assert r.l["queue:test:amd64"] == [_payload("job-z")], \
+        "an unrelated job keeps its place in the queue"
+
+
+def test_dropping_queued_jobs_is_a_no_op_when_nothing_is_parked():
+    import asyncio
+    r = _QueuedRedis(jobs={"job-a": {"workshop_id": "ws_mine",
+                                     "worker_id": "wamd001"}},
+                     queues={"queue:pending:queue:test:amd64": []})
+    assert asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine")) == 1
