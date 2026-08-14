@@ -396,18 +396,28 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
         log.warning("workshop %s sized from an ESTIMATED profile for %s — "
                     "measure this repo before relying on the number", ws_id, repo)
     try:
-        launched = await fleet.scale_up(
-            plan["workers"],
-            instance_type=WORKSHOP_INSTANCE_TYPE,
-            purchasing=WORKSHOP_PURCHASING,
-            pool=pool_name,
-            capacity=plan["seats_per_worker"],
-            # A workshop worker serves one repo, so its slots can be capped for
-            # that repo specifically rather than at a flat figure chosen for
-            # the lightest one.
-            slot_memory_mb=repo_profiles.slot_memory_cap_mb(profile),
-            code_branch=WORKER_CODE_BRANCH,
-        )
+        # scale_up refuses more than MAX_SCALE_UP (4) per call, and 70 seats
+        # needs exactly 4 — so the bootcamp sits ON the limit and anything
+        # larger would raise ValueError, be caught below, and retry forever
+        # without ever succeeding. Batch instead: the cap is a per-call safety
+        # rail, not a fleet ceiling.
+        launched = []
+        remaining = plan["workers"]
+        while remaining > 0:
+            batch = min(remaining, fleet.MAX_SCALE_UP)
+            launched += await fleet.scale_up(
+                batch,
+                instance_type=WORKSHOP_INSTANCE_TYPE,
+                purchasing=WORKSHOP_PURCHASING,
+                pool=pool_name,
+                capacity=plan["seats_per_worker"],
+                # A workshop worker serves one repo, so its slots can be capped
+                # for that repo specifically rather than at a flat figure chosen
+                # for the lightest one.
+                slot_memory_mb=repo_profiles.slot_memory_cap_mb(profile),
+                code_branch=WORKER_CODE_BRANCH,
+            )
+            remaining -= batch
         # scale_up returns snake_case ``instance_id``; accept both spellings so a
         # future change to either side cannot silently empty this list. It was
         # ``InstanceId`` only, which produced an empty list on every launch and

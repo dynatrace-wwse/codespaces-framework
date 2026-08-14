@@ -277,3 +277,29 @@ def test_entries_without_an_id_are_dropped_not_recorded_as_none():
     """A None in the list would reach scale_down and be refused as an
     untaggable instance, taking the whole teardown down with it."""
     assert _ids([{"type": "m6a.4xlarge"}, {"instance_id": "i-ok"}]) == ["i-ok"]
+
+
+def test_a_workshop_larger_than_the_scale_cap_is_batched():
+    """MAX_SCALE_UP is 4 per call, and 70 seats needs exactly 4 — the bootcamp
+    sits ON the limit. Anything larger would raise, be caught, and retry forever
+    without succeeding, so the launch batches instead. The cap is a per-call
+    safety rail, not a fleet ceiling."""
+    from dashboard import fleet
+    plan = wf.plan_workshop_capacity(200, rp.K8S_101, "m6a.4xlarge")
+    assert plan["workers"] > fleet.MAX_SCALE_UP, "test needs a plan above the cap"
+
+    batches, remaining = [], plan["workers"]
+    while remaining > 0:
+        b = min(remaining, fleet.MAX_SCALE_UP)
+        batches.append(b)
+        remaining -= b
+    assert sum(batches) == plan["workers"], "batching must not lose or add workers"
+    assert all(b <= fleet.MAX_SCALE_UP for b in batches)
+    assert len(batches) > 1
+
+
+def test_seventy_seats_sits_exactly_on_the_cap():
+    """Documents why this was easy to miss: the bootcamp itself never trips it."""
+    from dashboard import fleet
+    assert wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")["workers"] \
+        == fleet.MAX_SCALE_UP
