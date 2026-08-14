@@ -1,200 +1,159 @@
-# HANDOFF — 2026-08-14 — Workshop pools, paced provisioning, fleet control loop
+# HANDOFF — 2026-08-14 — Capacity in units, and the four bugs a load test found
 
-**Read first.** Everything else is linked from here.
+**Read first.** Supersedes the earlier version of this file (rehearsal-day notes).
 
 | | |
 |---|---|
 | **Branch** | `epic/workshop-pools-and-autoscale` (pushed, **NOT merged**) |
-| **Tests** | 770 dashboard + 108 worker-agent green |
-| **Deployed to** | master ops checkout + amd001 + amd002, **by branch checkout, not merge** |
-| **Report** | https://claude.ai/code/artifact/4df36acd-7176-455a-87be-02c4ac112ed5 |
-| **Rehearsal tooling** | `ops-server/tools/capacity/workshop_rehearsal{,_watch}.sh` |
+| **Tests** | 845 dashboard/shared/provisioning/workers + worker-agent suites green |
+| **Deployed to** | master ops checkout + amd001 + amd002, by branch checkout |
+| **Load test** | `tools/capacity/workshop_loadtest.py` — 5/5 assertions, twice consecutively |
 
 ---
 
-## Rolling back, if anything looks wrong
+## The change in one line
 
-Nothing here is merged, so rollback is a checkout:
+Capacity is now **one number per machine and one number per training**:
 
-```bash
-# master
-sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework checkout main
-sudo systemctl restart ops-dashboard
-# workers
-for w in autonomous-enablements-worker autonomous-enablements-worker-2; do
-  ssh $w "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework checkout main \
-          && sudo systemctl restart ops-worker-agent"
-done
+```
+seats = units(instance) // units(training)
 ```
 
-`/home/ops/.env` was appended to under a `# ── rehearsal 2026-08-14` marker, and backed
-up first to `/home/ops/.env.bak-prerehearsal-20260814-002237`. **Remove that block before
-treating the fleet as production** — it sets `CONTROL_LOOP_APPLY=1` scoped to a single
-rehearsal workshop, a 3-minute prewarm lead and a 1-minute teardown grace.
+`shared/capacity_units.py`. One unit is one Kubernetes-101 session. An m6a.4xlarge is
+20 units — measured, not derived: 20/20 sessions passed on that shape and 0/30 did. A
+4xlarge is worth exactly two 2xlarges.
+
+## What it replaced, and why
+
+A four-term model — memory, CPU, disk bandwidth, disk IOPS, take the minimum. It was
+correct and unusable. Two of its four terms bound how many installs may **start at
+once**, not how many sessions a box can **hold**, so a machine's planned capacity
+changed whenever a volume was reconfigured: the same m6a.4xlarge was described as 18,
+30 and 73 seats within two days.
+
+Paced admission already handles the start rate. Splitting the two lets the planning
+number be a table of what has actually been observed to work.
+
+The ceiling functions are kept as **diagnostics** — `limiting_factor` and
+`rank_by_cost` still answer "would more IOPS buy seats", which is real advice. They
+just no longer decide the plan. `fleet_policy.slots_for_instance` keeps its old meaning
+and its tests; planning moved to `fleet_policy.planned_slots`.
+
+Two rules make it fail safe, and both only ever *lower* a number:
+
+* an unprofiled training is priced as the heaviest one we know (3 units);
+* a derived instance figure is clamped by physical memory.
 
 ---
 
-## What was built
+## Four bugs, none of which a unit test could have found
 
-| Commit | What |
+### 1. The reconciler deleted every paced learner's record
+
+`api_arena_provision` writes `worker_id="queued"` before enqueueing. No worker
+registers under that name, so the terminate reconciler concluded the owning worker had
+vanished and **deleted the whole `job:running` record**.
+
+While a job sat in the queue for a second or two this almost never fired. The pacer
+holds a learner for minutes, so it fired on every parked learner: on 12 seats, the two
+admitted in the opening burst kept their records and **all ten who waited lost theirs**.
+
+Nothing looked broken. The worker recreated a bare record, the session came up, the
+learner could work. What vanished was everything Orbital knew about the session:
+
+| Lost field | Consequence |
 |---|---|
-| `dee9fe9` | workers self-update at boot (`WORKER_CODE_REF`) and belong to a pool (`WORKER_POOL`) |
-| `b58ba9f` | workshop jobs routed to `queue:pool:{pool}`; paced admission (token bucket) |
-| `0ed9560` | teardown hardening — reaper, ID-keyed waits, staggered kills, honest warm-up |
-| `531871b` | the control loop — workshop prewarm/teardown + daily autoscale |
-| `242eb77` | the admission brake actually bites (it was a flag nothing read) |
-| `749b8e6` | dry-run default, workshop allowlist, launchable branch |
-| `58bc604` | resolve a workshop's repo so its profile is found |
-| `7c4222c` | slot memory cap sized from the repo profile |
-| `1e00ed8` | rehearsal harness |
-| + | instance-id capture via `tag:orbital-pool`; `fleet:pressure` key rename |
+| `workshop_id` | ending the workshop terminates nothing |
+| `dt_token_ids` | terminate cannot revoke — two leaked tokens per paced learner |
+| `expires_at` | environment inherits the worker's 24 h default |
+| `arena_user` | session no longer attributable to the learner |
+
+Fixed in `workers/manager.py:_dead_worker_candidate` — same shape as the Codespace
+guard already in that function.
+
+### 2. `end` terminated nothing
+
+Setting state, writing the completion record, applying TTLs, returning 200 — and
+twelve environments still running ten minutes later. The teardown code existed; its
+only caller was the control loop, which is off by default and fires on the clock
+rather than on the trainer's action. `cancel` had the same gap.
+
+Load-bearing for the capacity work, not tidiness: a seat held by an ended workshop is a
+seat the next workshop's plan already spent.
+
+### 3. Ending a workshop left its parked learners in the queue
+
+Flagging `terminating` only reaches a job a worker has claimed. A workshop can end with
+learners still behind the pacer, and those were admitted afterwards — building
+environments for a workshop nobody was attending. Measured: three.
+
+### 4. The fleet-scaled drip was a no-op
+
+`worker:{id}:app_ports_free` is a **list**. `HGETALL` on it raises WRONGTYPE, which
+aborted the whole worker scan, so every queue paced at the one-worker rate no matter
+how many machines served it. Benign in direction — it drips slower, never faster —
+which is exactly why nothing caught it.
 
 ---
 
-## The three design decisions worth not re-litigating
+## Fleet consequences, all conservative
 
-### 1. CPU is not the scale signal — memory is
-
-Measured: 0.127 vCPU per session, so a **completely full** 30-seat worker sits at about
-**24% CPU**. A 70%-CPU scale trigger therefore never fires for occupancy. It fires only on
-install bursts, which are transient, and the machine it adds arrives 5–10 minutes later
-and cannot help sessions already placed — a Sysbox session cannot be migrated.
-
-Memory reaches 70% at roughly **25 of 30 seats**, which is an early warning with time left
-to act. Three signals, three jobs:
-
-| signal | meaning | action |
+| Change | Was | Now |
 |---|---|---|
-| free seats low | demand | launch a worker |
-| **memory ≥70% sustained** | **the repo profile is optimistic** | launch **and shrink that worker's advertised seats** |
-| CPU / IO pressure | a transient burst | admission brake. **Do not scale** |
+| Daily worker capacity | 30, typed into `/home/ops/.env` | **20**, derived from the instance type |
+| Slot memory limit | 4,096 MiB | **8,192 MiB** |
+| Provision drip | fixed 4/min per queue | **1.5/min per worker** (~12 installs in flight per volume) |
 
-The shrink is the part that matters: adding a machine while still advertising seats the
-box cannot back overfills it again.
+The workers now derive their own capacity, so the number a machine advertises and the
+number the planner assumed cannot drift apart. An explicit `WORKER_CAPACITY` still
+wins — the workshop planner sets it per launch.
 
-### 2. Capacity is a weight budget, not a seat count
-
-A count only means anything if every session weighs the same. A workshop is one repo, so
-budget ÷ weight is a clean seat count. The daily pool is heterogeneous, where a count was
-never meaningful and a "don't mix repos" rule would be unenforceable. **An unprofiled repo
-is planned as the heaviest thing we know** — the line that makes the system fail safe when
-someone adds a repo and forgets to measure it.
-
-### 3. Pool isolation is queue topology, not a filter
-
-```
-daily worker    → BLPOP queue:direct:{id}, queue:test:{arch}
-workshop worker → BLPOP queue:direct:{id}, queue:pool:{POOL}
-```
-
-Self-service work **cannot reach** a workshop box. A filter can regress; a queue a process
-never reads from cannot deliver. Blank `WORKER_POOL` resolves to `daily`, which is the
-upgrade path for the existing fleet — resolving blank to a pool queue would have made
-every worker go silent on restart.
+**`shared/` exists because a worker is a sparse checkout that does not clone
+`ops-server/dashboard`.** Putting the unit table in `dashboard/` made amd002 derive 6
+slots while amd001 derived 20, on identical hardware. `setup-worker.sh` now includes
+`ops-server/shared/**`. A test pins the location.
 
 ---
 
-## Bugs the live run caught that the unit suite could not
+## Load test result
 
-- **`scale_up` returns `instance_id`, not `InstanceId`.** The workshop record captured an
-  empty instance list, so teardown called `scale_down([])` and **terminated nothing**.
-  Fixed twice over: accept either spelling, and make teardown ask EC2 for
-  `tag:orbital-pool` instead of trusting the record. Unit tests never call the real
-  `scale_up`, which is the whole argument for the rehearsal harness.
-- **`PRESSURE_KEY = "worker:pressure"` collided with the `worker:*` scan** — the counter
-  appeared in `/api/workers` as a worker named `pressure`. Now `fleet:pressure`.
-- **`trainingId` is a catalog id, not a repo name.** A live workshop stores
-  `kubernetes-101` for `enablement-kubernetes-101`, so the profile missed and every
-  workshop was sized at 6 seats/worker from the heavy default instead of 20 — a silent 3×
-  over-provision, and one nobody would question because falling back is meant to be the
-  unusual path.
+`tools/capacity/workshop_loadtest.py --seats 12`, run twice back to back:
 
----
-
-## Traps worth not rediscovering
-
-- **Bots must JOIN before `provision-all`.** Unjoined roster emails return
-  "not-joined — will provision on entry" and queue nothing. A rehearsal that skips the
-  join measures nothing while looking like a scheduling failure.
-- **The join endpoint answers `{"state":...,"joinedCount":N}`** — no `"joined"` key.
-  Pattern-matching for one reports 0/8 while all eight joined.
-- **Live-session writes need the Orbital service bearer** (`ORBITAL_TOKEN` in
-  `/home/ops/.env`) or a signed-in org member. A bare curl gets a 401 that says so.
-- **Deploy ordering bites during validation.** The first rehearsal worker launched from a
-  dashboard running a commit older than `WORKER_CODE_BRANCH` and `slot_memory_mb`, so it
-  synced `main` and came up with slot limits off. The mechanism was fine; the running code
-  was two commits behind. Redeploy the master *before* trusting a launched worker.
-
----
-
-## Measured
-
-| Quantity | Value |
+| Assertion | Result |
 |---|---|
-| Warm-up, 30 slots, staged (`WARM_CONCURRENCY=6`) | 333 s / 340 s, `slots_degraded=0` |
-| Warm-up, same, previously all-at-once | 305 s — the burst is gone at almost no cost |
-| Workshop worker boot → ready (20 slots) | **~9 min** (launch 00:27:21 → registered ~00:30 → 20/20 at 00:38:34, of which 6 min was pool warm after an agent restart) — the number the prewarm lead must cover |
-| Seats/worker, k8s-101, ×0.55 planning safety | **20** (30 by memory alone) |
-| Workers for 70 seats | **4** → 80 seats, survives losing one machine |
-| Astroshop declared pod memory (helm values) | **6,320 MiB** across 10 components |
-| Slot cap live on both workers | 4,096 MiB — **below** the above |
-| OOM kills observed | none — a vanished margin, not an outage |
+| 1. workers advertise what the planner assumed | PASS — 20, model says 20 |
+| 2. admitted in phases, not in one burst | PASS — 4 at rest, then 1 per 20 s |
+| 3. every seat came up | PASS — 12/12 in **171 s**, then **172 s** |
+| 4. all seats landed in one pool | PASS |
+| 5. fleet healthy after teardown | PASS — 20/20 free both workers, 0 parked |
+
+Two runs within one second of each other is the point: the ask was consistency, not
+density.
+
+It mints real learner tokens, which earlier runs could not — bots died at
+`postCreateCommand` in four seconds and never reached the code the teardown assertions
+are about. That was itself three defects in `provisioning/`
+(`docs/known-issues/arena-oauth-mint-sso-url.md`).
 
 ---
-
-## Rehearsal result (2026-08-14, workshop `ws_mss7gmca-71d809`)
-
-| # | Assertion | Result |
-|---|---|---|
-| 1 | Machines launched automatically at prewarm time | **PASS** — fired 00:27:18, exactly 3 min before the 00:30:01 start, sized 9 seats ÷ 20/worker → 1 × m6a.4xlarge |
-| 2 | Launched worker runs current agent code | **PASS (mechanism)** — synced and stamped `WORKER_CODE_REF` at boot. It synced `main`, because the dashboard was two commits behind `WORKER_CODE_BRANCH` at launch time |
-| 3 | provision-all admits in phases | **PASS** — 2 admitted immediately, then 1 per ~15 s: `pacer: admitted 1 to queue:pool:ws-…, 5 still waiting` → `4` → `3` → `2` → `1` → `0` |
-| 4 | Self-service never lands on workshop machines | **PASS, with the bug it caught** (see below) |
-| 5 | Teardown returns the machines | **PASS, and it is the strongest result** — `terminated i-06d62eaee3a5794e5` at 01:06:23 while the record still read `instances: []`. The machine was found ONLY by the `tag:orbital-pool` fallback; without that fix it would have leaked silently |
-
-Post-run: 0 stray `docker wait`, 0 orphaned `job:running:*`, 0 pending queues, 0 pool
-queues left, amd001 back to 30/30 with `slots_degraded=0`, pool binding unbound.
-
-**One caveat on assertion 5.** The bot sessions died at `postCreateCommand` in ~4 s
-(no tokens — see the mint bug), so they never reached the `docker wait` the reaper
-replaces. This run exercised *instance* teardown, not teardown-under-load. The reaper
-itself remains unvalidated live and still wants a run with real environments.
-
-**Assertion 4 is the one worth reading.** In round one all eight workshop learners landed
-on the DAILY worker while the workshop's own machine sat idle at 20/20 — because
-`provision-all` never passed `workshopId`, so pool routing saw an untagged session. After
-the fix, round two placed all eight on the workshop worker, and a self-service session
-started mid-workshop went to the daily worker and never touched the workshop's machine:
-
-```
-round 1 (pre-fix)   WORKSHOP-BOT  -> worker-x86_64-amd001         x8   ✗
-round 2 (post-fix)  WORKSHOP-BOT  -> worker-x86_64-spot-3a5794e5  x8   ✓
-                    SELF-SERVICE  -> worker-x86_64-amd001         x1   ✓
-```
-
-Bot sessions fail at `postCreateCommand` in ~4 s because no DT tokens are minted for them.
-That is expected and does not affect assertions 1–4, which are about scheduling, routing
-and placement. It does mean the run exercised instance teardown rather than
-teardown-under-load; the 30-at-once session teardown still wants its own run.
 
 ## Still owed
 
-1. **Fix the arena OAuth mint URL, then measure Astroshop.** The measurement is BLOCKED,
-   not skipped: `provisioning/dt_token_provisioner.py:33` posts the client-credentials
-   grant to the tenant host instead of `sso.dynatrace.com`, so no harness can provision a
-   real environment. Written up in `docs/known-issues/arena-oauth-mint-sso-url.md`.
-   The same blocker means **the reaper has not been validated under load** — sessions
-   without tokens die at `postCreateCommand` and never reach the wait the reaper replaces.
-   Both want a real environment; fix the mint first and they come together.
-2. **Raise the daily pool's slot cap** from a flat 4,096 MiB. Astroshop declares 6,320 MiB
-   of pod limits, so 8,192 is defensible on the declared figures alone, without waiting for
-   the steady-state measurement. The workshop path is already safe — an unprofiled repo
-   gets a 12 GiB cap.
-3. **Turn the control loop on for real** — read a few dry-run ticks, then
-   `CONTROL_LOOP_APPLY=1` and widen `CONTROL_LOOP_WORKSHOPS`.
-4. **Merge to main**, so autoscaled workers get this code from their own boot sync rather
-   than needing `WORKER_CODE_BRANCH`.
-5. **Deploy build-once/upload-many** — proven safe (two builds with different
-   `DT_APP_ENVIRONMENT_URL` are byte-identical), turns ~87 min of live registration into ~3.
-6. **nginx**: gzip for JSON (only `text/html` is compressed today), upstream keepalive,
-   and back the 4 s lab log poll off to 8 s during a workshop.
+1. **Astroshop never bootstraps** — `docs/known-issues/astroshop-never-bootstraps.md`.
+   Every Astroshop session ever delivered has been an empty dev container, because
+   nothing mints the `DT_API_TOKEN`/`DT_PLATFORM_TOKEN` its `post-create.sh` gates on.
+   `DT_API_TOKEN` is ready to add; `DT_PLATFORM_TOKEN` needs
+   `platform-token:tokens:write` on the SRO account client. Until then Astroshop's cost
+   cannot be measured and stays at the heavy default of 3 units.
+2. **Turn the control loop on** — it is sizing correctly in dry-run
+   (`13 seats ÷ 20/worker → 1 × m6a.4xlarge`). Read a few ticks, then
+   `CONTROL_LOOP_APPLY=1`.
+3. **A run with a dedicated workshop pool.** Both runs above placed on the daily pool,
+   because the loop is in dry-run so no workshop machines were launched. Isolation is
+   proven by last night's rehearsal, not by these.
+4. **The reaper under load** is still unvalidated — teardown of 12 was clean, but 12 is
+   not 30.
+5. **Merge to main**, so autoscaled workers get this code from their boot sync.
+6. **Consider raising volume IOPS 3,000 → 6,000** (~$15/month per worker). At 3,000 the
+   IOPS ceiling is 18 installs, and the drip is what keeps us under it. Doubling it
+   removes the tightest constraint for the price of a coffee.
