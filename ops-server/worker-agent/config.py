@@ -3,6 +3,7 @@
 import os
 import platform
 import socket as _socket
+import sys
 import uuid
 from pathlib import Path
 from dotenv import load_dotenv
@@ -55,6 +56,40 @@ def _instance_type() -> str:
 INSTANCE_TYPE = os.environ.get("WORKER_INSTANCE_TYPE") or _instance_type()
 
 
+def _units_for_instance(instance_type: str) -> int:
+    """``capacity_units.units_for_instance``, loaded by PATH not by package.
+
+    ``from dashboard.capacity_units import ...`` looks obvious and is not
+    reliable here: whether ``dashboard`` is importable depends on how the agent
+    happened to be started and on what is on sys.path. Measured 2026-08-14 —
+    two workers of the identical instance type, started the same way, derived 20
+    and 6, because the import raised on one of them and the fallback swallowed
+    it. A silent fallback to a *smaller* number is the benign direction, but it
+    is still a machine quietly worth a third of what it cost.
+
+    Loading the file relative to this one has no such dependency, and it works
+    identically on an autoscaled worker built from the golden AMI.
+    """
+    try:
+        import importlib.util
+        import pathlib
+
+        path = (pathlib.Path(__file__).resolve().parent.parent
+                / "dashboard" / "capacity_units.py")
+        spec = importlib.util.spec_from_file_location("_capacity_units", path)
+        if spec is None or spec.loader is None:
+            return 0
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return int(module.units_for_instance(instance_type))
+    except Exception as exc:                                  # pragma: no cover
+        # Loud, not silent: this is the failure that cost amd002 two thirds of
+        # its capacity without anything in the logs saying so.
+        print(f"[config] could not derive capacity for {instance_type}: {exc}",
+              file=sys.stderr)
+        return 0
+
+
 def _derive_capacity() -> int:
     """Slots this box should advertise.
 
@@ -73,13 +108,9 @@ def _derive_capacity() -> int:
     if explicit:
         return int(explicit)
     if INSTANCE_TYPE:
-        try:
-            from dashboard.capacity_units import units_for_instance
-            derived = units_for_instance(INSTANCE_TYPE)
-            if derived > 0:
-                return derived
-        except Exception:                                     # pragma: no cover
-            pass
+        derived = _units_for_instance(INSTANCE_TYPE)
+        if derived > 0:
+            return derived
     return 6
 
 
