@@ -1,9 +1,10 @@
-# Astroshop sessions come up empty — `bootstrapWorkshop` has never run
+# Astroshop sessions came up empty — `bootstrapWorkshop` had never run
 
 **Found** 2026-08-14, while trying to measure what an Astroshop session costs.
-**Status:** root-caused. Half fixable here, half blocked on an account-level scope.
+**Fixed** 2026-08-16. Kept because the shape of this bug is worth remembering: it
+survived for as long as it did by looking exactly like success.
 
-## What happens
+## What happened
 
 Provision `astroshop-problems` through Orbital or through the app. The session comes
 up, `postCreateCommand` finishes in **41 seconds**, and the log ends with:
@@ -28,85 +29,97 @@ else
   printInfoSection "Workshop bootstrap is opt-in"
 ```
 
-Nothing that provisions a session supplies those two variables:
+Nothing that provisions a session supplied those two variables:
 
-| Minter | Produces |
+| Minter | Produced |
 |---|---|
 | Orbital `provisioning/token_specs.DEFAULT_SPECS` | `DT_OPERATOR_TOKEN`, `DT_INGEST_TOKEN` |
-| App `api/mintTrainingTokens.function.ts` `DEFAULT_SPECS` | `DT_OPERATOR_TOKEN`, `DT_INGEST_TOKEN`, `DT_ONEAGENT_TOKEN` |
+| App `api/mintTrainingTokens.function.ts` `DEFAULT_SPECS` | + `DT_ONEAGENT_TOKEN` |
 | App `PLATFORM_SPECS` (gen3 tenants) | one token aliased to those same three |
 
-`DT_API_TOKEN` and `DT_PLATFORM_TOKEN` appear in **none** of them. The repo has no
-`.devcontainer/yaml/dt-tokens.yaml` either, so `load_token_specs` falls through to the
-framework default and the mismatch is never visible.
+`DT_API_TOKEN` and `DT_PLATFORM_TOKEN` appeared in **none** of them. The repo had no
+`.devcontainer/yaml/dt-tokens.yaml` either, so `load_token_specs` fell through to the
+framework default and the mismatch was never visible.
 
-Consequence: **every** Astroshop session ever delivered this way has been an empty
-dev container. Nothing errors, nothing retries, and the session looks healthy on the
-board — which is why it has survived.
+Consequence: **every** Astroshop session ever delivered this way was an empty dev
+container. Nothing errored, nothing retried, and the session looked healthy on the
+board — which is why it survived.
 
-## Fixing it
+## Why it took three changes to fix
 
-### `DT_API_TOKEN` — ready, verified mintable
+The obvious fix — add the two tokens to the framework default — is wrong twice over:
+it would mint them for every training that does not want them, and it cannot express
+what this workshop actually needs, which is **two token families in one session**.
 
-Classic token. `post-create.sh` documents the scopes it needs, and all ten mint 201 on
-SRO through the platform proxy (verified 2026-08-14):
+| Consumer | Needs | Because |
+|---|---|---|
+| SDLC event helpers, CI ingest, credential vault | classic `dt0c01` | ingest + config endpoints |
+| monaco, dtctl | gen3 `dt0s16` | the platform Documents/Workflows APIs refuse a classic Api-Token whatever its scopes |
 
-```
-ReadConfig  WriteConfig  events.ingest  bizevents.ingest
-openpipeline.events_sdlc.custom  CaptureRequestData
-credentialVault.read  credentialVault.write  apiTokens.read  apiTokens.write
-```
+So `TokenSpec` grew a `kind` (`classic` \| `platform`), and the three places that mint
+learned to honour it:
 
-The designed extension point is a `dt-tokens.yaml` in the **astroshop repo**:
+1. **`demo-astroshop-problems#39`** — the repo declares all four tokens it needs.
+   One source of truth, in the repo, where the consumer lives.
+2. **`codespaces-framework@4ef612c`** — `TokenSpec.kind`/`aliases`;
+   `DTTokenProvisioner` serves `kind: platform` through the Account Management API
+   and *refuses loudly* when built from a credential that cannot reach it;
+   `revoke_tokens` routes each id to its own API by prefix.
+3. **`dynatrace-app-enablements#79`** — the app is what mints for real learners and
+   had no way to ask what the repo declared. It now does
+   (`GET /api/arena/trainings/{id}/token-specs`), and mints mixed sets.
 
-```yaml
-tokens:
-  - name_suffix: operator
-    env_var: DT_OPERATOR_TOKEN
-    scopes: [activeGateTokenManagement.create, activeGateTokenManagement.write,
-             entities.read, settings.read, settings.write, DataExport,
-             InstallerDownload]
-  - name_suffix: ingest
-    env_var: DT_INGEST_TOKEN
-    scopes: [metrics.ingest, logs.ingest, events.ingest, openTelemetryTrace.ingest]
-  - name_suffix: api
-    env_var: DT_API_TOKEN
-    scopes: [ReadConfig, WriteConfig, events.ingest, bizevents.ingest,
-             openpipeline.events_sdlc.custom, CaptureRequestData,
-             credentialVault.read, credentialVault.write,
-             apiTokens.read, apiTokens.write]
-```
+**Keeping the answer in the repo rather than copying the table into the app is the
+whole point.** The copy is what hid this.
 
-Not applied here: it is a change to another repo, and on its own it does not lift the
-gate — see below. The app's `DEFAULT_SPECS` needs the same third entry, or the app
-path stays broken while the Orbital path works.
+## Two traps found on the way
 
-### `DT_PLATFORM_TOKEN` — blocked on a scope nobody holds
+**A classic API drops unrecognised scopes rather than rejecting them.** Sending gen3
+scope names to `createApiToken` would have produced a token that authenticates
+perfectly and can do nothing — a strictly worse failure than the one being fixed.
+Hence `kind: platform` skips classic routing entirely rather than being translated.
 
-A `dt0s16`, minted against the **account** API
-(`api.dynatrace.com/iam/v1/accounts/{acct}/platform-tokens`) with an OAuth bearer
-carrying `platform-token:tokens:write`. Probed directly against SSO, 2026-08-14:
+**A 201 is not evidence a token works.** A platform token's effective permissions are
+`scopes ∩ the OWNER's IAM policy`, and the mint API never checks the owner side. Both
+halves were therefore probed against endpoints matching their *granted* scopes:
 
-| Client | `platform-token:tokens:write` |
-|---|---|
-| SRO account (`SRO_CLIENT_ID`) | **400 — not held** |
-| sprint mint (`MINT_CLIENT_ID_SPRINT`) | 200 |
+| Token | Probe | Result |
+|---|---|---|
+| classic | `POST /api/v2/bizevents/ingest` | **202** |
+| classic | `GET /api/config/v1/autoTags` (`ReadConfig`) | 200 |
+| classic | `GET /api/v2/credentials` (`credentialVault.read`) | 200 |
+| platform | `GET /platform/document/v1/documents` | 200 |
+| platform | `GET /platform/automation/v1/workflows` | 200 |
 
-So Orbital cannot mint one for SRO at all. Granting that scope to the SRO account
-client is an account-admin change and the smallest thing that unblocks the rest.
+(`GET /api/v2/apiTokens` 400s on SRO — classic token *listing* is retired on that
+environment. Not a token defect, and not on any path the workshop uses.)
 
-Worth asking separately whether the gate needs to be a conjunction: if
-`DT_PLATFORM_TOKEN` only feeds the monaco/dtctl steps, a partial bootstrap with
-`DT_API_TOKEN` alone would deliver most of the workshop instead of none of it.
+## The account scope that was blocking it
+
+`DT_PLATFORM_TOKEN` needs `platform-token:tokens:write` on the account OAuth client.
+On 2026-08-14 the SRO client 400'd on that scope and this was recorded as blocked on
+an account-admin change. **It was granted, and re-probing on 2026-08-16 returns 200.**
+
+`environment-api:api-tokens:write` still 400s on that client, and does not need to:
+classic minting goes through the platform proxy with `SRO_MINTER_PLATFORM_TOKEN`, or
+through the app's own AppEngine identity.
+
+**Never infer either from the tenant URL** — classic retirement is per *environment*,
+not per domain or account.
 
 ## Consequence for capacity planning
 
-Astroshop's steady-state cost **cannot be measured** until this is fixed — a run today
-measures an empty container. Measured anyway, for the record: 495 MiB per session with
-the workers at 1.4% CPU, which is a third of what Kubernetes-101 costs and is
-meaningless as a planning figure.
+Before the fix, Astroshop measured **495 MiB per session at 1.4% CPU** — a third of
+what Kubernetes-101 costs, and meaningless: it was measuring an empty container. This
+is the reason the plateau detector exists in `tools/capacity/measure_repo.py`; a fixed
+timer cannot tell "settled" from "never started".
 
-It therefore stays at the **unprofiled default of 3 units** (6 seats on an
-m6a.4xlarge). That is the fail-safe working as designed: an unmeasured training is
-priced as the heaviest thing we know, so the error is a worker running below capacity
-rather than a workshop that oversells and fails in front of a room.
+`bootstrapWorkshop` is a **20–25 minute** run (Dynatrace operator, Astroshop, a GitLab
+helm install, seeded repos, monaco, loadgen, four release rolls), so a real
+measurement has to wait for a plateau, not a timer.
+
+Until a measured figure is published to `repo:units`, Astroshop stays at the
+**unprofiled default of 3 units** (6 seats on an m6a.4xlarge) — the fail-safe working
+as designed: an unmeasured training is priced as the heaviest thing we know, so the
+error is a worker running below capacity rather than a workshop that oversells and
+fails in front of a room.
