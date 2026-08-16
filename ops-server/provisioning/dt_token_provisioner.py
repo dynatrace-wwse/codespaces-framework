@@ -27,6 +27,7 @@ import httpx
 
 from .sso import account_api_for, discover_token_url, environment_id
 from .token_specs import TokenSpec
+from shared.log_safety import scrub_for_log
 
 log = logging.getLogger("ops-provisioning")
 
@@ -171,7 +172,8 @@ class DTTokenProvisioner:
                 # wrong resource — both are 400. Without it the caller sees a
                 # bare status and guesses.
                 log.error("OAuth mint HTTP %s at %s: %s",
-                          r.status_code, url, r.text[:300])
+                          r.status_code, scrub_for_log(url),
+                          scrub_for_log(r.text, limit=300))
             r.raise_for_status()
             data = r.json()
             self._bearer = data["access_token"]
@@ -218,7 +220,8 @@ class DTTokenProvisioner:
                 # the body is all the caller gets. Say which scopes were asked for —
                 # otherwise this is indistinguishable from a bad secret.
                 log.error("Platform-token grant HTTP %s at %s (scopes=%r): %s",
-                          r.status_code, url, _PLATFORM_TOKEN_SCOPES, r.text[:300])
+                          r.status_code, scrub_for_log(url), _PLATFORM_TOKEN_SCOPES,
+                          scrub_for_log(r.text, limit=300))
             r.raise_for_status()
             data = r.json()
             self._platform_bearer = data["access_token"]
@@ -310,14 +313,15 @@ class DTTokenProvisioner:
                     if token_id:
                         token_ids.append(token_id)
                     log.info("Created %s token '%s' (id=%s, expiry=%s)",
-                             spec.kind, name, token_id, expires_iso)
+                             scrub_for_log(spec.kind), scrub_for_log(name),
+                             scrub_for_log(token_id), expires_iso)
                 except httpx.HTTPStatusError as exc:
                     msg = f"Failed to create token '{name}': HTTP {exc.response.status_code} — {exc.response.text[:200]}"
-                    log.error(msg)
+                    log.error("%s", scrub_for_log(msg, limit=400))
                     errors.append(msg)
                 except Exception as exc:
                     msg = f"Failed to create token '{name}': {exc}"
-                    log.error(msg)
+                    log.error("%s", scrub_for_log(msg, limit=400))
                     errors.append(msg)
 
         if errors:

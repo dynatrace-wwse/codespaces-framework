@@ -1,4 +1,4 @@
-"""Code that BOTH the dashboard and the worker agent need.
+"""Code that more than one ops-server component needs.
 
 The worker is a deliberately slim sparse checkout — it does not clone
 ``ops-server/dashboard`` at all. Anything the two sides must agree on therefore
@@ -10,6 +10,8 @@ so one worker derived 20 slots and its identical twin derived 6.
 pattern. Adding a module here is enough; adding one to ``dashboard`` and
 importing it from the worker is not.
 
-Keep this package free of third-party imports — the worker's virtualenv is
-smaller than the dashboard's.
+The dashboard, the webhook server and the provisioning library import from here
+too — this package is the bottom of the import graph, not a second utils bin.
+Keep it free of third-party imports: the worker's virtualenv is smaller than the
+dashboard's, and a dependency added here has to exist in both.
 """

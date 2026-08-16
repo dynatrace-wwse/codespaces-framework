@@ -32,6 +32,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from shared.log_safety import scrub_for_log
+
 log = logging.getLogger(__name__)
 
 DEFAULT_SSO = "https://sso.dynatrace.com"
@@ -106,7 +108,8 @@ async def discover_sso(tenant_url: str) -> str:
                 if p.scheme and p.netloc:
                     return f"{p.scheme}://{p.netloc}"
     except Exception as exc:
-        log.warning("SSO discovery failed for %s: %s", tenant_url, exc)
+        log.warning("SSO discovery failed for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
     return sso_for_known_domain(tenant_url)
 
 

@@ -98,6 +98,7 @@ from dashboard.app_deploy import COE_TENANT_URL, _coe_remote_grail_token  # noqa
 # PII masking for anonymous (public) reads — pure transforms in
 # dashboard/masking.py (tested without Redis).
 from dashboard import masking  # noqa: E402
+from shared.log_safety import scrub_for_log  # noqa: E402
 from dashboard import training_dedupe  # noqa: E402
 
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
@@ -486,10 +487,11 @@ async def _resolve_role(user: str) -> dict:
                     log.info(
                         "org-role enrich for %s skipped (HTTP %d) — "
                         "trusting oauth2-proxy session",
-                        user, resp.status_code,
+                        scrub_for_log(user), resp.status_code,
                     )
         except Exception as e:
-            log.warning("org-role lookup for %s failed: %s", user, e)
+            log.warning("org-role lookup for %s failed: %s",
+                        scrub_for_log(user), scrub_for_log(e))
 
     payload = {
         # Authenticated via oauth2-proxy ⇒ org member ⇒ writer.
@@ -1291,7 +1293,9 @@ async def api_trigger_ghpages(request: Request):
         "timestamp":    datetime.utcnow().isoformat(),
     }
     await pool.rpush("queue:agent", json.dumps(job))
-    log.info("GH Pages queued: %s @ %s by %s (job_id=%s)", repo, ref, role["user"], job_id)
+    log.info("GH Pages queued: %s @ %s by %s (job_id=%s)",
+             scrub_for_log(repo), scrub_for_log(ref),
+             scrub_for_log(role["user"]), scrub_for_log(job_id))
     return {"status": "queued", "job_id": job_id, "repo": repo, "ref": ref}
 
 
@@ -1335,7 +1339,7 @@ async def api_trigger_ghpages_fleet(request: Request):
 
     log.info(
         "GH Pages fleet queued: branch=%s queued=%d skipped=%d by=%s",
-        branch, len(queued), len(skipped), role["user"],
+        scrub_for_log(branch), len(queued), len(skipped), scrub_for_log(role["user"]),
     )
     return {
         "status":              "queued",
@@ -1395,7 +1399,9 @@ async def api_agent_fix_ci(request: Request):
     }
 
     await pool.rpush("queue:agent", json.dumps(job))
-    log.info("Queued fix-ci agent job %s for %s@%s by %s", job_id, repo, branch, role["user"])
+    log.info("Queued fix-ci agent job %s for %s@%s by %s",
+             scrub_for_log(job_id), scrub_for_log(repo),
+             scrub_for_log(branch), scrub_for_log(role["user"]))
     return {"job_id": job_id, "status": "queued", "repo": repo, "branch": branch}
 
 
@@ -1440,7 +1446,9 @@ async def api_agent_fix_pr(request: Request):
         "context":       "fix-pr",
     }
     await pool.rpush("queue:agent", json.dumps(job))
-    log.info("Queued fix-pr job %s for %s PR#%s by %s", job_id, repo, pr_number, user)
+    log.info("Queued fix-pr job %s for %s PR#%s by %s",
+             scrub_for_log(job_id), scrub_for_log(repo),
+             scrub_for_log(pr_number), scrub_for_log(user))
     return {"job_id": job_id, "status": "queued", "repo": repo, "pr_number": pr_number}
 
 
@@ -1486,8 +1494,9 @@ async def api_agent_fix_issue(request: Request):
         "context":       "fix-issue",
     }
     await pool.rpush("queue:agent", json.dumps(job))
-    log.info("Queued fix-issue job %s for %s #%s (%r) by %s",
-             job_id, repo, issue_number, meta["title"][:60], user)
+    log.info("Queued fix-issue job %s for %s #%s (%s) by %s",
+             scrub_for_log(job_id), scrub_for_log(repo), scrub_for_log(issue_number),
+             scrub_for_log(meta["title"][:60]), scrub_for_log(user))
     return {"job_id": job_id, "status": "queued", "repo": repo, "issue_number": issue_number}
 
 
@@ -1637,10 +1646,10 @@ async def api_terminate_job(job_id: str, request: Request):
                 oauth_resource=meta.get("dt_oauth_resource", ""),
             )
             asyncio.create_task(provisioner.revoke_tokens(token_ids))
-            log.info("Revoking %d DT token(s) for session %s", len(token_ids), job_id)
+            log.info("Revoking %d DT token(s) for session %s", len(token_ids), scrub_for_log(job_id))
         except Exception as exc:
             log.warning("Could not initiate token revocation for %s: %s",
-                        masking.scrub_for_log(job_id), masking.scrub_for_log(exc))
+                        scrub_for_log(job_id), scrub_for_log(exc))
 
     # Codespace jobs have no Sysbox worker to signal — delete the Codespace directly
     # (as the learner, via their stored GitHub token) instead of publishing ops:terminate.
@@ -1649,7 +1658,8 @@ async def api_terminate_job(job_id: str, request: Request):
         try:
             await delete_codespace(meta.get("dtUser", ""), job_id)
         except Exception as exc:
-            log.warning("Codespace delete failed for %s: %s", job_id, exc)
+            log.warning("Codespace delete failed for %s: %s",
+                        scrub_for_log(job_id), scrub_for_log(exc))
             raise HTTPException(502, f"Could not delete codespace {job_id}: {exc}")
         # Record the session in history (machine size, tenant, creation-log pointer)
         # before the running hash is gone, so the History tab shows Codespace sessions.
@@ -1668,9 +1678,11 @@ async def api_terminate_job(job_id: str, request: Request):
             await pool.rpush("jobs:completed", json.dumps(hist))
             await pool.ltrim("jobs:completed", -500, -1)
         except Exception as exc:
-            log.warning("Could not write codespace history for %s: %s", job_id, exc)
+            log.warning("Could not write codespace history for %s: %s",
+                        scrub_for_log(job_id), scrub_for_log(exc))
         await pool.delete(f"job:running:{job_id}")
-        log.info("Codespace %s terminated by %s", job_id, requested_by)
+        log.info("Codespace %s terminated by %s",
+                 scrub_for_log(job_id), scrub_for_log(requested_by))
         return {"status": "terminated", "job_id": job_id, "requested_by": requested_by}
 
     # Flag terminating=1 BEFORE publishing so the worker's durable reconciler
@@ -1679,7 +1691,8 @@ async def api_terminate_job(job_id: str, request: Request):
     # leaks the daemon container forever.
     await pool.hset(f"job:running:{job_id}", "terminating", "1")
     await pool.publish("ops:terminate", job_id)
-    log.info("Termination requested for %s by %s", job_id, requested_by)
+    log.info("Termination requested for %s by %s",
+             scrub_for_log(job_id), scrub_for_log(requested_by))
     return {"status": "termination_requested", "job_id": job_id, "requested_by": requested_by}
 
 
@@ -1736,7 +1749,7 @@ async def api_queue_delete_item(job_id: str, request: Request):
             break
     if not removed:
         raise HTTPException(404, f"Job {job_id} not found in any pending queue")
-    log.info("Queue item %s deleted", job_id)
+    log.info("Queue item %s deleted", scrub_for_log(job_id))
     return {"removed": removed, "job_id": job_id}
 
 
@@ -2319,16 +2332,19 @@ async def _fetch_issue_meta(repo: str, issue_number) -> dict:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
     except asyncio.TimeoutError:
         proc.kill()
-        log.warning("gh issue view timed out for %s #%s", repo, issue_number)
+        log.warning("gh issue view timed out for %s #%s",
+                    scrub_for_log(repo), scrub_for_log(issue_number))
         return {"title": "", "body": "", "state": "", "url": ""}
     if proc.returncode != 0:
         log.warning("gh issue view failed for %s #%s: %s",
-                    repo, issue_number, stderr.decode(errors="replace")[:300])
+                    scrub_for_log(repo), scrub_for_log(issue_number),
+                    scrub_for_log(stderr.decode(errors="replace"), limit=300))
         return {"title": "", "body": "", "state": "", "url": ""}
     try:
         data = json.loads(stdout.decode())
     except Exception:
-        log.warning("gh issue view JSON parse error for %s #%s", repo, issue_number)
+        log.warning("gh issue view JSON parse error for %s #%s",
+                    scrub_for_log(repo), scrub_for_log(issue_number))
         return {"title": "", "body": "", "state": "", "url": ""}
     return {
         "title": data.get("title", "") or "",
@@ -3083,9 +3099,10 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
             "exec \"$SHELL\" -l; fi"
         )
         cmd = ["gh", "codespace", "ssh", "-c", job_id, "--", "-t", inner_shell]
-        log.info("Codespace shell open: job=%s rows=%s cols=%s", job_id, rows, cols)
+        log.info("Codespace shell open: job=%s rows=%s cols=%s",
+                 scrub_for_log(job_id), scrub_for_log(rows), scrub_for_log(cols))
         await _pty_bridge(ws, cmd, rows=rows, cols=cols, env=gh_env)
-        log.info("Codespace shell closed: job=%s", job_id)
+        log.info("Codespace shell closed: job=%s", scrub_for_log(job_id))
         return
 
     # sb_name is stored in the running hash by the warm-pool agent (slot-based jobs).
@@ -3113,9 +3130,11 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
     else:
         cmd = inner_exec
 
-    log.info("Shell open: job=%s worker=%s sb=%s rows=%s cols=%s", job_id, worker_id or "local", sb_name, rows, cols)
+    log.info("Shell open: job=%s worker=%s sb=%s rows=%s cols=%s",
+             scrub_for_log(job_id), scrub_for_log(worker_id or "local"),
+             scrub_for_log(sb_name), scrub_for_log(rows), scrub_for_log(cols))
     await _pty_bridge(ws, cmd, rows=rows, cols=cols)
-    log.info("Shell closed: job=%s", job_id)
+    log.info("Shell closed: job=%s", scrub_for_log(job_id))
 
 
 async def _pty_bridge(ws: WebSocket, cmd: list[str], rows: int = 24, cols: int = 220,
@@ -4434,7 +4453,8 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
                              or guard_tenant in (m.get("dt_tenant_url", ""), m.get("arena_tenant", "")))):
                     ex_id = m.get("job_id", key.split(":")[-1])
                     log.info("Provision deduped: %s already has session %s for %s",
-                             body.userId, ex_id, body.trainingId)
+                             scrub_for_log(body.userId), scrub_for_log(ex_id),
+                             scrub_for_log(body.trainingId))
                     livelog = await pool.get(f"job:livelog:{ex_id}")
                     status = ("ready" if livelog and "Daemon ready" in livelog
                               else "queued" if m.get("worker_id") in ("queued", "") else "provisioning")
@@ -4526,7 +4546,7 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
             mint_error = str(exc)[:300]
             _log.getLogger("ops-dashboard").warning(
                 "Token provisioning failed for %s / %s: %s — falling back to worker creds",
-                repo_nwo, body.userId, exc,
+                scrub_for_log(repo_nwo), scrub_for_log(body.userId), scrub_for_log(exc),
             )
 
     # Per-user Grail-isolation id — derived once here so the worker's .env
@@ -4564,7 +4584,7 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
             ceiling = live_sessions.class_pointer_of(ws_session) - 1
             if resume_step > ceiling:
                 log.info("Provision %s: resumeStep %d clamped to %d by workshop %s pacing gate",
-                         job_id, resume_step, ceiling, ws_id)
+                         scrub_for_log(job_id), resume_step, ceiling, scrub_for_log(ws_id))
                 resume_step = ceiling
     if resume_step:
         job["resume_step"] = resume_step
@@ -5455,7 +5475,7 @@ async def _arena_exec_run(job_id: str, meta: dict, body: ArenaExecRequest) -> di
         await pool.expire(log_key, 86400)
     except Exception as log_err:
         log.warning("Could not write exec-log for %s: %s",
-                    masking.scrub_for_log(job_id), masking.scrub_for_log(log_err))
+                    scrub_for_log(job_id), scrub_for_log(log_err))
 
     return result
 
@@ -5485,7 +5505,7 @@ async def _revoke_job_tokens(job_id: str, meta: dict) -> None:
         asyncio.create_task(provisioner.revoke_tokens(token_ids))
     except Exception as exc:
         log.warning("Could not initiate token revocation for %s: %s",
-                    masking.scrub_for_log(job_id), masking.scrub_for_log(exc))
+                    scrub_for_log(job_id), scrub_for_log(exc))
 
 
 @app.post("/api/arena/sessions/{job_id}/terminate")
@@ -5517,7 +5537,7 @@ async def api_arena_terminate(job_id: str, request: Request):
     # terminating job as gone so the user doesn't have to click Terminate repeatedly.
     await pool.hset(f"job:running:{job_id}", "terminating", "1")
     await pool.publish("ops:terminate", job_id)
-    log.info("Arena termination requested for %s", job_id)
+    log.info("Arena termination requested for %s", scrub_for_log(job_id))
     return {"status": "termination_requested", "job_id": job_id}
 
 
@@ -5632,7 +5652,8 @@ async def _emit_live_event(session_id: str, kind: str, **fields):
                         live_sessions.audit_event(kind, **fields),
                         maxlen=live_sessions.EVENTS_MAXLEN, approximate=True)
     except Exception as exc:                                   # pragma: no cover
-        log.warning("Live session %s: audit event %s dropped: %s", session_id, kind, exc)
+        log.warning("Live session %s: audit event %s dropped: %s",
+                    scrub_for_log(session_id), scrub_for_log(kind), scrub_for_log(exc))
 
 
 class LiveSessionCreate(BaseModel):
@@ -5817,7 +5838,8 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
         await pool.sadd(roster_key, *fields["roster"])
     await pool.zadd("live:sessions:index", {session_id: now.timestamp()})
     log.info("Live session %s created by %s (%s, %d invited, %d trainers)",
-             session_id, fields["trainerEmail"], fields["trainingId"],
+             scrub_for_log(session_id), scrub_for_log(fields["trainerEmail"]),
+             scrub_for_log(fields["trainingId"]),
              len(fields["roster"]), len(fields["trainers"]))
     return live_sessions.shape_detail(
         session_id, session, fields["roster"], {}, fields["trainerEmail"])
@@ -6060,7 +6082,8 @@ async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction
         session["startedAt"] = datetime.now(timezone.utc).isoformat()
         await pool.hset(sess_key, mapping={
             "state": new_state, "startedAt": session["startedAt"]})
-        log.info("Live session %s started by %s", session_id, body.trainerEmail)
+        log.info("Live session %s started by %s",
+                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail))
         await _emit_live_event(session_id, live_sessions.EVENT_STARTED,
                                actor=body.trainerEmail)
     roster = await pool.smembers(roster_key)
@@ -6117,7 +6140,7 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, 
         # seats the next workshop's plan had already counted.
         stopped = await _stop_workshop_sessions(session_id)
         log.info("Live session %s ended by %s — %d session(s) terminated",
-                 session_id, body.trainerEmail, stopped)
+                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail), stopped)
         # Emitted BEFORE the TTL fan-out below, which includes the events
         # stream — writing it after would set a TTL and then extend the key.
         await _emit_live_event(session_id, live_sessions.EVENT_ENDED,
@@ -6156,7 +6179,7 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
         await _store_completion_record(session_id, session)
         stopped = await _stop_workshop_sessions(session_id)
         log.info("Live session %s cancelled by %s — %d session(s) terminated",
-                 session_id, body.trainerEmail, stopped)
+                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail), stopped)
     await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
@@ -6202,7 +6225,8 @@ async def api_live_session_delete(session_id: str, request: Request, trainerEmai
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     await _delete_live_session_keys(session_id, session)
-    log.info("Live session %s deleted by %s", session_id, trainerEmail)
+    log.info("Live session %s deleted by %s",
+             scrub_for_log(session_id), scrub_for_log(trainerEmail))
     return {"ok": True, "deleted": session_id}
 
 
@@ -6225,7 +6249,8 @@ async def api_live_session_open_registration(session_id: str, body: LiveSessionT
     if changed:
         session["state"] = new_state
         await pool.hset(sess_key, "state", new_state)
-        log.info("Live session %s registration opened by %s", session_id, body.trainerEmail)
+        log.info("Live session %s registration opened by %s",
+                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail))
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
@@ -6273,8 +6298,8 @@ async def api_live_session_room(session_id: str, body: LiveSessionRoom, request:
     if session.get("roomOpen", "0") != flag:
         session["roomOpen"] = flag
         await pool.hset(sess_key, "roomOpen", flag)
-        log.info("Live session %s room %s by %s", session_id,
-                 "opened" if body.open else "closed", body.trainerEmail)
+        log.info("Live session %s room %s by %s", scrub_for_log(session_id),
+                 "opened" if body.open else "closed", scrub_for_log(body.trainerEmail))
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
@@ -6487,7 +6512,7 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     # on stays pending, so their own tenant retries on the next poll.
     log.info("Live session %s provision-all by %s: %d queued, %d active, "
              "%d requested (own tenant will provision), %d errors",
-             session_id, body.trainerEmail,
+             scrub_for_log(session_id), scrub_for_log(body.trainerEmail),
              sum(1 for r in results if r["status"] == "queued"),
              sum(1 for r in results if r["status"] == "already-active"),
              sum(1 for r in results if r["status"] == "requested"),
@@ -6540,8 +6565,9 @@ async def api_live_session_provision_ack(session_id: str,
         email=email, tenant=body.tenant,
         detail=(body.error or body.jobId or status))
     log.info("Live session %s provision-ack %s from %s: %s%s",
-             session_id, email, body.tenant or "?", status,
-             f" ({body.error[:120]})" if body.error else "")
+             scrub_for_log(session_id), scrub_for_log(email),
+             scrub_for_log(body.tenant or "?"), scrub_for_log(status),
+             scrub_for_log(f" ({body.error[:120]})") if body.error else "")
     return {"ok": True, "status": status}
 
 
@@ -6665,8 +6691,9 @@ async def api_live_session_update(session_id: str, body: LiveSessionUpdate, requ
     session = await pool.hgetall(sess_key)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
-    log.info("Live session %s edited by %s (%s)", session_id, body.trainerEmail,
-             ", ".join(sorted(updates)) or "roster only")
+    log.info("Live session %s edited by %s (%s)", scrub_for_log(session_id),
+             scrub_for_log(body.trainerEmail),
+             scrub_for_log(", ".join(sorted(updates))) or "roster only")
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
 
 
@@ -6749,7 +6776,7 @@ async def api_live_session_terminate_all(session_id: str, body: LiveSessionTrain
     jobs = await _workshop_jobs(session_id, session, participants)
     terminated, skipped = await _terminate_jobs(jobs)
     log.info("live: terminate-all %s → %d terminated, %d already terminating",
-             session_id, len(terminated), skipped)
+             scrub_for_log(session_id), len(terminated), skipped)
     return {"terminated": terminated, "count": len(terminated),
             "alreadyTerminating": skipped}
 
@@ -6805,7 +6832,7 @@ async def api_live_learner_terminate(session_id: str, email: str,
                                email=email, actor=body.trainerEmail,
                                detail=",".join(terminated)[:200])
     log.info("live: learner terminate %s/%s → %d terminated, %d already terminating",
-             masking.scrub_for_log(session_id), masking.scrub_for_log(email),
+             scrub_for_log(session_id), scrub_for_log(email),
              len(terminated), skipped)
     return {"terminated": terminated, "count": len(terminated),
             "alreadyTerminating": skipped}
@@ -6879,7 +6906,7 @@ async def api_live_learner_reprovision(session_id: str, email: str,
         # to tell "the tenant refused us" from "Redis is down" without
         # shipping internals to a browser.
         log.exception("live: reprovision failed for %s/%s",
-                      masking.scrub_for_log(session_id), masking.scrub_for_log(email))
+                      scrub_for_log(session_id), scrub_for_log(email))
         await _emit_live_event(session_id, live_sessions.EVENT_PROVISION_FAILED,
                                email=email, actor=body.trainerEmail,
                                tenant=tenant_for_env,
@@ -7296,9 +7323,10 @@ async def _store_completion_record(session_id: str, session: dict):
         await pool.set(f"live:session:{session_id}:completion",
                        json.dumps(record), ex=live_pad.EXPORT_TTL_SECONDS)
         log.info("live: completion record stored for %s (%d learners)",
-                 session_id, len(record["results"]))
+                 scrub_for_log(session_id), len(record["results"]))
     except Exception as exc:
-        log.warning("live: could not store completion record for %s: %s", session_id, exc)
+        log.warning("live: could not store completion record for %s: %s",
+                    scrub_for_log(session_id), scrub_for_log(exc))
 
 
 @app.get("/api/live/sessions/{session_id}/completion")
@@ -8788,8 +8816,8 @@ async def api_fleet_scale_up(request: Request):
         raise HTTPException(502, str(e))
 
     log.info("fleet scale-up by %s: %d × %s → %s",
-             role["user"], count, instance_type,
-             [i["instance_id"] for i in launched])
+             scrub_for_log(role["user"]), count, scrub_for_log(instance_type),
+             scrub_for_log([i["instance_id"] for i in launched]))
     return {
         "status": "launched",
         "count": count,
@@ -8853,7 +8881,7 @@ async def api_fleet_scale_down(request: Request):
         raise HTTPException(502, str(e))
 
     log.info("fleet scale-down by %s: %s (draining: %s)",
-             role["user"], instance_ids, draining)
+             scrub_for_log(role["user"]), scrub_for_log(instance_ids), draining)
     return {
         "status": "terminating",
         "instances": terminated,
@@ -8870,7 +8898,7 @@ async def api_fleet_worker_start(instance_id: str, request: Request):
         result = await fleet.start_worker(instance_id)
     except fleet.FleetError as e:
         raise HTTPException(502, str(e))
-    log.info("fleet worker start by %s: %s", role["user"], instance_id)
+    log.info("fleet worker start by %s: %s", scrub_for_log(role["user"]), scrub_for_log(instance_id))
     return {"status": "starting", **result, "requested_by": role["user"]}
 
 
@@ -8882,7 +8910,7 @@ async def api_fleet_worker_stop(instance_id: str, request: Request):
         result = await fleet.stop_worker(instance_id)
     except fleet.FleetError as e:
         raise HTTPException(502, str(e))
-    log.info("fleet worker stop by %s: %s", role["user"], instance_id)
+    log.info("fleet worker stop by %s: %s", scrub_for_log(role["user"]), scrub_for_log(instance_id))
     return {"status": "stopping", **result, "requested_by": role["user"]}
 
 
@@ -9078,7 +9106,8 @@ async def api_fleet_autoscale_apply(request: Request):
             })
             await pool.expire(key, FLEET_INFLIGHT_TTL_S)
         log.info("fleet scale-up by %s: %d × %s in %s (target %d seats)",
-                 role["user"], len(launched), instance_type, region, seats)
+                 scrub_for_log(role["user"]), len(launched), scrub_for_log(instance_type),
+                 scrub_for_log(region), seats)
 
     return {
         "status": "applied", "plan": plan, "launched": launched,

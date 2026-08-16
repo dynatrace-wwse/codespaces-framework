@@ -28,6 +28,8 @@ concern, different lifecycle.
 import logging
 from datetime import datetime, timezone
 
+from shared.log_safety import scrub_for_log
+
 log = logging.getLogger("ops-dashboard.tenant-registry")
 
 INDEX_KEY = "tenant:registry:index"
@@ -118,7 +120,7 @@ async def record_deploy(pool, tenant_id: str, via: str, *,
         await pool.sadd(INDEX_KEY, tenant_id)
     except Exception as exc:
         log.warning("tenant-registry write failed for %s (via=%s): %s",
-                    tenant_id, via, exc)
+                    scrub_for_log(tenant_id), scrub_for_log(via), scrub_for_log(exc))
 
 
 async def record_identity(pool, tenant_id: str, *, email: str = "",

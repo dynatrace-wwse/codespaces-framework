@@ -40,6 +40,7 @@ from dashboard.content_service import classify_tenant, register_tenant
 from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KEY) — COE token + stashed deploy token
 from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
 from provisioning.sso import DEFAULT_SSO, discover_sso as _discover_sso
+from shared.log_safety import scrub_for_log
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -190,9 +191,9 @@ async def _audit(user: str, tenant: str, action: str, result: str, **extra) -> N
         await p.lpush(AUDIT_KEY, json.dumps(rec))
         await p.ltrim(AUDIT_KEY, 0, 499)
     except Exception as exc:  # never let auditing break the flow
-        log.warning("audit write failed: %s", exc)
+        log.warning("audit write failed: %s", scrub_for_log(exc))
     # token is never part of `rec`
-    log.info("DEPLOY-AUDIT %s", {k: v for k, v in rec.items()})
+    log.info("DEPLOY-AUDIT %s", scrub_for_log(json.dumps(rec), limit=1000))
 
 
 def _client_for(domain: str) -> tuple[str, str]:
@@ -284,7 +285,8 @@ async def probe_capabilities(token: str, tenant_url: str) -> dict[str, bool]:
             }, params={"schema-id": ORBITAL_SCHEMA})
             caps["app_settings"] = r.status_code != 403
     except Exception as exc:
-        log.warning("capability probe failed for %s: %s", tenant_url, exc)
+        log.warning("capability probe failed for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
     return caps
 
 
@@ -544,7 +546,8 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
     async with _DEPLOY_TREE_LOCK:
         waited = asyncio.get_event_loop().time() - waited_from
         if waited > 1.0:
-            log.info("deploy for %s waited %.1fs for the build tree", tenant_url, waited)
+            log.info("deploy for %s waited %.1fs for the build tree",
+                     scrub_for_log(tenant_url), waited)
         await _stamp_ui_version(env)
         proc = await asyncio.create_subprocess_exec(
             str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
@@ -559,7 +562,7 @@ async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=10)
             except asyncio.TimeoutError:
-                log.error("deploy child for %s did not die after kill", tenant_url)
+                log.error("deploy child for %s did not die after kill", scrub_for_log(tenant_url))
             return 124, "deploy timed out"
     return proc.returncode or 0, out.decode(errors="replace")[-1500:]
 
@@ -574,7 +577,8 @@ async def _get_installed(token: str, tenant_url: str) -> str | None:
             return j.get("version") or j.get("appVersion")
         return None  # 404 → not installed
     except Exception as exc:
-        log.warning("installed-version check failed for %s: %s", tenant_url, exc)
+        log.warning("installed-version check failed for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return None
 
 
@@ -1005,7 +1009,8 @@ async def _ensure_outbound_allowlist(token: str, tenant_url: str,
                 return f"added {len(missing)} host(s) to the outbound allowlist"
             return f"allowlist update failed (HTTP {pr.status_code})"
     except Exception as exc:
-        log.warning("outbound allowlist for %s: %s", tenant_url, exc)
+        log.warning("outbound allowlist for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"allowlist error: {exc}"
 
 
@@ -1067,7 +1072,8 @@ async def _ensure_remote_grail(token: str, tenant_url: str) -> str:
             ok = cr.status_code in (200, 201)
             return "enabled → wwse" if ok else f"create failed (HTTP {cr.status_code}: {cr.text[:120]})"
     except Exception as exc:
-        log.warning("remote-grail for %s: %s", tenant_url, exc)
+        log.warning("remote-grail for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"remote-grail error: {exc}"
 
 
@@ -1129,7 +1135,8 @@ async def _store_mint_client(token: str, tenant_url: str, client_id: str, client
                 return "stored (app mints + self-updates on its own)"
             return f"create failed (HTTP {cr.status_code}: {cr.text[:120]})"
     except Exception as exc:
-        log.warning("mint-client store for %s: %s", tenant_url, exc)
+        log.warning("mint-client store for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"mint-client error: {exc}"
 
 
@@ -1194,7 +1201,8 @@ async def _store_instructors(token: str, tenant_url: str, emails: list[str]) -> 
             return ("stored (%d instructor(s))" % len(merged)) if cr.status_code in (200, 201) \
                 else f"create failed (HTTP {cr.status_code}: {cr.text[:120]})"
     except Exception as exc:
-        log.warning("instructors store for %s: %s", tenant_url, exc)
+        log.warning("instructors store for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"instructors error: {exc}"
 
 
@@ -1277,7 +1285,8 @@ async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
         }.get(status, f"seed via app function: {status or 'unknown'} "
                       f"{(body or {}).get('detail', '')}".strip())
     except Exception as exc:
-        log.warning("seedOrbitalConfig on %s: %s", tenant_url, exc)
+        log.warning("seedOrbitalConfig on %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"unverified (app function error: {exc})"
 
 
@@ -1343,7 +1352,8 @@ async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
             ok = cr.status_code in (200, 201)
             return "token seeded" if ok else f"seed failed (HTTP {cr.status_code}: {cr.text[:120]})"
     except Exception as exc:
-        log.warning("orbital-config for %s: %s", tenant_url, exc)
+        log.warning("orbital-config for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"orbital-config error: {exc}"
 
 
@@ -1352,7 +1362,8 @@ async def _register_in_content_service(user: str, tenant_url: str) -> dict | Non
     try:
         return await register_tenant({"tenant": tenant_url}, x_auth_user=user)
     except Exception as exc:
-        log.warning("register-tenant failed for %s: %s", tenant_url, exc)
+        log.warning("register-tenant failed for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
         return None
 
 

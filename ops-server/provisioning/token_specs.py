@@ -21,6 +21,8 @@ from typing import Optional
 import httpx
 import yaml
 
+from shared.log_safety import scrub_for_log
+
 log = logging.getLogger("ops-provisioning")
 
 _GH_RAW = "https://raw.githubusercontent.com/{repo}/{ref}/.devcontainer/yaml/dt-tokens.yaml"
@@ -179,10 +181,10 @@ async def load_token_specs(repo: str, ref: str = "main") -> list[TokenSpec]:
                 r = await client.get(url)
                 if r.status_code == 200:
                     specs = _parse_yaml(r.text)
-                    log.info("Loaded token specs from %s (%d tokens)", url, len(specs))
+                    log.info("Loaded token specs from %s (%d tokens)", scrub_for_log(url), len(specs))
                     return specs
             except Exception as exc:
-                log.debug("Could not fetch %s: %s", url, exc)
+                log.debug("Could not fetch %s: %s", scrub_for_log(url), scrub_for_log(exc))
 
     log.info("Using hardcoded DEFAULT_SPECS (no remote spec found)")
     return DEFAULT_SPECS
