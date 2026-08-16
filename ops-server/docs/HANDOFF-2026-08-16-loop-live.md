@@ -161,6 +161,36 @@ what that override is for and the only reason this could be proven before mergin
 
 ---
 
+## 4c. The reaper, at 30 seats, on workers that survive the teardown
+
+**A dedicated pool cannot test this.** Its machines are terminated when the workshop
+ends, so a hung `docker wait` there is harmless by construction. The failure that
+bricked amd001 on 2026-08-13 — 17 `docker wait` processes blocked for ever, the worker
+advertising 0 free seats while holding 30 warm ones — only strands a **persistent**
+worker. So this needed its own run on the daily pool.
+
+30 seats, placed 17 / 13, torn down together:
+
+| | |
+|---|---|
+| came up | 30/30 in 544 s |
+| teardown | ~3 min, both workers back to **20/20 free** |
+| stuck `docker wait` | **0** on both, during and after |
+| `reaper_watching` | drained 6 → 0 and 3 → 0 |
+| orphan `job:running` keys | 0 |
+| tokens | 60 revoked |
+
+The zero is structural, not lucky: `0ed9560` replaced the per-job blocking
+`docker wait` with **one shared poller keyed on the container id**, so there are no
+such processes left to hang. Slot names are recycled, which is why the id matters —
+a wait keyed on a *name* can outlive its session and report a later learner's exit.
+
+(The run was done with `CONTROL_LOOP_WORKSHOPS=none` so the loop would not launch idle
+workshop machines for a workshop whose seats were deliberately on daily. **That
+narrowing has been removed**; the loop is back to `workshops=*`.)
+
+---
+
 ## 5. Two more, found by things going wrong rather than by tests
 
 ### A dashboard restart cost 24 live tokens
