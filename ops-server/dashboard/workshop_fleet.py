@@ -133,6 +133,11 @@ WORKSHOP_LIFETIME_MARGIN_MINUTES = int(os.environ.get("WORKSHOP_LIFETIME_MARGIN_
 # hold the workshop at `warming` forever, which reads to a trainer as a hung
 # fleet and blocks the room from opening at all.
 WORKSHOP_WARMING_TIMEOUT_MINUTES = int(os.environ.get("WORKSHOP_WARMING_TIMEOUT_MINUTES", "20"))
+# How long teardown will keep deferring termination for workers that still
+# report active jobs. Long enough for a real teardown to finish (a 30-seat
+# teardown took ~2.5 min measured), short enough that a stuck job count cannot
+# keep a machine alive indefinitely.
+TEARDOWN_DEFER_MAX_MINUTES = int(os.environ.get("TEARDOWN_DEFER_MAX_MINUTES", "15"))
 # Workshops run on-demand, never spot. A spot reclamation costs a learner their
 # session with two minutes' notice and a Sysbox session cannot be migrated.
 WORKSHOP_PURCHASING = os.environ.get("WORKSHOP_PURCHASING", "on-demand")
@@ -643,19 +648,41 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     instances = sorted(set(rec.get("instances") or []) |
                        set(await _instances_tagged(rec.get("pool", ""))))
 
-    # Defensive: never terminate a host that still has sessions on it. This
-    # workshop's own sessions were just terminated, so anything still running
-    # here belongs to someone else -- a mis-tagged instance, or a pool that
-    # somehow serves two workshops. Leave it cordoned; it takes no new work and
-    # the next tick reaps it once it is empty. Cheap insurance against the one
-    # way this path could take a live learner down with it.
+    # Never terminate a host that still has sessions on it: this workshop's own
+    # sessions were just asked to stop, so anything still running is either
+    # mid-teardown or belongs to someone else. Leave it cordoned and come back.
+    #
+    # DEFERRING MUST CONVERGE. The first version of this set the deferral flag
+    # and then fell through to state=DONE, and `teardown_workshop_fleet` returns
+    # immediately for a DONE record — so "wait and retry" silently became
+    # "never", and three m6a.4xlarge ran on after their workshop ended. Measured
+    # 2026-08-16, on the very run that was meant to prove teardown was clean.
+    #
+    # So a deferral now leaves the record in DRAINING (which the next tick DOES
+    # re-enter) and is bounded: past the deadline the machines go regardless.
+    # A worker whose active_jobs never returns to zero is the known wedged-reaper
+    # bug, and a disposable machine must not outlive its workshop waiting for it.
     busy = await _busy_pool_workers(redis, rec.get("pool", ""))
     if busy and instances:
-        log.warning("workshop %s: %d worker(s) still hold sessions (%s) — "
-                    "leaving them cordoned instead of terminating",
-                    scrub_for_log(ws_id), len(busy), ", ".join(sorted(busy)))
-        instances = []
-        rec["deferred_termination"] = True
+        first = parse_iso(rec.get("deferred_since", "")) or datetime.now(timezone.utc)
+        rec["deferred_since"] = rec.get("deferred_since") or first.isoformat()
+        expired = datetime.now(timezone.utc) >= first + timedelta(
+            minutes=TEARDOWN_DEFER_MAX_MINUTES)
+        if expired:
+            log.error("workshop %s: %d worker(s) STILL report sessions after "
+                      "%d min (%s) — terminating anyway; a machine must not "
+                      "outlive its workshop waiting for a stuck job count",
+                      scrub_for_log(ws_id), len(busy), TEARDOWN_DEFER_MAX_MINUTES,
+                      ", ".join(sorted(busy)))
+        else:
+            log.warning("workshop %s: %d worker(s) still hold sessions (%s) — "
+                        "cordoned, retrying next tick (deferred since %s)",
+                        scrub_for_log(ws_id), len(busy), ", ".join(sorted(busy)),
+                        rec["deferred_since"])
+            rec["state"] = DRAINING
+            rec["deferred_termination"] = True
+            await _save_fleet_record(redis, ws_id, rec)
+            return rec
 
     if instances:
         try:

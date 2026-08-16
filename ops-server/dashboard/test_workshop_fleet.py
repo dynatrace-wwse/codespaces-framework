@@ -725,3 +725,39 @@ def test_a_malformed_duration_still_gets_a_timer():
     """No duration must not mean no cost ceiling."""
     assert wf._workshop_lifetime_minutes({}) > 0
     assert wf._workshop_lifetime_minutes({"durationMinutes": "abc"}) > 0
+
+
+# ── deferring termination must CONVERGE ─────────────────────────────────────
+#
+# The first version of the busy-worker guard set a flag and then fell through to
+# state=DONE — and teardown_workshop_fleet returns immediately for a DONE
+# record, so "wait and retry" silently became "never". Three m6a.4xlarge ran on
+# after their workshop ended, on the very run meant to prove teardown was clean.
+
+def test_a_deferred_teardown_stays_retryable():
+    """DRAINING is re-entered by the next tick; DONE is not. A deferral that
+    lands in DONE is a permanent leak, not a delay."""
+    import inspect
+    src = inspect.getsource(wf.teardown_workshop_fleet)
+    defer = src.index("deferred_termination")
+    # The deferral branch must set DRAINING and return, not fall through.
+    branch = src[defer - 400:defer + 400]
+    assert "DRAINING" in branch, "a deferred teardown must remain retryable"
+    assert "return rec" in branch, "the deferral must not fall through to DONE"
+
+
+def test_the_deferral_is_bounded():
+    """A worker whose active_jobs never returns to zero is the known wedged-reaper
+    bug. A disposable machine must not outlive its workshop waiting for it."""
+    assert wf.TEARDOWN_DEFER_MAX_MINUTES > 0
+    import inspect
+    src = inspect.getsource(wf.teardown_workshop_fleet)
+    assert "TEARDOWN_DEFER_MAX_MINUTES" in src
+    assert "deferred_since" in src, "without a start time the bound cannot be applied"
+
+
+def test_the_bound_outlasts_a_real_teardown():
+    """A 30-seat teardown measured ~2.5 minutes. The bound has to clear that by
+    a wide margin or it would terminate hosts mid-teardown — the exact thing the
+    guard exists to prevent."""
+    assert wf.TEARDOWN_DEFER_MAX_MINUTES >= 10
