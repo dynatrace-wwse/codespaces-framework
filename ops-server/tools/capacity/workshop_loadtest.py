@@ -88,14 +88,35 @@ def orbital_token() -> str:
                           ).stdout.strip().splitlines()[0]
 
 
+async def _get_json(client: httpx.AsyncClient, path: str, tries: int = 4):
+    """GET and decode, tolerating a brief outage.
+
+    Orbital 502s for a few seconds across a dashboard restart and answers with an
+    nginx HTML page, which json() raises on. A run must survive that: the crash
+    it caused happened INSIDE the teardown block, so the revoke below it never
+    ran and 24 tokens were left live. A poll loop that cannot tolerate one bad
+    response is not a poll loop.
+    """
+    last = None
+    for attempt in range(tries):
+        try:
+            r = await client.get(f"{ORBITAL}{path}")
+            return r.json()
+        except Exception as exc:                       # non-JSON, 5xx, connection reset
+            last = exc
+            if attempt < tries - 1:
+                log(f"  {path} unavailable ({type(exc).__name__}) — retrying")
+                await asyncio.sleep(5)
+    raise RuntimeError(f"{path} did not answer after {tries} tries: {last}")
+
+
 async def workers(client: httpx.AsyncClient) -> list[dict]:
-    r = await client.get(f"{ORBITAL}/api/workers")
-    return [w for w in r.json().get("workers", []) if w.get("role") != "master"]
+    d = await _get_json(client, "/api/workers")
+    return [w for w in d.get("workers", []) if w.get("role") != "master"]
 
 
 async def running_jobs(client: httpx.AsyncClient) -> list[dict]:
-    r = await client.get(f"{ORBITAL}/api/builds/running")
-    d = r.json()
+    d = await _get_json(client, "/api/builds/running")
     return d if isinstance(d, list) else d.get("running", d.get("builds", []))
 
 
@@ -309,37 +330,51 @@ async def main() -> int:
                 log(f"--keep: leaving workshop {ws} and {len(jobs)} session(s) up")
             else:
                 log("ending workshop (terminates every session)")
-                await client.post(f"{ORBITAL}/api/live/sessions/{ws}/end",
-                                  headers=auth, json={"trainerEmail": TRAINER})
-                # Teardown is asynchronous. Poll rather than guess a duration:
-                # a fixed 90 s wait failed a run that was in fact fine, and
-                # would equally have passed one that was not.
-                deadline = time.time() + 420
-                while time.time() < deadline:
+                try:
+                    await client.post(f"{ORBITAL}/api/live/sessions/{ws}/end",
+                                      headers=auth, json={"trainerEmail": TRAINER})
+                except Exception as exc:
+                    log(f"  END FAILED ({exc}) — workshop {ws} may still be running")
+                # Everything from here to assertion 5 is DIAGNOSTICS; the revoke
+                # below is not. A transient 502 from a dashboard restart raised
+                # inside this block once, which skipped the revoke and left 24
+                # tokens live — so the two are separated and the revoke wins.
+                try:
+                    # Teardown is asynchronous. Poll rather than guess a duration:
+                    # a fixed 90 s wait failed a run that was in fact fine, and
+                    # would equally have passed one that was not.
+                    deadline = time.time() + 420
+                    while time.time() < deadline:
+                        after = await workers(client)
+                        if all(int(w.get("active_jobs") or 0) == 0 for w in after):
+                            break
+                        await asyncio.sleep(15)
                     after = await workers(client)
-                    if all(int(w.get("active_jobs") or 0) == 0 for w in after):
-                        break
-                    await asyncio.sleep(15)
-                after = await workers(client)
-                for w in after:
-                    log(f"  {w['worker_id']:28} "
-                        f"{w.get('slots_ready')}/{w.get('slots_total')} "
-                        f"free={w.get('slots_free')} active={w.get('active_jobs')} "
-                        f"reaper_watching={w.get('reaper_watching')} "
-                        f"{w.get('status')}")
-                leftover = int(redis_cli("LLEN", f"queue:pending:{target}") or 0)
-                healthy = all(
-                    int(w.get("slots_free") or 0) == int(w.get("slots_total") or 0)
-                    and int(w.get("active_jobs") or 0) == 0
-                    for w in after)
-                check("5. fleet healthy after teardown", healthy and leftover == 0,
-                      f"{leftover} job(s) still parked; "
-                      + ", ".join(f"{w['worker_id']} {w.get('slots_free')}/"
-                                  f"{w.get('slots_total')} free"
-                                  for w in after))
+                    for w in after:
+                        log(f"  {w['worker_id']:28} "
+                            f"{w.get('slots_ready')}/{w.get('slots_total')} "
+                            f"free={w.get('slots_free')} active={w.get('active_jobs')} "
+                            f"reaper_watching={w.get('reaper_watching')} "
+                            f"{w.get('status')}")
+                    leftover = int(redis_cli("LLEN", f"queue:pending:{target}") or 0)
+                    healthy = all(
+                        int(w.get("slots_free") or 0) == int(w.get("slots_total") or 0)
+                        and int(w.get("active_jobs") or 0) == 0
+                        for w in after)
+                    check("5. fleet healthy after teardown", healthy and leftover == 0,
+                          f"{leftover} job(s) still parked; "
+                          + ", ".join(f"{w['worker_id']} {w.get('slots_free')}/"
+                                      f"{w.get('slots_total')} free"
+                                      for w in after))
+                except Exception as exc:
+                    check("5. fleet healthy after teardown", False,
+                          f"could not be checked: {exc}")
 
                 for tk in minted:
-                    await prov.revoke_tokens(tk.token_ids)
+                    try:
+                        await prov.revoke_tokens(tk.token_ids)
+                    except Exception as exc:
+                        log(f"  REVOKE FAILED for {tk.token_ids}: {exc}")
                 log(f"revoked {sum(len(t.token_ids) for t in minted)} token(s)")
 
     print("\n" + "=" * 68)
