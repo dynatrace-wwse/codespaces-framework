@@ -272,6 +272,25 @@ def due_for_teardown(session: dict, now: datetime,
     return end is not None and now >= end + timedelta(minutes=grace_minutes)
 
 
+# Fleet-record states from which a workshop may be (re)provisioned. DONE is in
+# here deliberately — see the comment at the call site in `tick`. Kept as a
+# module constant, and paired with the pure predicates below, because the bug it
+# fixes lived for weeks as an inline tuple inside `tick`, where nothing but a
+# full fake-Redis harness could reach it and so nothing ever did.
+PREWARMABLE_STATES = (None, "", "failed", DONE)
+TEARDOWNABLE_STATES = (WARMING, READY)
+
+
+def should_prewarm(state, session: dict, now: datetime) -> bool:
+    """Should this tick launch machines for the workshop?"""
+    return state in PREWARMABLE_STATES and due_for_prewarm(session, now)
+
+
+def should_teardown(state, session: dict, now: datetime) -> bool:
+    """Should this tick give the workshop's machines back?"""
+    return state in TEARDOWNABLE_STATES and due_for_teardown(session, now)
+
+
 def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
                            instance_type: str = WORKSHOP_INSTANCE_TYPE,
                            safety: float = WORKSHOP_SEAT_SAFETY,
@@ -1089,7 +1108,21 @@ async def tick(redis) -> dict:
                               scrub_for_log(ws_id), scrub_for_log(pool_name),
                               WORKSHOP_WARMING_TIMEOUT_MINUTES, degraded)
 
-            if state in (None, "", "failed") and due_for_prewarm(session, now):
+            # DONE is re-armable, and that is the whole point of listing it.
+            # Teardown leaves the record at DONE and deletes the pool binding.
+            # While DONE matched neither this tuple nor the teardown branch
+            # below, a torn-down workshop became invisible to the loop FOREVER:
+            # rescheduling it did nothing, no machines were ever launched again,
+            # and — because the binding was gone too — its learners silently
+            # routed to the shared daily queue and ate self-service capacity.
+            # Seen live 2026-08-16 on a workshop rescheduled after its window.
+            #
+            # This cannot oscillate with the teardown branch. Re-arming needs
+            # `due_for_prewarm`, which is false whenever `due_for_teardown` is
+            # true, and a workshop that has just been torn down is by definition
+            # past its end + grace. So DONE → WARMING only ever follows a real
+            # reschedule, which is exactly the operator action it should follow.
+            if should_prewarm(state, session, now):
                 if CONTROL_LOOP_APPLY:
                     await provision_workshop_fleet(redis, ws_id, session)
                 else:
@@ -1101,7 +1134,7 @@ async def tick(redis) -> dict:
                              plan["workers"], WORKSHOP_INSTANCE_TYPE, seats,
                              plan["reason"])
                 summary["prewarmed"].append(ws_id)
-            elif state in (WARMING, READY) and due_for_teardown(session, now):
+            elif should_teardown(state, session, now):
                 if CONTROL_LOOP_APPLY:
                     await teardown_workshop_fleet(redis, ws_id)
                 else:

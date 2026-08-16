@@ -94,6 +94,19 @@ def pending_key(target: str) -> str:
 # the right scope: it answers "is this happening now", not "how often historically".
 _FAIL_OPEN: dict[str, int] = {}
 
+# Times a workshop job actually took the shared queue because the workshop had
+# NO pool binding. Separate from `_FAIL_OPEN` because the cause is different and
+# so is the fix: `_FAIL_OPEN` means Redis could not answer, this means Redis
+# answered "nothing". Counted separately rather than folded in, because folding
+# them would have hidden the more common one behind the rarer one.
+#
+# `_FAIL_OPEN` only ever incremented inside an `except`, so the unbound case —
+# the one that actually happened on 2026-08-16, when a torn-down workshop lost
+# its binding and 21 learners landed on the daily lane — reported ZERO. The
+# metric built to detect lost isolation could not see the likeliest way to lose
+# it. Anything that reports fail-open must report this alongside it.
+_UNBOUND: dict[str, int] = {}
+
 
 def fail_open_counts() -> dict[str, int]:
     """Workshops whose routing has fallen back to the shared queue, and how often.
@@ -101,8 +114,19 @@ def fail_open_counts() -> dict[str, int]:
     Exposed so a workshop that quietly lost its isolation can be SEEN. Without
     it, a workshop delivered on the daily pool by a Redis blip looks exactly
     like one delivered correctly — same sessions, same board, same everything.
+
+    Redis-failure only. Pair it with :func:`unbound_counts` for the full picture.
     """
     return dict(_FAIL_OPEN)
+
+
+def unbound_counts() -> dict[str, int]:
+    """Workshops that routed to the shared queue because they had no pool bound.
+
+    Non-zero means those learners are NOT isolated: they are sharing the daily
+    lane with self-service, and with each other.
+    """
+    return dict(_UNBOUND)
 
 
 async def pool_for_workshop(redis, ws_id: str) -> str:
@@ -135,9 +159,24 @@ async def unbind_workshop_pool(redis, ws_id: str) -> None:
 
 
 async def target_queue(redis, ws_id: str, arch: str = "amd64") -> str:
-    """The queue a session job for this workshop belongs on."""
+    """The queue a session job for this workshop belongs on.
+
+    This is the point where isolation is actually won or lost — not
+    :func:`pool_for_workshop`, which cannot tell "no pool wanted" from "pool
+    wanted but missing". Here we know the job belongs to a workshop, so an empty
+    pool means this learner is going onto the shared lane, and that is worth
+    recording every single time.
+    """
     pool = await pool_for_workshop(redis, ws_id)
-    return pool_queue(pool) if pool else arch_queue(arch)
+    if pool:
+        return pool_queue(pool)
+    target = arch_queue(arch)
+    if ws_id:
+        _UNBOUND[ws_id] = _UNBOUND.get(ws_id, 0) + 1
+        log.warning("workshop %s has no pool bound — routing to the shared "
+                    "queue %s (%d time(s); these learners are NOT isolated)",
+                    scrub_for_log(ws_id), scrub_for_log(target), _UNBOUND[ws_id])
+    return target
 
 
 # ── Paced admission ─────────────────────────────────────────────────────────

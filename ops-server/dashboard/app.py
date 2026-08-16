@@ -772,8 +772,15 @@ async def api_workshop_fleet(ws_id: str):
     # no fleet record, because THAT is the case where it matters most: a
     # workshop with no record is one whose learners all went to the daily pool.
     fell_open = pools.fail_open_counts().get(ws_id, 0)
+    # Reported alongside failedOpen because it is the SAME symptom — learners on
+    # the shared lane — with a different cause, and it is the one that actually
+    # occurs. failedOpen needs Redis to be broken; unbound only needs the pool
+    # binding to be absent, which is the normal state of every workshop that has
+    # been torn down. Reporting only failedOpen showed 0 while 21 learners sat on
+    # the daily queue.
+    unbound = pools.unbound_counts().get(ws_id, 0)
     if not rec:
-        return {"failedOpen": fell_open} if fell_open else {}
+        return {"failedOpen": fell_open, "unbound": unbound} if (fell_open or unbound) else {}
     return {
         "workshopId": ws_id,
         "state": rec.get("state", ""),
@@ -781,6 +788,9 @@ async def api_workshop_fleet(ws_id: str):
         # Non-zero means this workshop lost its isolation N times: Redis could
         # not say which pool serves it, so those learners took the shared queue.
         "failedOpen": fell_open,
+        # Non-zero means the same loss for a plainer reason: no pool was bound
+        # at all, so those learners were routed to the shared daily queue.
+        "unbound": unbound,
         "degraded": bool(rec.get("degraded")),
         "seats": rec.get("seats", 0),
         "workers": rec.get("workers", 0),

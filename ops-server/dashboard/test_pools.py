@@ -436,3 +436,69 @@ def test_a_healthy_lookup_counts_nothing():
 
     asyncio.run(pools.pool_for_workshop(_OkRedis(), "ws_healthy"))
     assert "ws_healthy" not in pools.fail_open_counts()
+
+
+# ── an unbound workshop is a SEEN loss of isolation ─────────────────────────
+# `_FAIL_OPEN` only incremented inside an `except`, so it could only ever report
+# a Redis outage. The far commoner way to lose isolation — the workshop simply
+# has no pool bound, because it was torn down or has not been provisioned yet —
+# returned "" on the clean path and counted nothing. On 2026-08-16 that showed
+# `failedOpen: 0` while 21 learners ran on the shared daily lane.
+
+def test_an_unbound_workshop_routes_to_the_shared_queue():
+    r = FakeRedis()
+    pools._UNBOUND.clear()
+    target = asyncio.run(pools.target_queue(r, "ws_gone", "amd64"))
+    assert target == pools.arch_queue("amd64")
+
+
+def test_an_unbound_workshop_is_counted():
+    """The whole point: this must be visible, not silent."""
+    r = FakeRedis()
+    pools._UNBOUND.clear()
+    for _ in range(3):
+        asyncio.run(pools.target_queue(r, "ws_gone", "amd64"))
+    assert pools.unbound_counts()["ws_gone"] == 3
+
+
+def test_a_bound_workshop_counts_nothing():
+    r = FakeRedis()
+    pools._UNBOUND.clear()
+    asyncio.run(pools.bind_workshop_pool(r, "ws_ok", "ws-ws_ok"))
+    target = asyncio.run(pools.target_queue(r, "ws_ok", "amd64"))
+    assert target == pools.pool_queue("ws-ws_ok")
+    assert pools.unbound_counts() == {}
+
+
+def test_the_standing_lane_is_not_counted_as_unbound():
+    """A small workshop bound to the shared workshop lane IS isolated from
+    self-service. Counting it would cry wolf on the normal case."""
+    r = FakeRedis()
+    pools._UNBOUND.clear()
+    asyncio.run(pools.bind_workshop_pool(r, "ws_small", pools.WORKSHOP_POOL))
+    target = asyncio.run(pools.target_queue(r, "ws_small", "amd64"))
+    assert target == pools.pool_queue(pools.WORKSHOP_POOL)
+    assert pools.unbound_counts() == {}
+
+
+def test_a_non_workshop_job_is_not_counted():
+    """Self-service jobs legitimately have no workshop and no pool."""
+    r = FakeRedis()
+    pools._UNBOUND.clear()
+    target = asyncio.run(pools.target_queue(r, "", "amd64"))
+    assert target == pools.arch_queue("amd64")
+    assert pools.unbound_counts() == {}
+
+
+def test_redis_failure_and_unbound_are_counted_separately():
+    """Same symptom, different cause, different fix — folding them together
+    would hide the common one behind the rare one."""
+    r = FakeRedis()
+    pools._FAIL_OPEN.clear()
+    pools._UNBOUND.clear()
+    r.fail_hget = True
+    asyncio.run(pools.target_queue(r, "ws_broken", "amd64"))
+    r.fail_hget = False
+    asyncio.run(pools.target_queue(r, "ws_gone", "amd64"))
+    assert pools.fail_open_counts() == {"ws_broken": 1}
+    assert pools.unbound_counts() == {"ws_broken": 1, "ws_gone": 1}

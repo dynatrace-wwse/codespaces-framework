@@ -761,3 +761,71 @@ def test_the_bound_outlasts_a_real_teardown():
     a wide margin or it would terminate hosts mid-teardown — the exact thing the
     guard exists to prevent."""
     assert wf.TEARDOWN_DEFER_MAX_MINUTES >= 10
+
+
+# ── re-arming a torn-down workshop ──────────────────────────────────────────
+# The control loop gated prewarm on `state in (None, "", "failed")` and teardown
+# on `state in (WARMING, READY)`. DONE matched neither, so a workshop whose pool
+# had been torn down was invisible to the loop from then on: rescheduling it
+# launched nothing, and because teardown also deletes the pool binding, its
+# learners routed to the shared daily queue instead. Observed 2026-08-16 —
+# 21 learner sessions landed on the two standing nodes with `failedOpen: 0`.
+
+def test_a_torn_down_workshop_can_be_rescheduled():
+    """DONE must be re-armable, or teardown is a one-way door."""
+    s = _session(start_offset_min=30)          # inside the prewarm lead
+    assert wf.should_prewarm(wf.DONE, s, NOW) is True
+
+
+def test_every_terminal_state_is_re_armable():
+    """No state a workshop can come to REST in may be absorbing. DRAINING is
+    excluded on purpose: it means a teardown is still in flight."""
+    for state in (None, "", "failed", wf.DONE):
+        assert wf.should_prewarm(state, _session(start_offset_min=30), NOW) is True, state
+
+
+def test_re_arming_does_not_oscillate_with_teardown():
+    """The pair that made the loop launch and terminate the same machine every
+    30s. A DONE workshop still past its window must stay DONE — only a genuine
+    reschedule may re-arm it."""
+    stale = _session(start_offset_min=-1000)   # ended long ago, never rescheduled
+    assert wf.due_for_teardown(stale, NOW) is True
+    assert wf.should_prewarm(wf.DONE, stale, NOW) is False
+    # ...and DONE is not torn down again either, so the tick is a no-op.
+    assert wf.should_teardown(wf.DONE, stale, NOW) is False
+
+
+def test_prewarm_and_teardown_stay_mutually_exclusive():
+    """Whatever the fleet state, one tick may never both launch and terminate."""
+    for state in (None, "", "failed", wf.WARMING, wf.READY, wf.DRAINING, wf.DONE):
+        for offset in (-1000, -60, 0, 30, 300):
+            s = _session(start_offset_min=offset)
+            assert not (wf.should_prewarm(state, s, NOW)
+                        and wf.should_teardown(state, s, NOW)), (state, offset)
+
+
+def test_a_warming_workshop_is_not_relaunched():
+    """Re-arming must not re-enter a fleet that is already coming up."""
+    s = _session(start_offset_min=30)
+    assert wf.should_prewarm(wf.WARMING, s, NOW) is False
+    assert wf.should_prewarm(wf.READY, s, NOW) is False
+
+
+def test_a_draining_workshop_is_left_alone():
+    """DRAINING means teardown is mid-flight; launching into it would race."""
+    s = _session(start_offset_min=30)
+    assert wf.should_prewarm(wf.DRAINING, s, NOW) is False
+
+
+def test_an_ended_workshop_is_never_re_armed():
+    """A trainer who pressed end must not have machines bought back for them."""
+    s = _session(start_offset_min=30, state="ended")
+    assert wf.should_prewarm(wf.DONE, s, NOW) is False
+
+
+def test_the_loop_uses_the_tested_predicates():
+    """The bug survived because the tuples were inline in `tick`, unreachable
+    from any unit test. If they move back inline, this fails."""
+    import inspect
+    src = inspect.getsource(wf.tick)
+    assert "should_prewarm(" in src and "should_teardown(" in src
