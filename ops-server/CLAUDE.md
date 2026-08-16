@@ -436,6 +436,27 @@ region `eu-west-2`); endpoints in `dashboard/app.py`; pure-logic tests in
 | `POST /api/fleet/scale-down` | writer | `{instanceIds, force?}` — marks matched workers `draining=1`, 409s if a matched worker has `active_jobs > 0` (unless `force`), then terminates. Refuses any id not tagged `orbital-role=worker` / `Name=orbital-worker-spot` |
 | `POST /api/fleet/worker/{id}/start` `/stop` | writer | start/stop pet workers (`autonomous-enablements-worker*`, e.g. stopped worker-3 `i-03689a1374d39cb6a`) |
 
+**Root volume is provisioned at launch, not inherited from the AMI.**
+`_root_block_device()` puts 300 GiB gp3 / **500 MB/s** / **6,000 IOPS** into
+`BlockDeviceMappings`, so a worker is *born* at target — AWS's ~6 h cooldown is a
+`ModifyVolume` rule and never applies here (the autoscaler role cannot call
+`ModifyVolume` anyway). Both disk dimensions are provisioned because they bind in
+different phases of an install: bandwidth during image pull/extract, IOPS while the
+ActiveGate JVM boots. At the free 3,000 IOPS an m6a.4xlarge delivered 18 seats
+against the 20 its memory allows; 6,000 removes IOPS from the binding set for
+~$15/mo on a full-month worker.
+
+Two constant pairs, and they mean different things — `DEFAULT_VOLUME_*` in
+`fleet_policy` is gp3's *free baseline* (what the 2026-08-13 measurements were taken
+on), `FLEET_VOLUME_*` is what we *launch*. `fleet.py` imports the latter rather than
+holding its own copy; `test_launched_volume_is_what_the_planner_assumed_it_would_be`
+fails if they drift. Defaulting the planner to the baseline is what had it describing
+every worker as bandwidth-bound at 18 long after none were launched that way.
+
+> Nothing measures IOPS automatically. Every number in the disk model came from
+> hand-run `iostat` during load tests — treat a changed value as a hypothesis until
+> a run confirms it.
+
 Spot user-data (built by `_build_user_data()`): IMDSv2-derived unique
 `WORKER_ID=worker-x86_64-spot-<iid tail>` sed-set in `/home/ops/.env`,
 `MASTER_REDIS_URL` host forced to `172.31.36.172`, then
