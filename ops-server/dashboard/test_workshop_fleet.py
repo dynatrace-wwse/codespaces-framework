@@ -399,6 +399,10 @@ class _JobsRedis:
     async def hgetall(self, key):
         return dict(self.h.get(key, {}))
 
+    async def delete(self, key):
+        self.h.pop(key, None)
+        self.l.pop(key, None)
+
     async def hset(self, key, field, value):
         self.h.setdefault(key, {})[field] = value
 
@@ -548,3 +552,32 @@ def test_a_worker_with_no_heartbeat_field_is_still_counted():
     import asyncio
     r = _WorkersRedis({"amd001": {"status": "ready", "capacity": "20"}})
     assert len(asyncio.run(wf._daily_workers(r))) == 1
+
+
+def test_a_never_started_learners_record_goes_when_the_workshop_ends():
+    """Ending the workshop is now the ONLY moment these can be cleaned up.
+
+    The terminate reconciler deliberately no longer treats worker_id="queued" as
+    an orphan — that bug deleted every paced learner's record mid-session — so a
+    learner who never started has nothing else that would ever reap their record.
+    Measured 2026-08-16: five survived a workshop that had ended, reading as
+    running sessions with no environment anywhere.
+    """
+    import asyncio
+    r = _QueuedRedis(jobs={"job-parked": {"workshop_id": "ws_mine", "worker_id": "queued"},
+                           "job-live":   {"workshop_id": "ws_mine", "worker_id": "wamd001"}},
+                     queues={"queue:pending:queue:test:amd64": [_payload("job-parked")]})
+    asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine"))
+    assert "job:running:job-parked" not in r.h, "the parked learner's record must go"
+    assert "job:running:job-live" in r.h, \
+        "a learner a worker CLAIMED still owns their record — the worker clears it"
+
+
+def test_an_absent_worker_id_is_unknown_not_never_started():
+    """Only the explicit "queued" marker means never-started. Deleting on an
+    ABSENT worker_id would take a live learner's record with it."""
+    import asyncio
+    r = _QueuedRedis(jobs={"job-x": {"workshop_id": "ws_mine"}},   # no worker_id
+                     queues={"queue:pending:queue:test:amd64": [_payload("job-x")]})
+    asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine"))
+    assert "job:running:job-x" in r.h

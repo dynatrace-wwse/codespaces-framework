@@ -691,6 +691,30 @@ async def _drop_queued_jobs(redis, ws_id: str, job_ids: set[str]) -> int:
             except Exception as exc:
                 log.warning("workshop %s: could not scan %s: %s",
                             scrub_for_log(ws_id), scrub_for_log(key), scrub_for_log(exc))
+    # And drop their job records. A learner who never started has no environment
+    # to reap, so nothing else will ever clean these up: the terminate reconciler
+    # deliberately no longer treats worker_id="queued" as an orphan (that bug
+    # deleted every paced learner's record mid-session), which means ending the
+    # workshop is now the only moment these can go. Left behind, they read as
+    # running sessions for ever — five survived a workshop that had ended, with
+    # no environment anywhere.
+    for job_id in job_ids:
+        try:
+            rec = await redis.hgetall(f"job:running:{job_id}")
+            # ONLY the explicit marker. "queued" is what api_arena_provision
+            # writes before enqueueing, so it means "no worker has ever touched
+            # this". An ABSENT worker_id is merely unknown, and deleting on
+            # unknown would take a live learner's record with it — the opposite
+            # asymmetry to _dead_worker_candidate, which treats both as
+            # not-dead because there the safe answer is to leave things alone.
+            if rec and (rec.get("worker_id") or "") == "queued":
+                await redis.delete(f"job:running:{job_id}")
+                log.info("workshop %s: dropped the record of never-started job %s",
+                         scrub_for_log(ws_id), scrub_for_log(job_id))
+        except Exception as exc:
+            log.warning("workshop %s: could not drop the record for %s: %s",
+                        scrub_for_log(ws_id), scrub_for_log(job_id), scrub_for_log(exc))
+
     return dropped
 
 
