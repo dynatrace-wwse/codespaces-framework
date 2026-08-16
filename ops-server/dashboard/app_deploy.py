@@ -39,6 +39,7 @@ from webhook.config import REDIS_URL
 from dashboard.content_service import classify_tenant, register_tenant
 from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KEY) — COE token + stashed deploy token
 from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
+from provisioning.sso import DEFAULT_SSO, discover_sso as _discover_sso
 from shared.log_safety import scrub_for_log
 
 log = logging.getLogger("ops-dashboard.deploy")
@@ -62,7 +63,6 @@ DEPLOY_SCOPES = os.environ.get(
     "app-settings:objects:write settings:objects:read settings:objects:write",
 )
 APP_ID = "my.dynatrace.enablements"
-DEFAULT_SSO = "https://sso.dynatrace.com"
 FLOW_TTL = 600  # seconds a started flow stays valid
 AUDIT_KEY = "audit:deploy"
 # IAM permissions the signed-in user must actually hold (reflected in the token's granted
@@ -174,21 +174,13 @@ def _pkce() -> tuple[str, str]:
 
 
 async def discover_sso(tenant_url: str) -> str:
-    """Discover the tenant's SSO origin (HEAD /platform/oauth2/authorization/dynatrace-sso →
-    Location origin). Falls back to the default SSO."""
-    try:
-        u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
-        probe = f"{u.scheme}://{u.netloc}/platform/oauth2/authorization/dynatrace-sso"
-        async with httpx.AsyncClient(timeout=8, follow_redirects=False) as c:
-            r = await c.head(probe)
-            loc = r.headers.get("location")
-            if 300 <= r.status_code < 400 and loc:
-                p = urlparse(loc)
-                return f"{p.scheme}://{p.netloc}"
-    except Exception as exc:
-        log.warning("SSO discovery failed for %s: %s",
-                    scrub_for_log(tenant_url), scrub_for_log(exc))
-    return DEFAULT_SSO
+    """Discover the tenant's SSO origin.
+
+    Re-exported from ``provisioning.sso`` so the deploy path and the token
+    provisioner cannot drift apart again — they did, and the provisioner's copy
+    was formatting the *tenant* URL into a token endpoint.
+    """
+    return await _discover_sso(tenant_url)
 
 
 async def _audit(user: str, tenant: str, action: str, result: str, **extra) -> None:

@@ -225,6 +225,25 @@ A pull without the restart deploys nothing — the running python process keeps
 its imported code. If a load test / live sessions are running on the worker
 (`docker ps | grep sb-slot`), pull immediately but defer the restart.
 
+**Deploying a BRANCH to the workers needs an explicit refspec.** A worker's clone
+does not track anything but `main`, so `git fetch origin` silently leaves
+`origin/<branch>` at whatever it last saw and the follow-up `reset`/`merge` reports
+"Already up to date" against a stale ref. Measured 2026-08-16: both workers sat six
+commits behind while every command in the loop above returned success.
+
+```bash
+B=epic/workshop-pools-and-autoscale
+for w in autonomous-enablements-worker autonomous-enablements-worker-2; do
+  ssh $w "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework \
+            fetch origin refs/heads/$B:refs/remotes/origin/$B \
+       && sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework \
+            reset --hard origin/$B \
+       && sudo systemctl restart ops-worker-agent"
+done
+```
+
+Always finish by printing the three HEADs (below) — "up to date" is not evidence.
+
 After editing on master (`ubuntu` path), sync to production (`ops` path) and restart:
 ```bash
 sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/workers/manager.py \
@@ -371,6 +390,36 @@ Rules:
 - IF graphify-out/wiki/index.md EXISTS, navigate it instead of reading raw files
 - For cross-module "how does X relate to Y" questions, prefer `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` over grep — these traverse the graph's EXTRACTED + INFERRED edges instead of scanning files
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+## Control loop — LIVE since 2026-08-16
+
+`dashboard/workshop_fleet.py` runs every 30 s and **acts**: `CONTROL_LOOP_APPLY=1` is
+set in `/home/ops/.env`. It launches and terminates EC2 on its own.
+
+| Signal | Action |
+|---|---|
+| a workshop is within `PREWARM_LEAD_MINUTES` (45) of starting, and not past its teardown point | launch `ceil(seats / units-per-worker)` machines into a dedicated pool |
+| the workshop ended, or overran its window + `TEARDOWN_GRACE_MINUTES` (30) | terminate them, unbind the pool, drop their worker records |
+| daily free seats < `DAILY_MIN_FREE_SEATS` (4), **and** warming seats will not cover it | launch one daily worker |
+| sustained memory ≥ 70% on a worker | shrink its advertised capacity by 1 |
+| sustained CPU ≥ 70% on a worker | set `admission_brake` (reversible; NOT a scale trigger) |
+
+Things that will bite you here:
+
+- **Capacity comes from `shared/capacity_units.py`**, not from a typed number.
+  `seats = units(instance) // units(training)`; per-repo overrides live in the Redis
+  hash `repo:units` and take effect on the next tick with no deploy.
+- **A launched worker syncs `origin/main`** (`fleet._build_user_data`,
+  `code_branch`). `WORKER_CODE_BRANCH` overrides it — that is how a fleet change is
+  validated on a real launched worker *before* merging. If it is set to a branch,
+  every machine the loop launches runs that branch: check it before assuming main.
+- **Never restart `ops-dashboard` while a load test or a workshop is provisioning.**
+  The API 502s for a few seconds and answers with an nginx HTML page; a client that
+  calls `.json()` on that raises. It cost 24 unrevoked tokens once.
+- Prewarm and teardown are deliberately **mutually exclusive**. If you add a third
+  scheduling predicate, check it against both — two predicates that drive opposite
+  actions on the same object made the loop launch and terminate the same machine in
+  a cycle, and dry run cannot show that because dry run never transitions state.
 
 ## Fleet autoscaler
 

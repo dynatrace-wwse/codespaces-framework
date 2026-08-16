@@ -78,6 +78,7 @@ app.include_router(codespace_router)
 # EC2 spot-worker fleet scaling (aws CLI, no boto3) — see dashboard/fleet.py.
 from dashboard import fleet  # noqa: E402
 from dashboard import fleet_policy  # noqa: E402
+from dashboard import pools  # noqa: E402
 
 # Live training sessions (bootcamp cohorts) — pure decision logic lives in
 # dashboard/live_sessions.py (tested without Redis); endpoints below stay thin.
@@ -402,6 +403,27 @@ async def startup():
         asyncio.get_running_loop().create_task(content_sync.sync_loop())
     except Exception as exc:
         log.warning("content sync start failed (continuing without): %s", exc)
+
+    # Drains paced provisions onto their queues. Unlike the telemetry loops
+    # above this one is load-bearing: if it does not run, jobs parked in
+    # queue:pending:* stay there and a trainer sees what looks like a hung
+    # fleet. It is still started defensively so a failure here cannot stop the
+    # dashboard booting -- but it logs at ERROR, not WARNING, because the
+    # consequence is learners never being provisioned.
+    try:
+        asyncio.get_running_loop().create_task(pools.pacer_loop(pool))
+    except Exception as exc:
+        log.error("PROVISION PACER FAILED TO START — paced jobs will not drain: %s", exc)
+
+    # Workshop prewarm/teardown on a schedule + daily-pool autoscale. Before
+    # this, scaling was four endpoints a human clicked; nothing read a calendar
+    # and nothing watched utilisation.
+    try:
+        from dashboard import workshop_fleet
+        asyncio.get_running_loop().create_task(workshop_fleet.control_loop(pool))
+    except Exception as exc:
+        log.error("CONTROL LOOP FAILED TO START — workshops will not get "
+                  "machines automatically: %s", exc)
 
 
 @app.on_event("shutdown")
@@ -729,6 +751,37 @@ async def api_workshops_admin_trainer_remove(request: Request, email: str):
     if not removed:
         raise HTTPException(status_code=404, detail="not a registered trainer")
     return {"ok": True, "removed": live_sessions.normalize_email(email)}
+
+
+@app.get("/api/workshops/{ws_id}/fleet")
+async def api_workshop_fleet(ws_id: str):
+    """This workshop's dedicated machines, if the control loop gave it any.
+
+    `{}` means it has none and its learners go to the shared daily pool — the
+    correct answer for a small workshop, for one created before pools existed, and
+    for any workshop while the loop is in dry run.
+
+    Read-only and public like the rest of the arena surface: instance ids and a
+    state, no credentials. Exists so a caller can tell "the pool is ready" from
+    "there is no pool", which otherwise needs Redis access on the master — the
+    load test could not distinguish them and silently measured the daily pool.
+    """
+    from dashboard import workshop_fleet
+    rec = await workshop_fleet._fleet_record(pool, ws_id)
+    if not rec:
+        return {}
+    return {
+        "workshopId": ws_id,
+        "state": rec.get("state", ""),
+        "pool": rec.get("pool", ""),
+        "seats": rec.get("seats", 0),
+        "workers": rec.get("workers", 0),
+        "seats_per_worker": rec.get("seats_per_worker", 0),
+        "ready_workers": rec.get("ready_workers", 0),
+        "instances": rec.get("instances", []),
+        "requested_at": rec.get("requested_at", ""),
+        "ready_at": rec.get("ready_at", ""),
+    }
 
 
 @app.get("/api/workshops/admin/schedule")
@@ -1497,6 +1550,18 @@ async def api_builds_running(request: Request):
         queues[arch] = await pool.llen(f"queue:test:{arch}")
     queues["agent"] = await pool.llen("queue:agent")
     queues["sync"]  = await pool.llen("queue:sync")
+    # Pool queues and their pending backlogs. Without these a paced provision is
+    # invisible: the job is neither running nor on a queue anyone displays, so a
+    # drip looks identical to a fleet that has silently stopped accepting work.
+    async for key in pool.scan_iter(match="queue:pool:*", count=100):
+        queues[key] = await pool.llen(key)
+    pending = {}
+    async for key in pool.scan_iter(match="queue:pending:*", count=100):
+        depth = await pool.llen(key)
+        if depth:
+            pending[key[len("queue:pending:"):]] = depth
+    if pending:
+        queues["pending"] = pending
 
     running = []
     async for key in pool.scan_iter(match="job:running:*", count=500):
@@ -1609,6 +1674,7 @@ async def api_terminate_job(job_id: str, request: Request):
                 api_token=meta.get("dt_auth_token", ""),
                 oauth_client_id=meta.get("dt_oauth_client_id", ""),
                 oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+                oauth_resource=meta.get("dt_oauth_resource", ""),
             )
             asyncio.create_task(provisioner.revoke_tokens(token_ids))
             log.info("Revoking %d DT token(s) for session %s", len(token_ids), scrub_for_log(job_id))
@@ -4233,6 +4299,48 @@ async def api_arena_trainings(tenant: str = ""):
     return trainings
 
 
+@app.get("/api/arena/trainings/{training_id}/token-specs")
+async def api_arena_token_specs(training_id: str):
+    """Which Dynatrace tokens this training needs, from the repo's own declaration.
+
+    The app mints per-learner tokens with its own tenant identity — Orbital holds no
+    credential and never sees them. But the app had no way to know a training needs
+    anything other than the standard operator+ingest pair, so a repo declaring extra
+    tokens (`.devcontainer/yaml/dt-tokens.yaml`) was honoured only on the scripted
+    provisioning path and silently ignored for every real learner. The CI/CD workshop
+    gates its whole bootstrap on two such tokens and therefore never ran: sessions came
+    up as empty dev containers with no error.
+
+    Exposing the parsed file keeps ONE source of truth — the repo — instead of a second
+    copy of the same table inside the app, which is exactly the mismatch that hid this.
+    Public, like the rest of `/api/arena/*`: scope names, not secrets.
+    """
+    from provisioning import load_token_specs
+
+    cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
+    catalog = json.loads(cached) if cached else await _fetch_arena_catalog()
+    training = arena_training_for_id(catalog, training_id)
+    if training is None:
+        raise HTTPException(status_code=404, detail=f"Training '{training_id}' not found")
+
+    repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
+    specs = await load_token_specs(repo_nwo, ref=training.get("branch") or "main")
+    return {
+        "trainingId": training["id"],
+        "repo": repo_nwo,
+        "specs": [
+            {
+                "nameSuffix": s.name_suffix,
+                "envVar": s.env_var,
+                "kind": s.kind,
+                "aliasEnvVars": list(s.aliases),
+                "scopes": list(s.scopes),
+            }
+            for s in specs
+        ],
+    }
+
+
 # Ceiling on any caller-supplied session lifetime. A full-day workshop plus
 # overrun still fits; nothing can ask for a daemon that outlives a working day.
 MAX_SESSION_HOURS = 12
@@ -4267,6 +4375,9 @@ class ArenaProvisionRequest(BaseModel):
     # Auth for token provisioning: OAuth2 (preferred, app-installed flow) OR existing API token.
     oauthClientId: str = ""
     oauthClientSecret: str = ""
+    # Account URN, for account-scoped clients. App-installed clients have none,
+    # and sending an empty `resource` is itself a 400 — so this stays optional.
+    oauthResource: str = ""
     apiToken: str = ""          # existing token with apiTokens.write scope
     # Preferred (multi-tenancy): the app self-mints per-tenant tokens and passes the
     # VALUES here, so Orbital never holds a tenant minting credential. The app owns
@@ -4447,6 +4558,7 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
                 api_token=body.apiToken,
                 oauth_client_id=body.oauthClientId,
                 oauth_client_secret=body.oauthClientSecret,
+                oauth_resource=body.oauthResource,
             )
             specs = await load_token_specs(repo_nwo, ref=session_ref)
             result = await provisioner.create_tokens(
@@ -4556,13 +4668,29 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
         elif body.oauthClientId:
             redis_meta["dt_oauth_client_id"] = body.oauthClientId
             redis_meta["dt_oauth_client_secret"] = body.oauthClientSecret
+            if body.oauthResource:
+                redis_meta["dt_oauth_resource"] = body.oauthResource
 
     await pool.hset(f"job:running:{job_id}", mapping=redis_meta)
     await pool.expire(f"job:running:{job_id}", int(timedelta(hours=session_hours).total_seconds()))
-    await pool.rpush("queue:test:amd64", json.dumps(job))
+    # Single admission point for EVERY learner session, which is why both the
+    # pool routing and the drip live here rather than in provision-all. A
+    # same-tenant roster arrives through provision-all's server-side loop;
+    # foreign-tenant learners arrive one at a time from their own tenants when
+    # their app notices provisionRequestedAt. Pacing the one place they both
+    # reach covers 70 independent clients that no trainer-side code can reach.
+    target = await pools.target_queue(pool, ws_id, "amd64")
+    admission = await pools.enqueue_paced(pool, target, job)
+    if not admission["admitted"]:
+        log.info("provision %s parked at position %d on %s",
+                 job_id, admission["position"], target)
 
     return {
         "jobId":            job_id,
+        # Honest queue position rather than an unexplained spinner: a learner
+        # dripped behind 20 others should be told so.
+        "queuePosition":    admission["position"],
+        "queue":            target,
         "wsUrl":            f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{job_id}/shell",
         "expiresAt":        expires_at,
         "status":           "provisioning",
@@ -5403,6 +5531,7 @@ async def _revoke_job_tokens(job_id: str, meta: dict) -> None:
             api_token=meta.get("dt_auth_token", ""),
             oauth_client_id=meta.get("dt_oauth_client_id", ""),
             oauth_client_secret=meta.get("dt_oauth_client_secret", ""),
+            oauth_resource=meta.get("dt_oauth_resource", ""),
         )
         asyncio.create_task(provisioner.revoke_tokens(token_ids))
     except Exception as exc:
@@ -5993,6 +6122,24 @@ async def api_live_session_start(session_id: str, body: LiveSessionTrainerAction
     return live_sessions.shape_detail(session_id, session, roster, joined, body.trainerEmail)
 
 
+async def _stop_workshop_sessions(session_id: str) -> int:
+    """Terminate every environment belonging to a workshop. Never raises.
+
+    A failure here must not fail the trainer's end/cancel call: the workshop is
+    over either way, and a 500 would leave the board saying it is still running.
+    It is logged loudly instead, because leaked environments hold seats that the
+    next workshop's capacity plan has already spent.
+    """
+    try:
+        from dashboard import workshop_fleet
+        return await workshop_fleet.terminate_workshop_sessions(pool, session_id)
+    except Exception as exc:
+        log.error("workshop %s: could not terminate its sessions: %s — "
+                  "environments may be left running until their TTL expires",
+                  scrub_for_log(session_id), scrub_for_log(exc))
+        return 0
+
+
 @app.post("/api/live/sessions/{session_id}/end")
 async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, request: Request):
     """Trainer ends the session: state → ended, freezes the board, and sets a
@@ -6016,8 +6163,15 @@ async def api_live_session_end(session_id: str, body: LiveSessionTrainerAction, 
             "state": new_state, "endedAt": session["endedAt"]})
         await _store_pad_export(session_id, session)
         await _store_completion_record(session_id, session)
-        log.info("Live session %s ended by %s",
-                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail))
+        # Ending the workshop has to stop its environments. Until 2026-08-14
+        # nothing here did: the only caller of the teardown was the control
+        # loop, which is off by default and fires on the clock rather than on
+        # the trainer's action. Measured on a 12-seat load test — end returned
+        # 200 and all 12 sessions were still running ten minutes later, holding
+        # seats the next workshop's plan had already counted.
+        stopped = await _stop_workshop_sessions(session_id)
+        log.info("Live session %s ended by %s — %d session(s) terminated",
+                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail), stopped)
         # Emitted BEFORE the TTL fan-out below, which includes the events
         # stream — writing it after would set a TTL and then extend the key.
         await _emit_live_event(session_id, live_sessions.EVENT_ENDED,
@@ -6054,8 +6208,9 @@ async def api_live_session_cancel(session_id: str, body: LiveSessionTrainerActio
             "state": new_state, "cancelledAt": session["cancelledAt"]})
         await _store_pad_export(session_id, session)
         await _store_completion_record(session_id, session)
-        log.info("Live session %s cancelled by %s",
-                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail))
+        stopped = await _stop_workshop_sessions(session_id)
+        log.info("Live session %s cancelled by %s — %d session(s) terminated",
+                 scrub_for_log(session_id), scrub_for_log(body.trainerEmail), stopped)
     await _expire_live_session_keys(session_id, session)
     roster = await pool.smembers(roster_key)
     joined = await pool.hgetall(joined_key)
@@ -6344,6 +6499,15 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                 # otherwise a 120-minute workshop reaps every learner's
                 # environment exactly as the session ends.
                 sessionHours=workshop_session_hours(session),
+                # Trainer-provisioned learners were reaching the arena path with
+                # NO workshop id, so their sessions were never tagged with the
+                # workshop that created them. Two consequences, both silent:
+                # workshop-scoped operations (per-learner stop/rebuild, teardown)
+                # could not see them, and pool routing sent them to the shared
+                # arch queue — onto daily machines — while the workshop's own
+                # dedicated workers sat idle. The pull path always passed this;
+                # only the trainer's own "provision all" did not.
+                workshopId=session_id,
             ), request)
             status = "already-active" if provisioned.get("deduped") else "queued"
             # Settle the request for this learner: their own app must not
@@ -8827,7 +8991,7 @@ async def _fleet_workers() -> list[dict]:
 async def _fleet_snapshot(instance_type: str) -> tuple[list[dict], list[dict], dict]:
     workers = await _fleet_workers()
     inflight = await _fleet_inflight()
-    per = fleet_policy.slots_for_instance(instance_type) or 1
+    per = fleet_policy.planned_slots(instance_type) or 1
     return workers, inflight, fleet_policy.fleet_state(workers, inflight, per)
 
 
@@ -8851,7 +9015,7 @@ async def api_fleet_autoscale_status(request: Request,
         "region": region,
         "homeRegion": fleet_policy.HOME_REGION,
         "instanceType": instanceType,
-        "slotsPerInstance": fleet_policy.slots_for_instance(instanceType),
+        "slotsPerInstance": fleet_policy.planned_slots(instanceType),
         # A curated shortlist, not every shape we can price. Offering the full
         # matrix invites picking on RAM alone, which is how we ended up
         # recommending r6a before measuring it.
@@ -8957,7 +9121,7 @@ async def api_fleet_autoscale_apply(request: Request):
             raise HTTPException(502, str(e))
         # Step 2 — record in-flight BEFORE returning, so the very next tick
         # already counts this capacity and cannot launch it again.
-        per = fleet_policy.slots_for_instance(instance_type)
+        per = fleet_policy.planned_slots(instance_type)
         for inst in launched:
             iid = inst.get("instance_id")
             if not iid:

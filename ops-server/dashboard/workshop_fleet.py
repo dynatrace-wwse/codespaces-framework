@@ -1,0 +1,898 @@
+"""The control loop: workshop machines on a schedule, daily machines on demand.
+
+Until now the autoscaler was four HTTP endpoints a human clicked -- plan,
+apply, scale-down, reap. Nothing read a calendar and nothing watched
+utilisation, so "the machines should be up before the workshop" and "scale when
+a worker gets hot" were both unbuilt rather than merely unwired. This is that
+loop.
+
+TWO POOLS, TWO DIFFERENT CONTROL PROBLEMS
+-----------------------------------------
+They are not the same problem with different numbers, and treating them alike
+is what makes fleets either wasteful or unreliable.
+
+*Workshop* machines are **planned**. The roster size, the repo and the start
+time are all known in advance, so the right control is a schedule: launch
+enough capacity before the doors open, keep everything else off those machines,
+and give it all back when the room empties. Reacting to load here would be
+strictly worse -- by the time a workshop looks busy, seventy people are already
+waiting.
+
+*Daily* machines are **reactive**. Nobody files a ticket before starting a
+self-service lab, so the control is a feedback loop on free seats.
+
+WHY CPU IS NOT THE SCALE SIGNAL
+-------------------------------
+The instinct is to scale at 70% CPU. Measured, a *completely full* 30-seat
+worker sits at about **24% CPU** -- 0.127 vCPU per session against 16 vCPUs. A
+70% CPU trigger would therefore never fire for occupancy at all. It would fire
+only during install bursts, which are transient and self-resolving, and would
+add a machine five to ten minutes later, after the burst had passed, that could
+not help the sessions already placed -- a Sysbox session cannot be moved.
+
+Memory behaves the opposite way and makes an excellent signal. Thirty sessions
+at 1,609 MiB plus host overhead is roughly 85% of a 64 GiB worker, so 70%
+memory is reached at about **25 of 30 seats**: an early warning that arrives
+while there is still time to act.
+
+So the three signals do three different jobs:
+
+===============  ===================================  ==========================
+signal           meaning                              action
+===============  ===================================  ==========================
+free seats low   demand                               launch a worker
+memory >= 70%    the repo profile is optimistic       launch AND shrink this
+                                                      worker's advertised seats
+cpu/io pressure  a transient burst                    stop admitting here;
+                                                      do NOT scale
+===============  ===================================  ==========================
+
+The second row's second half matters most. If memory reaches 70% at twenty
+seats on a box that advertised thirty, the profile is wrong, and adding a
+machine while still selling the remaining ten seats overfills anyway. Shrinking
+the advertisement is what makes the fleet self-correct when a profile is wrong
+-- which, for every repo except Kubernetes-101, it currently is, because no
+other repo has been measured.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+
+from dashboard import fleet_policy, repo_profiles
+from shared.log_safety import scrub_for_log
+
+log = logging.getLogger(__name__)
+
+# ── Tunables ────────────────────────────────────────────────────────────────
+# How far ahead of a workshop to start its machines. A worker takes ~5-10 min
+# to boot and warm, so the default leaves real margin. Deliberately in MINUTES
+# and env-configurable so a rehearsal can compress a whole delivery into a few
+# minutes instead of waiting an hour to find out the loop works.
+PREWARM_LEAD_MINUTES = int(os.environ.get("PREWARM_LEAD_MINUTES", "45"))
+# Grace after a workshop's scheduled end before its machines are taken back.
+# Overruns are normal; a trainer finishing ten minutes late must not have the
+# room's environments deleted underneath them.
+TEARDOWN_GRACE_MINUTES = int(os.environ.get("TEARDOWN_GRACE_MINUTES", "30"))
+CONTROL_TICK_S = float(os.environ.get("CONTROL_TICK_S", "30"))
+CONTROL_LOOP_ENABLED = os.environ.get("CONTROL_LOOP_ENABLED", "1").strip().lower() \
+    in ("1", "true", "yes")
+
+# ── Rollout guards ──────────────────────────────────────────────────────────
+# This loop launches and terminates EC2 instances on its own. Enabling it
+# against a Redis that already holds 33 historical workshops would have it act
+# on all of them within one tick — so it starts in DRY RUN and says what it
+# would have done. Flip CONTROL_LOOP_APPLY=1 once the log reads correctly.
+#
+# This is a deliberate no-op default, not an accidental one: the log line at
+# startup states it plainly, and every skipped action is logged with the word
+# DRY-RUN. A silent no-op would be the drain-cordon bug over again.
+CONTROL_LOOP_APPLY = os.environ.get("CONTROL_LOOP_APPLY", "0").strip().lower() \
+    in ("1", "true", "yes")
+# Comma-separated workshop ids the loop may manage; "*" means all of them.
+# Narrow this during a rehearsal so one test workshop can be driven end to end
+# without touching a real cohort that happens to be running.
+CONTROL_LOOP_WORKSHOPS = os.environ.get("CONTROL_LOOP_WORKSHOPS", "*").strip()
+
+
+def manages(ws_id: str) -> bool:
+    if CONTROL_LOOP_WORKSHOPS in ("*", ""):
+        return True
+    allowed = {w.strip() for w in CONTROL_LOOP_WORKSHOPS.split(",") if w.strip()}
+    return ws_id in allowed
+
+# Planning safety on top of the profile arithmetic. 0.55 turns the 30 seats the
+# memory model allows on an m6a.4xlarge into 20 -- an explicit instruction
+# rather than a hedge: "I would rather provision 20 per machine than fit 30
+# exactly and lose the delivery to two or three failures." Being wrong in this
+# direction costs a few dollars; being wrong in the other costs the workshop.
+WORKSHOP_SEAT_SAFETY = float(os.environ.get("WORKSHOP_SEAT_SAFETY", "0.55"))
+WORKSHOP_INSTANCE_TYPE = os.environ.get("WORKSHOP_INSTANCE_TYPE", "m6a.4xlarge")
+# Workshops run on-demand, never spot. A spot reclamation costs a learner their
+# session with two minutes' notice and a Sysbox session cannot be migrated.
+WORKSHOP_PURCHASING = os.environ.get("WORKSHOP_PURCHASING", "on-demand")
+# Branch a launched worker syncs its agent code from. "main" in production;
+# overridable so fleet changes can be validated on a real launched worker
+# before being merged, rather than proving the code by shipping it.
+WORKER_CODE_BRANCH = os.environ.get("WORKER_CODE_BRANCH", "main")
+
+# Daily pool.
+DAILY_MIN_FREE_SEATS = int(os.environ.get("DAILY_MIN_FREE_SEATS", "4"))
+DAILY_MAX_WORKERS = int(os.environ.get("DAILY_MAX_WORKERS", "4"))
+DAILY_INSTANCE_TYPE = os.environ.get("DAILY_INSTANCE_TYPE", "m6a.2xlarge")
+# Sustained memory fraction that means "this worker's seats are overpriced".
+MEMORY_PRESSURE_THRESHOLD = float(os.environ.get("MEMORY_PRESSURE_THRESHOLD", "0.70"))
+# CPU fraction that means "stop admitting here", NOT "scale".
+CPU_BRAKE_THRESHOLD = float(os.environ.get("CPU_BRAKE_THRESHOLD", "0.70"))
+# Consecutive ticks above threshold before acting. A single hot sample during a
+# k3d bring-up is normal and must not move the fleet.
+PRESSURE_SUSTAIN_TICKS = int(os.environ.get("PRESSURE_SUSTAIN_TICKS", "4"))
+
+FLEET_KEY = "workshop:fleet"          # hash: ws_id -> json record
+# NOT "worker:pressure" — that matched the worker:* scan used by /api/workers
+# and by _daily_workers, so the pressure counter itself was listed as a worker
+# ("pressure  status=None  None/None") and would have been fed to the scale
+# planner as a box with no free seats. Caught live on the first apply run.
+PRESSURE_KEY = "fleet:pressure"       # hash: worker_id -> consecutive tick count
+
+# Workshop fleet lifecycle.
+WARMING, READY, DRAINING, DONE = "warming", "ready", "draining", "done"
+
+
+# ── Pure decisions (no Redis, no AWS — unit-testable) ────────────────────────
+
+def parse_iso(value: str):
+    """Tolerant ISO8601 → aware datetime, or None.
+
+    Returns None rather than raising: a workshop with an unparseable start time
+    must be skipped by the scheduler, never crash the loop that also serves
+    every other workshop.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def due_for_prewarm(session: dict, now: datetime,
+                    lead_minutes: int = PREWARM_LEAD_MINUTES) -> bool:
+    """Is it time to start this workshop's machines?
+
+    A workshop already past its start time is still due: a trainer who opens
+    the room late, or a loop that was restarted, must still get machines rather
+    than being silently skipped for having missed the window.
+
+    But only until its teardown point. Being unbounded on the late side made this
+    predicate and :func:`due_for_teardown` both true at once for any workshop whose
+    trainer never pressed end — and the control loop acts on prewarm first. With
+    CONTROL_LOOP_APPLY on that is an infinite launch/terminate cycle: tick 1 launches
+    the machines, a later tick tears them down for being past the window, the next tick
+    launches them again, forever, for a workshop nobody is attending. Found with a real
+    one — a room opened 2026-08-13 and never ended, which the loop had been asking to
+    prewarm every 30 seconds for three days.
+
+    Making the two mutually exclusive is what stops the oscillation, and it costs the
+    late trainer nothing: teardown is not due until the scheduled end PLUS grace.
+    """
+    if session.get("state") in ("ended", "cancelled", "deleted"):
+        return False
+    start = parse_iso(session.get("scheduledAt", ""))
+    if start is None:
+        return False
+    if now < start - timedelta(minutes=lead_minutes):
+        return False
+    return not due_for_teardown(session, now)
+
+
+def workshop_repo(session: dict) -> str:
+    """Which repo a workshop delivers, for profile lookup.
+
+    ``repoUrl`` is preferred because it is the unambiguous one. ``trainingId``
+    is a catalog id and does NOT match the repo name — a live workshop stores
+    ``kubernetes-101`` for ``enablement-kubernetes-101`` — so relying on it
+    alone silently sent every workshop to the heavy default.
+    """
+    return (session.get("repoUrl") or session.get("trainingId")
+            or session.get("repo") or "")
+
+
+def workshop_end(session: dict):
+    start = parse_iso(session.get("scheduledAt", ""))
+    if start is None:
+        return None
+    try:
+        minutes = int(session.get("durationMinutes") or 120)
+    except (TypeError, ValueError):
+        minutes = 120
+    return start + timedelta(minutes=minutes)
+
+
+def due_for_teardown(session: dict, now: datetime,
+                     grace_minutes: int = TEARDOWN_GRACE_MINUTES) -> bool:
+    """Give the machines back — either the workshop ended, or it overran its
+    scheduled window plus grace.
+
+    An explicit end always wins over the clock: a trainer who finishes early
+    should not pay for an hour of idle machines.
+    """
+    if session.get("state") in ("ended", "cancelled", "deleted"):
+        return True
+    end = workshop_end(session)
+    return end is not None and now >= end + timedelta(minutes=grace_minutes)
+
+
+def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
+                           instance_type: str = WORKSHOP_INSTANCE_TYPE,
+                           safety: float = WORKSHOP_SEAT_SAFETY) -> dict:
+    """Machines and per-machine seats for a workshop of ``seats`` people.
+
+    Returns ``workers``, ``seats_per_worker``, ``total_seats`` and whether the
+    profile behind it was estimated. ``workers == 0`` means refuse to plan --
+    an unknown instance type must never be guessed at.
+    """
+    per = repo_profiles.seats_per_worker(profile, instance_type, safety)
+    if per <= 0:
+        return {"workers": 0, "seats_per_worker": 0, "total_seats": 0,
+                "estimated": profile.estimated,
+                "reason": f"no capacity model for {instance_type}"}
+    workers = -(-max(0, seats) // per)
+    return {
+        "workers": workers,
+        "seats_per_worker": per,
+        "total_seats": workers * per,
+        "estimated": profile.estimated,
+        "reason": (f"{seats} seats ÷ {per}/worker"
+                   + (" (profile is an ESTIMATE, not a measurement)"
+                      if profile.estimated else "")),
+    }
+
+
+def _frac(hash_value, key: str) -> float:
+    try:
+        return float(hash_value.get(key, 0) or 0) / 100.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def daily_scale_decision(workers: list[dict], pressure_ticks: dict[str, int],
+                         min_free: int = DAILY_MIN_FREE_SEATS,
+                         max_workers: int = DAILY_MAX_WORKERS) -> dict:
+    """What the daily pool should do this tick.
+
+    ``workers`` are heartbeat hashes for the DAILY pool only -- workshop
+    machines must never be counted as available self-service capacity, which is
+    the whole reason the pool field exists.
+
+    Returns ``{"scale_up": n, "shrink": [...], "brake": [...], "why": str}``.
+    Each is a separate lever on purpose: shrinking an over-advertised worker is
+    what stops a scale-up from overfilling anyway, and braking is what protects
+    the sessions already on a hot box, which adding a machine cannot do.
+    """
+    if not workers:
+        return {"scale_up": 0, "shrink": [], "brake": [],
+                "why": "no daily workers registered"}
+
+    free = sum(int(w.get("slots_free", 0) or 0) for w in workers
+               if w.get("status") == "ready" and not _truthy(w.get("draining")))
+    shrink, brake, reasons = [], [], []
+
+    for w in workers:
+        wid = w.get("worker_id", "?")
+        sustained = pressure_ticks.get(wid, 0) >= PRESSURE_SUSTAIN_TICKS
+        if not sustained:
+            continue
+        if _frac(w, "mem_pct") >= MEMORY_PRESSURE_THRESHOLD:
+            # Memory is the honest occupancy proxy, so sustained pressure means
+            # the seats this worker advertises cost more than the profile says.
+            # Stop selling the rest of them.
+            shrink.append(wid)
+            reasons.append(f"{wid} mem {w.get('mem_pct')}% sustained")
+        if _frac(w, "cpu_pct") >= CPU_BRAKE_THRESHOLD:
+            # NOT a scale trigger. A new machine arrives minutes late and cannot
+            # take work off this one; refusing new admissions here can.
+            brake.append(wid)
+            reasons.append(f"{wid} cpu {w.get('cpu_pct')}% sustained — braking")
+
+    # A warming worker contributes 0 free seats, so a pool that is merely
+    # restarting looks exactly like a pool that is full. It is not: those seats
+    # are temporarily ABSENT, not taken, and they return in minutes — whereas a
+    # machine launched now needs its own boot plus warm-up and lands about when
+    # it stops being needed. Unguarded, every worker restart bought a spare
+    # instance and a fleet-wide deploy bought one per worker.
+    #
+    # The guard is deliberately narrow: only wait when the seats already coming
+    # back would COVER the shortfall. A warming worker does not excuse a pool
+    # that will still be short once it lands — that is real demand, and the
+    # machine should be on its way now rather than one warm-up later.
+    incoming = sum(int(w.get("capacity", 0) or 0) for w in workers
+                   if w.get("status") == "warming" and not _truthy(w.get("draining")))
+
+    scale_up = 0
+    if free < min_free and free + incoming >= min_free:
+        reasons.append(f"{free} free seats < {min_free}, but {incoming} seat(s) are "
+                       f"warming back up — waiting for capacity already paid for")
+    elif free < min_free:
+        reasons.append(f"{free} free seats < {min_free}"
+                       + (f" (only {incoming} warming)" if incoming else ""))
+        scale_up = 1
+    elif shrink:
+        # Capacity is about to be withdrawn from the pool, so replace it.
+        reasons.append("replacing seats withdrawn by memory pressure")
+        scale_up = 1
+    if len(workers) >= max_workers and scale_up:
+        reasons.append(f"at DAILY_MAX_WORKERS={max_workers} — NOT scaling")
+        scale_up = 0
+
+    return {"scale_up": scale_up, "shrink": shrink, "brake": brake,
+            "why": "; ".join(reasons) or f"{free} free seats — steady"}
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes")
+
+
+def update_pressure(pressure_ticks: dict[str, int], workers: list[dict]) -> dict[str, int]:
+    """Count consecutive ticks a worker has been hot; reset the moment it is not.
+
+    Sustain counting is what separates "a k3d bring-up is running" from "this
+    box is genuinely full". A single hot sample must never move the fleet.
+    """
+    out = dict(pressure_ticks)
+    for w in workers:
+        wid = w.get("worker_id", "?")
+        hot = (_frac(w, "mem_pct") >= MEMORY_PRESSURE_THRESHOLD
+               or _frac(w, "cpu_pct") >= CPU_BRAKE_THRESHOLD)
+        out[wid] = out.get(wid, 0) + 1 if hot else 0
+    return out
+
+
+# ── Effects (Redis + AWS) ───────────────────────────────────────────────────
+
+LIVE_INDEX_KEY = "live:sessions:index"
+
+
+async def _fleet_record(redis, ws_id: str) -> dict:
+    raw = await redis.hget(FLEET_KEY, ws_id)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+async def _save_fleet_record(redis, ws_id: str, rec: dict) -> None:
+    await redis.hset(FLEET_KEY, ws_id, json.dumps(rec))
+
+
+async def _roster_size(redis, ws_id: str) -> int:
+    """Seats to plan for: the roster plus the trainer, who also gets an
+    environment and is otherwise the one person left without one."""
+    try:
+        return int(await redis.scard(f"live:session:{ws_id}:roster")) + 1
+    except Exception:
+        return 1
+
+
+async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
+    """Launch dedicated machines for a workshop and bind it to its pool.
+
+    Order matters: the pool binding is written BEFORE the instances exist. A
+    learner who arrives early then queues on the pool queue and waits for its
+    machines, instead of being scheduled onto the daily pool where they would
+    consume a self-service seat and escape the workshop's isolation.
+    """
+    from dashboard import fleet, pools
+
+    existing = await _fleet_record(redis, ws_id)
+    if existing and existing.get("state") in (WARMING, READY):
+        return existing
+
+    repo = workshop_repo(session)
+    seats = await _roster_size(redis, ws_id)
+    profile = await repo_profiles.load(redis, repo)
+    plan = plan_workshop_capacity(seats, profile)
+
+    if plan["workers"] <= 0:
+        log.error("workshop %s: cannot plan capacity (%s)", ws_id, plan["reason"])
+        return {"state": "failed", "reason": plan["reason"]}
+
+    pool_name = f"ws-{ws_id}"
+    await pools.bind_workshop_pool(redis, ws_id, pool_name)
+
+    rec = {
+        "state": WARMING,
+        "pool": pool_name,
+        "repo": repo,
+        "seats": seats,
+        "workers": plan["workers"],
+        "seats_per_worker": plan["seats_per_worker"],
+        "profile_estimated": plan["estimated"],
+        "instances": [],
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await _save_fleet_record(redis, ws_id, rec)
+
+    log.info("workshop %s: launching %d × %s for %d seats (%s)",
+             ws_id, plan["workers"], WORKSHOP_INSTANCE_TYPE, seats, plan["reason"])
+    if plan["estimated"]:
+        # Say it out loud. A plan built on a guess should never read like a
+        # plan built on a measurement.
+        log.warning("workshop %s sized from an ESTIMATED profile for %s — "
+                    "measure this repo before relying on the number", ws_id, repo)
+    try:
+        # scale_up refuses more than MAX_SCALE_UP (4) per call, and 70 seats
+        # needs exactly 4 — so the bootcamp sits ON the limit and anything
+        # larger would raise ValueError, be caught below, and retry forever
+        # without ever succeeding. Batch instead: the cap is a per-call safety
+        # rail, not a fleet ceiling.
+        launched = []
+        remaining = plan["workers"]
+        while remaining > 0:
+            batch = min(remaining, fleet.MAX_SCALE_UP)
+            launched += await fleet.scale_up(
+                batch,
+                instance_type=WORKSHOP_INSTANCE_TYPE,
+                purchasing=WORKSHOP_PURCHASING,
+                pool=pool_name,
+                capacity=plan["seats_per_worker"],
+                # A workshop worker serves one repo, so its slots can be capped
+                # for that repo specifically rather than at a flat figure chosen
+                # for the lightest one.
+                slot_memory_mb=repo_profiles.slot_memory_cap_mb(profile),
+                code_branch=WORKER_CODE_BRANCH,
+            )
+            remaining -= batch
+        # scale_up returns snake_case ``instance_id``; accept both spellings so a
+        # future change to either side cannot silently empty this list. It was
+        # ``InstanceId`` only, which produced an empty list on every launch and
+        # therefore a teardown that terminated nothing — invisible in unit tests
+        # because they never call the real scale_up.
+        rec["instances"] = [i.get("instance_id") or i.get("InstanceId")
+                            for i in launched
+                            if i.get("instance_id") or i.get("InstanceId")]
+    except Exception as exc:
+        # Leave the binding in place. Learners queue on the pool rather than
+        # leaking onto the daily workers, and the next tick retries the launch.
+        log.error("workshop %s: launch failed (%s) — will retry next tick", ws_id, exc)
+        rec["state"] = WARMING
+        rec["last_error"] = str(exc)[:300]
+    await _save_fleet_record(redis, ws_id, rec)
+    return rec
+
+
+async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
+    """Give a finished workshop's machines back, in the only safe order.
+
+    Drain, then terminate the sessions, then terminate the instances. Draining
+    first is what stops a straggler being scheduled onto a machine that is
+    about to disappear; terminating sessions before instances is what gives the
+    per-slot teardown (and the reaper) a chance to run rather than having
+    everything vanish with the host.
+    """
+    from dashboard import fleet, pools
+
+    rec = await _fleet_record(redis, ws_id)
+    if not rec or rec.get("state") == DONE:
+        return rec or {}
+
+    rec["state"] = DRAINING
+    await _save_fleet_record(redis, ws_id, rec)
+
+    # Unbind first: no further learner can be routed to these machines.
+    await pools.unbind_workshop_pool(redis, ws_id)
+
+    # Remember who they were before cordoning: once the instances are gone their
+    # heartbeats stop, and the scan that finds them by pool would find nothing.
+    pool_workers = await _pool_worker_ids(redis, rec.get("pool", ""))
+    for wid in pool_workers:
+        try:
+            await redis.hset(f"worker:{wid}", "draining", "1")
+        except Exception as exc:
+            log.warning("workshop %s: could not cordon %s: %s", ws_id, wid, exc)
+
+    terminated = await _terminate_workshop_sessions(redis, ws_id)
+    log.info("workshop %s: requested termination of %d session(s)", ws_id, terminated)
+
+    # The record is a convenience, NOT the source of truth. Instances are tagged
+    # with their pool at launch, so ask EC2 what actually exists rather than
+    # trusting a list that a bug, a lost write or a restart could have emptied.
+    # This is the difference between a workshop that gives its machines back and
+    # one that leaks them silently — and the record WAS empty on the first live
+    # run, so this path is load-bearing, not belt-and-braces.
+    instances = sorted(set(rec.get("instances") or []) |
+                       set(await _instances_tagged(rec.get("pool", ""))))
+    if instances:
+        try:
+            # scale_down refuses anything not tagged orbital-role=worker, so a
+            # bug in the record here cannot terminate an unrelated instance.
+            await fleet.scale_down(instances)
+            log.info("workshop %s: terminated %s", ws_id, ", ".join(instances))
+        except Exception as exc:
+            # The instances still carry a self-destruct timer and the
+            # ManagedBy tag, so a failure here delays the refund rather than
+            # leaking a machine forever -- but it must be visible.
+            log.error("workshop %s: instance termination FAILED (%s) — "
+                      "instances %s need manual review", ws_id, exc, instances)
+            rec["last_error"] = str(exc)[:300]
+
+    # Drop the heartbeats of machines that no longer exist. A terminated instance
+    # leaves its `worker:{id}` hash behind for ever, frozen at whatever it last
+    # published — the first workshop machine the loop ever tore down left one at
+    # `status: warming` / `capacity: 0`, which every consumer read as a live
+    # worker that would never contribute a seat. `_daily_workers` now also skips
+    # stale records, so this is hygiene rather than the only defence, but leaving
+    # them accumulating makes every fleet view progressively less true.
+    for wid in pool_workers:
+        try:
+            await redis.delete(f"worker:{wid}")
+        except Exception as exc:
+            log.warning("workshop %s: could not drop the heartbeat for %s: %s",
+                        ws_id, wid, exc)
+    if pool_workers:
+        log.info("workshop %s: dropped %d worker record(s)", ws_id, len(pool_workers))
+
+    rec["state"] = DONE
+    rec["ended_at"] = datetime.now(timezone.utc).isoformat()
+    await _save_fleet_record(redis, ws_id, rec)
+    return rec
+
+
+async def _pool_workers_ready(redis, pool_name: str) -> int:
+    """How many of this pool's workers report ready with a full slot pool.
+
+    ``slots_degraded`` is deliberately part of the test: a worker that came up
+    short is not "ready" for a workshop that was sized on its full seat count.
+    """
+    if not pool_name:
+        return 0
+    ready = 0
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if h.get("pool") != pool_name:
+            continue
+        if h.get("status") == "ready" and int(h.get("slots_degraded", 0) or 0) == 0:
+            ready += 1
+    return ready
+
+
+async def _instances_tagged(pool_name: str) -> list[str]:
+    """Live EC2 instance ids carrying this pool's tag.
+
+    Deliberately queries AWS rather than Redis: when a workshop's machines need
+    giving back, the question is "what is actually still running", and Redis is
+    the component most likely to be the reason the record is wrong.
+    """
+    if not pool_name:
+        return []
+    from dashboard import fleet
+    try:
+        data = await fleet._aws(
+            "ec2", "describe-instances",
+            "--filters", f"Name=tag:orbital-pool,Values={pool_name}",
+            "Name=instance-state-name,Values=pending,running,stopping,stopped")
+    except Exception as exc:
+        log.warning("could not list instances for pool %s: %s", pool_name, exc)
+        return []
+    return [i.get("InstanceId") for r in (data or {}).get("Reservations", [])
+            for i in r.get("Instances", []) if i.get("InstanceId")]
+
+
+async def _pool_worker_ids(redis, pool_name: str) -> list[str]:
+    if not pool_name:
+        return []
+    out = []
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            if (await redis.hget(key, "pool")) == pool_name:
+                out.append(key.split(":", 1)[1])
+        except Exception:
+            continue
+    return out
+
+
+async def terminate_workshop_sessions(redis, ws_id: str) -> int:
+    """Public name for :func:`_terminate_workshop_sessions`.
+
+    Ending a workshop has to stop its environments, and until 2026-08-14 the
+    only caller was the control loop's scheduled teardown — which is off by
+    default and driven by the clock, not by the trainer. So a trainer pressing
+    "end" got a 200, a completion record, and twelve learner environments still
+    running: measured on a 12-seat load test, still 12/12 active ten minutes
+    after the end call returned.
+
+    That is not merely untidy. A seat held by an ended workshop is a seat the
+    next workshop's capacity plan already counted on, so the whole unit model
+    is only as honest as this function being called.
+    """
+    return await _terminate_workshop_sessions(redis, ws_id)
+
+
+async def _terminate_workshop_sessions(redis, ws_id: str) -> int:
+    """Ask every session belonging to this workshop to stop.
+
+    Sets the durable ``terminating`` flag and publishes on ``ops:terminate``.
+    The flag is what makes this survive a worker that is restarting or briefly
+    disconnected: the pub/sub message is fire-and-forget, the flag is not.
+    """
+    count = 0
+    job_ids: set[str] = set()
+    async for key in redis.scan_iter(match="job:running:*", count=500):
+        try:
+            if await redis.type(key) != "hash":
+                continue
+            rec = await redis.hgetall(key)
+            if rec.get("workshop_id") != ws_id:
+                continue
+            job_id = key.split("job:running:", 1)[1]
+            job_ids.add(job_id)
+            await redis.hset(key, "terminating", "1")
+            await redis.publish("ops:terminate", job_id)
+            count += 1
+        except Exception as exc:
+            log.warning("workshop %s: could not terminate %s: %s",
+                        scrub_for_log(ws_id), scrub_for_log(key), scrub_for_log(exc))
+
+    count += await _drop_queued_jobs(redis, ws_id, job_ids)
+    return count
+
+
+async def _drop_queued_jobs(redis, ws_id: str, job_ids: set[str]) -> int:
+    """Remove the workshop's not-yet-started jobs from the queues.
+
+    Flagging ``terminating`` only reaches a job a worker has already claimed.
+    Paced admission means a workshop can end with learners still parked, and
+    those payloads would be admitted afterwards and build environments for a
+    workshop nobody is attending — measured 2026-08-14: a workshop ended with
+    three learners still in the pending list.
+
+    Matched by job id rather than by payload content, because the queued
+    payload carries no workshop id — only the ``job:running`` record does.
+    """
+    if not job_ids:
+        return 0
+    dropped = 0
+    patterns = ("queue:pending:*", "queue:pool:*", "queue:test:*",
+                "queue:direct:*")
+    for pattern in patterns:
+        async for key in redis.scan_iter(match=pattern, count=200):
+            try:
+                if await redis.type(key) != "list":
+                    continue
+                for payload in await redis.lrange(key, 0, -1):
+                    try:
+                        job_id = json.loads(payload).get("job_id", "")
+                    except (ValueError, TypeError):
+                        continue
+                    if job_id in job_ids:
+                        # LREM by exact value: the payload is unique, and this
+                        # cannot disturb another learner's position in the queue.
+                        removed = await redis.lrem(key, 1, payload)
+                        if removed:
+                            dropped += removed
+                            log.info("workshop %s: dropped queued job %s from %s",
+                                     scrub_for_log(ws_id), scrub_for_log(job_id),
+                                     scrub_for_log(key))
+            except Exception as exc:
+                log.warning("workshop %s: could not scan %s: %s",
+                            scrub_for_log(ws_id), scrub_for_log(key), scrub_for_log(exc))
+    # And drop their job records. A learner who never started has no environment
+    # to reap, so nothing else will ever clean these up: the terminate reconciler
+    # deliberately no longer treats worker_id="queued" as an orphan (that bug
+    # deleted every paced learner's record mid-session), which means ending the
+    # workshop is now the only moment these can go. Left behind, they read as
+    # running sessions for ever — five survived a workshop that had ended, with
+    # no environment anywhere.
+    for job_id in job_ids:
+        try:
+            rec = await redis.hgetall(f"job:running:{job_id}")
+            # ONLY the explicit marker. "queued" is what api_arena_provision
+            # writes before enqueueing, so it means "no worker has ever touched
+            # this". An ABSENT worker_id is merely unknown, and deleting on
+            # unknown would take a live learner's record with it — the opposite
+            # asymmetry to _dead_worker_candidate, which treats both as
+            # not-dead because there the safe answer is to leave things alone.
+            if rec and (rec.get("worker_id") or "") == "queued":
+                await redis.delete(f"job:running:{job_id}")
+                log.info("workshop %s: dropped the record of never-started job %s",
+                         scrub_for_log(ws_id), scrub_for_log(job_id))
+        except Exception as exc:
+            log.warning("workshop %s: could not drop the record for %s: %s",
+                        scrub_for_log(ws_id), scrub_for_log(job_id), scrub_for_log(exc))
+
+    return dropped
+
+
+async def _daily_workers(redis) -> list[dict]:
+    """Heartbeats for the DAILY pool only.
+
+    A missing ``pool`` field means daily: every worker predating pools is in the
+    shared pool, and reading absence as "unknown" would exclude the entire
+    existing fleet from its own autoscaler.
+
+    Records whose heartbeat has stopped are skipped. A terminated machine leaves
+    its ``worker:{id}`` hash behind, and a hash is not a worker: the one from a
+    torn-down workshop pool sat at ``status: warming`` / ``capacity: 0``
+    for ever, which reads as a daily worker that will never contribute a seat and
+    would have had the loop scaling up against it indefinitely. Measured
+    2026-08-16, on the first workshop machine the loop launched and terminated.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    out = []
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if not h or h.get("role") == "master":
+            continue
+        if (h.get("pool") or "daily") != "daily":
+            continue
+        wid = h.get("worker_id") or key.split(":", 1)[1]
+        if fleet_policy.normalize_worker(wid, h, now)["stale"]:
+            log.debug("skipping %s in the daily pool: heartbeat is stale", wid)
+            continue
+        h["worker_id"] = wid
+        out.append(h)
+    return out
+
+
+async def tick(redis) -> dict:
+    """One control pass. Returns a summary for logs and tests."""
+    from dashboard import fleet
+
+    now = datetime.now(timezone.utc)
+    summary = {"prewarmed": [], "torn_down": [], "daily": {}}
+
+    # ── workshops ───────────────────────────────────────────────────────────
+    try:
+        ws_ids = await redis.zrevrange(LIVE_INDEX_KEY, 0, -1)
+    except Exception as exc:
+        log.warning("control loop: cannot read workshop index: %s", exc)
+        ws_ids = []
+
+    for ws_id in ws_ids:
+        try:
+            session = await redis.hgetall(f"live:session:{ws_id}")
+            if not session:
+                continue
+            if not manages(ws_id):
+                continue
+            rec = await _fleet_record(redis, ws_id)
+            state = rec.get("state")
+
+            # WARMING → READY once the pool's workers actually report ready.
+            # Without this the record sits at "warming" for the whole workshop,
+            # so the one field an operator reads to answer "are the machines up
+            # yet" never answers it. Teardown worked anyway (it accepts either
+            # state), which is exactly why the gap was easy to miss.
+            if state == WARMING:
+                pool_name = rec.get("pool", "")
+                ready = await _pool_workers_ready(redis, pool_name)
+                if ready:
+                    rec["state"] = READY
+                    rec["ready_at"] = now.isoformat()
+                    rec["ready_workers"] = ready
+                    await _save_fleet_record(redis, ws_id, rec)
+                    state = READY
+                    log.info("workshop %s: %d worker(s) ready", ws_id, ready)
+
+            if state in (None, "", "failed") and due_for_prewarm(session, now):
+                if CONTROL_LOOP_APPLY:
+                    await provision_workshop_fleet(redis, ws_id, session)
+                else:
+                    seats = await _roster_size(redis, ws_id)
+                    profile = await repo_profiles.load(redis, workshop_repo(session))
+                    plan = plan_workshop_capacity(seats, profile)
+                    log.info("DRY-RUN workshop %s (%s): would launch %d × %s "
+                             "for %d seats — %s", ws_id, session.get("title", ""),
+                             plan["workers"], WORKSHOP_INSTANCE_TYPE, seats,
+                             plan["reason"])
+                summary["prewarmed"].append(ws_id)
+            elif state in (WARMING, READY) and due_for_teardown(session, now):
+                if CONTROL_LOOP_APPLY:
+                    await teardown_workshop_fleet(redis, ws_id)
+                else:
+                    log.info("DRY-RUN workshop %s: would tear down %s",
+                             ws_id, rec.get("instances") or "(no instances)")
+                summary["torn_down"].append(ws_id)
+        except Exception as exc:
+            # One malformed workshop must not stop the loop serving the others.
+            log.warning("control loop: workshop %s failed this tick: %s", ws_id, exc)
+
+    # ── daily pool ──────────────────────────────────────────────────────────
+    try:
+        workers = await _daily_workers(redis)
+        raw = await redis.hgetall(PRESSURE_KEY) or {}
+        ticks = {k: int(v or 0) for k, v in raw.items()}
+        ticks = update_pressure(ticks, workers)
+        await redis.delete(PRESSURE_KEY)
+        if ticks:
+            await redis.hset(PRESSURE_KEY, mapping={k: str(v) for k, v in ticks.items()})
+
+        decision = daily_scale_decision(workers, ticks)
+        summary["daily"] = decision
+
+        if not CONTROL_LOOP_APPLY:
+            if decision["scale_up"] or decision["shrink"] or decision["brake"]:
+                log.info("DRY-RUN daily: would scale_up=%d shrink=%s brake=%s — %s",
+                         decision["scale_up"], decision["shrink"],
+                         decision["brake"], decision["why"])
+            return summary
+
+        for wid in decision["shrink"]:
+            # Withdraw the seats this worker cannot actually back. Capacity is
+            # what the scale planner consumes, so lowering it here is what stops
+            # a scale-up from overfilling the same box again.
+            try:
+                current = int((await redis.hget(f"worker:{wid}", "capacity")) or 0)
+                if current > 1:
+                    await redis.hset(f"worker:{wid}", "capacity", str(current - 1))
+                    log.warning("daily: shrank %s to %d seats — sustained memory "
+                                "pressure means its profile is optimistic",
+                                wid, current - 1)
+            except Exception as exc:
+                log.warning("daily: could not shrink %s: %s", wid, exc)
+
+        for wid in decision["brake"]:
+            # Not a cordon: the worker keeps its sessions and its seats, it just
+            # stops taking NEW ones until the burst passes.
+            try:
+                await redis.hset(f"worker:{wid}", "admission_brake", "1")
+            except Exception:
+                pass
+        for w in workers:
+            wid = w.get("worker_id", "")
+            if wid and wid not in decision["brake"] and w.get("admission_brake"):
+                await redis.hset(f"worker:{wid}", "admission_brake", "0")
+
+        if decision["scale_up"]:
+            log.info("daily: scaling up %d (%s)", decision["scale_up"], decision["why"])
+            try:
+                await fleet.scale_up(decision["scale_up"],
+                                     instance_type=DAILY_INSTANCE_TYPE,
+                                     purchasing="spot", pool="daily")
+            except Exception as exc:
+                log.error("daily: scale-up failed: %s", exc)
+    except Exception as exc:
+        log.warning("control loop: daily pass failed: %s", exc)
+
+    return summary
+
+
+async def control_loop(redis) -> None:
+    if not CONTROL_LOOP_ENABLED:
+        log.info("Control loop disabled (CONTROL_LOOP_ENABLED=0)")
+        return
+    log.info("Control loop: prewarm %d min ahead, teardown %d min after, tick %.0fs, "
+             "workshop seats ×%.2f safety, workshops=%s",
+             PREWARM_LEAD_MINUTES, TEARDOWN_GRACE_MINUTES, CONTROL_TICK_S,
+             WORKSHOP_SEAT_SAFETY, CONTROL_LOOP_WORKSHOPS)
+    if not CONTROL_LOOP_APPLY:
+        log.warning("Control loop is in DRY RUN — it will log what it would do "
+                    "and launch NOTHING. Set CONTROL_LOOP_APPLY=1 to act.")
+    while True:
+        try:
+            await tick(redis)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                              # pragma: no cover
+            log.warning("control tick failed: %s", exc)
+        await asyncio.sleep(CONTROL_TICK_S)

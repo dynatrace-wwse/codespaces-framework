@@ -15,7 +15,7 @@ Spec file format (YAML):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -34,6 +34,15 @@ class TokenSpec:
     name_suffix: str    # e.g. "operator"
     env_var: str        # e.g. "DT_OPERATOR_TOKEN"
     scopes: list[str]
+    # Token FAMILY. "classic" mints a dt0c01 Api-Token (translated to a platform token
+    # on tenants that retired classic creation); "platform" always mints a dt0s16 via
+    # the Account Management API, because the consumer calls an endpoint that accepts
+    # nothing else. A repo may declare both — the CI/CD workshop needs monaco/dtctl
+    # (platform) alongside the SDLC event helpers (classic) in the same session.
+    kind: str = "classic"
+    # Further env vars that receive the SAME token value. Mirrors aliasEnvVars in the
+    # app's TokenSpec; lets one minted token serve several consumer variables.
+    aliases: list[str] = field(default_factory=list)
 
 
 # Standard DT Operator + Ingest tokens — used by all K8s enablement repos.
@@ -136,10 +145,20 @@ def _parse_yaml(content: str) -> list[TokenSpec]:
     data = yaml.safe_load(content)
     specs = []
     for t in data.get("tokens", []):
+        # An unrecognised kind is a typo in a file we do not control the review of.
+        # Fall back to classic rather than skipping the token: a missing token fails
+        # the session, a classic one fails loudly at the first call with a real error.
+        kind = str(t.get("kind", "classic")).strip().lower() or "classic"
+        if kind not in ("classic", "platform"):
+            log.warning("Unknown token kind %r for %r — treating as classic",
+                        kind, t.get("env_var"))
+            kind = "classic"
         specs.append(TokenSpec(
             name_suffix=t["name_suffix"],
             env_var=t["env_var"],
             scopes=t.get("scopes", []),
+            kind=kind,
+            aliases=list(t.get("aliases", []) or []),
         ))
     return specs or DEFAULT_SPECS
 

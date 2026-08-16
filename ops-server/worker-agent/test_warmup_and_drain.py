@@ -26,6 +26,7 @@ Two regression contracts, both observed live on 2026-08-12:
 
 import asyncio
 
+from . import agent as agent_mod
 from .agent import SysboxPool
 from .executor import SysboxSlot
 
@@ -59,8 +60,9 @@ async def _mark_ready(pool: SysboxPool, slot: SysboxSlot) -> None:
 class _FakeRedis:
     """Minimal stand-in for the redis.asyncio client used by _refresh_draining."""
 
-    def __init__(self, value=None, raises: bool = False):
+    def __init__(self, value=None, raises: bool = False, brake=None):
         self.value = value
+        self.brake = brake
         self.raises = raises
         self.calls = 0
 
@@ -70,6 +72,12 @@ class _FakeRedis:
             raise ConnectionError("redis unreachable")
         return self.value
 
+    async def hmget(self, key, *fields):
+        self.calls += 1
+        if self.raises:
+            raise ConnectionError("redis unreachable")
+        return [self.value if f == "draining" else self.brake for f in fields]
+
 
 class _Agent:
     """Just enough of WorkerAgent to exercise _refresh_draining unchanged."""
@@ -77,6 +85,7 @@ class _Agent:
     def __init__(self, redis_client):
         self.pool = redis_client
         self._draining = False
+        self._braked = False
 
     # bind the real implementation
     from .agent import WorkerAgent as _WA
@@ -139,10 +148,15 @@ def test_free_slots_tracks_claimed_slots():
     assert pool.free_slots() == 3         # ...but one is in use
 
 
-def test_total_warm_failure_unblocks_consumers():
+def test_total_warm_failure_unblocks_consumers(monkeypatch):
     # If every slot fails to warm, init() sets first_ready anyway so
     # _consume_queue can proceed to its own error handling instead of
     # hanging forever on an event that will never fire.
+    #
+    # Backoff is shortened here rather than left at the production value: init()
+    # now retries failed slots, and the real 10s/20s waits would put 30 seconds
+    # of sleep into the unit suite for no extra coverage.
+    monkeypatch.setattr(agent_mod, "WARM_RETRY_BASE_S", 0)
     pool = _pool(2)
 
     async def _all_fail(_slot):
@@ -154,6 +168,62 @@ def test_total_warm_failure_unblocks_consumers():
     assert pool.warm_complete.is_set()
     assert pool.first_ready.is_set()
     assert pool.ready_count == 0
+    assert pool.degraded == 2, "a pool with nothing ready must report itself degraded"
+
+
+def test_warmup_retries_slots_that_failed_the_first_time(monkeypatch):
+    """The recovery restart that returned 18/30 did so because a slot that
+    failed once was never tried again. Transient dockerd pressure is exactly
+    the case retrying fixes."""
+    monkeypatch.setattr(agent_mod, "WARM_RETRY_BASE_S", 0)
+    pool = _pool(4)
+    attempts = {}
+
+    async def _fail_once(slot):
+        attempts[slot.index] = attempts.get(slot.index, 0) + 1
+        return attempts[slot.index] > 1      # fails first time, succeeds after
+
+    pool._init_slot = _fail_once
+    ready = asyncio.run(pool.init())
+    assert ready == 4, "every slot should recover on the retry"
+    assert pool.degraded == 0
+
+
+def test_warmup_reports_a_short_pool_instead_of_absorbing_it(monkeypatch):
+    """'Worker fully warm' was logged at 18/30. A pool that cannot reach
+    capacity has to say so — the scale planner cannot infer it."""
+    monkeypatch.setattr(agent_mod, "WARM_RETRY_BASE_S", 0)
+    pool = _pool(4)
+
+    async def _one_always_fails(slot):
+        return slot.index != 3
+
+    pool._init_slot = _one_always_fails
+    ready = asyncio.run(pool.init())
+    assert ready == 3
+    assert pool.degraded == 1
+
+
+def test_warmup_never_fires_every_slot_at_once(monkeypatch):
+    """The 30-at-once init burst is what failed while dockerd was busy.
+
+    Asserts the observed peak concurrency stays within WARM_CONCURRENCY.
+    """
+    monkeypatch.setattr(agent_mod, "WARM_RETRY_BASE_S", 0)
+    monkeypatch.setattr(agent_mod, "WARM_CONCURRENCY", 3)
+    pool = _pool(12)
+    live = {"now": 0, "peak": 0}
+
+    async def _slow(_slot):
+        live["now"] += 1
+        live["peak"] = max(live["peak"], live["now"])
+        await asyncio.sleep(0)
+        live["now"] -= 1
+        return True
+
+    pool._init_slot = _slow
+    assert asyncio.run(pool.init()) == 12
+    assert live["peak"] <= 3, f"warmed {live['peak']} at once, cap is 3"
 
 
 # ── cordon ───────────────────────────────────────────────────────────────────
@@ -295,3 +365,38 @@ def test_liveness_probe_reads_docker_inspect_state():
         assert asyncio.run(pool._slot_is_alive(pool.slots[0])) is False
     finally:
         agent_mod.asyncio.create_subprocess_exec = orig
+
+
+# ── admission brake ──────────────────────────────────────────────────────────
+# The control loop sets admission_brake on a worker under sustained CPU
+# pressure. A flag nothing reads is worse than no flag at all -- the drain
+# cordon was exactly that until 2026-08-12 -- so these pin that it bites.
+
+def test_admission_brake_stops_new_intake():
+    agent = _Agent(_FakeRedis("0", brake="1"))
+    assert asyncio.run(agent._refresh_draining()) is True
+    assert agent._braked is True
+    assert agent._draining is False, "a brake must not masquerade as a cordon"
+
+
+def test_brake_clears_when_the_worker_cools():
+    agent = _Agent(_FakeRedis("0", brake="1"))
+    assert asyncio.run(agent._refresh_draining()) is True
+    agent.pool.brake = "0"
+    assert asyncio.run(agent._refresh_draining()) is False
+    assert agent._braked is False
+
+
+def test_cordon_and_brake_are_tracked_separately():
+    """Distinct lifetimes: a cordon precedes termination, a brake is temporary
+    back-pressure. A braked worker must not look like one being scaled down."""
+    agent = _Agent(_FakeRedis("1", brake="0"))
+    assert asyncio.run(agent._refresh_draining()) is True
+    assert agent._draining is True and agent._braked is False
+
+
+def test_brake_fails_open_on_a_redis_blip():
+    """Same reasoning as the cordon: a transient blip must not quietly idle
+    the fleet."""
+    agent = _Agent(_FakeRedis(raises=True))
+    assert asyncio.run(agent._refresh_draining()) is False

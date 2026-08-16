@@ -138,12 +138,27 @@ def _validate_scale_count(count: int) -> int:
 
 def _build_user_data(redis_host: str = MASTER_REDIS_HOST,
                      capacity: int | None = None,
-                     lifetime_minutes: int = 0) -> str:
+                     lifetime_minutes: int = 0,
+                     pool: str = "daily",
+                     code_branch: str = "main",
+                     slot_memory_mb: int | None = None) -> str:
     """Cloud-init user-data shell script for a fresh worker.
 
     - Stops the baked agent FIRST. The golden AMI was baked from a live worker,
       so it boots carrying that worker's identity and would heartbeat as it
       (overwriting the real worker's registration) until this script lands.
+    - SYNCS THE CODE CHECKOUT to origin/{code_branch} before starting the agent.
+      The golden AMI is a point-in-time image (v2 was baked 2026-07-15), so
+      without this every autoscaled worker runs whatever agent code was current
+      on the day the image was made, while master and the two long-lived workers
+      move on. Fleet drift then looks like a heisenbug: a training passes on the
+      hand-maintained boxes and fails on the autoscaled one, with identical docs.
+      The repo is public over HTTPS, so this needs no credential.
+    - Stamps WORKER_CODE_REF with the resulting short SHA, published on every
+      heartbeat. If the sync fails the stamp is left EMPTY rather than faked,
+      so a stale worker is visible instead of silently serving learners.
+    - Sets WORKER_POOL, which decides whether this box takes shared
+      self-service work or only its own pool's queue.
     - Derives a unique WORKER_ID from the instance id (IMDSv2, token-based).
     - Clears WORKER_SSH_HOST, which the AMI inherited from the instance it was
       baked from. Left stale, the master's PTY bridge SSHes to the WRONG BOX for
@@ -177,13 +192,69 @@ else
   echo "WORKER_CAPACITY={capacity}" >> "$ENV_FILE"
 fi
 """
+    # Per-slot memory ceiling, sized from the repo this worker will serve.
+    #
+    # The flat 4096 MiB default is right for Kubernetes-101 (1,609 MiB
+    # committed, 2.2-3.1 GiB transient peak) and is NOT right for everything:
+    # Astroshop's helm values alone declare 6,320 MiB of pod limits, so a slot
+    # capped at 4 GiB has no headroom for its own declared workload. A cap set
+    # too LOW is as damaging as none at all -- it OOM-kills a healthy lab
+    # mid-install and the learner sees a broken step, not a resource message.
+    #
+    # This only works because a workshop worker serves ONE repo. The daily pool
+    # is mixed, so its cap must stay generic and must be sized for the heaviest
+    # repo it may be asked to run.
+    slot_memory_block = ""
+    if slot_memory_mb:
+        slot_memory_block = f"""
+# Per-slot memory ceiling for this pool's repo.
+if grep -q '^WORKER_SLOT_MEMORY_MB=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_SLOT_MEMORY_MB=.*|WORKER_SLOT_MEMORY_MB={slot_memory_mb}|" "$ENV_FILE"
+else
+  echo "WORKER_SLOT_MEMORY_MB={slot_memory_mb}" >> "$ENV_FILE"
+fi
+if grep -q '^WORKER_SLOT_LIMITS=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_SLOT_LIMITS=.*|WORKER_SLOT_LIMITS=1|" "$ENV_FILE"
+else
+  echo "WORKER_SLOT_LIMITS=1" >> "$ENV_FILE"
+fi
+"""
     return f"""#!/bin/bash
 set -uo pipefail
 ENV_FILE=/home/ops/.env
+CHECKOUT=/home/ops/enablement-framework/codespaces-framework
+LOG=/var/log/orbital-worker-init.log
 
 # Stop BEFORE rewriting identity: the golden AMI boots as the worker it was
 # baked from and would briefly heartbeat under that worker's id.
 systemctl stop ops-worker-agent || true
+
+# ── Sync the agent code to origin/{code_branch} ───────────────────────────────
+# The AMI is a snapshot; without this the worker serves learners with whatever
+# agent code existed when the image was baked. Public HTTPS remote, so no
+# credential is involved. Best-effort by design: a worker running slightly old
+# code is better than a worker that never starts — but the stamp below is what
+# makes that tradeoff honest instead of invisible.
+CODE_REF=""
+if [ -d "$CHECKOUT/.git" ]; then
+  if sudo -u ops git -C "$CHECKOUT" fetch --quiet origin {code_branch} 2>>"$LOG" \\
+     && sudo -u ops git -C "$CHECKOUT" reset --hard --quiet FETCH_HEAD 2>>"$LOG"; then
+    CODE_REF=$(sudo -u ops git -C "$CHECKOUT" rev-parse --short HEAD 2>/dev/null || echo "")
+    echo "orbital: code synced to {code_branch}@$CODE_REF" >> "$LOG"
+  else
+    echo "orbital: WARNING code sync FAILED — running baked AMI code" >> "$LOG"
+  fi
+else
+  echo "orbital: WARNING no checkout at $CHECKOUT — running baked AMI code" >> "$LOG"
+fi
+
+# Stamp the ref (empty on failure — an empty code_ref on the heartbeat is the
+# signal that this worker is not known to be current).
+if grep -q '^WORKER_CODE_REF=' "$ENV_FILE" 2>/dev/null; then
+  sed -i "s|^WORKER_CODE_REF=.*|WORKER_CODE_REF=${{CODE_REF}}|" "$ENV_FILE"
+else
+  echo "WORKER_CODE_REF=${{CODE_REF}}" >> "$ENV_FILE"
+fi
 
 # IMDSv2: fetch a session token, then the instance id (last 8 chars).
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \\
@@ -211,7 +282,16 @@ if grep -q '^WORKER_SSH_HOST=' "$ENV_FILE"; then
 else
   echo "WORKER_SSH_HOST=${{PRIVATE_IP}}" >> "$ENV_FILE"
 fi
-{capacity_block}
+{capacity_block}{slot_memory_block}
+# Pool membership decides which queue this worker consumes. "daily" takes
+# shared self-service work; anything else takes ONLY queue:pool:{{that name}},
+# which is what keeps a self-service learner off a workshop's machines.
+if grep -q '^WORKER_POOL=' "$ENV_FILE"; then
+  sed -i "s|^WORKER_POOL=.*|WORKER_POOL={pool}|" "$ENV_FILE"
+else
+  echo "WORKER_POOL={pool}" >> "$ENV_FILE"
+fi
+
 # Ensure MASTER_REDIS_URL points at the master ({redis_host}),
 # preserving any redis://[:password@] userinfo already present.
 if grep -q '^MASTER_REDIS_URL=' "$ENV_FILE"; then
@@ -437,7 +517,10 @@ async def list_fleet() -> list[dict]:
 
 
 async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
-                   purchasing: str = "spot", lifetime_minutes: int = 0) -> list[dict]:
+                   purchasing: str = "spot", lifetime_minutes: int = 0,
+                   pool: str = "daily", capacity: int | None = None,
+                   code_branch: str = "main",
+                   slot_memory_mb: int | None = None) -> list[dict]:
     """Launch ``count`` workers from the golden AMI (hard cap 4).
 
     Subnet, security groups and key-name are resolved at call time from the
@@ -455,6 +538,12 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
     on any AWS scheduler, or on a credential that outlives the launch — the
     box kills itself even if everything else here is dead or expired. It is
     the only cost guarantee that survives total failure of the control plane.
+
+    ``pool`` names the queue the worker will serve. The default ``"daily"``
+    joins the shared self-service pool; passing a workshop's pool id produces a
+    machine that self-service work can never be scheduled onto. ``capacity``
+    pins the advertised slot count — a workshop sized from a measured repo
+    profile wants an explicit number rather than the AMI's baked-in one.
     """
     count = _validate_scale_count(count)
 
@@ -490,7 +579,12 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         # call fails UnauthorizedOperation. It is also the blast-radius guarantee
         # that the role can never touch an instance it did not create.
         f"{{Key={FLEET_TAG_KEY},Value={FLEET_TAG_VALUE}}},"
-        f"{{Key=orbital-role,Value={WORKER_ROLE_TAG}}}]"
+        f"{{Key=orbital-role,Value={WORKER_ROLE_TAG}}},"
+        # Pool is tagged as well as written into .env so it survives a stop/start
+        # (user-data only runs on first boot) and so the reaper can find every
+        # instance belonging to a finished workshop without consulting Redis —
+        # which matters precisely when Redis is the thing that went wrong.
+        f"{{Key=orbital-pool,Value={pool}}}]"
     )
 
     args = [
@@ -502,7 +596,9 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         "--security-group-ids", *sg_ids,
         "--tag-specifications", tag_spec,
         "--block-device-mappings", _root_block_device(),
-        "--user-data", _encode_user_data(_build_user_data(lifetime_minutes=lifetime_minutes)),
+        "--user-data", _encode_user_data(_build_user_data(
+            lifetime_minutes=lifetime_minutes, pool=pool, capacity=capacity,
+            code_branch=code_branch, slot_memory_mb=slot_memory_mb)),
     ]
     if purchasing == "spot":
         args += ["--instance-market-options", market_options]

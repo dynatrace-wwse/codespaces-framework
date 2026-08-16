@@ -85,3 +85,68 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ── staggered teardown ──────────────────────────────────────────────────────
+# The reaping bug has never reproduced on a single terminate; it took ~30
+# simultaneous `docker rm -fv` on nested Sysbox containers. The reaper makes a
+# wedged teardown survivable, staggering makes it rare, and both are needed:
+# staggering alone leaves the bug latent for the next Docker hiccup, and the
+# reaper alone means wedging the daemon on every workshop teardown.
+
+import asyncio
+
+from . import agent as agent_mod
+
+
+class _StaggerAgent:
+    """Minimal stand-in exposing only what _kill_staggered touches."""
+
+    def __init__(self):
+        self.killed: list[str] = []
+        self.peak = 0
+        self._live = 0
+
+    async def _kill_job_container(self, job_id, rec=None):
+        self._live += 1
+        self.peak = max(self.peak, self._live)
+        await asyncio.sleep(0)
+        self.killed.append(job_id)
+        self._live -= 1
+        return True
+
+    _kill_staggered = agent_mod.WorkerAgent._kill_staggered
+
+
+def test_teardown_never_fires_every_kill_at_once(monkeypatch):
+    monkeypatch.setattr(agent_mod, "TEARDOWN_CONCURRENCY", 4)
+    monkeypatch.setattr(agent_mod, "TEARDOWN_STAGGER_S", 0)
+    a = _StaggerAgent()
+    asyncio.run(a._kill_staggered([f"job{i}" for i in range(30)]))
+    assert len(a.killed) == 30, "every job must still be terminated"
+    assert a.peak <= 4, f"fired {a.peak} kills at once, cap is 4"
+
+
+def test_one_stuck_container_does_not_block_the_rest(monkeypatch):
+    """A container refusing to die must not stop the other twenty-nine from
+    being asked -- that would turn one bad slot into a stalled teardown."""
+    monkeypatch.setattr(agent_mod, "TEARDOWN_CONCURRENCY", 2)
+    monkeypatch.setattr(agent_mod, "TEARDOWN_STAGGER_S", 0)
+    a = _StaggerAgent()
+
+    async def _boom(job_id, rec=None):
+        if job_id == "job3":
+            raise RuntimeError("did not receive an exit event")
+        a.killed.append(job_id)
+        return True
+
+    a._kill_job_container = _boom
+    asyncio.run(a._kill_staggered([f"job{i}" for i in range(10)]))
+    assert len(a.killed) == 9
+    assert "job3" not in a.killed
+
+
+def test_empty_teardown_is_a_noop():
+    a = _StaggerAgent()
+    asyncio.run(a._kill_staggered([]))
+    assert a.killed == []

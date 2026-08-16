@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import math
 
+from shared import capacity_units
+
 # ── measured constants (MiB) ────────────────────────────────────────────────
 # Committed (unreclaimable) memory a full Kubernetes-101 session holds.
 SESSION_COMMITTED_MB = 1609
@@ -284,6 +286,11 @@ def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR,
 
     Returns 0 for an unknown type — callers must treat that as "refuse to plan"
     rather than guessing, because guessing high is how a class gets oversold.
+
+    NOT THE PLANNING NUMBER since 2026-08-14 — see :func:`planned_slots`. This
+    stays as the *diagnostic*: it answers "which resource is this shape short
+    of, and would buying more of it help", which is what an operator comparing
+    instance types and volume settings needs to see.
     """
     caps = (
         memory_slots(instance_type, safety),
@@ -294,6 +301,28 @@ def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR,
     if any(c <= 0 for c in caps):
         return 0
     return min(caps)
+
+
+def planned_slots(instance_type: str) -> int:
+    """Seats this shape is PLANNED for — the number that buys machines.
+
+    Comes from ``capacity_units``, a table of counts that have actually been
+    observed to pass, rather than from the four-ceiling arithmetic above.
+
+    Why the split. Two of those four terms — disk bandwidth and disk IOPS —
+    bound how many installs may START AT ONCE, not how many sessions a box can
+    HOLD. Paced admission (``pools.py``) now handles the start rate directly, so
+    folding a concurrency limit into a holding number made a machine's planned
+    capacity change whenever a volume was reconfigured. That is not a property
+    anyone can plan a class around, and it is why the same box was described as
+    18, 30 and 73 seats within two days.
+
+    Falls back to the ceiling arithmetic for a shape the unit table has never
+    seen, so a hand-launched instance still gets a defensible number rather than
+    a zero.
+    """
+    units = capacity_units.units_for_instance(instance_type)
+    return units if units > 0 else slots_for_instance(instance_type)
 
 
 def limiting_factor(instance_type: str,
@@ -325,7 +354,7 @@ def instances_for_seats(seats: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
     any single host still leaves enough slots — on-demand removes spot reclaim,
     not hardware failure.
     """
-    per = slots_for_instance(instance_type)
+    per = planned_slots(instance_type)
     if per <= 0 or seats <= 0:
         return 0
     return math.ceil(seats / per) + (1 if redundancy else 0)
@@ -445,7 +474,7 @@ def plan_scale_up(target_seats: int, state: dict, *,
     if target_seats < 0:
         raise PolicyRefusal("target seats must be >= 0")
 
-    per_instance = slots_for_instance(instance_type)
+    per_instance = planned_slots(instance_type)
     if per_instance <= 0:
         raise PolicyRefusal(
             f"unknown instance type {instance_type!r} — refusing to plan "
@@ -683,7 +712,7 @@ def instance_choices(region: str = HOME_REGION) -> list[dict]:
     out = []
     for choice in INSTANCE_CHOICES:
         t = choice["type"]
-        slots = slots_for_instance(t)
+        slots = planned_slots(t)
         price = prices.get(t)
         out.append({
             **choice,
@@ -716,7 +745,7 @@ def rank_by_cost(region: str, hours: float = 1.0) -> list[dict]:
     prices = ON_DEMAND_USD_PER_HOUR.get(region, {})
     rows = []
     for t, unit in prices.items():
-        slots = slots_for_instance(t)
+        slots = planned_slots(t)
         if slots <= 0:
             continue
         rows.append({

@@ -76,3 +76,47 @@ if __name__ == "__main__":
             fn()
             print(f"ok {name}")
     print("all log-safety tests passed")
+
+
+# ── safe_error_detail ───────────────────────────────────────────────────────
+
+def test_error_fields_are_kept():
+    from .log_safety import safe_error_detail
+    out = safe_error_detail('{"error":"invalid_request","error_description":"",'
+                            '"issueId":"52UFH6KTL7CHGRRE"}')
+    assert "error=invalid_request" in out
+    assert "issueId=52UFH6KTL7CHGRRE" in out
+
+
+def test_a_token_in_the_body_is_never_copied_into_the_log():
+    """The reason this exists. A token endpoint's body is the only useful
+    diagnostic on a 4xx, and the same shape of body can carry an access_token —
+    logging one in clear text turns a failed mint into a leaked credential."""
+    from .log_safety import safe_error_detail
+    out = safe_error_detail('{"access_token":"eyJhbGciOiJFUzI1NiJ9.SUPERSECRET",'
+                            '"scope":"platform-token:tokens:write"}')
+    assert "SUPERSECRET" not in out
+    assert "eyJ" not in out
+    # It still says what WAS there, so a new error shape is visible.
+    assert "access_token" in out and "keys:" in out
+
+
+def test_an_unparseable_body_is_reported_by_length_not_quoted():
+    from .log_safety import safe_error_detail
+    out = safe_error_detail("<html>token=abc123</html>")
+    assert "abc123" not in out
+    assert "unparseable" in out and "25 chars" in out
+
+
+def test_empty_and_missing_bodies_do_not_crash():
+    from .log_safety import safe_error_detail
+    assert safe_error_detail(None) == "(no body)"
+    assert safe_error_detail("") == "(empty body)"
+    assert safe_error_detail("   ") == "(empty body)"
+    assert "list" in safe_error_detail('[1,2,3]')
+
+
+def test_control_characters_in_an_error_field_are_still_scrubbed():
+    from .log_safety import safe_error_detail
+    out = safe_error_detail('{"message":"bad\\n2026-01-01 INFO fleet scaled to 0"}')
+    assert "\n" not in out

@@ -675,14 +675,27 @@ async def execute_daemon(
     job: dict,
     redis_pool=None,
     slot: SysboxSlot | None = None,
+    reaper=None,
+    on_container=None,
 ) -> dict:
     """Start the devcontainer environment and keep it alive until terminated.
 
     Mirrors execute_integration_test setup (clone → Sysbox → dt → postCreate →
-    postStart) but skips the integration test and blocks on ``docker wait``
-    instead, giving users an interactive shell for training / exploration.
+    postStart) but instead of running a test it waits for the container to stop,
+    giving users an interactive shell for training / exploration.
 
     When ``slot`` is provided the Sysbox startup and image-load are skipped.
+
+    ``reaper``, when supplied, replaces a dedicated blocking ``docker wait``
+    process with a watch on the shared poller — see reaper.py for the outage
+    that motivated it. Waiting is keyed on the container **ID**, resolved once
+    here: slot names are recycled, so a wait keyed on a name can outlive its
+    session and end up reporting a later learner's exit. ``on_container`` is
+    called with that id so the agent can address the right container when a
+    terminate arrives.
+
+    Falls back to the old ``docker wait`` when no reaper is passed, which keeps
+    this function usable standalone and in tests.
     """
     repo      = job["repo"]
     head_repo = job.get("head_repo") or repo
@@ -870,12 +883,34 @@ async def execute_daemon(
                 await redis_pool.expire(livelog_key, 86400)
 
             log.info("Daemon %s ready — waiting for termination", job_id)
-            wait_proc = await asyncio.create_subprocess_exec(
-                "docker", "wait", sb_name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await wait_proc.wait()
+            if reaper is not None:
+                from .reaper import container_id_of, ABANDONED
+                cid = await container_id_of(sb_name)
+                if cid:
+                    if on_container:
+                        on_container(cid)
+                    outcome = await reaper.watch(cid)
+                    if outcome == ABANDONED:
+                        # Docker never admitted the container died. The job is
+                        # being freed deliberately so the worker keeps its
+                        # capacity; the slot is poisoned and must be rebuilt,
+                        # which the agent decides from this flag.
+                        log.error("Daemon %s abandoned by reaper — slot needs rebuild",
+                                  job_id)
+                        job["slot_abandoned"] = True
+                else:
+                    # No id means the container was already gone before we could
+                    # look. Nothing to wait for -- returning immediately is
+                    # correct and is what lets the slot be reclaimed.
+                    log.warning("Daemon %s: container %s vanished before watch",
+                                job_id, sb_name)
+            else:
+                wait_proc = await asyncio.create_subprocess_exec(
+                    "docker", "wait", sb_name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await wait_proc.wait()
         else:
             log.warning(
                 "Daemon %s setup failed at %s (rc=%s) — not marking ready",

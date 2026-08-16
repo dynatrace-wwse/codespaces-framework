@@ -160,6 +160,55 @@ def test_user_data_capacity_override():
     assert "WORKER_CAPACITY=30" in fleet._build_user_data(capacity=30)
 
 
+def test_user_data_syncs_code_before_starting_the_agent():
+    """The golden AMI is a snapshot; an unsynced worker serves learners with
+    whatever agent code existed the day the image was baked.
+
+    Ordering is the substance of this test: the sync has to complete before
+    ``systemctl start ops-worker-agent``, or the agent loads the stale modules
+    and the pull only takes effect on the next restart -- which never comes.
+    """
+    script = fleet._build_user_data()
+    assert 'git -C "$CHECKOUT" fetch --quiet origin main' in script
+    sync_at = script.index("reset --hard --quiet FETCH_HEAD")
+    start_at = script.index("systemctl start ops-worker-agent")
+    assert sync_at < start_at, "code sync must run BEFORE the agent starts"
+
+
+def test_user_data_leaves_code_ref_empty_when_sync_fails():
+    """A failed sync must not stamp a reassuring value.
+
+    WORKER_CODE_REF is the only signal the master has that a worker is running
+    current code. Defaulting it to anything on failure would turn a visible
+    stale worker into an invisible one -- the exact failure mode this field was
+    added to expose.
+    """
+    script = fleet._build_user_data()
+    assert 'CODE_REF=""' in script
+    assert "WARNING code sync FAILED" in script
+    # The stamp is written unconditionally from CODE_REF, so an empty ref
+    # reaches .env rather than being skipped (skipping would leave the AMI's
+    # previous value in place, which is worse than empty: it would be a LIE).
+    assert "WORKER_CODE_REF=${CODE_REF}" in script
+
+
+def test_user_data_sets_pool_and_defaults_to_daily():
+    assert "WORKER_POOL=daily" in fleet._build_user_data()
+    assert "WORKER_POOL=ws_bootcamp" in fleet._build_user_data(pool="ws_bootcamp")
+
+
+def test_launched_instance_is_tagged_with_its_pool():
+    """The pool is tagged as well as written to .env.
+
+    user-data runs once, on first boot -- so after a stop/start the tag is the
+    only surviving record of which workshop a machine belongs to, and it is
+    what lets the reaper clean up a finished workshop without Redis.
+    """
+    import inspect
+    src = inspect.getsource(fleet.scale_up)
+    assert "Key=orbital-pool,Value=" in src
+
+
 def test_fleet_tag_constants_match_iam_policy():
     """These exact strings are what the OrbitalFleetAutoscaler IAM policy
     conditions on. If they drift, every launch fails UnauthorizedOperation."""
