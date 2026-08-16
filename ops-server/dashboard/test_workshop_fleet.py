@@ -493,3 +493,58 @@ def test_dropping_queued_jobs_is_a_no_op_when_nothing_is_parked():
                                      "worker_id": "wamd001"}},
                      queues={"queue:pending:queue:test:amd64": []})
     assert asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine")) == 1
+
+
+# ── stale heartbeats ────────────────────────────────────────────────────────
+
+class _WorkersRedis:
+    """Just enough Redis to scan `worker:*` hashes."""
+
+    def __init__(self, workers):
+        self.h = {f"worker:{wid}": dict(fields) for wid, fields in workers.items()}
+        self.deleted = []
+
+    async def scan_iter(self, match=None, count=None):
+        for k in list(self.h):
+            yield k
+
+    async def hgetall(self, key):
+        return self.h.get(key, {})
+
+    async def delete(self, key):
+        self.deleted.append(key)
+        self.h.pop(key, None)
+
+
+def _hb(seconds_ago):
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def test_a_terminated_machines_leftover_record_is_not_a_worker():
+    """MEASURED 2026-08-16, on the first workshop machine the loop tore down.
+
+    Terminating an instance does not remove its `worker:{id}` hash, so the record
+    stayed frozen at `status: warming` / `capacity: 0` with a heartbeat minutes
+    old. It carried no `pool` field — it had booted from main, whose agent has no
+    concept of pools — so every consumer read it as a DAILY worker that would
+    never contribute a seat, and the loop would have scaled up against it for as
+    long as the record existed.
+    """
+    import asyncio
+    r = _WorkersRedis({
+        "amd001": {"status": "ready", "capacity": "20", "slots_free": "20",
+                   "last_heartbeat": _hb(5)},
+        "spot-dead": {"status": "warming", "capacity": "0", "slots_free": "0",
+                      "last_heartbeat": _hb(600)},
+    })
+    live = asyncio.run(wf._daily_workers(r))
+    assert [w["worker_id"] for w in live] == ["amd001"]
+
+
+def test_a_worker_with_no_heartbeat_field_is_still_counted():
+    """Absence is not staleness. A worker mid-registration, or one on an older
+    agent that does not publish the field, must not be dropped from its own
+    autoscaler — that would empty the fleet during a rolling deploy."""
+    import asyncio
+    r = _WorkersRedis({"amd001": {"status": "ready", "capacity": "20"}})
+    assert len(asyncio.run(wf._daily_workers(r))) == 1

@@ -63,7 +63,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from dashboard import repo_profiles
+from dashboard import fleet_policy, repo_profiles
 
 log = logging.getLogger(__name__)
 
@@ -489,7 +489,10 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     # Unbind first: no further learner can be routed to these machines.
     await pools.unbind_workshop_pool(redis, ws_id)
 
-    for wid in await _pool_worker_ids(redis, rec.get("pool", "")):
+    # Remember who they were before cordoning: once the instances are gone their
+    # heartbeats stop, and the scan that finds them by pool would find nothing.
+    pool_workers = await _pool_worker_ids(redis, rec.get("pool", ""))
+    for wid in pool_workers:
         try:
             await redis.hset(f"worker:{wid}", "draining", "1")
         except Exception as exc:
@@ -519,6 +522,22 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
             log.error("workshop %s: instance termination FAILED (%s) — "
                       "instances %s need manual review", ws_id, exc, instances)
             rec["last_error"] = str(exc)[:300]
+
+    # Drop the heartbeats of machines that no longer exist. A terminated instance
+    # leaves its `worker:{id}` hash behind for ever, frozen at whatever it last
+    # published — the first workshop machine the loop ever tore down left one at
+    # `status: warming` / `capacity: 0`, which every consumer read as a live
+    # worker that would never contribute a seat. `_daily_workers` now also skips
+    # stale records, so this is hygiene rather than the only defence, but leaving
+    # them accumulating makes every fleet view progressively less true.
+    for wid in pool_workers:
+        try:
+            await redis.delete(f"worker:{wid}")
+        except Exception as exc:
+            log.warning("workshop %s: could not drop the heartbeat for %s: %s",
+                        ws_id, wid, exc)
+    if pool_workers:
+        log.info("workshop %s: dropped %d worker record(s)", ws_id, len(pool_workers))
 
     rec["state"] = DONE
     rec["ended_at"] = datetime.now(timezone.utc).isoformat()
@@ -677,7 +696,15 @@ async def _daily_workers(redis) -> list[dict]:
     A missing ``pool`` field means daily: every worker predating pools is in the
     shared pool, and reading absence as "unknown" would exclude the entire
     existing fleet from its own autoscaler.
+
+    Records whose heartbeat has stopped are skipped. A terminated machine leaves
+    its ``worker:{id}`` hash behind, and a hash is not a worker: the one from a
+    torn-down workshop pool sat at ``status: warming`` / ``capacity: 0``
+    for ever, which reads as a daily worker that will never contribute a seat and
+    would have had the loop scaling up against it indefinitely. Measured
+    2026-08-16, on the first workshop machine the loop launched and terminated.
     """
+    now = datetime.now(timezone.utc).timestamp()
     out = []
     async for key in redis.scan_iter(match="worker:*", count=200):
         if key.count(":") != 1:
@@ -690,7 +717,11 @@ async def _daily_workers(redis) -> list[dict]:
             continue
         if (h.get("pool") or "daily") != "daily":
             continue
-        h["worker_id"] = h.get("worker_id") or key.split(":", 1)[1]
+        wid = h.get("worker_id") or key.split(":", 1)[1]
+        if fleet_policy.normalize_worker(wid, h, now)["stale"]:
+            log.debug("skipping %s in the daily pool: heartbeat is stale", wid)
+            continue
+        h["worker_id"] = wid
         out.append(h)
     return out
 
