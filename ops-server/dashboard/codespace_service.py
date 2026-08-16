@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from webhook.config import REDIS_URL
 from dashboard.github_oauth import get_user_token
+from shared.log_safety import scrub_for_log
 
 log = logging.getLogger("ops-dashboard.codespace")
 
@@ -120,17 +121,18 @@ async def _clear_orbital_marker(dtUser: str, repo: str) -> None:
             return
         await _gh(dtUser, "api", "-X", "DELETE",
                   f"/user/codespaces/secrets/ORBITAL_ENVIRONMENT/repositories/{repo_id}")
-        log.info("Cleared ORBITAL_ENVIRONMENT scope user=%s repo=%s", dtUser, repo)
+        log.info("Cleared ORBITAL_ENVIRONMENT scope user=%s repo=%s",
+                 scrub_for_log(dtUser), scrub_for_log(repo))
     except Exception as exc:
         # Removing the only selected repo can be refused; drop the whole secret then.
         try:
             await _gh(dtUser, "api", "-X", "DELETE",
                       "/user/codespaces/secrets/ORBITAL_ENVIRONMENT")
             log.info("Deleted ORBITAL_ENVIRONMENT secret user=%s (scope removal failed: %s)",
-                     dtUser, exc)
+                     scrub_for_log(dtUser), scrub_for_log(exc))
         except Exception as exc2:
             log.warning("Could not clear ORBITAL_ENVIRONMENT for %s on %s: %s / %s",
-                        dtUser, repo, exc, exc2)
+                        scrub_for_log(dtUser), scrub_for_log(repo), scrub_for_log(exc), scrub_for_log(exc2))
 
 
 async def delete_codespace(dtUser: str, name: str) -> None:
@@ -149,7 +151,7 @@ async def delete_codespace(dtUser: str, name: str) -> None:
     await _pool().delete(f"job:running:{name}")
     await _pool().delete(f"gh:token:{dtUser}")  # destroy the credential now the Codespace is gone
     log.info("Codespace deleted name=%s user=%s repo=%s machine=%s (credential destroyed)",
-             name, dtUser, repo, machine)
+             scrub_for_log(name), scrub_for_log(dtUser), scrub_for_log(repo), scrub_for_log(machine))
 
 
 async def reap_codespace_if_idle(dtUser: str, name: str, max_idle_min: int | None = None) -> str | None:
@@ -409,7 +411,9 @@ async def provision(body: ProvisionBody):
     ws_url = f"wss://autonomous-enablements.whydevslovedynatrace.com/ws/jobs/{name}/shell"
     # Audit: user + repo + machine + tenant/stage — NEVER the credential or DT tokens.
     log.info("Codespace provisioned name=%s user=%s repo=%s machine=%s tenant=%s stage=%s",
-             name, body.dtUser, body.repo, machine_display, tenant_id, stage)
+             scrub_for_log(name), scrub_for_log(body.dtUser),
+             scrub_for_log(body.repo), scrub_for_log(machine_display),
+             scrub_for_log(tenant_id), scrub_for_log(stage))
     # d.
     return {"jobId": name, "status": "provisioning", "webUrl": web_url, "wsUrl": ws_url}
 
@@ -457,12 +461,13 @@ async def _append_creation_log(dtUser: str, name: str) -> None:
         text = out_b.decode(errors="replace").strip()
     except Exception as exc:
         await _pool().hdel(key, "creation_log_fetched")
-        log.warning("Could not fetch creation log for %s: %s", name, exc)
+        log.warning("Could not fetch creation log for %s: %s", scrub_for_log(name), scrub_for_log(exc))
         return
     if text.startswith("__ORBITAL_RECOVERY__"):
         text = text[len("__ORBITAL_RECOVERY__"):].lstrip("\n")
         await _pool().hset(key, "recovery", "1")
-        log.warning("Codespace %s is in GitHub RECOVERY MODE (devcontainer exited) — marking broken", name)
+        log.warning("Codespace %s is in GitHub RECOVERY MODE (devcontainer exited) — marking broken",
+                    scrub_for_log(name))
     if proc.returncode == 0:
         # One SSH round-trip succeeded → sshd (installed by setUpTerminal during
         # post-create) is up. session_status holds "provisioning" until this flag
@@ -481,7 +486,7 @@ async def _append_creation_log(dtUser: str, name: str) -> None:
         + "\n"
     )
     await _pool().set(log_key, combined, ex=ttl if ttl and ttl > 0 else CODESPACE_JOB_TTL)
-    log.info("Creation log appended for codespace %s (%d bytes)", name, len(text))
+    log.info("Creation log appended for codespace %s (%d bytes)", scrub_for_log(name), len(text))
 
 
 @router.get("/api/codespace/sessions/{name}")

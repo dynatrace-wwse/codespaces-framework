@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, HTTPException
 import redis.asyncio as redis
 
 from webhook.config import WEBHOOK_SECRET, REDIS_URL
+from shared.log_safety import scrub_for_log
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,7 +77,9 @@ async def webhook(request: Request):
     action = data.get("action", "")
     repo_full = data.get("repository", {}).get("full_name", "unknown")
 
-    log.info("Event: %s.%s on %s (delivery: %s)", event_type, action, repo_full, delivery_id)
+    log.info("Event: %s.%s on %s (delivery: %s)",
+             scrub_for_log(event_type), scrub_for_log(action),
+             scrub_for_log(repo_full), scrub_for_log(delivery_id))
 
     # GitHub Actions workflow runs are recorded directly in Redis
     # (no Claude agent or worker needs to handle them).
@@ -102,7 +105,7 @@ async def webhook(request: Request):
         queued = []
         for job in jobs:
             await pool.rpush(f"queue:{job['queue']}", json.dumps(job))
-            log.info("Queued job: %s → queue:%s", job["type"], job["queue"])
+            log.info("Queued job: %s → queue:%s", scrub_for_log(job["type"]), scrub_for_log(job["queue"]))
             queued.append({"type": job["type"], "queue": job["queue"]})
         return {"status": "queued", "jobs": queued}
 
@@ -118,10 +121,12 @@ async def prebuild_content_pack(repo_full: str, branch: str, sha: str) -> None:
         async with httpx.AsyncClient(timeout=90) as client:
             r = await client.post("http://127.0.0.1:8080/api/content/packs/build",
                                   json={"repo": repo_full, "branch": branch, "sha": sha})
-            log.info("Pack prebuild %s@%s: %s %s", repo_full, branch,
-                     r.status_code, r.text[:200])
+            log.info("Pack prebuild %s@%s: %s %s",
+                     scrub_for_log(repo_full), scrub_for_log(branch),
+                     r.status_code, scrub_for_log(r.text[:200]))
     except Exception as exc:
-        log.warning("Pack prebuild failed for %s@%s: %s", repo_full, branch, exc)
+        log.warning("Pack prebuild failed for %s@%s: %s",
+                    scrub_for_log(repo_full), scrub_for_log(branch), scrub_for_log(exc))
 
 
 async def record_workflow_run(data: dict, repo: str, delivery_id: str):
@@ -168,7 +173,8 @@ async def record_workflow_run(data: dict, repo: str, delivery_id: str):
     await pool.ltrim(history_key, -200, -1)
 
     log.info("Recorded workflow_run: %s/%s@%s → %s",
-             repo, workflow, branch, record["conclusion"])
+             scrub_for_log(repo), scrub_for_log(workflow),
+             scrub_for_log(branch), scrub_for_log(record["conclusion"]))
 
 
 def route_event(

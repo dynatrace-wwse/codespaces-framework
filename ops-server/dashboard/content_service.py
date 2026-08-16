@@ -38,6 +38,8 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from shared.log_safety import scrub_for_log
+
 log = logging.getLogger("ops-dashboard.content")
 
 GH_TOKEN = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
@@ -308,7 +310,8 @@ async def _latest_sha(owner: str, repo: str, branch: str) -> str | None:
                 if r.status_code == 200:
                     sha = r.json().get("sha")
         except Exception as exc:
-            log.warning("sha fetch failed %s/%s@%s: %s", owner, repo, branch, exc)
+            log.warning("sha fetch failed %s/%s@%s: %s",
+                        scrub_for_log(owner), scrub_for_log(repo), scrub_for_log(branch), scrub_for_log(exc))
             # Keep serving the previous sha (if any) rather than flapping to None.
             if cached is not None and cached[0] is not None:
                 return cached[0]
@@ -356,7 +359,8 @@ async def get_manifest(tenant: str | None = None):
     tenant_id, domain_class = classify_tenant(tenant)
     profile_id = resolve_profile(tenant_id, domain_class)
     profile = _load_profile(profile_id)
-    log.info("Manifest: tenant=%s (%s) → profile=%s", tenant_id, domain_class, profile_id)
+    log.info("Manifest: tenant=%s (%s) → profile=%s",
+             scrub_for_log(tenant_id), scrub_for_log(domain_class), scrub_for_log(profile_id))
     return {"profileId": profile_id, "tenant": tenant_id, "domain": domain_class,
             "sources": await _build_sources(profile)}
 
@@ -512,7 +516,8 @@ async def _build_pack(owner: str, repo: str, sha: str) -> dict:
         tmp.write_text(json.dumps(pack))
         tmp.replace(path)  # atomic — readers never see a half-written pack
         _pack_gc(owner, repo)
-        log.info("Pack built: %s/%s@%s (%d files)", owner, repo, sha[:12], len(pack["files"]))
+        log.info("Pack built: %s/%s@%s (%d files)",
+                 scrub_for_log(owner), scrub_for_log(repo), scrub_for_log(sha[:12]), len(pack["files"]))
         return pack
 
 
@@ -594,7 +599,8 @@ async def put_profile(profile_id: str, body: dict, x_auth_user: str | None = Hea
     profile = {"profileId": profile_id, "description": body.get("description", ""), "sources": clean}
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     (PROFILES_DIR / f"{profile_id}.json").write_text(json.dumps(profile, indent=2) + "\n")
-    log.info("Profile '%s' saved by %s (%d sources)", profile_id, x_auth_user, len(clean))
+    log.info("Profile '%s' saved by %s (%d sources)",
+             scrub_for_log(profile_id), scrub_for_log(x_auth_user), len(clean))
     return {"ok": True, "profileId": profile_id, "sources": len(clean)}
 
 
@@ -610,7 +616,7 @@ async def delete_profile(profile_id: str, x_auth_user: str | None = Header(defau
     if not path.is_file():
         raise HTTPException(404, f"No profile '{profile_id}' on disk.")
     path.unlink()
-    log.info("Profile '%s' deleted by %s", profile_id, x_auth_user)
+    log.info("Profile '%s' deleted by %s", scrub_for_log(profile_id), scrub_for_log(x_auth_user))
     return {"ok": True}
 
 
@@ -661,7 +667,8 @@ async def put_tenant_map(body: dict, x_auth_user: str | None = Header(default=No
     }
     TENANT_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
     TENANT_MAP_FILE.write_text(json.dumps(clean, indent=2) + "\n")
-    log.info("Tenant map saved by %s (%d tenant override(s))", x_auth_user, len(clean["tenants"]))
+    log.info("Tenant map saved by %s (%d tenant override(s))",
+             scrub_for_log(x_auth_user), len(clean["tenants"]))
     return {"ok": True, "tenants": len(clean["tenants"])}
 
 
@@ -705,7 +712,8 @@ async def add_source(body: dict, x_auth_user: str | None = Header(default=None))
         if (existing.get("branch") or "main") != branch:
             existing["branch"] = branch
             _save_sources(sources)
-            log.info("Switched managed source %s to branch %s by %s", repo_full, branch, x_auth_user)
+            log.info("Switched managed source %s to branch %s by %s",
+                     scrub_for_log(repo_full), scrub_for_log(branch), scrub_for_log(x_auth_user))
             return {"ok": True, "source": existing, "branchSwitched": True}
         raise HTTPException(409, f"{repo_full} is already managed.")
     category = (body.get("category") or "hands-on").strip()
@@ -720,7 +728,8 @@ async def add_source(body: dict, x_auth_user: str | None = Header(default=None))
     }
     sources.append(entry)
     _save_sources(sources)
-    log.info("Added managed source %s (%s) by %s", repo_full, entry["delivery"], x_auth_user)
+    log.info("Added managed source %s (%s) by %s",
+             scrub_for_log(repo_full), scrub_for_log(entry["delivery"]), scrub_for_log(x_auth_user))
     return {"ok": True, "source": entry}
 
 
@@ -734,7 +743,8 @@ async def remove_source(owner: str, repo: str, x_auth_user: str | None = Header(
     if len(kept) == len(sources):
         raise HTTPException(404, f"{owner}/{repo} is not a managed source.")
     _save_sources(kept)
-    log.info("Removed managed source %s/%s by %s", owner, repo, x_auth_user)
+    log.info("Removed managed source %s/%s by %s",
+             scrub_for_log(owner), scrub_for_log(repo), scrub_for_log(x_auth_user))
     return {"ok": True, "removed": f"{owner}/{repo}"}
 
 
@@ -752,5 +762,7 @@ async def register_tenant(body: dict, x_auth_user: str | None = Header(default=N
         tenants[tenant_id] = m.get("defaults", {}).get(domain_class, "all")
         TENANT_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
         TENANT_MAP_FILE.write_text(json.dumps(m, indent=2) + "\n")
-        log.info("Registered tenant %s (%s) → profile %s by %s", tenant_id, domain_class, tenants[tenant_id], x_auth_user)
+        log.info("Registered tenant %s (%s) → profile %s by %s",
+                 scrub_for_log(tenant_id), scrub_for_log(domain_class), scrub_for_log(tenants[tenant_id]),
+                 scrub_for_log(x_auth_user))
     return {"ok": True, "tenant": tenant_id, "domain": domain_class, "profile": tenants[tenant_id], "added": added}

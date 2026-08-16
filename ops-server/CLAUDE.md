@@ -252,6 +252,37 @@ done
 
 ---
 
+## Logging caller-supplied values
+
+Tenant URLs, job ids, session ids, emails, repo names and GitHub logins all
+arrive from outside and all end up in log lines. A newline in one of them writes
+a second line that reads exactly like a real entry, so the journal stops being
+evidence. Wrap them:
+
+```python
+from shared.log_safety import scrub_for_log
+
+log.info("Live session %s started by %s",
+         scrub_for_log(session_id), scrub_for_log(body.trainerEmail))
+```
+
+- Wrap the **caller-supplied** arguments only. `len(x)`, counts and typed ints
+  (`rows: int = 24`) are not tainted and `%d` would break if you stringified them.
+- Wrap `exc` too — an exception message often quotes the input verbatim.
+- `scrub_for_log` caps at 200 chars by default; pass `limit=` when the value is
+  a payload you actually need in full (`limit=1000` for the deploy audit line).
+- It is **not** a logging.Filter on purpose: a filter would have to truncate
+  every string in the service, would break `%d` on non-strings, and CodeQL
+  cannot see it — so every call site would stay flagged with no way to tell
+  which ones had been considered. See the module docstring.
+
+CodeQL's `py/log-injection` recognises `str.replace` as a barrier but **not**
+`re.sub`, which is why `scrub_for_log` strips `\r` and `\n` with `replace`
+before its catch-all regex. That line is load-bearing for the analysis; do not
+"simplify" it away.
+
+---
+
 ## Nginx location order (relevant blocks)
 
 All regex locations (`~`) take priority over `location /`.

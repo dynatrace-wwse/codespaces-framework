@@ -29,6 +29,18 @@ from langchain_weaviate.vectorstores import WeaviateVectorStore
 # disable traceloop telemetry
 os.environ["TRACELOOP_TELEMETRY"] = "false"
 
+
+def one_line(text) -> str:
+    """Keep a user's search term on one log line.
+
+    The prompt comes straight off the query string, so a newline in it writes
+    what looks like a second log entry. This app runs inside the learner's own
+    cluster — they would only be fooling themselves — but the demo is also the
+    example people copy, and it should not teach the wrong habit.
+    """
+    return str(text).replace("\r", " ").replace("\n", " ")[:300]
+
+
 def read_token():
     return os.environ.get("API_TOKEN", read_secret("token"))
 
@@ -294,7 +306,7 @@ def llm_chat(prompt: str):
 @workflow(name="travelgenerator")
 def rag_chat(prompt: str):
     if prompt:
-        logger.info(f"Calling RAG to get the answer to the question: {prompt}...")
+        logger.info(f"Calling RAG to get the answer to the question: {one_line(prompt)}...")
         response = retrieval_chain.invoke( prompt, config={})
         return {"message": response}
     else:  # No, or invalid prompt given
@@ -319,13 +331,13 @@ def agentic_chat(prompt: str):
 @app.get("/api/v1/thumbsUp")
 @otel_tracer.start_as_current_span("/api/v1/thumbsUp")
 def thumbs_up(prompt: str):
-    logger.info(f"Positive user feedback for search term: {prompt}")
+    logger.info(f"Positive user feedback for search term: {one_line(prompt)}")
 
 
 @app.get("/api/v1/thumbsDown")
 @otel_tracer.start_as_current_span("/api/v1/thumbsDown")
 def thumbs_down(prompt: str):
-    logger.info(f"Negative user feedback for search term: {prompt}")
+    logger.info(f"Negative user feedback for search term: {one_line(prompt)}")
 
 
 if __name__ == "__main__":
