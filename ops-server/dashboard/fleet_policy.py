@@ -151,8 +151,31 @@ IOPS_PER_SESSION = 165
 # NOTE: that projection is UNMEASURED, and this block exists because the last
 # unmeasured projection here was wrong. AWS also enforces a ~6 hour cooldown
 # between modifications of the same volume, so it cannot be tested immediately
-# after a throughput change.
+# after a throughput change. The cooldown applies only to ModifyVolume on an
+# EXISTING volume; a volume born at RunInstances with these values in its
+# BlockDeviceMappings is created at target, so the fleet defaults below cost
+# nothing to change.
 DEFAULT_VOLUME_IOPS = 3000
+
+# ── what the fleet actually LAUNCHES ────────────────────────────────────────
+# The two constants above are gp3's *free baseline* — what a volume gets when
+# nobody asks for anything. They are not what we run: fleet._root_block_device
+# overrides both at RunInstances. Keeping the two pairs distinct matters because
+# defaulting the diagnostics to the baseline described every worker in the fleet
+# as bandwidth-bound at 18 seats when none of them had been born that way since
+# the AMI override landed.
+#
+# 6,000 IOPS is chosen to take disk IOPS out of the binding set entirely rather
+# than to sit just above the requirement. The largest shape we buy holds 20 units
+# by memory, and at IOPS_PER_SESSION that needs 3,300 — so the free 3,000 fell a
+# few hundred short, which is precisely why an m6a.4xlarge measured 18 seats
+# against the 20 its memory allows. Provisioning to 6,000 leaves memory as the
+# sole binder with ~80% headroom, for $0.005/IOPS-month on the 3,000 above
+# baseline (~$15/mo on a worker that runs a full month, cents on an ephemeral
+# workshop worker). Buying the exact requirement would put us back one
+# measurement error away from silently overselling a class.
+FLEET_VOLUME_THROUGHPUT_MBPS = 500
+FLEET_VOLUME_IOPS = 6000
 
 # Nominal usable RAM (MiB) as the OS reports it — i.e. after firmware/kernel
 # reserve. c5.2xlarge and r6a.2xlarge are measured; the rest follow the same
@@ -267,8 +290,8 @@ def iops_slots(iops: float = DEFAULT_VOLUME_IOPS) -> int:
 
 
 def slots_for_instance(instance_type: str, safety: float = SLOT_SAFETY_FACTOR,
-                       throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS,
-                       iops: float = DEFAULT_VOLUME_IOPS) -> int:
+                       throughput_mbps: float = FLEET_VOLUME_THROUGHPUT_MBPS,
+                       iops: float = FLEET_VOLUME_IOPS) -> int:
     """How many concurrent full-lab sessions one instance should be planned for.
 
     The lowest of four measured ceilings — memory, CPU, disk bandwidth and disk
@@ -326,8 +349,8 @@ def planned_slots(instance_type: str) -> int:
 
 
 def limiting_factor(instance_type: str,
-                    throughput_mbps: float = DEFAULT_VOLUME_THROUGHPUT_MBPS,
-                    iops: float = DEFAULT_VOLUME_IOPS) -> str:
+                    throughput_mbps: float = FLEET_VOLUME_THROUGHPUT_MBPS,
+                    iops: float = FLEET_VOLUME_IOPS) -> str:
     """Which ceiling binds for this shape — shown in the UI so the operator can
     see whether more RAM, more cores, more bandwidth or more IOPS would actually
     buy anything. Bandwidth and IOPS are reported separately on purpose: raising

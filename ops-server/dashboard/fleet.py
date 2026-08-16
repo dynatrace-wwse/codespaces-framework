@@ -17,6 +17,8 @@ import asyncio
 import base64
 import json
 
+from dashboard import fleet_policy
+
 AWS_CLI = "/usr/local/bin/aws"
 # Home region: where the master, Redis and the golden AMI live. Every call
 # accepts an explicit region so a bootcamp can be run elsewhere (ap-southeast-1
@@ -57,10 +59,17 @@ WORKER_AMI = "ami-01c331ae9b0054602"
 # needs no IAM change (the role's RunInstances already covers volume/*), and
 # it is strictly better than ModifyVolume-after-launch, which would race the
 # worker registering itself as ready with its full nominal capacity.
+#
+# IOPS is a SECOND, independent disk ceiling (small random I/O while the
+# ActiveGate JVM boots, versus the sequential pull above), and the free 3,000
+# was the reason an m6a.4xlarge measured 18 seats against the 20 its memory
+# allows — 20 sessions want 3,300. Both numbers are imported rather than
+# repeated so the planner and the launcher cannot disagree about what a worker
+# is born with; the derivation and the cost live next to them in fleet_policy.
 WORKER_ROOT_DEVICE = "/dev/sda1"
 WORKER_ROOT_SIZE_GB = 300
-WORKER_ROOT_THROUGHPUT_MBPS = 500    # gp3 max 1000; needs >=2000 IOPS (0.25 MiB/s per IOPS)
-WORKER_ROOT_IOPS = 3000
+WORKER_ROOT_THROUGHPUT_MBPS = fleet_policy.FLEET_VOLUME_THROUGHPUT_MBPS
+WORKER_ROOT_IOPS = fleet_policy.FLEET_VOLUME_IOPS
 # worker-1 — template instance whose subnet / security groups / key-name are
 # resolved dynamically at scale-up time so networking never drifts from prod.
 TEMPLATE_INSTANCE_ID = "i-02b773319c758fe40"

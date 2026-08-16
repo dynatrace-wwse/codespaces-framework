@@ -238,6 +238,23 @@ def test_root_block_device_iops_can_sustain_the_throughput():
     assert ebs["Throughput"] <= 1000        # gp3 hard maximum
 
 
+def test_launched_volume_is_what_the_planner_assumed_it_would_be():
+    """The planner sizes a class from a volume it never sees. If the launcher
+    and the planner hold two copies of these numbers, the fleet is silently
+    oversold by exactly the gap — which is the shape of the 18-vs-30 bug the
+    IOPS term was added to explain. One source, asserted end to end.
+    """
+    from dashboard import fleet_policy
+    ebs = json.loads(fleet._root_block_device())[0]["Ebs"]
+    assert ebs["Iops"] == fleet_policy.FLEET_VOLUME_IOPS
+    assert ebs["Throughput"] == fleet_policy.FLEET_VOLUME_THROUGHPUT_MBPS
+    # And the point of provisioning them: neither disk dimension may be the
+    # ceiling on the largest shape we buy, so capacity is decided by memory.
+    assert fleet_policy.iops_slots(ebs["Iops"]) > fleet_policy.memory_slots("m6a.4xlarge")
+    assert fleet_policy.disk_slots(ebs["Throughput"]) > fleet_policy.memory_slots("m6a.4xlarge")
+    assert fleet_policy.limiting_factor("m6a.4xlarge") == "memory"
+
+
 def test_root_block_device_deletes_on_termination():
     """A terminated spot worker must not leave a 300 GiB volume we still pay for."""
     ebs = json.loads(fleet._root_block_device())[0]["Ebs"]

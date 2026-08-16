@@ -71,13 +71,18 @@ def test_r6a_is_cpu_bound_not_memory_bound():
     assert fp.limiting_factor("r6a.2xlarge") == "cpu"
 
 
-def test_planning_takes_the_lowest_of_all_three_ceilings():
+def test_planning_takes_the_lowest_of_all_four_ceilings():
     # Was "lower of both" until 2026-08-13, when a 30-session run on a shape
     # memory and CPU both cleared returned 0 passes — the volume was the wall.
+    # Then IOPS turned out to be a fourth, independent one. The volume terms
+    # must be read from the same numbers the function defaults to, or this
+    # passes while comparing a fleet volume against a stock one.
     for t in fp.INSTANCE_MEMORY_MB:
         if fp.slots_for_instance(t):
             assert fp.slots_for_instance(t) == min(
-                fp.memory_slots(t), fp.cpu_slots(t), fp.disk_slots()), t
+                fp.memory_slots(t), fp.cpu_slots(t),
+                fp.disk_slots(fp.FLEET_VOLUME_THROUGHPUT_MBPS),
+                fp.iops_slots(fp.FLEET_VOLUME_IOPS)), t
 
 
 def test_more_memory_than_cores_can_feed_is_wasted():
@@ -409,12 +414,16 @@ def test_current_vs_proposed_fleet_cost_and_capacity():
     # 60. That was then MEASURED and came out 8/30 — bandwidth was necessary and
     # not sufficient, because IOPS stayed at the 3,000 baseline. 36 stands until
     # a run with both dimensions raised says otherwise.
+    stock = dict(throughput_mbps=fp.DEFAULT_VOLUME_THROUGHPUT_MBPS,
+                 iops=fp.DEFAULT_VOLUME_IOPS)
     balanced = fp.estimate_cost(2, "m6a.4xlarge", 730.0, eu)
-    balanced_slots = 2 * fp.slots_for_instance("m6a.4xlarge")
+    balanced_slots = 2 * fp.slots_for_instance("m6a.4xlarge", **stock)
     assert balanced_slots == 36
     # Throughput alone buys nothing: 8/30 measured.
-    assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == 36
-    # Both dimensions raised is what the 60 would need — still a projection.
+    assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500,
+                                     iops=fp.DEFAULT_VOLUME_IOPS) == 36
+    # Both dimensions raised is what the 60 would need — still a projection,
+    # and what the fleet now actually launches on.
     assert 2 * fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500, iops=5000) == 60
     assert abs(balanced["total_usd"] - proposed["total_usd"]) < 1.0
 
@@ -523,15 +532,19 @@ def test_disk_ceiling_scales_with_volume_throughput_not_instance_size():
     assert fp.disk_slots(250) > fp.disk_slots(125)
 
 
-def test_disk_binds_first_on_the_default_shape():
+def test_disk_binds_first_on_a_STOCK_volume():
     # m6a.4xlarge: memory says 30, CPU says 32, disk says 18. Before this term
     # existed the picker promised 30 and a 30-session run returned 0 passes.
+    # This is the STOCK-volume case and has to say so explicitly — the fleet
+    # stopped launching stock volumes once _root_block_device landed.
+    stock = dict(throughput_mbps=fp.DEFAULT_VOLUME_THROUGHPUT_MBPS,
+                 iops=fp.DEFAULT_VOLUME_IOPS)
     assert fp.memory_slots("m6a.4xlarge") > 18
     assert fp.cpu_slots("m6a.4xlarge") > 18
-    assert fp.slots_for_instance("m6a.4xlarge") == 18
+    assert fp.slots_for_instance("m6a.4xlarge", **stock) == 18
     # On a stock gp3 volume both disk dimensions land on 18 at once, so neither
     # is singled out. Raising only one leaves the other at 18 — measured.
-    assert fp.limiting_factor("m6a.4xlarge") == "balanced"
+    assert fp.limiting_factor("m6a.4xlarge", **stock) == "balanced"
     assert fp.disk_slots(fp.DEFAULT_VOLUME_THROUGHPUT_MBPS) == 18
     assert fp.iops_slots(fp.DEFAULT_VOLUME_IOPS) == 18
 
@@ -553,9 +566,12 @@ def test_faster_disk_alone_does_not_hand_the_ceiling_back_to_memory():
     baseline and became the next ceiling, at the same 18. Raising one disk
     dimension and not the other buys nothing.
     """
+    stock_iops = fp.DEFAULT_VOLUME_IOPS
     assert fp.disk_slots(500) > 30                      # bandwidth no longer binds
-    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500) == 18
-    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=500) == "disk-iops"
+    assert fp.slots_for_instance("m6a.4xlarge", throughput_mbps=500,
+                                 iops=stock_iops) == 18
+    assert fp.limiting_factor("m6a.4xlarge", throughput_mbps=500,
+                              iops=stock_iops) == "disk-iops"
 
 
 def test_raising_both_disk_dimensions_reaches_the_memory_ceiling():
