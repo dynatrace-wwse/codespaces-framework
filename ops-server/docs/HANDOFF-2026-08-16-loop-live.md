@@ -254,18 +254,25 @@ history either.)
 
 ## Still owed
 
-1. **Merge to main.** `fleet._build_user_data` syncs a launched worker to
-   `origin/main`, and main's agent has **zero `WORKER_POOL` references** — so until
-   this merges, a machine the loop launches itself comes up poolless and without the
-   unit model. `WORKER_CODE_BRANCH` exists for exactly this and is currently set to
-   the epic branch in `/home/ops/.env`: **remove that line once merged**, or launched
-   workers will keep syncing a branch that is no longer where the work lands.
-2. **Volume IOPS 3,000 → 6,000** (~$15/month/worker). At 3,000 the ceiling is ~18
-   concurrent installs and the drip is what keeps us under it.
-3. **A stuck-warming worker now blocks scale-up** by design. If the "came back short"
-   bug (`SysboxPool: 18/30 slots ready` reported as *fully warm*) recurs, the pool will
-   wait on seats that never arrive. Worth a bounded timeout on that guard.
-4. **The two advisory security checks.** Neither is required (only
-   `codespaces-integration-test-with-dynatrace-deployment` is), and both are described
-   in §6 — the GitGuardian one needs a dashboard dismissal, the CodeQL ones are
-   mitigated-not-eliminable.
+Merged to `main` as `ae9a9e4` and deployed to master + both workers; the
+`WORKER_CODE_BRANCH` override has been removed, so launched workers sync `origin/main`
+again. CodeQL passed on the final head — the single-parse, host-returning SSRF guard
+cleared it. What is left:
+
+1. **Volume IOPS 3,000 → 6,000** (~$15/month/worker). At 3,000 the ceiling is ~18
+   concurrent installs and the drip is what keeps us under it. Deliberately deferred:
+   the pacer may have removed the need, and AWS imposes a ~6 h cooldown per volume, so
+   this wants a measurement first rather than a purchase.
+2. **A stuck-warming worker now blocks scale-up** by design — the guard waits when the
+   returning seats would cover the shortfall. If the "came back short" bug
+   (`SysboxPool: 18/30 slots ready` reported as *fully warm*) recurs, the pool waits on
+   seats that never arrive. Wants a bounded timeout.
+3. **A nightly teardown-under-load test.** Today's 30-seat run was driven by hand. The
+   reaper failure took two occurrences to characterise precisely because nothing
+   exercised mass teardown on a schedule.
+4. **`DT_PLATFORM_TOKEN` on tenants other than SRO.** The Astroshop gate needs an
+   account client holding `platform-token:tokens:write`. SRO has it; COE and sprint have
+   not been checked, and classic retirement is per ENVIRONMENT, so neither can be
+   inferred from the other.
+5. **One GitGuardian dismissal** on PR #153 — the literal `dt0s16.SOMETHING` in a test,
+   38 commits back. Not a credential; renamed at head, but GG scans every commit.
