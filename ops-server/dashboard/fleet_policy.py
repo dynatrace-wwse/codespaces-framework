@@ -212,6 +212,12 @@ INSTANCE_VCPUS = {
 
 DEFAULT_INSTANCE_TYPE = "r6a.2xlarge"
 
+# The self-service lane. Everything in this module plans for THIS pool only:
+# workshop machines are bought against a roster, on a schedule, by the control
+# loop, and must never be cordoned or counted by a planner reacting to
+# self-service demand.
+DAILY_POOL = "daily"
+
 # ── regions ─────────────────────────────────────────────────────────────────
 # Deliberately a short curated list, not all 30+ AWS regions: the choice that
 # matters is "near which audience", and a long dropdown invites a mis-click that
@@ -423,6 +429,13 @@ def normalize_worker(worker_id: str, h: dict, now_epoch: float,
     return {
         "worker_id": worker_id,
         "role": (h.get("role") or "").strip().lower(),
+        # Lane. A missing value means "daily": every worker that predates pools
+        # is in the shared pool, and reading absence as unknown would hide the
+        # entire existing fleet from its own autoscaler. Carried here because
+        # the planners below MUST be able to tell the lanes apart — without it
+        # a scale-down cordons whichever worker is emptiest, and a workshop
+        # machine prewarmed 45 minutes early is exactly that.
+        "pool": (h.get("pool") or DAILY_POOL).strip() or DAILY_POOL,
         "status": status,
         "draining": _truthy(h.get("draining")),
         "slots_ready": ready,
@@ -452,7 +465,8 @@ def fleet_state(workers: list[dict], inflight: list[dict],
     sixteen times and launches sixteen times the capacity.
     """
     usable = [w for w in workers
-              if not w["stale"] and not w["draining"] and w["role"] != "master"]
+              if not w["stale"] and not w["draining"] and w["role"] != "master"
+              and w.get("pool", DAILY_POOL) == DAILY_POOL]
     free_ready = sum(w["slots_free"] for w in usable)
     free_inflight = sum(_int(i.get("expected_slots"), slots_per_instance)
                         for i in inflight)
@@ -585,9 +599,14 @@ def plan_scale_down(target_seats: int, state: dict, workers: list[dict], *,
     and cordoning it strands the fewest learners if the decision is reversed.
     """
     surplus = state["free_effective"] - target_seats
+    # Daily lane only. A workshop machine prewarmed 45 minutes before its class
+    # has active_jobs == 0, which makes it the emptiest worker in the fleet and
+    # therefore the FIRST thing the sort below would cordon — half an hour
+    # before seventy people need it.
     candidates = [w for w in workers
                   if w["role"] != "master" and not w["draining"]
-                  and not w["stale"] and not w["warming"]]
+                  and not w["stale"] and not w["warming"]
+                  and w.get("pool", DAILY_POOL) == DAILY_POOL]
     live_count = len(candidates)
 
     if surplus <= 0 or live_count <= min_workers:
@@ -630,7 +649,8 @@ def terminatable(workers: list[dict], grace_s: int = 300) -> list[str]:
     function only answers the "is it empty and cordoned" half.
     """
     return [w["worker_id"] for w in workers
-            if w["draining"] and w["active_jobs"] == 0 and w["role"] != "master"]
+            if w["draining"] and w["active_jobs"] == 0 and w["role"] != "master"
+            and w.get("pool", DAILY_POOL) == DAILY_POOL]
 
 
 def estimate_cost(instance_count: int, instance_type: str, hours: float,

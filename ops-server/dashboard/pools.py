@@ -58,6 +58,11 @@ log = logging.getLogger(__name__)
 
 # ── Pool identity ───────────────────────────────────────────────────────────
 DAILY_POOL = "daily"
+# The standing workshop lane. One long-lived box sits here permanently so a
+# workshop small enough to fit its reserve can open immediately, with no
+# instance launch at all. Bigger workshops still get their own dedicated pool
+# (``ws-{id}``) so two of them can never compete for the same machines.
+WORKSHOP_POOL = "workshop"
 
 # Redis hash mapping workshop id → pool name, written when a workshop's
 # machines are provisioned and deleted when they are torn down. A workshop with

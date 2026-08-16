@@ -1279,41 +1279,83 @@ def test_realm_hosts_do_not_mutate_the_shared_baseline():
     assert dep.OUTBOUND_HOSTS == before
 
 
-# --- concurrent deploys must not share the build tree ------------------------
+# --- build once, upload many -------------------------------------------------
 
-def test_concurrent_deploys_serialise_on_the_build_tree():
-    """Two deploys must never run `dt-app` in APP_REPO_DIR at the same time.
+class _CountingProc:
+    """Records how many of its kind overlap, so a test can assert serialisation."""
 
-    The tree is shared: _sync_repo() resets it, _stamp_ui_version() rewrites a
-    file in it, and the build writes dist/. Overlap does not merely queue, it
-    can hand one tenant a bundle built from another tenant's state. This test
-    fails loudly if the lock is ever removed for "throughput".
-    """
-    overlap = {"max": 0, "cur": 0}
+    def __init__(self, kind, seen, hold=0.05):
+        self.kind, self.seen, self.hold = kind, seen, hold
+        self.returncode = 0
 
-    class FakeProc:
-        returncode = 0
-        async def communicate(self):
-            overlap["cur"] += 1
-            overlap["max"] = max(overlap["max"], overlap["cur"])
-            await asyncio.sleep(0.05)          # hold the tree
-            overlap["cur"] -= 1
-            return (b"deployed", b"")
-        async def wait(self):
-            return 0
-        def kill(self):
-            pass
+    async def communicate(self):
+        s = self.seen[self.kind]
+        s["cur"] += 1
+        s["max"] = max(s["max"], s["cur"])
+        s["total"] += 1
+        await asyncio.sleep(self.hold)
+        s["cur"] -= 1
+        return (b"ok", b"")
+
+    async def wait(self):
+        return 0
+
+    def kill(self):
+        pass
+
+
+def _patch_deploy_subprocesses(seen):
+    """Fake dt-app so build/upload can be counted separately. Returns a restore fn."""
+    saved = {
+        "exec": asyncio.create_subprocess_exec,
+        "stamp": dep._stamp_ui_version,
+        "exists": dep.Path.exists,
+        "sandbox": dep._build_sandbox,
+        "rmtree": dep.shutil.rmtree,
+        "head": dep._head_sha,
+        "version": dep._app_version,
+    }
 
     async def fake_exec(*a, **kw):
-        return FakeProc()
+        argv = [str(x) for x in a]
+        if "build" in argv:
+            return _CountingProc("build", seen)
+        if "rev-parse" in argv:
+            return _CountingProc("git", seen, hold=0)
+        return _CountingProc("upload", seen)
 
-    saved_exec = asyncio.create_subprocess_exec
-    saved_stamp = dep._stamp_ui_version
-    saved_exists = dep.Path.exists
     asyncio.create_subprocess_exec = fake_exec
     async def _no_stamp(env): return "v-test"
     dep._stamp_ui_version = _no_stamp
     dep.Path.exists = lambda self: True
+    dep._build_sandbox = lambda dest: seen["sandboxes"].append(str(dest))
+    dep.shutil.rmtree = lambda *a, **kw: None
+    async def _head(): return "abc1234"
+    dep._head_sha = _head
+    dep._app_version = lambda: "1.0.0"
+
+    def restore():
+        asyncio.create_subprocess_exec = saved["exec"]
+        dep._stamp_ui_version = saved["stamp"]
+        dep.Path.exists = saved["exists"]
+        dep._build_sandbox = saved["sandbox"]
+        dep.shutil.rmtree = saved["rmtree"]
+        dep._head_sha = saved["head"]
+        dep._app_version = saved["version"]
+        dep._BUILD_STAMP = None
+    return restore
+
+
+def _fresh_seen():
+    return {k: {"cur": 0, "max": 0, "total": 0} for k in ("build", "upload", "git")} | {"sandboxes": []}
+
+
+def test_the_build_is_serialised_and_happens_once_for_many_tenants():
+    """The build mutates one shared checkout, so it must never overlap itself —
+    and six tenants on the same commit must produce ONE build, not six."""
+    seen = _fresh_seen()
+    restore = _patch_deploy_subprocesses(seen)
+    dep._BUILD_STAMP = None
     try:
         async def go():
             await asyncio.gather(*[
@@ -1321,18 +1363,119 @@ def test_concurrent_deploys_serialise_on_the_build_tree():
             ])
         asyncio.run(go())
     finally:
+        restore()
+
+    assert seen["build"]["max"] == 1, (
+        f"{seen['build']['max']} builds ran in the shared checkout at once — "
+        "the tree lock is not holding")
+    assert seen["build"]["total"] == 1, (
+        f"{seen['build']['total']} builds for one commit — the build stamp is not being reused")
+
+
+def test_uploads_run_in_parallel():
+    """Uploads work from private sandboxes, so they must NOT serialise —
+    that is the whole point of build-once/upload-many."""
+    seen = _fresh_seen()
+    restore = _patch_deploy_subprocesses(seen)
+    dep._BUILD_STAMP = None
+    try:
+        async def go():
+            await asyncio.gather(*[
+                dep._run_deploy("tok", f"https://t{i}.example.com") for i in range(6)
+            ])
+        asyncio.run(go())
+    finally:
+        restore()
+
+    assert seen["upload"]["total"] == 6
+    assert seen["upload"]["max"] > 1, (
+        "uploads ran one at a time — parallel upload is not working")
+    assert seen["upload"]["max"] <= dep.DEPLOY_UPLOAD_CONCURRENCY
+
+
+def test_every_upload_gets_its_own_sandbox():
+    """dt-app derives its token cache as <root>/.dt-app/.tokens.json with no env
+    override, so two uploads sharing a root could hand tenant A the bearer
+    written by tenant B's deploy. Distinct roots are what makes that impossible."""
+    seen = _fresh_seen()
+    restore = _patch_deploy_subprocesses(seen)
+    dep._BUILD_STAMP = None
+    try:
+        async def go():
+            await asyncio.gather(*[
+                dep._run_deploy("tok", f"https://t{i}.example.com") for i in range(6)
+            ])
+        asyncio.run(go())
+    finally:
+        restore()
+
+    boxes = seen["sandboxes"]
+    assert len(boxes) == 6
+    assert len(set(boxes)) == 6, f"sandboxes were reused across tenants: {boxes}"
+    assert dep.APP_REPO_DIR not in boxes, "an upload ran in the shared checkout"
+
+
+def test_sandbox_never_carries_the_token_cache():
+    """.dt-app is skipped wholesale; the build metadata under it is re-linked
+    explicitly. A credential file must never be one of the things copied."""
+    assert ".dt-app" in dep._SANDBOX_SKIP
+    assert ".env" in dep._SANDBOX_SKIP
+    assert "node_modules" in dep._SANDBOX_SKIP
+
+
+def test_a_failed_build_leaves_no_stamp():
+    """A stamp after a failed build would let the next tenant upload whatever
+    stale dist/ survived."""
+    saved_exec = asyncio.create_subprocess_exec
+    saved_exists = dep.Path.exists
+    saved_stamp = dep._stamp_ui_version
+    saved_head = dep._head_sha
+
+    class Failing:
+        returncode = 1
+        async def communicate(self): return (b"build blew up", b"")
+        async def wait(self): return 1
+        def kill(self): pass
+
+    async def fake_exec(*a, **kw):
+        return Failing()
+
+    asyncio.create_subprocess_exec = fake_exec
+    dep.Path.exists = lambda self: True
+    async def _no_stamp(env): return "v"
+    dep._stamp_ui_version = _no_stamp
+    async def _head(): return "deadbee"
+    dep._head_sha = _head
+    dep._BUILD_STAMP = ("stale", "0.0.1")
+    try:
+        ok, msg = asyncio.run(dep._ensure_build())
+    finally:
         asyncio.create_subprocess_exec = saved_exec
-        dep._stamp_ui_version = saved_stamp
         dep.Path.exists = saved_exists
+        dep._stamp_ui_version = saved_stamp
+        dep._head_sha = saved_head
 
-    assert overlap["max"] == 1, (
-        f"{overlap['max']} deploys ran in the shared checkout at once — "
-        "the build-tree lock is not holding"
-    )
+    assert ok is False
+    assert dep._BUILD_STAMP is None, "a failed build left a stamp behind"
+    assert "blew up" in msg
 
 
-def test_upload_concurrency_defaults_to_serial():
-    """Parallel upload is opt-in. It is only safe once the built bundle is
-    proven tenant-independent; defaulting it on would risk shipping one
-    tenant's environment URL to another."""
-    assert dep.DEPLOY_UPLOAD_CONCURRENCY == 1
+def test_run_deploy_does_not_upload_when_the_build_failed():
+    """A build failure must stop the deploy, not ship the previous bundle."""
+    saved_build = dep._ensure_build
+    saved_upload = dep._upload
+    uploaded = []
+
+    async def failing_build(): return False, "build failed"
+    async def spy_upload(token, tenant): uploaded.append(tenant); return 0, "ok"
+
+    dep._ensure_build = failing_build
+    dep._upload = spy_upload
+    try:
+        rc, out = asyncio.run(dep._run_deploy("tok", "https://t.example.com"))
+    finally:
+        dep._ensure_build = saved_build
+        dep._upload = saved_upload
+
+    assert rc != 0
+    assert uploaded == [], "uploaded despite a failed build"

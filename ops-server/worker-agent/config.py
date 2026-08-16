@@ -139,18 +139,67 @@ WORKER_MAX_HEAVY = int(os.environ["WORKER_MAX_HEAVY"]) if os.environ.get("WORKER
 # pinning by WORKER_ID could not do.
 WORKER_POOL = os.environ.get("WORKER_POOL", "daily").strip() or "daily"
 DAILY_POOL = "daily"
+# The standing workshop lane. A workshop small enough to fit the reserve runs
+# here and launches no machines at all — which is the whole point of keeping a
+# workshop box warm: a trainer can open a room now instead of waiting ~8 minutes
+# for an instance to boot and warm.
+WORKSHOP_POOL = "workshop"
+
+# ── Lending (the standing workshop box only) ────────────────────────────────
+# A dedicated workshop machine is idle whenever no workshop is running, which is
+# most of the time. Lending part of it to self-service recovers that cost
+# without weakening the guarantee, because the lend is CAPPED: at most
+# WORKER_BORROW_FRACTION of the slots may ever hold borrowed work, so the rest
+# is always there for a workshop that starts with no notice.
+#
+# The cap is a cap on INTAKE, not a reservation carved out of the slot pool: a
+# borrowed session cannot be migrated once placed (Sysbox), so the only moment
+# we can enforce anything is the moment we decide to claim the job.
+WORKER_BORROW_POOL = os.environ.get("WORKER_BORROW_POOL", "").strip()
+WORKER_BORROW_FRACTION = float(os.environ.get("WORKER_BORROW_FRACTION", "0.5"))
 
 
-def queue_keys(worker_id: str, arch: str, pool_name: str = "") -> list[str]:
+def borrow_capacity(capacity: int = 0) -> int:
+    """How many slots this worker may lend to its borrow pool. 0 = lends nothing.
+
+    Floors at 0 and never exceeds the worker's own capacity. A fraction of 0.5
+    on a 20-slot box lends 10 and keeps 10 for workshops.
+    """
+    if not WORKER_BORROW_POOL:
+        return 0
+    cap = capacity or WORKER_CAPACITY
+    return max(0, min(int(cap), int(cap * WORKER_BORROW_FRACTION)))
+
+
+def queue_keys(worker_id: str, arch: str, pool_name: str = "",
+               borrowing: bool = False) -> list[str]:
     """BLPOP key list for this worker, highest priority first.
 
     ``queue:direct:{id}`` stays in front for both pool kinds: it is how a
     capacity test or an operator targets one specific box, and that must keep
     working regardless of pool membership.
+
+    ``borrowing`` appends the borrow pool's queue LAST. BLPOP scans keys in
+    order and returns the first non-empty one, so key order is priority order —
+    this worker's own lane is always drained before it takes borrowed work, and
+    that ordering needs no scheduler, no preemption and no extra state.
     """
     pool = (pool_name or WORKER_POOL).strip() or DAILY_POOL
     shared = f"queue:test:{arch}" if pool == DAILY_POOL else f"queue:pool:{pool}"
-    return [f"queue:direct:{worker_id}", shared]
+    keys = [f"queue:direct:{worker_id}", shared]
+    if borrowing and WORKER_BORROW_POOL and WORKER_BORROW_POOL != pool:
+        borrow = (f"queue:test:{arch}" if WORKER_BORROW_POOL == DAILY_POOL
+                  else f"queue:pool:{WORKER_BORROW_POOL}")
+        keys.append(borrow)
+    return keys
+
+
+def borrow_queue(arch: str) -> str:
+    """The queue borrowed work arrives on, or "" when this worker lends nothing."""
+    if not WORKER_BORROW_POOL:
+        return ""
+    return (f"queue:test:{arch}" if WORKER_BORROW_POOL == DAILY_POOL
+            else f"queue:pool:{WORKER_BORROW_POOL}")
 
 
 # Short git SHA of the code this worker is actually running, stamped into

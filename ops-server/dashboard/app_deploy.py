@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -448,6 +449,10 @@ async def _sync_repo() -> tuple[bool, str]:
     `git reset --hard` only rewrites tracked files, so the checkout's untracked/ignored
     node_modules, .env and .dt-app are preserved. Dependency changes (package-lock.json) still
     need a manual `npm ci` in the checkout — surfaced via the returned message.
+
+    Runs under _TREE_LOCK. It mutates the same working tree the build reads, so
+    without the lock a second tenant's sync could reset the tree mid-build — a
+    race that existed at concurrency 1 and would be routine at 8.
     """
     if not (Path(APP_REPO_DIR) / ".git").is_dir():
         return False, "not a git checkout"
@@ -466,15 +471,17 @@ async def _sync_repo() -> tuple[bool, str]:
         return proc.returncode or 0, out.decode(errors="replace").strip()
 
     ref = deploy_ref()
-    rc, msg = await _fetch_deploy_ref(_git)
-    if rc != 0:
-        return False, f"fetch failed: {msg[-300:]}"
-    # Note whether dependencies changed so the operator knows to `npm ci` if a build fails.
-    _, lock_diff = await _git("diff", "--name-only", f"HEAD..{ref}", "--", "package-lock.json")
-    rc, msg = await _git("reset", "--hard", ref)
-    if rc != 0:
-        return False, f"reset failed: {msg[-300:]}"
-    _, head = await _git("rev-parse", "--short", "HEAD")
+    tree_lock, _ = _deploy_locks()
+    async with tree_lock:
+        rc, msg = await _fetch_deploy_ref(_git)
+        if rc != 0:
+            return False, f"fetch failed: {msg[-300:]}"
+        # Note whether dependencies changed so the operator knows to `npm ci` if a build fails.
+        _, lock_diff = await _git("diff", "--name-only", f"HEAD..{ref}", "--", "package-lock.json")
+        rc, msg = await _git("reset", "--hard", ref)
+        if rc != 0:
+            return False, f"reset failed: {msg[-300:]}"
+        _, head = await _git("rev-parse", "--short", "HEAD")
     suffix = " (package-lock changed — run `npm ci` if build fails)" if lock_diff else ""
     return True, f"{ref}@{head}{suffix}"
 
@@ -514,57 +521,252 @@ async def _stamp_ui_version(env: dict) -> str:
 # guard of any kind here, so a bootcamp morning where many tenants self-update
 # at once was a silent-corruption risk, not a slow-but-correct one.
 #
-# The lock is the correctness fix and it is deliberately a hard serialisation of
-# everything that touches the tree. Throughput is a separate problem: `dt-app
-# deploy --skip-build` exists, so the real answer for N tenants is to build once
-# and upload N times in parallel. That is NOT enabled here, because it is only
-# safe if the built bundle is genuinely tenant-independent -- DT_APP_ENVIRONMENT_URL
-# is present in the build env, and shipping tenant A's URL inside tenant B's
-# bundle would be a worse bug than slowness. Verify that first, then raise
-# DEPLOY_UPLOAD_CONCURRENCY.
-_DEPLOY_TREE_LOCK = asyncio.Lock()
-DEPLOY_UPLOAD_CONCURRENCY = int(os.environ.get("DEPLOY_UPLOAD_CONCURRENCY", "1"))
+# Two primitives, because the tree is mutated for seconds and uploaded from for
+# minutes:
+#
+#   _TREE_LOCK   serialises everything that MUTATES the checkout -- the git
+#                sync, the version stamp, the build, and the instant a sandbox
+#                is hardlinked out of it.
+#   _UPLOAD_SEM  bounds concurrent uploads. An upload holds NO tree lock at all,
+#                because it runs out of its own private sandbox.
+#
+# MEASURED 2026-08-16: two builds of one commit with different
+# DT_APP_ENVIRONMENT_URL values produced 33/33 byte-identical files under dist/.
+# The tenant is a deploy-target concern, not a build input -- that is what makes
+# "build once, upload N times" correct rather than merely faster. The only tenant
+# hostname in the bundle is COE, hardcoded in source as the analytics home, and
+# it is identical in both builds. RE-RUN that check after any dt-app upgrade;
+# the procedure is phase 0a of docs/PROVISIONING-AND-LANES.md.
+DEPLOY_UPLOAD_CONCURRENCY = int(os.environ.get("DEPLOY_UPLOAD_CONCURRENCY", "8"))
+
+# Created on first use inside the running loop, not at import: an asyncio
+# primitive binds to the loop that first awaits it, and a module-level one then
+# raises "bound to a different event loop" in any process that runs more than
+# one loop. The service has a single loop; its tests do not.
+_TREE_LOCK: asyncio.Lock | None = None
+_UPLOAD_SEM: asyncio.Semaphore | None = None
+_PRIMITIVE_LOOP = None
 
 
-async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
-    """Shell `dt-app deploy` with the delegated token as DT_APP_PLATFORM_TOKEN (dt-app builds,
-    signs and POSTs the archive to the registry — correct by construction). Token is passed via
-    the child env only, never logged.
+def _deploy_locks() -> tuple[asyncio.Lock, asyncio.Semaphore]:
+    """(tree lock, upload semaphore) for the currently running loop."""
+    global _TREE_LOCK, _UPLOAD_SEM, _PRIMITIVE_LOOP
+    loop = asyncio.get_running_loop()
+    if _PRIMITIVE_LOOP is not loop or _TREE_LOCK is None or _UPLOAD_SEM is None:
+        _TREE_LOCK = asyncio.Lock()
+        _UPLOAD_SEM = asyncio.Semaphore(DEPLOY_UPLOAD_CONCURRENCY)
+        _PRIMITIVE_LOOP = loop
+    return _TREE_LOCK, _UPLOAD_SEM
+# (head_sha, app_version) of the build currently in dist/. A second tenant on the
+# same commit waits for the lock, finds this fresh, and uploads without building.
+_BUILD_STAMP: tuple[str, str] | None = None
 
-    Serialised on ``_DEPLOY_TREE_LOCK``: the build mutates a shared checkout, so
-    concurrent callers must not overlap. A caller that waits is reported as
-    waiting, not as failed -- the wait is bounded by DEPLOY_TIMEOUT per holder."""
-    binary = Path(APP_REPO_DIR) / "node_modules" / ".bin" / "dt-app"
+# Sandboxes are hardlink snapshots, so they MUST sit on the same filesystem as
+# the checkout -- os.link across devices raises EXDEV. A sibling directory
+# guarantees that; the copy fallback below exists only so a misconfigured root
+# degrades to slow rather than broken.
+DEPLOY_SANDBOX_ROOT = os.environ.get(
+    "DEPLOY_SANDBOX_ROOT", str(Path(APP_REPO_DIR).parent / ".deploy-sandboxes"))
+
+# Never hardlinked into a sandbox. `.dt-app` is the important one: dt-app derives
+# its token cache path as <root>/.dt-app/.tokens.json with no env override, so
+# giving every upload its own root is what makes it STRUCTURALLY impossible for
+# two tenants to share a credential file. (dt-app 1.9.0 also short-circuits on
+# DT_APP_PLATFORM_TOKEN and never consults that cache on our route -- but that is
+# a third-party code path that an upgrade could change, and this does not depend
+# on it.) `.env` is excluded because an upload has no business reading it.
+_SANDBOX_SKIP = {
+    "node_modules", ".git", ".dt-app", ".env", ".venv",
+    ".pytest_cache", "graphify-out", ".claude", "coverage", ".nyc_output",
+}
+
+
+def _child_env() -> dict:
+    """Env every dt-app child needs. Carries no credential — callers add one."""
+    return {**os.environ,
+            "DT_APP_DEACTIVATE_SPINNER": "1", "CI": "1",
+            # node lives in /usr/local/bin (symlink); ensure it's on PATH for the systemd service
+            "PATH": "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", "/home/ops")}
+
+
+def _dt_app_binary() -> Path:
+    return Path(APP_REPO_DIR) / "node_modules" / ".bin" / "dt-app"
+
+
+async def _head_sha() -> str:
+    """Short HEAD of the deploy checkout, or "" when it is not a git tree."""
+    if not (Path(APP_REPO_DIR) / ".git").is_dir():
+        return ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", APP_REPO_DIR, "rev-parse", "--short", "HEAD",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except (asyncio.TimeoutError, OSError):
+        return ""
+    return out.decode(errors="replace").strip() if proc.returncode == 0 else ""
+
+
+def _link_tree(src: Path, dst: Path) -> None:
+    """Hardlink-copy ``src`` to ``dst``, skipping the entries in _SANDBOX_SKIP.
+
+    Hardlinks rather than copies because a sandbox is created per upload and the
+    tree is ~17 MB: linking is near-instant and costs no disk. It is safe here
+    because an upload only ever READS the linked files -- dt-app is invoked with
+    --skip-build, so nothing rewrites dist/ in place.
+    """
+    def _ignore(directory, names):
+        # Only prune at the top level: a nested directory legitimately named
+        # "coverage" inside ui/ is source, not a cache.
+        return set(names) & _SANDBOX_SKIP if Path(directory) == src else set()
+
+    def _link_or_copy(a, b):
+        try:
+            os.link(a, b)
+        except OSError:
+            # EXDEV (sandbox root on another filesystem) or a link-count limit.
+            # Slower, still correct.
+            shutil.copy2(a, b)
+
+    shutil.copytree(src, dst, copy_function=_link_or_copy, ignore=_ignore,
+                    symlinks=True, dirs_exist_ok=True)
+
+
+def _build_sandbox(dest: Path) -> None:
+    """A private, self-contained project root for one upload.
+
+    Everything dt-app reads is present; the one thing it must not share is. The
+    build metadata under .dt-app/build IS copied (it is a build artefact and the
+    deploy refuses to run without it) while .dt-app/.tokens.json is NOT (it is a
+    credential).
+    """
+    repo = Path(APP_REPO_DIR)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _link_tree(repo, dest)
+
+    (dest / ".dt-app").mkdir(parents=True, exist_ok=True)
+    build_meta = repo / ".dt-app" / "build"
+    if build_meta.is_dir():
+        _link_tree(build_meta, dest / ".dt-app" / "build")
+    schema = repo / ".dt-app" / "app.config.schema.json"
+    if schema.is_file():
+        shutil.copy2(schema, dest / ".dt-app" / "app.config.schema.json")
+
+    # node_modules is symlinked, never copied: it is ~1 GB and read-only here.
+    link = dest / "node_modules"
+    if not link.exists():
+        link.symlink_to(repo / "node_modules")
+
+
+async def _ensure_build() -> tuple[bool, str]:
+    """Build ``dist/`` once for the commit currently checked out.
+
+    Holds _TREE_LOCK for the whole build, so a second tenant arriving mid-build
+    waits and then finds the stamp fresh instead of rebuilding. This is the
+    "build once" half of build-once/upload-many.
+    """
+    global _BUILD_STAMP
+    binary = _dt_app_binary()
     if not binary.exists():
-        return 127, f"dt-app not found in {APP_REPO_DIR} (is the app repo checked out with node_modules?)"
-    env = {**os.environ, "DT_APP_PLATFORM_TOKEN": token, "DT_APP_ENVIRONMENT_URL": tenant_url,
-           "DT_APP_DEACTIVATE_SPINNER": "1", "CI": "1",
-           # node lives in /usr/local/bin (symlink); ensure it's on PATH for the systemd service
-           "PATH": "/usr/local/bin:/usr/bin:/bin:" + os.environ.get("PATH", ""),
-           "HOME": os.environ.get("HOME", "/home/ops")}
+        return False, f"dt-app not found in {APP_REPO_DIR} (is the app repo checked out with node_modules?)"
+
+    env = _child_env()
+    tree_lock, _ = _deploy_locks()
     waited_from = asyncio.get_event_loop().time()
-    async with _DEPLOY_TREE_LOCK:
+    async with tree_lock:
         waited = asyncio.get_event_loop().time() - waited_from
         if waited > 1.0:
-            log.info("deploy for %s waited %.1fs for the build tree",
-                     scrub_for_log(tenant_url), waited)
+            log.info("build tree was busy for %.1fs before this deploy", waited)
+
+        want = (await _head_sha(), _app_version())
+        if _BUILD_STAMP == want and (Path(APP_REPO_DIR) / "dist").is_dir():
+            return True, f"reusing build {want[1]}@{want[0] or 'nogit'}"
+
         await _stamp_ui_version(env)
         proc = await asyncio.create_subprocess_exec(
-            str(binary), "deploy", "--non-interactive", cwd=APP_REPO_DIR, env=env,
+            str(binary), "build", "--non-interactive", "--no-color",
+            cwd=APP_REPO_DIR, env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
             # Reap the killed child inside the lock; releasing while it still
-            # holds file handles in the tree would hand the next deploy a
-            # half-written dist/.
+            # holds file handles would hand the next deploy a half-written dist/.
             try:
                 await asyncio.wait_for(proc.wait(), timeout=10)
             except asyncio.TimeoutError:
-                log.error("deploy child for %s did not die after kill", scrub_for_log(tenant_url))
-            return 124, "deploy timed out"
-    return proc.returncode or 0, out.decode(errors="replace")[-1500:]
+                log.error("build child did not die after kill")
+            _BUILD_STAMP = None
+            return False, "build timed out"
+
+        if proc.returncode:
+            # A failed build must never leave a stamp behind, or the next tenant
+            # would upload whatever stale dist/ survived.
+            _BUILD_STAMP = None
+            return False, out.decode(errors="replace")[-1500:]
+
+        # Re-read the version: _stamp_ui_version regenerates it from app.config.json.
+        _BUILD_STAMP = (want[0], _app_version())
+        return True, f"built {_BUILD_STAMP[1]}@{_BUILD_STAMP[0] or 'nogit'}"
+
+
+async def _upload(token: str, tenant_url: str) -> tuple[int, str]:
+    """Ship the already-built bundle to one tenant, from a private sandbox.
+
+    The token is passed through the child env only, never logged and never
+    written to disk. The sandbox is what keeps two concurrent uploads from
+    sharing dt-app's token cache; it is removed on every exit path.
+    """
+    binary = _dt_app_binary()
+    if not binary.exists():
+        return 127, f"dt-app not found in {APP_REPO_DIR}"
+
+    env = {**_child_env(), "DT_APP_PLATFORM_TOKEN": token,
+           "DT_APP_ENVIRONMENT_URL": tenant_url}
+    sandbox = Path(DEPLOY_SANDBOX_ROOT) / f"deploy-{secrets.token_hex(6)}"
+
+    tree_lock, upload_sem = _deploy_locks()
+    async with upload_sem:
+        try:
+            # Snapshot under the tree lock so a concurrent build can never be
+            # observed half-written; the link itself takes milliseconds.
+            async with tree_lock:
+                await asyncio.to_thread(_build_sandbox, sandbox)
+
+            # No lock from here on -- this sandbox is nobody else's.
+            proc = await asyncio.create_subprocess_exec(
+                str(binary), "deploy", "--skip-build", "--non-interactive", "--no-color",
+                "--environment-url", tenant_url,
+                cwd=str(sandbox), env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=DEPLOY_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    log.error("deploy child for %s did not die after kill",
+                              scrub_for_log(tenant_url))
+                return 124, "deploy timed out"
+            return proc.returncode or 0, out.decode(errors="replace")[-1500:]
+        finally:
+            await asyncio.to_thread(shutil.rmtree, sandbox, True)
+
+
+async def _run_deploy(token: str, tenant_url: str) -> tuple[int, str]:
+    """Build once if needed, then upload to this tenant.
+
+    Kept as one function so both routes and `_deploy_with_status` are unchanged.
+    """
+    if not _dt_app_binary().exists():
+        return 127, f"dt-app not found in {APP_REPO_DIR} (is the app repo checked out with node_modules?)"
+    ok, msg = await _ensure_build()
+    if not ok:
+        return 1, msg
+    return await _upload(token, tenant_url)
 
 
 async def _get_installed(token: str, tenant_url: str) -> str | None:

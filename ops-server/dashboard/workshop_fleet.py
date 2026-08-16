@@ -63,7 +63,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from dashboard import fleet_policy, repo_profiles
+from dashboard import fleet_policy, pools, repo_profiles
+from shared import capacity_units
 from shared.log_safety import scrub_for_log
 
 log = logging.getLogger(__name__)
@@ -112,6 +113,26 @@ def manages(ws_id: str) -> bool:
 # direction costs a few dollars; being wrong in the other costs the workshop.
 WORKSHOP_SEAT_SAFETY = float(os.environ.get("WORKSHOP_SEAT_SAFETY", "0.55"))
 WORKSHOP_INSTANCE_TYPE = os.environ.get("WORKSHOP_INSTANCE_TYPE", "m6a.4xlarge")
+# At or below this many seats a workshop runs on the standing workshop box and
+# launches nothing. Set to 7 rather than the full reserve (10 of a 20-slot box)
+# so a small room still leaves headroom for a second one -- the reserve exists
+# to absorb rooms that open with no notice, and a threshold equal to it would
+# let the first small workshop consume all of it.
+WORKSHOP_STANDING_MAX_SEATS = int(os.environ.get("WORKSHOP_STANDING_MAX_SEATS", "7"))
+# Spare machines on top of the arithmetic, for workshops that get their own.
+# One host lost mid-delivery strands a full machine's worth of learners and the
+# loop will not re-plan a bound workshop, so the spare is the only remedy.
+WORKSHOP_REDUNDANCY = int(os.environ.get("WORKSHOP_REDUNDANCY", "1"))
+# Extra minutes on top of prewarm + duration + grace before a workshop machine
+# kills itself. Wide enough that the self-destruct never races a workshop that
+# is merely overrunning — the loop's teardown should always win the race.
+WORKSHOP_LIFETIME_MARGIN_MINUTES = int(os.environ.get("WORKSHOP_LIFETIME_MARGIN_MINUTES", "60"))
+# How long a pool may sit in WARMING before the loop stops waiting for the last
+# slot and delivers with what came up. A worker that comes back short (measured:
+# "SysboxPool: 18/30 slots ready" while reporting fully warm) would otherwise
+# hold the workshop at `warming` forever, which reads to a trainer as a hung
+# fleet and blocks the room from opening at all.
+WORKSHOP_WARMING_TIMEOUT_MINUTES = int(os.environ.get("WORKSHOP_WARMING_TIMEOUT_MINUTES", "20"))
 # Workshops run on-demand, never spot. A spot reclamation costs a learner their
 # session with two minutes' notice and a Sysbox session cannot be migrated.
 WORKSHOP_PURCHASING = os.environ.get("WORKSHOP_PURCHASING", "on-demand")
@@ -204,6 +225,23 @@ def workshop_repo(session: dict) -> str:
             or session.get("repo") or "")
 
 
+def _workshop_lifetime_minutes(session: dict,
+                               margin_minutes: int = WORKSHOP_LIFETIME_MARGIN_MINUTES) -> int:
+    """Hard self-destruct offset for a workshop's machines.
+
+    Prewarm lead + the booked duration + the teardown grace + a margin, so the
+    timer can only ever fire AFTER the loop's own teardown would have. It is a
+    backstop against the loop not running at all, not a second schedule
+    competing with it.
+    """
+    try:
+        duration = int(session.get("durationMinutes") or 120)
+    except (TypeError, ValueError):
+        duration = 120
+    return (PREWARM_LEAD_MINUTES + max(0, duration)
+            + TEARDOWN_GRACE_MINUTES + max(0, margin_minutes))
+
+
 def workshop_end(session: dict):
     start = parse_iso(session.get("scheduledAt", ""))
     if start is None:
@@ -231,25 +269,54 @@ def due_for_teardown(session: dict, now: datetime,
 
 def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
                            instance_type: str = WORKSHOP_INSTANCE_TYPE,
-                           safety: float = WORKSHOP_SEAT_SAFETY) -> dict:
+                           safety: float = WORKSHOP_SEAT_SAFETY,
+                           standing_max_seats: int = WORKSHOP_STANDING_MAX_SEATS,
+                           redundancy: int = WORKSHOP_REDUNDANCY) -> dict:
     """Machines and per-machine seats for a workshop of ``seats`` people.
 
-    Returns ``workers``, ``seats_per_worker``, ``total_seats`` and whether the
-    profile behind it was estimated. ``workers == 0`` means refuse to plan --
-    an unknown instance type must never be guessed at.
+    Two tiers, decided by size:
+
+    * **At or under ``standing_max_seats``** the workshop launches NOTHING and
+      runs on the standing workshop box's reserved half. That is what makes a
+      small room openable now instead of in the ~8 minutes it takes to boot and
+      warm an instance, and it is the reason the box keeps a reserve at all.
+    * **Above it**, the workshop gets its own machines, sized for ALL of its
+      seats. It deliberately does not lean on the standing box: the reserve has
+      to stay free for the next room that opens with no notice.
+
+    Returns ``workers``, ``seats_per_worker``, ``total_seats``, ``pool_kind``
+    and whether the profile behind it was estimated. ``workers == 0`` with
+    ``pool_kind == "dedicated"`` means refuse to plan -- an unknown instance
+    type must never be guessed at.
     """
     per = repo_profiles.seats_per_worker(profile, instance_type, safety)
+    if seats <= standing_max_seats:
+        return {
+            "workers": 0,
+            "seats_per_worker": per,
+            "total_seats": seats,
+            "estimated": profile.estimated,
+            "pool_kind": "standing",
+            "reason": (f"{seats} seats ≤ {standing_max_seats} — runs on the "
+                       f"standing {pools.WORKSHOP_POOL} box, no machines launched"),
+        }
     if per <= 0:
         return {"workers": 0, "seats_per_worker": 0, "total_seats": 0,
-                "estimated": profile.estimated,
+                "estimated": profile.estimated, "pool_kind": "dedicated",
                 "reason": f"no capacity model for {instance_type}"}
-    workers = -(-max(0, seats) // per)
+    # Round UP, then add a spare. A workshop one seat short is a person without
+    # an environment in front of a room, and the loop does not re-plan a
+    # workshop whose machines are already bound -- so losing a host mid-delivery
+    # has no automatic remedy other than the spare bought here.
+    workers = -(-max(0, seats) // per) + max(0, redundancy)
     return {
         "workers": workers,
         "seats_per_worker": per,
         "total_seats": workers * per,
         "estimated": profile.estimated,
+        "pool_kind": "dedicated",
         "reason": (f"{seats} seats ÷ {per}/worker"
+                   + (f" +{redundancy} spare" if redundancy else "")
                    + (" (profile is an ESTIMATE, not a measurement)"
                       if profile.estimated else "")),
     }
@@ -282,6 +349,12 @@ def daily_scale_decision(workers: list[dict], pressure_ticks: dict[str, int],
 
     free = sum(int(w.get("slots_free", 0) or 0) for w in workers
                if w.get("status") == "ready" and not _truthy(w.get("draining")))
+    # Seats a workshop box is willing to lend count as daily capacity, because
+    # they are: the lending worker reads the daily queue while it is under its
+    # cap. Without this the planner buys a machine while ten borrowable seats
+    # sit warm and idle on the standing box.
+    free += sum(int(w.get("borrow_free", 0) or 0) for w in workers
+                if w.get("status") == "ready" and not _truthy(w.get("draining")))
     shrink, brake, reasons = [], [], []
 
     for w in workers:
@@ -312,7 +385,17 @@ def daily_scale_decision(workers: list[dict], pressure_ticks: dict[str, int],
     # back would COVER the shortfall. A warming worker does not excuse a pool
     # that will still be short once it lands — that is real demand, and the
     # machine should be on its way now rather than one warm-up later.
-    incoming = sum(int(w.get("capacity", 0) or 0) for w in workers
+    #
+    # Count `slots_total`, NOT `capacity`. The agent publishes `capacity` as the
+    # number of slots ALREADY WARM, which is 0 for most of a warm-up — so this
+    # guard summed zero at exactly the moment it existed for, and never fired.
+    # Measured 2026-08-16: amd001 restarted at 13:51:46 and the loop launched
+    # spot instances at 13:52:16 and 13:52:48, with both pets warming at
+    # capacity=0 and nothing queued. `slots_total` is the nominal figure and is
+    # published from registration onward, which is the seats that are genuinely
+    # on their way back.
+    incoming = sum(int(w.get("slots_total", 0) or w.get("capacity", 0) or 0)
+                   for w in workers
                    if w.get("status") == "warming" and not _truthy(w.get("draining")))
 
     scale_up = 0
@@ -401,6 +484,27 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
     profile = await repo_profiles.load(redis, repo)
     plan = plan_workshop_capacity(seats, profile)
 
+    # Small enough for the standing box: bind the shared workshop lane and stop.
+    # Nothing is launched, so the room is deliverable the moment it opens.
+    if plan["pool_kind"] == "standing":
+        await pools.bind_workshop_pool(redis, ws_id, pools.WORKSHOP_POOL)
+        rec = {
+            "state": READY,
+            "pool": pools.WORKSHOP_POOL,
+            "repo": repo,
+            "seats": seats,
+            "workers": 0,
+            "seats_per_worker": plan["seats_per_worker"],
+            "profile_estimated": plan["estimated"],
+            "instances": [],
+            "standing": True,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "ready_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await _save_fleet_record(redis, ws_id, rec)
+        log.info("workshop %s: %s", ws_id, plan["reason"])
+        return rec
+
     if plan["workers"] <= 0:
         log.error("workshop %s: cannot plan capacity (%s)", ws_id, plan["reason"])
         return {"state": "failed", "reason": plan["reason"]}
@@ -444,6 +548,15 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
                 purchasing=WORKSHOP_PURCHASING,
                 pool=pool_name,
                 capacity=plan["seats_per_worker"],
+                # Self-destruct, armed inside the instance at boot. Until now the
+                # ONLY thing that ever terminated a workshop machine was this
+                # loop's teardown, so a lost fleet record, a deleted (rather than
+                # ended) workshop, or a dashboard that never comes back left the
+                # machines running until somebody noticed. `shutdown -h +N` needs
+                # nothing from Orbital, Redis, AWS credentials or the network —
+                # it is the only cost guarantee that survives losing all of them.
+                # Generous on purpose: it is a backstop, not a schedule.
+                lifetime_minutes=_workshop_lifetime_minutes(session),
                 # A workshop worker serves one repo, so its slots can be capped
                 # for that repo specifically rather than at a flat figure chosen
                 # for the lightest one.
@@ -490,6 +603,21 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     # Unbind first: no further learner can be routed to these machines.
     await pools.unbind_workshop_pool(redis, ws_id)
 
+    # A workshop that ran on the STANDING box owns no machines. Its sessions
+    # must still be terminated, but every step below this one would act on a
+    # long-lived worker shared with every other small workshop: cordoning it
+    # would stop it serving them, and deleting its record would remove a live
+    # box from the fleet's view entirely.
+    if rec.get("standing") or rec.get("pool") == pools.WORKSHOP_POOL:
+        terminated = await _terminate_workshop_sessions(redis, ws_id)
+        rec["state"] = DONE
+        rec["torn_down_at"] = datetime.now(timezone.utc).isoformat()
+        await _save_fleet_record(redis, ws_id, rec)
+        log.info("workshop %s: ended on the standing %s box — %d session(s) "
+                 "terminated, no machines to return",
+                 scrub_for_log(ws_id), pools.WORKSHOP_POOL, terminated)
+        return rec
+
     # Remember who they were before cordoning: once the instances are gone their
     # heartbeats stop, and the scan that finds them by pool would find nothing.
     pool_workers = await _pool_worker_ids(redis, rec.get("pool", ""))
@@ -510,6 +638,21 @@ async def teardown_workshop_fleet(redis, ws_id: str) -> dict:
     # run, so this path is load-bearing, not belt-and-braces.
     instances = sorted(set(rec.get("instances") or []) |
                        set(await _instances_tagged(rec.get("pool", ""))))
+
+    # Defensive: never terminate a host that still has sessions on it. This
+    # workshop's own sessions were just terminated, so anything still running
+    # here belongs to someone else -- a mis-tagged instance, or a pool that
+    # somehow serves two workshops. Leave it cordoned; it takes no new work and
+    # the next tick reaps it once it is empty. Cheap insurance against the one
+    # way this path could take a live learner down with it.
+    busy = await _busy_pool_workers(redis, rec.get("pool", ""))
+    if busy and instances:
+        log.warning("workshop %s: %d worker(s) still hold sessions (%s) — "
+                    "leaving them cordoned instead of terminating",
+                    scrub_for_log(ws_id), len(busy), ", ".join(sorted(busy)))
+        instances = []
+        rec["deferred_termination"] = True
+
     if instances:
         try:
             # scale_down refuses anything not tagged orbital-role=worker, so a
@@ -567,6 +710,73 @@ async def _pool_workers_ready(redis, pool_name: str) -> int:
         if h.get("status") == "ready" and int(h.get("slots_degraded", 0) or 0) == 0:
             ready += 1
     return ready
+
+
+def _warming_too_long(rec: dict, now: datetime,
+                      timeout_minutes: int = 0) -> bool:
+    """Has this pool been WARMING past the point where waiting still helps?
+
+    Measured from ``requested_at`` — the launch — because that is when the clock
+    a trainer cares about started. Returns False when the timestamp is missing
+    or unparseable: a record we cannot date must not be declared degraded.
+    """
+    timeout_minutes = timeout_minutes or WORKSHOP_WARMING_TIMEOUT_MINUTES
+    started = parse_iso(rec.get("requested_at", ""))
+    if started is None:
+        return False
+    return now >= started + timedelta(minutes=timeout_minutes)
+
+
+async def _pool_workers_any(redis, pool_name: str) -> int:
+    """Workers in ``pool_name`` reporting ANY warm slot.
+
+    The degraded counterpart to ``_pool_workers_ready``: it answers "how much
+    can this pool actually serve right now", not "did every slot come up".
+    """
+    if not pool_name:
+        return 0
+    count = 0
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if not h or h.get("pool") != pool_name:
+            continue
+        try:
+            if int(h.get("slots_ready", 0) or 0) > 0:
+                count += 1
+        except (TypeError, ValueError):
+            continue
+    return count
+
+
+async def _busy_pool_workers(redis, pool_name: str) -> list[str]:
+    """Workers in ``pool_name`` still reporting active jobs.
+
+    Read AFTER this workshop's sessions have been asked to stop, so a non-empty
+    answer means work that is not ours.
+    """
+    if not pool_name:
+        return []
+    busy = []
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if not h or h.get("pool") != pool_name:
+            continue
+        try:
+            if int(h.get("active_jobs", 0) or 0) > 0:
+                busy.append(h.get("worker_id") or key.split(":", 1)[1])
+        except (TypeError, ValueError):
+            continue
+    return busy
 
 
 async def _instances_tagged(pool_name: str) -> list[str]:
@@ -793,6 +1003,26 @@ async def tick(redis) -> dict:
                     await _save_fleet_record(redis, ws_id, rec)
                     state = READY
                     log.info("workshop %s: %d worker(s) ready", ws_id, ready)
+                elif _warming_too_long(rec, now):
+                    # Readiness requires slots_degraded == 0, so ONE worker that
+                    # came up short holds the whole workshop at `warming` with no
+                    # deadline — indistinguishable, to a trainer, from a hung
+                    # fleet. Past the timeout, deliver with whatever warmed:
+                    # partial capacity that learners can actually use beats a
+                    # room that never opens. Said out loud, because a degraded
+                    # pool must never look like a healthy one.
+                    degraded = await _pool_workers_any(redis, pool_name)
+                    rec["state"] = READY
+                    rec["ready_at"] = now.isoformat()
+                    rec["ready_workers"] = degraded
+                    rec["degraded"] = True
+                    await _save_fleet_record(redis, ws_id, rec)
+                    state = READY
+                    log.error("workshop %s: pool %s still not fully warm after "
+                              "%d min — proceeding DEGRADED with %d worker(s); "
+                              "seats may be short",
+                              scrub_for_log(ws_id), scrub_for_log(pool_name),
+                              WORKSHOP_WARMING_TIMEOUT_MINUTES, degraded)
 
             if state in (None, "", "failed") and due_for_prewarm(session, now):
                 if CONTROL_LOOP_APPLY:
@@ -866,9 +1096,17 @@ async def tick(redis) -> dict:
         if decision["scale_up"]:
             log.info("daily: scaling up %d (%s)", decision["scale_up"], decision["why"])
             try:
+                # Pin the slot count from the unit model. Without an explicit
+                # capacity the worker keeps the AMI's baked WORKER_CAPACITY,
+                # which an explicit env var makes win over the unit derivation
+                # — the golden AMI carries 6 from the c5.2xlarge era, so every
+                # autoscaled m6a.2xlarge advertised 6 seats instead of 10 and
+                # the pool kept buying more of them. Measured live 2026-08-16.
                 await fleet.scale_up(decision["scale_up"],
                                      instance_type=DAILY_INSTANCE_TYPE,
-                                     purchasing="spot", pool="daily")
+                                     purchasing="spot", pool="daily",
+                                     capacity=capacity_units.units_for_instance(
+                                         DAILY_INSTANCE_TYPE) or None)
             except Exception as exc:
                 log.error("daily: scale-up failed: %s", exc)
     except Exception as exc:

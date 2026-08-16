@@ -357,6 +357,14 @@ def _parse_instances(reservations: list) -> list[dict]:
                 # EC2 only sets InstanceLifecycle for spot/scheduled.
                 "lifecycle": inst.get("InstanceLifecycle") or "on-demand",
                 "launch_time": inst.get("LaunchTime", ""),
+                # Which lane this machine belongs to. Every instance the
+                # autoscaler launches is tagged with it, but this function used
+                # to drop all tags — so the browser could not tell a workshop
+                # machine from a self-service one, and neither could the human
+                # reading the fleet table before clicking "scale down".
+                # Untagged (the two long-lived pet workers) reads as daily,
+                # matching how every other consumer treats a missing pool.
+                "pool": tags.get("orbital-pool", "") or "",
             })
     return out
 

@@ -1624,3 +1624,61 @@ body.role-writer .tab-writer-only { display: inline-block; }
 .inst-note .inst-why,
 .inst-note .inst-limit { opacity: 0.8; }
 .inst-note .inst-limit { font-variant-numeric: tabular-nums; }
+
+/* ── Lanes ───────────────────────────────────────────────────────────────────
+   A worker serves exactly one queue topology, and that decides who can land on
+   it. Self-service and workshop machines used to look identical here, so an
+   operator could not tell which ones were safe to cordon. Colour carries the
+   lane; the badge repeats it in words, because colour alone is not a label. */
+
+.lane-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 99px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    border: 1px solid transparent;
+}
+.lane-badge.daily      { background: rgba(74,222,128,.12); color: var(--green);  border-color: rgba(74,222,128,.32); }
+.lane-badge.workshop   { background: rgba(251,191,36,.13); color: var(--yellow); border-color: rgba(251,191,36,.34); }
+/* Not an error, but not nothing either: it means the worker has registered and
+   not yet published a pool, and every consumer is reading it as daily. */
+.lane-badge.unassigned { background: rgba(148,163,184,.14); color: var(--text-2); border-color: rgba(148,163,184,.34); }
+
+/* A thin left edge on the card, so a grid of workers separates into lanes at a
+   glance without reading a single badge. */
+.worker-card.lane-workshop { border-left: 3px solid rgba(251,191,36,.55); }
+.worker-card.lane-daily    { border-left: 3px solid rgba(74,222,128,.40); }
+
+.lane-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0 0 14px;
+}
+.lane-card {
+    flex: 1 1 260px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-soft);
+    border-left-width: 3px;
+    border-radius: var(--r-sm);
+    background: var(--surface);
+}
+.lane-card.lane-daily    { border-left-color: rgba(74,222,128,.55); }
+.lane-card.lane-workshop { border-left-color: rgba(251,191,36,.65); }
+.lane-card .lane-name {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--text-2);
+}
+.lane-card .lane-stats { font-size: 0.82rem; color: var(--text); }
+.lane-card .lane-stats b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.worker-card .meta .muted { color: var(--text-3); }
