@@ -1013,27 +1013,44 @@ class WorkerAgent:
         nothing. A fabricated 0 would read as an idle volume, which is a
         different claim from "not measured yet".
         """
+        # Read /proc/diskstats rather than psutil: psutil is NOT installed on the
+        # workers (the cpu/mem collection above already carries a procfs fallback
+        # for the same reason), and a metric that silently reports nothing on
+        # every real box is worse than one that was never added.
+        #
+        # Layout, per `Documentation/admin-guide/iostats.rst`:
+        #   [0] major  [1] minor  [2] name
+        #   [3] reads completed          [5] sectors read
+        #   [7] writes completed         [9] sectors written
+        # Sectors are always 512 bytes here, regardless of physical block size.
         try:
-            import psutil as _ps
-            counters = _ps.disk_io_counters(perdisk=True) or {}
-        except Exception:
+            with open("/proc/diskstats") as fh:
+                lines = fh.readlines()
+        except OSError:
             return {}
 
-        # Whole physical disks only. Partitions double-count their parent, and
-        # loop/dm devices are container overlay noise that would swamp the real
-        # volume — the number has to describe the EBS volume or it is worse than
-        # having none.
-        def _is_whole_disk(name: str) -> bool:
-            if re.fullmatch(r"nvme\d+n\d+", name):
-                return True
-            return bool(re.fullmatch(r"(xvd|sd)[a-z]+", name))
-
         totals = {"read_bytes": 0, "write_bytes": 0, "read_count": 0, "write_count": 0}
-        for name, c in counters.items():
-            if not _is_whole_disk(name):
+        for line in lines:
+            f = line.split()
+            if len(f) < 10:
                 continue
-            for k in totals:
-                totals[k] += getattr(c, k, 0) or 0
+            name = f[2]
+            # Whole physical disks only. Partitions (nvme0n1p1) double-count
+            # their parent, and loop/dm devices are container overlay noise that
+            # would swamp the real volume — the number has to describe the EBS
+            # volume or it is worse than having none.
+            if not (re.fullmatch(r"nvme\d+n\d+", name)
+                    or re.fullmatch(r"(xvd|sd)[a-z]+", name)):
+                continue
+            try:
+                totals["read_count"] += int(f[3])
+                totals["read_bytes"] += int(f[5]) * 512
+                totals["write_count"] += int(f[7])
+                totals["write_bytes"] += int(f[9]) * 512
+            except (ValueError, IndexError):
+                continue
+        if not totals["read_count"] and not totals["write_count"]:
+            return {}
 
         now = time.monotonic()
         prev = _DISK_IO_SAMPLE.get("sample")

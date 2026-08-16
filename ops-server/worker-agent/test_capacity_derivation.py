@@ -92,3 +92,49 @@ class TestDerivedCapacity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ── disk telemetry ──────────────────────────────────────────────────────────
+#
+# Every disk figure in the capacity model came from a human running `iostat`
+# during a load test. This is the production version of that, and it has to work
+# on the workers as they actually are — which means procfs, because psutil is
+# NOT installed there.
+
+def test_disk_io_reads_procfs_not_psutil():
+    """psutil is absent on every worker; the cpu/mem collector already carries a
+    procfs fallback for the same reason. A metric that silently reports nothing
+    on every real box is worse than one that was never added."""
+    import inspect
+    from . import agent as ag
+    src = inspect.getsource(ag.WorkerAgent._collect_disk_io)
+    assert "/proc/diskstats" in src
+    assert "import psutil" not in src
+
+
+def test_disk_io_counts_whole_disks_only():
+    """A partition double-counts its parent and loop/dm devices are container
+    overlay noise — counting them would describe the container runtime, not the
+    EBS volume the capacity model is about."""
+    import re as _re
+    nvme = _re.compile(r"nvme\d+n\d+")
+    assert nvme.fullmatch("nvme0n1")
+    assert not nvme.fullmatch("nvme0n1p1"), "partition would double-count its parent"
+    other = _re.compile(r"(xvd|sd)[a-z]+")
+    assert other.fullmatch("xvda") and other.fullmatch("sda")
+    assert not other.fullmatch("loop0") and not other.fullmatch("dm-0")
+
+
+def test_first_sample_publishes_nothing_then_a_rate():
+    """A fabricated 0 reads as an idle volume, which is a different claim from
+    'not measured yet'."""
+    from . import agent as ag
+    ag._DISK_IO_SAMPLE.clear()
+    assert ag.WorkerAgent._collect_disk_io() == {}, \
+        "published a rate with no baseline to compare against"
+    second = ag.WorkerAgent._collect_disk_io()
+    if second:                      # empty only on a host with no matching disk
+        assert {"disk_read_mbps", "disk_write_mbps", "disk_iops"} == set(second)
+        assert float(second["disk_read_mbps"]) >= 0
+        assert int(second["disk_iops"]) >= 0
+    ag._DISK_IO_SAMPLE.clear()
