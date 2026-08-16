@@ -123,6 +123,16 @@ WORKSHOP_STANDING_MAX_SEATS = int(os.environ.get("WORKSHOP_STANDING_MAX_SEATS", 
 # One host lost mid-delivery strands a full machine's worth of learners and the
 # loop will not re-plan a bound workshop, so the spare is the only remedy.
 WORKSHOP_REDUNDANCY = int(os.environ.get("WORKSHOP_REDUNDANCY", "1"))
+# Extra minutes on top of prewarm + duration + grace before a workshop machine
+# kills itself. Wide enough that the self-destruct never races a workshop that
+# is merely overrunning — the loop's teardown should always win the race.
+WORKSHOP_LIFETIME_MARGIN_MINUTES = int(os.environ.get("WORKSHOP_LIFETIME_MARGIN_MINUTES", "60"))
+# How long a pool may sit in WARMING before the loop stops waiting for the last
+# slot and delivers with what came up. A worker that comes back short (measured:
+# "SysboxPool: 18/30 slots ready" while reporting fully warm) would otherwise
+# hold the workshop at `warming` forever, which reads to a trainer as a hung
+# fleet and blocks the room from opening at all.
+WORKSHOP_WARMING_TIMEOUT_MINUTES = int(os.environ.get("WORKSHOP_WARMING_TIMEOUT_MINUTES", "20"))
 # Workshops run on-demand, never spot. A spot reclamation costs a learner their
 # session with two minutes' notice and a Sysbox session cannot be migrated.
 WORKSHOP_PURCHASING = os.environ.get("WORKSHOP_PURCHASING", "on-demand")
@@ -213,6 +223,23 @@ def workshop_repo(session: dict) -> str:
     """
     return (session.get("repoUrl") or session.get("trainingId")
             or session.get("repo") or "")
+
+
+def _workshop_lifetime_minutes(session: dict,
+                               margin_minutes: int = WORKSHOP_LIFETIME_MARGIN_MINUTES) -> int:
+    """Hard self-destruct offset for a workshop's machines.
+
+    Prewarm lead + the booked duration + the teardown grace + a margin, so the
+    timer can only ever fire AFTER the loop's own teardown would have. It is a
+    backstop against the loop not running at all, not a second schedule
+    competing with it.
+    """
+    try:
+        duration = int(session.get("durationMinutes") or 120)
+    except (TypeError, ValueError):
+        duration = 120
+    return (PREWARM_LEAD_MINUTES + max(0, duration)
+            + TEARDOWN_GRACE_MINUTES + max(0, margin_minutes))
 
 
 def workshop_end(session: dict):
@@ -521,6 +548,15 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
                 purchasing=WORKSHOP_PURCHASING,
                 pool=pool_name,
                 capacity=plan["seats_per_worker"],
+                # Self-destruct, armed inside the instance at boot. Until now the
+                # ONLY thing that ever terminated a workshop machine was this
+                # loop's teardown, so a lost fleet record, a deleted (rather than
+                # ended) workshop, or a dashboard that never comes back left the
+                # machines running until somebody noticed. `shutdown -h +N` needs
+                # nothing from Orbital, Redis, AWS credentials or the network —
+                # it is the only cost guarantee that survives losing all of them.
+                # Generous on purpose: it is a backstop, not a schedule.
+                lifetime_minutes=_workshop_lifetime_minutes(session),
                 # A workshop worker serves one repo, so its slots can be capped
                 # for that repo specifically rather than at a flat figure chosen
                 # for the lightest one.
@@ -674,6 +710,47 @@ async def _pool_workers_ready(redis, pool_name: str) -> int:
         if h.get("status") == "ready" and int(h.get("slots_degraded", 0) or 0) == 0:
             ready += 1
     return ready
+
+
+def _warming_too_long(rec: dict, now: datetime,
+                      timeout_minutes: int = 0) -> bool:
+    """Has this pool been WARMING past the point where waiting still helps?
+
+    Measured from ``requested_at`` — the launch — because that is when the clock
+    a trainer cares about started. Returns False when the timestamp is missing
+    or unparseable: a record we cannot date must not be declared degraded.
+    """
+    timeout_minutes = timeout_minutes or WORKSHOP_WARMING_TIMEOUT_MINUTES
+    started = parse_iso(rec.get("requested_at", ""))
+    if started is None:
+        return False
+    return now >= started + timedelta(minutes=timeout_minutes)
+
+
+async def _pool_workers_any(redis, pool_name: str) -> int:
+    """Workers in ``pool_name`` reporting ANY warm slot.
+
+    The degraded counterpart to ``_pool_workers_ready``: it answers "how much
+    can this pool actually serve right now", not "did every slot come up".
+    """
+    if not pool_name:
+        return 0
+    count = 0
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if not h or h.get("pool") != pool_name:
+            continue
+        try:
+            if int(h.get("slots_ready", 0) or 0) > 0:
+                count += 1
+        except (TypeError, ValueError):
+            continue
+    return count
 
 
 async def _busy_pool_workers(redis, pool_name: str) -> list[str]:
@@ -926,6 +1003,26 @@ async def tick(redis) -> dict:
                     await _save_fleet_record(redis, ws_id, rec)
                     state = READY
                     log.info("workshop %s: %d worker(s) ready", ws_id, ready)
+                elif _warming_too_long(rec, now):
+                    # Readiness requires slots_degraded == 0, so ONE worker that
+                    # came up short holds the whole workshop at `warming` with no
+                    # deadline — indistinguishable, to a trainer, from a hung
+                    # fleet. Past the timeout, deliver with whatever warmed:
+                    # partial capacity that learners can actually use beats a
+                    # room that never opens. Said out loud, because a degraded
+                    # pool must never look like a healthy one.
+                    degraded = await _pool_workers_any(redis, pool_name)
+                    rec["state"] = READY
+                    rec["ready_at"] = now.isoformat()
+                    rec["ready_workers"] = degraded
+                    rec["degraded"] = True
+                    await _save_fleet_record(redis, ws_id, rec)
+                    state = READY
+                    log.error("workshop %s: pool %s still not fully warm after "
+                              "%d min — proceeding DEGRADED with %d worker(s); "
+                              "seats may be short",
+                              scrub_for_log(ws_id), scrub_for_log(pool_name),
+                              WORKSHOP_WARMING_TIMEOUT_MINUTES, degraded)
 
             if state in (None, "", "failed") and due_for_prewarm(session, now):
                 if CONTROL_LOOP_APPLY:

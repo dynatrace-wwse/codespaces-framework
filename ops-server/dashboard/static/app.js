@@ -1047,6 +1047,97 @@ document.addEventListener('change', e => {
 });
 
 // ── Workers View ────────────────────────────────────────────────────────────
+//
+// Lanes. A worker serves exactly one queue topology and that decides who can
+// ever land on it: `daily` takes self-service work, anything else is a workshop
+// pool that self-service traffic cannot reach. Until this was rendered the two
+// were indistinguishable in the UI, so an operator could not tell which
+// machines were safe to cordon — and the planner had the same blind spot.
+
+const DAILY_POOL = 'daily';
+
+/** Lane of a worker hash. A missing pool means daily, matching every consumer. */
+function laneOf(w) {
+    return (w.pool || '').trim() || DAILY_POOL;
+}
+
+function laneClass(w) {
+    if (w.role === 'master') return '';
+    return laneOf(w) === DAILY_POOL ? 'lane-daily' : 'lane-workshop';
+}
+
+function laneBadge(w) {
+    const lane = laneOf(w);
+    if (!w.pool) {
+        // Genuinely unknown rather than daily-by-default: a worker that has
+        // registered but not yet heartbeat, or a hand-built box. Worth seeing.
+        return '<span class="lane-badge unassigned" title="No pool published yet — '
+             + 'registered but not yet heartbeat, or a hand-built worker. '
+             + 'Treated as daily until it reports one.">unassigned</span>';
+    }
+    if (lane === DAILY_POOL) {
+        return '<span class="lane-badge daily" title="Self-service lane — '
+             + 'takes learner sessions off the shared queue">self-service</span>';
+    }
+    const label = lane === 'workshop' ? 'workshop' : `workshop · ${lane}`;
+    return `<span class="lane-badge workshop" title="Workshop lane (${escapeHtml(lane)}) — `
+         + `self-service work can never be scheduled here">${escapeHtml(label)}</span>`;
+}
+
+/** "lending 3/10 to self-service" for the standing workshop box. */
+function lendingLine(w) {
+    const cap = parseInt(w.borrow_capacity || '0', 10);
+    if (!cap || !w.borrow_pool) return '';
+    const inFlight = parseInt(w.borrow_in_flight || '0', 10);
+    const free = parseInt(w.borrow_free || '0', 10);
+    return `<div title="Half this box is lent to ${escapeHtml(w.borrow_pool)}; the rest `
+         + `is reserved so a workshop can start with no notice">`
+         + `Lending: <strong>${inFlight}/${cap}</strong> to ${escapeHtml(w.borrow_pool)}`
+         + ` <span class="muted">(${free} free to lend)</span></div>`;
+}
+
+/**
+ * The lanes strip: one row per lane, so "how many seats can self-service
+ * actually get" and "how many are held for workshops" are answerable at a
+ * glance instead of by adding up worker cards.
+ */
+function renderLanes(workers) {
+    const el = document.getElementById('lane-strip');
+    if (!el) return;
+    const lanes = {};
+    for (const w of workers) {
+        if (w.role === 'master') continue;
+        const lane = laneOf(w);
+        const l = lanes[lane] || (lanes[lane] = {
+            workers: 0, ready: 0, free: 0, active: 0, lent: 0, lendable: 0,
+        });
+        l.workers += 1;
+        if (w.status === 'ready') l.ready += 1;
+        l.free += parseInt(w.slots_free || '0', 10) || 0;
+        l.active += parseInt(w.active_jobs || '0', 10) || 0;
+        l.lent += parseInt(w.borrow_in_flight || '0', 10) || 0;
+        l.lendable += parseInt(w.borrow_capacity || '0', 10) || 0;
+    }
+    const order = Object.keys(lanes).sort((a, b) =>
+        (a === DAILY_POOL ? -1 : b === DAILY_POOL ? 1 : a.localeCompare(b)));
+    if (!order.length) { el.innerHTML = ''; return; }
+
+    el.innerHTML = order.map(lane => {
+        const l = lanes[lane];
+        const isDaily = lane === DAILY_POOL;
+        const name = isDaily ? 'Self-service' : (lane === 'workshop' ? 'Workshops' : `Workshop · ${lane}`);
+        const reserved = l.lendable ? ` · <b>${l.lendable}</b> lendable` : '';
+        const lent = l.lent ? ` · <b>${l.lent}</b> lent out` : '';
+        return `
+            <div class="lane-card ${isDaily ? 'lane-daily' : 'lane-workshop'}">
+                <span class="lane-name">${escapeHtml(name)}</span>
+                <span class="lane-stats">
+                    <b>${l.free}</b> free · <b>${l.active}</b> in use ·
+                    <b>${l.ready}/${l.workers}</b> workers ready${reserved}${lent}
+                </span>
+            </div>`;
+    }).join('');
+}
 
 async function loadWorkers() {
     const [workersRes, buildsRes, healthRes] = await Promise.all([
@@ -1102,12 +1193,15 @@ async function loadWorkers() {
                     ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Containers: ${escapeHtml(String(w.containers_running))}</div>`
                     : '',
             ].filter(Boolean).join('');
+            const lanePill = isMaster ? '' : laneBadge(w);
+            const lendLine = lendingLine(w);
             return `
-                <div class="worker-card ${isMaster ? 'is-master' : ''} ${stale ? 'offline' : ''}">
-                    <h4>${escapeHtml(w.worker_id)} ${badge} ${statusPill}</h4>
+                <div class="worker-card ${isMaster ? 'is-master' : ''} ${stale ? 'offline' : ''} ${laneClass(w)}">
+                    <h4>${escapeHtml(w.worker_id)} ${badge} ${lanePill} ${statusPill}</h4>
                     <div class="meta">
                         <div>Arch: <strong>${escapeHtml(w.arch || '')}</strong></div>
                         <div>Active: ${escapeHtml(String(w.active_jobs || '0'))} / ${escapeHtml(String(w.capacity || '?'))}</div>
+                        ${lendLine}
                         <div>Last heartbeat: ${formatTime(w.last_heartbeat)}</div>
                         ${masterExtras}
                     </div>
@@ -1116,6 +1210,8 @@ async function loadWorkers() {
             `;
         }).join('');
     }
+
+    renderLanes(workersData.workers);
 
     const queueGrid = document.getElementById('queue-status');
     queueGrid.innerHTML = Object.entries(buildsData.queues).map(([name, count]) => `

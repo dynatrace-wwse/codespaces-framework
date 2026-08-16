@@ -317,7 +317,8 @@ def test_parse_instances_shape_and_lifecycle():
                 "PrivateIpAddress": "172.31.40.1",
                 "InstanceLifecycle": "spot",
                 "LaunchTime": "2026-07-14T10:00:00+00:00",
-                "Tags": [{"Key": "Name", "Value": "orbital-worker-spot"}],
+                "Tags": [{"Key": "Name", "Value": "orbital-worker-spot"},
+                         {"Key": "orbital-pool", "Value": "ws-abc123"}],
             },
             {
                 "InstanceId": "i-master",
@@ -339,7 +340,14 @@ def test_parse_instances_shape_and_lifecycle():
     assert spot["private_ip"] == "172.31.40.1"
     assert master["type"] == "c5.4xlarge"
     assert set(spot) == {"instance_id", "name", "type", "state",
-                         "private_ip", "lifecycle", "launch_time"}
+                         "private_ip", "lifecycle", "launch_time", "pool"}
+    # The lane must survive the flattening. Dropping every tag here is what left
+    # the UI unable to tell a workshop machine from a self-service one, and it
+    # is the same blind spot that let a scale-down click cordon a workshop box.
+    assert spot["pool"] == "ws-abc123"
+    # An untagged instance (the long-lived pet workers) reports no lane rather
+    # than a guessed one; consumers read empty as daily, as they do everywhere.
+    assert master["pool"] == ""
 
 
 if __name__ == "__main__":

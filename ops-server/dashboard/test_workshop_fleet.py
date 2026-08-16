@@ -659,3 +659,40 @@ def test_a_full_lender_offers_nothing_and_the_pool_still_scales():
     lender["borrow_free"] = "0"
     d = wf.daily_scale_decision([lender], {}, min_free=4)
     assert d["scale_up"] == 1
+
+
+# ── the bounded warming wait ────────────────────────────────────────────────
+
+def test_a_pool_that_never_finishes_warming_is_not_waited_on_forever():
+    """A worker that comes back short (seen: 18/30 slots while reporting fully
+    warm) held the workshop at `warming` with no deadline — which reads to a
+    trainer exactly like a hung fleet, and the room never opens."""
+    rec = {"requested_at": NOW.isoformat()}
+    assert wf._warming_too_long(rec, NOW, timeout_minutes=20) is False
+    assert wf._warming_too_long(rec, NOW + timedelta(minutes=19),
+                                timeout_minutes=20) is False
+    assert wf._warming_too_long(rec, NOW + timedelta(minutes=21),
+                                timeout_minutes=20) is True
+
+
+def test_an_undateable_record_is_never_declared_degraded():
+    """Guessing here would flip a healthy workshop to DEGRADED on a bad clock
+    or a half-written record."""
+    assert wf._warming_too_long({}, NOW) is False
+    assert wf._warming_too_long({"requested_at": "not-a-date"}, NOW) is False
+
+
+# ── the self-destruct backstop ──────────────────────────────────────────────
+
+def test_machines_outlive_the_teardown_window_but_not_by_much():
+    """The timer must never fire before the loop's own teardown would have, or
+    it becomes a second scheduler racing the first."""
+    lifetime = wf._workshop_lifetime_minutes({"durationMinutes": "120"})
+    latest_teardown = wf.PREWARM_LEAD_MINUTES + 120 + wf.TEARDOWN_GRACE_MINUTES
+    assert lifetime > latest_teardown, "self-destruct could fire mid-workshop"
+
+
+def test_a_malformed_duration_still_gets_a_timer():
+    """No duration must not mean no cost ceiling."""
+    assert wf._workshop_lifetime_minutes({}) > 0
+    assert wf._workshop_lifetime_minutes({"durationMinutes": "abc"}) > 0
