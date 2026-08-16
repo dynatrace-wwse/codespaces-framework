@@ -87,20 +87,42 @@ def pending_key(target: str) -> str:
     return f"queue:pending:{target}"
 
 
+# Times the routing above fell back to the shared queue because Redis could not
+# answer, per workshop. IN PROCESS, not in Redis, precisely because the thing it
+# records is Redis being unavailable — a counter that needs the failed dependency
+# to increment would be empty exactly when it matters. Reset on restart, which is
+# the right scope: it answers "is this happening now", not "how often historically".
+_FAIL_OPEN: dict[str, int] = {}
+
+
+def fail_open_counts() -> dict[str, int]:
+    """Workshops whose routing has fallen back to the shared queue, and how often.
+
+    Exposed so a workshop that quietly lost its isolation can be SEEN. Without
+    it, a workshop delivered on the daily pool by a Redis blip looks exactly
+    like one delivered correctly — same sessions, same board, same everything.
+    """
+    return dict(_FAIL_OPEN)
+
+
 async def pool_for_workshop(redis, ws_id: str) -> str:
     """Pool serving ``ws_id``, or "" when it has no dedicated machines.
 
     Fails OPEN: any Redis problem returns "" and the job takes the shared
     queue. A workshop losing its isolation is a degraded delivery; a workshop
     whose learners cannot be provisioned at all is a failed one.
+
+    The fallback is COUNTED as well as logged — see ``fail_open_counts``.
     """
     if not ws_id:
         return ""
     try:
         return (await redis.hget(WORKSHOP_POOL_KEY, ws_id)) or ""
     except Exception as exc:                                  # pragma: no cover
-        log.warning("pool lookup failed for %s: %s — using shared queue",
-                    scrub_for_log(ws_id), scrub_for_log(exc))
+        _FAIL_OPEN[ws_id] = _FAIL_OPEN.get(ws_id, 0) + 1
+        log.warning("pool lookup failed for %s: %s — using shared queue "
+                    "(%d time(s) for this workshop; its isolation is GONE)",
+                    scrub_for_log(ws_id), scrub_for_log(exc), _FAIL_OPEN[ws_id])
         return ""
 
 

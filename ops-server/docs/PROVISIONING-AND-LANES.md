@@ -625,5 +625,24 @@ nothing.
    ```
 2. **Merge the branch.** Launched workers sync `origin/main`, so until then any machine the loop
    launches comes up without the lending code (harmless — only the standing box lends).
-3. Decide `DAILY_MAX_WORKERS` for bootcamp day (G6).
-4. The remaining measurement gaps, G8 and G9.
+3. ~~Decide `DAILY_MAX_WORKERS` for bootcamp day (G6).~~ **Resolved: leave it at 4.** The lane
+   split does not shrink the self-service ceiling, because amd002 vacating a daily slot returns
+   exactly the headroom it took out of standing capacity:
+
+   | | before the split | now |
+   |---|---|---|
+   | standing, zero spend | amd001 + amd002 = **40** | amd001 20 + amd002 lends 10 = **30** |
+   | autoscaler headroom | 2 spot × 10 = 20 | 3 spot × 10 = **30** |
+   | **ceiling** | **60** | **60** |
+
+   The workshop lane is a separate pool and never consumes this cap, so a bootcamp's dedicated
+   machines do not compete with self-service scaling at all.
+4. ~~G9 — fail-open routing is silent.~~ **Done**: counted per workshop in-process (not in Redis —
+   it records Redis being unavailable) and surfaced as `failedOpen` on
+   `GET /api/workshops/{id}/fleet`.
+5. ~~G8, first half — no IOPS telemetry anywhere.~~ **Done**: the worker heartbeat now publishes
+   `disk_read_mbps`, `disk_write_mbps` and `disk_iops`, rendered on each worker card and flagged
+   red past 80% of the provisioned 500 MB/s / 6,000 IOPS. Whole physical disks only — partitions
+   double-count their parent and loop/dm devices are container overlay noise.
+6. Still open: **G8, second half** — the reaper has not been exercised by a *workshop* teardown at
+   30 seats (validated on the daily pool only).

@@ -22,6 +22,7 @@ stay alive. If a slot becomes unhealthy it is automatically re-initialized.
 import asyncio
 import json
 import logging
+import re
 import secrets
 import shutil
 import signal
@@ -575,6 +576,12 @@ async def _image_digest(image: str) -> str:
         return ""
 
 
+
+# Previous disk counters, for turning monotonic totals into rates.
+# Module level because _collect_disk_io is a staticmethod on a single-process
+# agent; an instance attribute would buy nothing at the call site.
+_DISK_IO_SAMPLE: dict = {}
+
 class WorkerAgent:
     """Lightweight worker that connects to master Redis, pulls and executes test jobs."""
 
@@ -989,6 +996,70 @@ class WorkerAgent:
         return draining or braked
 
     @staticmethod
+    def _collect_disk_io() -> dict:
+        """Volume throughput and IOPS since the previous heartbeat.
+
+        WHY THIS EXISTS: every disk number in the capacity model — the 125 MB/s
+        bandwidth ceiling, the ~3,300 IOPS an install burst needs, the finding
+        that raising throughput alone bought nothing — came from a human running
+        `iostat` during a load test. Nothing measured it in production, so a
+        volume quietly running at its limit looked exactly like a healthy one.
+
+        Rates, not counters: a counter that only ever grows tells an operator
+        nothing at a glance, and the interesting question ("is the volume the
+        thing that is slow right now") is a rate question.
+
+        The first call after a restart establishes the baseline and publishes
+        nothing. A fabricated 0 would read as an idle volume, which is a
+        different claim from "not measured yet".
+        """
+        try:
+            import psutil as _ps
+            counters = _ps.disk_io_counters(perdisk=True) or {}
+        except Exception:
+            return {}
+
+        # Whole physical disks only. Partitions double-count their parent, and
+        # loop/dm devices are container overlay noise that would swamp the real
+        # volume — the number has to describe the EBS volume or it is worse than
+        # having none.
+        def _is_whole_disk(name: str) -> bool:
+            if re.fullmatch(r"nvme\d+n\d+", name):
+                return True
+            return bool(re.fullmatch(r"(xvd|sd)[a-z]+", name))
+
+        totals = {"read_bytes": 0, "write_bytes": 0, "read_count": 0, "write_count": 0}
+        for name, c in counters.items():
+            if not _is_whole_disk(name):
+                continue
+            for k in totals:
+                totals[k] += getattr(c, k, 0) or 0
+
+        now = time.monotonic()
+        prev = _DISK_IO_SAMPLE.get("sample")
+        _DISK_IO_SAMPLE["sample"] = (now, totals)
+        if not prev:
+            return {}
+        elapsed = now - prev[0]
+        if elapsed <= 0:
+            return {}
+
+        before = prev[1]
+        read_mb = (totals["read_bytes"] - before["read_bytes"]) / 1024 ** 2 / elapsed
+        write_mb = (totals["write_bytes"] - before["write_bytes"]) / 1024 ** 2 / elapsed
+        iops = ((totals["read_count"] - before["read_count"])
+                + (totals["write_count"] - before["write_count"])) / elapsed
+        # A counter reset (device replaced, or a wrapped counter) shows up as a
+        # negative delta. Report nothing rather than a nonsense negative rate.
+        if min(read_mb, write_mb, iops) < 0:
+            return {}
+        return {
+            "disk_read_mbps": str(round(read_mb, 1)),
+            "disk_write_mbps": str(round(write_mb, 1)),
+            "disk_iops": str(int(iops)),
+        }
+
+    @staticmethod
     def _collect_metrics() -> dict:
         """Collect host CPU, memory, disk, and container metrics."""
         metrics = {}
@@ -1039,6 +1110,9 @@ class WorkerAgent:
             metrics["containers_running"] = str(len([l for l in out.splitlines() if l]))
         except Exception:
             pass
+        # Volume throughput + IOPS. Empty on the first heartbeat after a restart
+        # (no baseline yet) rather than a fabricated zero.
+        metrics.update(WorkerAgent._collect_disk_io())
         return metrics
 
     async def _heartbeat_loop(self):

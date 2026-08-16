@@ -331,7 +331,8 @@ def _frac(hash_value, key: str) -> float:
 
 def daily_scale_decision(workers: list[dict], pressure_ticks: dict[str, int],
                          min_free: int = DAILY_MIN_FREE_SEATS,
-                         max_workers: int = DAILY_MAX_WORKERS) -> dict:
+                         max_workers: int = DAILY_MAX_WORKERS,
+                         lenders: list[dict] | None = None) -> dict:
     """What the daily pool should do this tick.
 
     ``workers`` are heartbeat hashes for the DAILY pool only -- workshop
@@ -349,12 +350,15 @@ def daily_scale_decision(workers: list[dict], pressure_ticks: dict[str, int],
 
     free = sum(int(w.get("slots_free", 0) or 0) for w in workers
                if w.get("status") == "ready" and not _truthy(w.get("draining")))
-    # Seats a workshop box is willing to lend count as daily capacity, because
-    # they are: the lending worker reads the daily queue while it is under its
-    # cap. Without this the planner buys a machine while ten borrowable seats
-    # sit warm and idle on the standing box.
-    free += sum(int(w.get("borrow_free", 0) or 0) for w in workers
-                if w.get("status") == "ready" and not _truthy(w.get("draining")))
+    # Seats a workshop box is willing to lend ARE daily capacity: the lending
+    # worker reads the daily queue while it is under its cap. They arrive as a
+    # SEPARATE list rather than in `workers`, because a lender must contribute
+    # its lendable seats WITHOUT counting toward DAILY_MAX_WORKERS or being
+    # eligible for the shrink/brake decisions below — those belong to whoever
+    # owns the machine, and that is the workshop lane.
+    lent_free = sum(int(w.get("borrow_free", 0) or 0) for w in (lenders or [])
+                    if w.get("status") == "ready" and not _truthy(w.get("draining")))
+    free += lent_free
     shrink, brake, reasons = [], [], []
 
     for w in workers:
@@ -928,6 +932,40 @@ async def _drop_queued_jobs(redis, ws_id: str, job_ids: set[str]) -> int:
     return dropped
 
 
+async def _lending_workers(redis) -> list[dict]:
+    """Workers OUTSIDE the daily pool that lend seats INTO it.
+
+    The standing workshop box reads the daily queue while it is under its lend
+    cap, so its ``borrow_free`` seats are genuinely available to self-service —
+    but it is not a daily worker, and ``_daily_workers`` correctly excludes it.
+    Returned separately so the planner can count the seats without also counting
+    the machine: a lender must not fill a slot in DAILY_MAX_WORKERS, and its
+    memory/CPU pressure belongs to the lane that owns it.
+    """
+    out = []
+    async for key in redis.scan_iter(match="worker:*", count=200):
+        if key.count(":") != 1:
+            continue
+        try:
+            h = await redis.hgetall(key)
+        except Exception:
+            continue
+        if not h or "capacity" not in h:
+            continue
+        if (h.get("pool") or "daily") == "daily":
+            continue                       # already counted by _daily_workers
+        if (h.get("borrow_pool") or "") != "daily":
+            continue
+        wid = h.get("worker_id") or key.split(":", 1)[1]
+        h.setdefault("worker_id", wid)
+        # Same staleness rule as the daily scan: a terminated machine's record
+        # can outlive it, and a frozen record would advertise seats forever.
+        if fleet_policy.normalize_worker(wid, h, datetime.now(timezone.utc).timestamp())["stale"]:
+            continue
+        out.append(h)
+    return out
+
+
 async def _daily_workers(redis) -> list[dict]:
     """Heartbeats for the DAILY pool only.
 
@@ -1057,7 +1095,8 @@ async def tick(redis) -> dict:
         if ticks:
             await redis.hset(PRESSURE_KEY, mapping={k: str(v) for k, v in ticks.items()})
 
-        decision = daily_scale_decision(workers, ticks)
+        decision = daily_scale_decision(workers, ticks,
+                                        lenders=await _lending_workers(redis))
         summary["daily"] = decision
 
         if not CONTROL_LOOP_APPLY:

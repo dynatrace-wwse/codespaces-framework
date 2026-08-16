@@ -395,3 +395,44 @@ def test_a_wrongtype_key_costs_that_key_not_the_whole_count():
     for i in range(3):
         r.l[f"worker:wdaily{i}:app_ports_free"] = ["32001", "32002"]
     assert asyncio.run(pools.workers_serving(r, "queue:test:amd64")) == 3
+
+
+# ── fail-open must be visible, not just logged ──────────────────────────────
+
+class _BrokenRedis:
+    """Redis that cannot answer the pool lookup — the exact failure that makes
+    routing fall back to the shared queue."""
+
+    async def hget(self, *a, **kw):
+        raise ConnectionError("redis is down")
+
+
+def test_fail_open_is_counted_per_workshop():
+    """A workshop delivered on the daily pool by a Redis blip looks identical to
+    one delivered correctly. Counting the fallback is the only thing that makes
+    the difference observable."""
+    import asyncio
+    before = pools.fail_open_counts().get("ws_counted", 0)
+    got = asyncio.run(pools.pool_for_workshop(_BrokenRedis(), "ws_counted"))
+    assert got == "", "must still fail OPEN — a workshop that cannot provision is worse"
+    assert pools.fail_open_counts().get("ws_counted", 0) == before + 1
+
+
+def test_the_counter_does_not_live_in_the_thing_that_broke():
+    """It records Redis being unavailable, so storing it in Redis would leave it
+    empty exactly when it matters."""
+    import inspect
+    src = inspect.getsource(pools.pool_for_workshop)
+    assert "_FAIL_OPEN[ws_id]" in src
+    assert "redis.incr" not in src and "redis.hincrby" not in src
+
+
+def test_a_healthy_lookup_counts_nothing():
+    import asyncio
+
+    class _OkRedis:
+        async def hget(self, *a, **kw):
+            return "ws-abc"
+
+    asyncio.run(pools.pool_for_workshop(_OkRedis(), "ws_healthy"))
+    assert "ws_healthy" not in pools.fail_open_counts()

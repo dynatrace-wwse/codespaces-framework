@@ -645,20 +645,49 @@ def test_the_threshold_is_configurable():
 def test_lent_seats_count_as_daily_capacity():
     """The standing workshop box reads the daily queue while under its lend cap,
     so its lendable seats ARE self-service capacity. Ignoring them makes the
-    planner buy a machine while ten warm seats sit idle."""
+    planner buy a machine while ten warm seats sit idle.
+
+    They arrive as `lenders`, NOT in `workers`: _daily_workers filters to
+    pool == daily, so a workshop box never appears in that list — which is
+    exactly how the first version of this shipped with the sum in the wrong
+    place and no effect at all.
+    """
+    daily = _worker("w-daily", free=0)
     lender = _worker("w-standing", free=0)
     lender["borrow_free"] = "10"
-    d = wf.daily_scale_decision([lender], {}, min_free=4)
+    d = wf.daily_scale_decision([daily], {}, min_free=4, lenders=[lender])
     assert d["scale_up"] == 0, "bought a machine while 10 borrowable seats were free"
 
 
 def test_a_full_lender_offers_nothing_and_the_pool_still_scales():
     """borrow_free is what the box will ACTUALLY take, so a full one must not
     keep the planner from buying real capacity."""
+    daily = _worker("w-daily", free=0)
     lender = _worker("w-standing", free=0)
     lender["borrow_free"] = "0"
-    d = wf.daily_scale_decision([lender], {}, min_free=4)
+    d = wf.daily_scale_decision([daily], {}, min_free=4, lenders=[lender])
     assert d["scale_up"] == 1
+
+
+def test_a_lender_does_not_fill_a_slot_in_the_worker_cap():
+    """A lender contributes seats, not a machine. Counting it toward
+    DAILY_MAX_WORKERS would let one workshop box block every daily purchase."""
+    daily = [_worker(f"w{i}", free=0) for i in range(2)]
+    lenders = [_worker("w-standing", free=0)]
+    lenders[0]["borrow_free"] = "0"
+    d = wf.daily_scale_decision(daily, {}, min_free=4, max_workers=3, lenders=lenders)
+    assert d["scale_up"] == 1, "the lender was counted as a daily worker"
+
+
+def test_a_draining_or_warming_lender_offers_nothing():
+    """Seats on a box that is going away, or has not warmed, are not seats."""
+    daily = _worker("w-daily", free=0)
+    for bad in ({"status": "warming"}, {"draining": "1"}):
+        lender = _worker("w-standing", free=0)
+        lender["borrow_free"] = "10"
+        lender.update(bad)
+        d = wf.daily_scale_decision([daily], {}, min_free=4, lenders=[lender])
+        assert d["scale_up"] == 1, f"counted seats from a {bad} lender"
 
 
 # ── the bounded warming wait ────────────────────────────────────────────────

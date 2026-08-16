@@ -1084,6 +1084,30 @@ function laneBadge(w) {
          + `self-service work can never be scheduled here">${escapeHtml(label)}</span>`;
 }
 
+/**
+ * Volume throughput and IOPS.
+ *
+ * Both matter and they bind in DIFFERENT phases of an install — bandwidth while
+ * images are pulled and extracted, IOPS while the ActiveGate JVM starts — so
+ * showing only one would hide half the failures. The thresholds are the
+ * provisioned figures for a launched worker (500 MB/s, 6,000 IOPS); at 80% the
+ * volume is close enough to its ceiling to be the reason installs are slow.
+ */
+function diskIoLine(w) {
+    if (w.disk_iops == null || w.disk_iops === '') return '';   // no baseline yet
+    const iops = parseInt(w.disk_iops, 10) || 0;
+    const read = parseFloat(w.disk_read_mbps || '0') || 0;
+    const write = parseFloat(w.disk_write_mbps || '0') || 0;
+    const mbps = read + write;
+    const hot = iops >= 4800 || mbps >= 400;
+    const colour = hot ? 'var(--red)' : 'var(--text-muted)';
+    return `<div style="font-size:0.72rem;color:${colour};margin-top:4px"
+                 title="Read ${read} + write ${write} MB/s. Provisioned: 500 MB/s, 6000 IOPS.
+Bandwidth binds during image pull; IOPS binds while the ActiveGate JVM boots.">
+        Disk I/O: ${mbps.toFixed(1)} MB/s · ${iops.toLocaleString()} IOPS${hot ? ' ⚠' : ''}
+    </div>`;
+}
+
 /** "lending 3/10 to self-service" for the standing workshop box. */
 function lendingLine(w) {
     const cap = parseInt(w.borrow_capacity || '0', 10);
@@ -1192,6 +1216,7 @@ async function loadWorkers() {
                 w.containers_running != null && w.containers_running !== ''
                     ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Containers: ${escapeHtml(String(w.containers_running))}</div>`
                     : '',
+                diskIoLine(w),
             ].filter(Boolean).join('');
             const lanePill = isMaster ? '' : laneBadge(w);
             const lendLine = lendingLine(w);

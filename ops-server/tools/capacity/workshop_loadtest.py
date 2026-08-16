@@ -161,11 +161,22 @@ async def main() -> int:
         # ── 1. what the model says this costs ───────────────────────────────
         units = cu.units_for_repo_static(repo)
         seats_each = cu.seats_per_instance(args.instance_type, units)
-        machines = cu.instances_for_seats(args.seats, args.instance_type, units)
+        # A workshop at or under the standing threshold launches NOTHING and runs
+        # on the standing workshop box's reserve. Printing a machine count for it
+        # would describe a plan the control loop is never going to make, and a
+        # wrong expectation in a test log is how someone later "fixes" a non-bug.
+        standing_max = int(os.environ.get("WORKSHOP_STANDING_MAX_SEATS", "7"))
+        on_standing = args.seats <= standing_max
+        machines = 0 if on_standing else cu.instances_for_seats(
+            args.seats, args.instance_type, units)
         log(f"unit model: {repo.split('/')[-1]} = {units} unit(s)/session, "
             f"{args.instance_type} = {cu.units_for_instance(args.instance_type)} "
             f"units -> {seats_each} seats each")
-        log(f"  {args.seats} seats -> {machines} machine(s) (incl. 1 spare)")
+        if on_standing:
+            log(f"  {args.seats} seats <= {standing_max} -> 0 machines, runs on the "
+                f"standing workshop box's reserve")
+        else:
+            log(f"  {args.seats} seats -> {machines} machine(s) (incl. 1 spare)")
 
         before = await workers(client)
         for w in before:
