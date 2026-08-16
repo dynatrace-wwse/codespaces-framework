@@ -138,6 +138,29 @@ the `r`.)
 
 ---
 
+## 4b. A 31-seat workshop, delivered without anyone clicking anything
+
+The run the whole epic was for, on `CONTROL_LOOP_APPLY=1`:
+
+| Step | What happened |
+|---|---|
+| sizing | `31 seats ÷ 20/worker` → **2 × m6a.4xlarge**, from the unit table |
+| launch | both started, tagged `orbital-pool=ws-…`, bound to a private queue |
+| readiness | loop waited for **20/20 slots on each**, then flipped the record to `ready` |
+| admission | 26 of 30 parked behind the pacer on `queue:pool:ws-…` |
+| placement | **15 / 15** across the two machines |
+| came up | **30/30 in 524 s** |
+| isolation | `pools ['ws-ws_msvssoab-ba0af8']` — the daily pool never moved off 20/20 free |
+| teardown | both instances terminated, both worker records dropped, 60 tokens revoked |
+
+**5/5 assertions.** Three earlier 12-seat runs on the daily pool came up in 171 s, 172 s
+and 161 s. Consistency was the ask, not density.
+
+The launched machines ran this branch, not `main`, via `WORKER_CODE_BRANCH` — which is
+what that override is for and the only reason this could be proven before merging.
+
+---
+
 ## 5. Two more, found by things going wrong rather than by tests
 
 ### A dashboard restart cost 24 live tokens
