@@ -753,6 +753,37 @@ async def api_workshops_admin_trainer_remove(request: Request, email: str):
     return {"ok": True, "removed": live_sessions.normalize_email(email)}
 
 
+@app.get("/api/workshops/{ws_id}/fleet")
+async def api_workshop_fleet(ws_id: str):
+    """This workshop's dedicated machines, if the control loop gave it any.
+
+    `{}` means it has none and its learners go to the shared daily pool — the
+    correct answer for a small workshop, for one created before pools existed, and
+    for any workshop while the loop is in dry run.
+
+    Read-only and public like the rest of the arena surface: instance ids and a
+    state, no credentials. Exists so a caller can tell "the pool is ready" from
+    "there is no pool", which otherwise needs Redis access on the master — the
+    load test could not distinguish them and silently measured the daily pool.
+    """
+    from dashboard import workshop_fleet
+    rec = await workshop_fleet._fleet_record(pool, ws_id)
+    if not rec:
+        return {}
+    return {
+        "workshopId": ws_id,
+        "state": rec.get("state", ""),
+        "pool": rec.get("pool", ""),
+        "seats": rec.get("seats", 0),
+        "workers": rec.get("workers", 0),
+        "seats_per_worker": rec.get("seats_per_worker", 0),
+        "ready_workers": rec.get("ready_workers", 0),
+        "instances": rec.get("instances", []),
+        "requested_at": rec.get("requested_at", ""),
+        "ready_at": rec.get("ready_at", ""),
+    }
+
+
 @app.get("/api/workshops/admin/schedule")
 async def api_workshops_admin_schedule(request: Request, state: str = "",
                                        limit: int = 500):

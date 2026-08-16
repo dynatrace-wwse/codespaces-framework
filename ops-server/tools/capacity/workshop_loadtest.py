@@ -119,6 +119,11 @@ async def main() -> int:
     ap.add_argument("--up-timeout", type=int, default=2400,
                     help="seconds to wait for every seat to be running")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--wait-for-pool", type=int, default=0, metavar="SECONDS",
+                    help="wait this long for the control loop to give the workshop "
+                         "its OWN machines before provisioning. 0 (default) "
+                         "provisions immediately, which lands on the shared daily "
+                         "pool because the loop binds the pool on a later tick.")
     args = ap.parse_args()
 
     minter = os.environ.get("SRO_MINTER_PLATFORM_TOKEN", "")
@@ -188,6 +193,34 @@ async def main() -> int:
 
         await client.post(f"{ORBITAL}/api/live/sessions/{ws}/start",
                           headers=auth, json={"trainerEmail": TRAINER})
+
+        # ── 2b. optionally wait for this workshop's OWN machines ────────────
+        # Without this the run measures the daily pool no matter what the control
+        # loop does: the loop binds workshop -> pool when it launches, on its next
+        # tick, and anything provisioned before that bind is already on the shared
+        # arch queue. In production a workshop is scheduled hours out and prewarm
+        # runs 45 minutes ahead, so the pool is ready long before any learner. A
+        # test that provisions two minutes after creating the workshop exercises
+        # the fallback instead, which is why every run so far reported pool
+        # ['daily'] however well the loop behaved.
+        if args.wait_for_pool:
+            log(f"waiting up to {args.wait_for_pool}s for a dedicated pool "
+                f"(control loop must be applying, not dry-run)")
+            deadline = time.time() + args.wait_for_pool
+            pool_name = ""
+            while time.time() < deadline:
+                rec = await client.get(f"{ORBITAL}/api/workshops/{ws}/fleet", headers=auth)
+                body = rec.json() if rec.status_code == 200 else {}
+                state, pool_name = body.get("state", ""), body.get("pool", "")
+                ready = body.get("ready_workers", 0)
+                log(f"  pool={pool_name or '(none yet)'} state={state or '(none)'} ready={ready}")
+                if state == "ready":
+                    break
+                await asyncio.sleep(30)
+            if not pool_name:
+                log("no dedicated pool appeared — is CONTROL_LOOP_APPLY=1? Refusing, "
+                    "because this run would silently measure the daily pool again.")
+                return 1
 
         # ── 3. mint per learner, then provision all at once ─────────────────
         # The OAuth client is what mints `kind: platform` specs — the CI/CD workshop
