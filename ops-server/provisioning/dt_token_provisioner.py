@@ -366,7 +366,8 @@ class DTTokenProvisioner:
                     # Say so rather than fail silently: these tokens outlive the session
                     # and count against the per-owner cap that caused an outage before.
                     log.warning("Cannot revoke %d platform token(s) %s — this provisioner "
-                                "has no account OAuth client", len(platform_ids), platform_ids)
+                                "has no account OAuth client",
+                                len(platform_ids), scrub_for_log(", ".join(platform_ids)))
                     return
                 headers = await self._platform_auth_headers()
                 base = _PLATFORM_TOKEN_API.format(api_host=self._account_api_host,
@@ -380,8 +381,8 @@ class DTTokenProvisioner:
         try:
             r = await client.delete(url, headers=headers)
             if r.status_code in (200, 204, 404):
-                log.info("Revoked token %s (status=%d)", tid, r.status_code)
+                log.info("Revoked token %s (status=%d)", scrub_for_log(tid), r.status_code)
             else:
-                log.warning("Unexpected status revoking token %s: %d", tid, r.status_code)
+                log.warning("Unexpected status revoking token %s: %d", scrub_for_log(tid), r.status_code)
         except Exception as exc:
-            log.warning("Could not revoke token %s: %s", tid, exc)
+            log.warning("Could not revoke token %s: %s", scrub_for_log(tid), scrub_for_log(exc))
