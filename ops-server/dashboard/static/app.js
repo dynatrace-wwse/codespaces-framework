@@ -234,7 +234,7 @@ async function loadFleet() {
                     <option value="amd64">amd64</option>
                 </select>
                 <button class="btn btn-small" data-action
-                        onclick="triggerBuildFromRow('${repo.repo}', '${safeRepo}', this)">
+                        onclick="triggerBuildFromRow('${escapeJsAttr(repo.repo)}', '${safeRepo}', this)">
                     Trigger
                 </button>
                 </div>
@@ -620,8 +620,41 @@ function ansi256(n) {
     return `rgb(${v},${v},${v})`;
 }
 
+// Every dynamic value in this dashboard goes through here before it reaches
+// innerHTML. There used to be TWO declarations of this function — this one,
+// escaping `& < >`, and a second one further down escaping `& < > "`. The
+// later declaration silently won at runtime, so the weaker one at the top of
+// the file was dead code that read like the authoritative sanitizer. Whoever
+// checked "do we escape quotes?" got a different answer depending on which
+// one they found. There is now exactly one.
+//
+// It escapes quotes because most values no longer land in element TEXT: they
+// land inside quoted attributes (`value="…"`, `title="…"`, `data-ws-open="…"`)
+// and a workshop title or a trainer note is free text somebody else typed.
+// A `"` closes the attribute early and the rest is parsed as markup — XSS with
+// no `<` in sight. `'` is escaped for the same reason in `'`-quoted attributes.
 function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// For values interpolated into a JS string literal inside an inline handler
+// (`onclick="fn('${…}')"`). escapeHtml is NOT enough there: the HTML parser
+// decodes `&#39;` back to `'` before the JS parser ever sees it, so the quote
+// still breaks out of the string. Escape for JS first, then for HTML — and
+// only for `&"<>`, so the JS backslashes survive decoding intact.
+function escapeJsAttr(s) {
+    return String(s ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 function ansiToHtml(text) {
@@ -2516,12 +2549,6 @@ document.addEventListener('click', async e => {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'
-    }[c]));
-}
-
 function formatTrigger(trigger) {
     // "arena" was the old name for the enablement-app provisioner; the Arena product
     // was renamed to the Enablement App. Map both the legacy value (old Redis jobs) and
@@ -3175,7 +3202,7 @@ function renderAgentFailed(limit = 10) {
             <td>${dur}</td>
             <td>${logLink}</td>
             <td><button class="btn btn-small btn-agent" data-action
-                onclick="triggerAgentFixCI('${safeJobId}','${safeRepo}','${safeBranch}','${safeArch}','${safeStep}',this)"
+                onclick="triggerAgentFixCI('${escapeJsAttr(r.job_id || '')}','${escapeJsAttr(r.repo)}','${escapeJsAttr(r.branch || '')}','${escapeJsAttr(r.arch || '')}','${escapeJsAttr(failedStep)}',this)"
                 title="Ask Claude to analyse and fix this failure">Fix with AI</button></td>
         </tr>`;
     }).join('');
