@@ -27,7 +27,7 @@ import httpx
 
 from .sso import account_api_for, discover_token_url, environment_id
 from .token_specs import TokenSpec
-from shared.log_safety import scrub_for_log
+from shared.log_safety import safe_error_detail, scrub_for_log
 
 log = logging.getLogger("ops-provisioning")
 
@@ -173,7 +173,7 @@ class DTTokenProvisioner:
                 # bare status and guesses.
                 log.error("OAuth mint HTTP %s at %s: %s",
                           r.status_code, scrub_for_log(url),
-                          scrub_for_log(r.text, limit=300))
+                          safe_error_detail(r.text))
             r.raise_for_status()
             data = r.json()
             self._bearer = data["access_token"]
@@ -221,7 +221,7 @@ class DTTokenProvisioner:
                 # otherwise this is indistinguishable from a bad secret.
                 log.error("Platform-token grant HTTP %s at %s (scopes=%r): %s",
                           r.status_code, scrub_for_log(url), _PLATFORM_TOKEN_SCOPES,
-                          scrub_for_log(r.text, limit=300))
+                          safe_error_detail(r.text))
             r.raise_for_status()
             data = r.json()
             self._platform_bearer = data["access_token"]

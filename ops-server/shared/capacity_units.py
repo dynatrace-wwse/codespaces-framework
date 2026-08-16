@@ -72,6 +72,27 @@ import logging
 import math
 import os
 
+# This module is imported TWO ways and must survive both:
+#   - `from shared import capacity_units` on the master, and
+#   - loaded BY PATH by the worker agent (`worker-agent/config.py`), whose sparse
+#     checkout has no `ops-server/dashboard` and which therefore gets no package
+#     context at all.
+# A package-relative `from .log_safety import ...` raises under the second, and
+# the loader treats any failure as "no unit table" — which silently halves a
+# worker's advertised capacity rather than erroring. Caught by
+# worker-agent/test_capacity_derivation.py, which is why that test exists.
+try:                                     # normal package import
+    from shared.log_safety import scrub_for_log
+except ImportError:                      # loaded by path, next to log_safety.py
+    import importlib.util as _ilu
+    import pathlib as _pathlib
+    _spec = _ilu.spec_from_file_location(
+        "_capacity_log_safety",
+        _pathlib.Path(__file__).resolve().parent / "log_safety.py")
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    scrub_for_log = _mod.scrub_for_log
+
 log = logging.getLogger(__name__)
 
 # ── the unit ────────────────────────────────────────────────────────────────
@@ -170,7 +191,7 @@ def units_for_instance(instance_type: str) -> int:
     clamp = _memory_clamp(instance_type)
     if clamp and clamp < derived:
         log.info("%s: derived %d units clamped to %d by memory",
-                 instance_type, derived, clamp)
+                 scrub_for_log(instance_type), derived, clamp)
         return clamp
     return derived
 

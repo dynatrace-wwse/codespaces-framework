@@ -64,6 +64,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dashboard import fleet_policy, repo_profiles
+from shared.log_safety import scrub_for_log
 
 log = logging.getLogger(__name__)
 
@@ -644,7 +645,8 @@ async def _terminate_workshop_sessions(redis, ws_id: str) -> int:
             await redis.publish("ops:terminate", job_id)
             count += 1
         except Exception as exc:
-            log.warning("workshop %s: could not terminate %s: %s", ws_id, key, exc)
+            log.warning("workshop %s: could not terminate %s: %s",
+                        scrub_for_log(ws_id), scrub_for_log(key), scrub_for_log(exc))
 
     count += await _drop_queued_jobs(redis, ws_id, job_ids)
     return count
@@ -684,9 +686,11 @@ async def _drop_queued_jobs(redis, ws_id: str, job_ids: set[str]) -> int:
                         if removed:
                             dropped += removed
                             log.info("workshop %s: dropped queued job %s from %s",
-                                     ws_id, job_id, key)
+                                     scrub_for_log(ws_id), scrub_for_log(job_id),
+                                     scrub_for_log(key))
             except Exception as exc:
-                log.warning("workshop %s: could not scan %s: %s", ws_id, key, exc)
+                log.warning("workshop %s: could not scan %s: %s",
+                            scrub_for_log(ws_id), scrub_for_log(key), scrub_for_log(exc))
     return dropped
 
 

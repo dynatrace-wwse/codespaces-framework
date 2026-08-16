@@ -50,3 +50,46 @@ def scrub_for_log(value, limit: int = 200) -> str:
     text = str(value).replace("\r", " ").replace("\n", " ")
     text = _LOG_UNSAFE.sub(" ", text)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+# Error fields worth keeping from an auth/API response body. Anything not on
+# this list is dropped rather than filtered, so a field nobody anticipated
+# cannot arrive in the journal by default.
+_ERROR_FIELDS = ("error", "error_description", "errorCode", "message", "detail",
+                 "issueId", "title", "reason")
+
+
+def safe_error_detail(body, limit: int = 300) -> str:
+    """Summarise a FAILED HTTP response body without copying it into the log.
+
+    Token endpoints are the reason this exists. Their bodies are the only useful
+    diagnostic on a 4xx — SSO hard-400s an unheld scope and leaves
+    `error_description` empty, so the raw body is what tells a human whether the
+    secret is wrong or the scope is — but the same bodies can carry an
+    `access_token`, and logging one in clear text turns a failed mint into a
+    leaked credential.
+
+    So: parse, keep a whitelist of error fields, drop everything else. A body
+    that is not JSON is reported by length only, because an unparseable body
+    from a credential endpoint is exactly the one not to quote.
+    """
+    import json as _json
+
+    if body is None:
+        return "(no body)"
+    text = body if isinstance(body, str) else str(body)
+    if not text.strip():
+        return "(empty body)"
+    try:
+        data = _json.loads(text)
+    except (ValueError, TypeError):
+        return f"(unparseable body, {len(text)} chars)"
+    if not isinstance(data, dict):
+        return f"({type(data).__name__} body)"
+
+    kept = {k: data[k] for k in _ERROR_FIELDS if k in data and data[k] not in (None, "")}
+    if not kept:
+        # Say what WAS there, so a new error shape is visible without quoting it.
+        return f"(no recognised error field; keys: {sorted(data)[:8]})"
+    return scrub_for_log(
+        ", ".join(f"{k}={data[k]}" for k in sorted(kept)), limit=limit)

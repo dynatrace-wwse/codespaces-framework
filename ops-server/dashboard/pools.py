@@ -52,6 +52,8 @@ import logging
 import os
 import time
 
+from shared.log_safety import scrub_for_log
+
 log = logging.getLogger(__name__)
 
 # ── Pool identity ───────────────────────────────────────────────────────────
@@ -92,7 +94,8 @@ async def pool_for_workshop(redis, ws_id: str) -> str:
     try:
         return (await redis.hget(WORKSHOP_POOL_KEY, ws_id)) or ""
     except Exception as exc:                                  # pragma: no cover
-        log.warning("pool lookup failed for %s: %s — using shared queue", ws_id, exc)
+        log.warning("pool lookup failed for %s: %s — using shared queue",
+                    scrub_for_log(ws_id), scrub_for_log(exc))
         return ""
 
 

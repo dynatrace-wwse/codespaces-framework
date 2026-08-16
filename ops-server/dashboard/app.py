@@ -6136,7 +6136,7 @@ async def _stop_workshop_sessions(session_id: str) -> int:
     except Exception as exc:
         log.error("workshop %s: could not terminate its sessions: %s — "
                   "environments may be left running until their TTL expires",
-                  session_id, exc)
+                  scrub_for_log(session_id), scrub_for_log(exc))
         return 0
 
 

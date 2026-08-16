@@ -95,11 +95,39 @@ def environment_id(tenant_url: str) -> str:
     return _host(tenant_url).split(".")[0].lower()
 
 
+# Hosts this module will make a request to. The probe below fetches a URL built
+# from a CALLER-SUPPLIED tenant, from inside the ops server, which is an SSRF
+# primitive: without a restriction, "tenant_url" of http://169.254.169.254/ makes
+# Orbital fetch its own instance credentials and log the outcome. Discovery is
+# only ever meant to reach a Dynatrace tenant, so say so.
+PROBEABLE_SUFFIXES = (".dynatrace.com", ".dynatracelabs.com")
+
+
+def is_probeable(tenant_url: str) -> bool:
+    """Whether discovery may make a network request to this tenant.
+
+    https only — a downgrade to http would put the probe on the wire in clear —
+    and the host must be a Dynatrace one. Anything else falls back to the
+    domain-suffix map, which needs no network and cannot be pointed anywhere.
+    """
+    u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
+    if u.scheme != "https":
+        return False
+    host = (u.hostname or "").lower()
+    return any(host == s.lstrip(".") or host.endswith(s) for s in PROBEABLE_SUFFIXES)
+
+
 async def discover_sso(tenant_url: str) -> str:
     """The tenant's SSO origin (no path). Never raises."""
+    if not is_probeable(tenant_url):
+        log.debug("not probing %s — not an https Dynatrace host; using the domain map",
+                  scrub_for_log(_host(tenant_url)))
+        return sso_for_known_domain(tenant_url)
     try:
         u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
-        probe = f"{u.scheme}://{u.netloc}/platform/oauth2/authorization/dynatrace-sso"
+        # Rebuilt from the validated hostname and a fixed scheme/path, so nothing
+        # the caller wrote reaches the request except a host that passed above.
+        probe = f"https://{u.hostname}/platform/oauth2/authorization/dynatrace-sso"
         async with httpx.AsyncClient(timeout=8, follow_redirects=False) as c:
             r = await c.head(probe)
             loc = r.headers.get("location")
@@ -108,8 +136,10 @@ async def discover_sso(tenant_url: str) -> str:
                 if p.scheme and p.netloc:
                     return f"{p.scheme}://{p.netloc}"
     except Exception as exc:
+        # HOST only. A tenant URL can carry credentials in userinfo or a query
+        # string, and this line runs on a path where the caller supplied it.
         log.warning("SSO discovery failed for %s: %s",
-                    scrub_for_log(tenant_url), scrub_for_log(exc))
+                    scrub_for_log(_host(tenant_url)), scrub_for_log(exc))
     return sso_for_known_domain(tenant_url)
 
 
