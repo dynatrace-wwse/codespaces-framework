@@ -38,6 +38,30 @@ def test_prewarm_still_fires_for_a_workshop_already_underway():
     assert wf.due_for_prewarm(_session(start_offset_min=-30), NOW) is True
 
 
+def test_prewarm_and_teardown_are_never_both_due():
+    """The oscillation guard.
+
+    Prewarm used to be unbounded on the late side, so for any workshop whose trainer
+    never pressed end BOTH predicates were true — and the loop acts on prewarm first.
+    With CONTROL_LOOP_APPLY on that is an infinite launch/terminate cycle: launch, tear
+    down for being past the window, launch again, forever, for a workshop nobody is
+    attending. Found live — a room opened three days earlier that the loop had been
+    asking to prewarm every 30 seconds since.
+    """
+    for offset in (-30, -119, -121, -200, -400, -4320):   # -4320 min = 3 days
+        s = _session(start_offset_min=offset)
+        assert not (wf.due_for_prewarm(s, NOW) and wf.due_for_teardown(s, NOW)), \
+            f"both due at start_offset={offset}"
+
+
+def test_a_workshop_long_past_its_window_is_not_prewarmed():
+    # 120 min duration + 30 min grace: still due at 149 min late, not at 151.
+    assert wf.due_for_prewarm(_session(start_offset_min=-149), NOW) is True
+    assert wf.due_for_prewarm(_session(start_offset_min=-151), NOW) is False
+    # The real one: opened three days ago, never ended.
+    assert wf.due_for_prewarm(_session(start_offset_min=-3 * 24 * 60), NOW) is False
+
+
 def test_ended_workshop_is_never_prewarmed():
     for state in ("ended", "cancelled", "deleted"):
         assert wf.due_for_prewarm(_session(-10, state=state), NOW) is False

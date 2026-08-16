@@ -129,8 +129,19 @@ async def main() -> int:
                 f"free={w.get('slots_free')} mem={float(w.get('mem_used_gb') or 0):.2f} GiB")
 
         # ── mint ────────────────────────────────────────────────────────────
-        prov = DTTokenProvisioner(tenant_url=TENANT, api_token=minter)
+        # The OAuth client is what mints `kind: platform` specs — the CI/CD workshop
+        # needs one, and a provisioner built from the minter token alone refuses them.
+        prov = DTTokenProvisioner(
+            tenant_url=TENANT, api_token=minter,
+            oauth_client_id=os.environ.get("SRO_CLIENT_ID", ""),
+            oauth_client_secret=os.environ.get("SRO_CLIENT_SECRET", ""),
+            oauth_resource=os.environ.get("SRO_RESOURCE", ""),
+        )
         specs = await load_token_specs(repo)
+        if any(s.kind == "platform" for s in specs) and not prov.can_mint_platform:
+            log(f"{repo} declares a kind: platform token but SRO_CLIENT_ID/SECRET/RESOURCE\n"
+                "are not set — the mint would fail. Refusing.")
+            return 2
         log(f"token specs for {repo}: {[s.env_var for s in specs]}")
 
         minted: list = []

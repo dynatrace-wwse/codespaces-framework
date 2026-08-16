@@ -190,8 +190,19 @@ async def main() -> int:
                           headers=auth, json={"trainerEmail": TRAINER})
 
         # ── 3. mint per learner, then provision all at once ─────────────────
-        prov = DTTokenProvisioner(tenant_url=TENANT, api_token=minter)
+        # The OAuth client is what mints `kind: platform` specs — the CI/CD workshop
+        # needs one, and a provisioner built from the minter token alone refuses them.
+        prov = DTTokenProvisioner(
+            tenant_url=TENANT, api_token=minter,
+            oauth_client_id=os.environ.get("SRO_CLIENT_ID", ""),
+            oauth_client_secret=os.environ.get("SRO_CLIENT_SECRET", ""),
+            oauth_resource=os.environ.get("SRO_RESOURCE", ""),
+        )
         specs = await load_token_specs(repo)
+        if any(s.kind == "platform" for s in specs) and not prov.can_mint_platform:
+            log(f"{repo} declares a kind: platform token but SRO_CLIENT_ID/SECRET/RESOURCE\n"
+                "are not set — the mint would fail. Refusing.")
+            return 2
         per_user: dict[str, dict] = {}
         minted = []
         log(f"minting {args.seats} x {len(specs)} token(s)")

@@ -168,13 +168,27 @@ def due_for_prewarm(session: dict, now: datetime,
     A workshop already past its start time is still due: a trainer who opens
     the room late, or a loop that was restarted, must still get machines rather
     than being silently skipped for having missed the window.
+
+    But only until its teardown point. Being unbounded on the late side made this
+    predicate and :func:`due_for_teardown` both true at once for any workshop whose
+    trainer never pressed end — and the control loop acts on prewarm first. With
+    CONTROL_LOOP_APPLY on that is an infinite launch/terminate cycle: tick 1 launches
+    the machines, a later tick tears them down for being past the window, the next tick
+    launches them again, forever, for a workshop nobody is attending. Found with a real
+    one — a room opened 2026-08-13 and never ended, which the loop had been asking to
+    prewarm every 30 seconds for three days.
+
+    Making the two mutually exclusive is what stops the oscillation, and it costs the
+    late trainer nothing: teardown is not due until the scheduled end PLUS grace.
     """
     if session.get("state") in ("ended", "cancelled", "deleted"):
         return False
     start = parse_iso(session.get("scheduledAt", ""))
     if start is None:
         return False
-    return now >= start - timedelta(minutes=lead_minutes)
+    if now < start - timedelta(minutes=lead_minutes):
+        return False
+    return not due_for_teardown(session, now)
 
 
 def workshop_repo(session: dict) -> str:
