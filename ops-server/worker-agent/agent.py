@@ -52,6 +52,9 @@ from .config import (
     WORKER_SLOT_LIMITS,
     WORKER_SLOT_MEMORY_MB,
     WORKER_POOL,
+    WORKER_BORROW_POOL,
+    borrow_capacity,
+    borrow_queue,
     WORKER_CODE_REF,
     WARM_CONCURRENCY,
     WARM_MAX_ATTEMPTS,
@@ -617,6 +620,10 @@ class WorkerAgent:
         # pressure. Distinct from _draining: a brake is cleared when the box
         # cools, a cordon precedes termination.
         self._braked = False
+        # Jobs claimed from the BORROW queue rather than this worker's own lane.
+        # Tracked by job id, not counted, so a double release cannot drive the
+        # figure negative and strand the lend cap at zero for the process's life.
+        self._borrowed_jobs: set[str] = set()
 
     async def start(self):
         """Connect to master Redis, register, initialize pool, and start consuming."""
@@ -914,6 +921,17 @@ class WorkerAgent:
             "draining": "0",
             "host": WORKER_HOST,
             "ssh_host": WORKER_SSH_HOST or WORKER_HOST,
+            # Lane, from the FIRST heartbeat rather than the second. Every
+            # consumer treats a missing `pool` as "daily", so a workshop worker
+            # that registered without it was counted as self-service capacity
+            # for up to HEARTBEAT_INTERVAL seconds — a warming box has no free
+            # slots to give away, but the fleet views and the pacer's worker
+            # count both read it, and both were wrong for that window.
+            "pool": WORKER_POOL,
+            "borrow_pool": WORKER_BORROW_POOL,
+            "borrow_capacity": str(borrow_capacity()),
+            "borrow_in_flight": "0",
+            "borrow_free": "0",
             "registered_at": datetime.now(timezone.utc).isoformat(),
             "last_heartbeat": datetime.now(timezone.utc).isoformat(),
         }
@@ -1036,6 +1054,12 @@ class WorkerAgent:
             # Which queue this worker eats from. The scale planner needs it to
             # avoid counting workshop seats as available self-service capacity.
             "pool": WORKER_POOL,
+            # Lending, for the standing workshop box. The daily planner adds
+            # `borrow_free` to its own pool's free seats, so it does not buy a
+            # machine while a workshop worker is sitting on seats it is willing
+            # to lend.
+            "borrow_pool": WORKER_BORROW_POOL,
+            "borrow_capacity": str(borrow_capacity()),
             # Short SHA of the code actually running here, stamped at boot.
             # Empty = never stamped (hand-built box, or the boot sync failed);
             # left visibly empty rather than defaulted to something reassuring,
@@ -1085,6 +1109,14 @@ class WorkerAgent:
                     # climbing while active_jobs does not is the fingerprint of
                     # the leak this replaced.
                     "reaper_watching": str(self.reaper.watched_count),
+                    # Borrowed work in flight, and how much more this box will
+                    # take. Bounded by BOTH the lend cap and the real free
+                    # slots — advertising lendable seats a full worker does not
+                    # have would send the daily planner shopping for nothing.
+                    "borrow_in_flight": str(len(self._borrowed_jobs)),
+                    "borrow_free": str(min(
+                        max(0, borrow_capacity() - len(self._borrowed_jobs)),
+                        max(0, ready - active))),
                     "last_heartbeat": datetime.now(timezone.utc).isoformat(),
                     "status": status,
                     **{k: str(v) for k, v in self.scheduler.stats().items()},
@@ -1107,15 +1139,23 @@ class WorkerAgent:
         in a workshop pool takes only that pool's queue and is therefore
         unreachable by self-service traffic. That is the whole isolation
         mechanism — see config.WORKER_POOL for why it is topology, not a filter.
-        """
-        direct_key, queue_key = queue_keys(WORKER_ID, WORKER_ARCH)
 
+        A worker with a BORROW pool additionally reads that pool's queue, but
+        only while it holds fewer than `borrow_capacity()` borrowed jobs. The key
+        list is therefore rebuilt every tick rather than once: dropping the borrow
+        queue from it is how the cap is enforced, and it is enforced at the only
+        moment it can be, because a placed session cannot later be moved off.
+        """
         # Don't claim jobs before a slot exists to run them in. Waiting on the
         # FIRST slot (not the whole pool) is what lets a warming worker start
         # serving minutes early; claiming with zero warm slots would just park
         # a learner's session on an unusable host.
         await self.sysbox_pool.first_ready.wait()
-        log.info("Consuming from %s and %s", queue_key, direct_key)
+        borrow_key = borrow_queue(WORKER_ARCH)
+        log.info("Consuming from %s%s",
+                 ", ".join(queue_keys(WORKER_ID, WORKER_ARCH)),
+                 f" (+ lending up to {borrow_capacity()} slot(s) to "
+                 f"{WORKER_BORROW_POOL} via {borrow_key})" if borrow_key else "")
 
         while self._running:
             try:
@@ -1132,18 +1172,27 @@ class WorkerAgent:
                     await asyncio.sleep(2)
                     continue
 
-                result = await self.pool.blpop([direct_key, queue_key], timeout=5)
+                may_borrow = len(self._borrowed_jobs) < borrow_capacity()
+                keys = queue_keys(WORKER_ID, WORKER_ARCH, borrowing=may_borrow)
+                result = await self.pool.blpop(keys, timeout=5)
                 if result is None:
                     continue
 
-                _, job_json = result
+                popped_key, job_json = result
                 job = json.loads(job_json)
                 if not job.get("job_id"):
                     job["job_id"] = _new_job_id()
                 job["worker_id"] = WORKER_ID
                 job["worker_arch"] = WORKER_ARCH
 
-                asyncio.create_task(self._run_job(job))
+                # Which queue it came off decides whether it counts against the
+                # lend cap. BLPOP tells us, so nothing has to be inferred from
+                # the payload — and a job with no workshop_id is not necessarily
+                # borrowed, it may simply be an untagged job on our own lane.
+                if borrow_key and popped_key == borrow_key:
+                    self._borrowed_jobs.add(job["job_id"])
+
+                asyncio.create_task(self._run_job_tracked(job))
                 await asyncio.sleep(0)
 
             except redis.ConnectionError:
@@ -1152,6 +1201,21 @@ class WorkerAgent:
             except Exception as e:
                 log.error("Consumer error: %s", e)
                 await asyncio.sleep(1)
+
+    async def _run_job_tracked(self, job: dict):
+        """Run a job and release its borrow reservation on EVERY exit path.
+
+        Deliberately a wrapper rather than a line in ``_run_job``'s own finally:
+        ``_run_job`` returns early when a repo/branch lock is already held, and
+        that path never reaches the finally. A lend cap that leaks on the
+        deferred path would ratchet down to zero over a long-lived process and
+        the box would silently stop lending.
+        """
+        job_id = job.get("job_id", "")
+        try:
+            await self._run_job(job)
+        finally:
+            self._borrowed_jobs.discard(job_id)
 
     async def _run_job(self, job: dict):
         """Execute a single job: acquire a warm Sysbox slot, run, then release."""

@@ -98,13 +98,15 @@ def test_lead_time_is_configurable_down_to_minutes():
 
 # ── sizing ──────────────────────────────────────────────────────────────────
 
-def test_seventy_seats_of_k8s101_plans_four_machines():
-    """30 seats fit on memory; the 0.55 safety turns that into 20, which is the
-    explicit instruction to prefer 20 over a tight 30."""
+def test_seventy_seats_of_k8s101_plans_four_machines_plus_a_spare():
+    """20 seats per m6a.4xlarge from the unit model, so 70 needs 4 machines —
+    plus one spare, because the loop does not re-plan a workshop whose machines
+    are already bound and losing a host would otherwise strand 20 learners."""
     plan = wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")
     assert plan["seats_per_worker"] == 20
-    assert plan["workers"] == 4
-    assert plan["total_seats"] == 80, "must exceed the roster, not merely meet it"
+    assert plan["workers"] == 5, "4 for the roster + 1 spare"
+    assert plan["total_seats"] == 100, "must exceed the roster, not merely meet it"
+    assert plan["pool_kind"] == "dedicated"
 
 
 def test_an_unprofiled_repo_is_planned_as_heavy():
@@ -119,9 +121,13 @@ def test_an_unprofiled_repo_is_planned_as_heavy():
 
 def test_capacity_rounds_up_never_down():
     """A workshop one seat short is a person without an environment in front of
-    a room."""
+    a room. 21 seats needs 2 machines by arithmetic, and gets a third as the
+    spare."""
     plan = wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge")
-    assert plan["workers"] == 2
+    assert plan["workers"] == 3
+    # Without the spare the arithmetic itself must still have rounded UP.
+    bare = wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge", redundancy=0)
+    assert bare["workers"] == 2
 
 
 def test_unknown_instance_type_refuses_to_plan():
@@ -163,6 +169,20 @@ def test_seats_coming_back_are_not_a_reason_to_buy_a_machine():
     d = wf.daily_scale_decision([warming], {}, min_free=4)
     assert d["scale_up"] == 0
     assert "warming back up" in d["why"]
+
+    # THE REAL SHAPE, and why the guard never actually fired. The agent
+    # publishes `capacity` as slots ALREADY WARM — which is 0 for most of a
+    # warm-up — and `slots_total` as the nominal figure. Summing `capacity`
+    # therefore summed zero at exactly the moment this guard exists for.
+    # Measured 2026-08-16: amd001 restarted at 13:51:46 and the loop bought
+    # spot instances at 13:52:16 and 13:52:48, with nothing queued.
+    honest = _worker("w1", free=0, status="warming")
+    honest["capacity"] = "0"          # nothing warm yet
+    honest["slots_total"] = "20"      # twenty seats on their way back
+    d = wf.daily_scale_decision([honest], {}, min_free=4)
+    assert d["scale_up"] == 0, (
+        "bought a machine while 20 seats were warming — this is the bug that "
+        "put two unwanted spot workers in the fleet")
 
     # A DRAINING worker is going away for good — its seats are not coming back.
     gone = _worker("w1", free=0, status="warming", draining="1")
@@ -368,11 +388,14 @@ def test_a_workshop_larger_than_the_scale_cap_is_batched():
     assert len(batches) > 1
 
 
-def test_seventy_seats_sits_exactly_on_the_cap():
-    """Documents why this was easy to miss: the bootcamp itself never trips it."""
+def test_seventy_seats_now_EXCEEDS_the_per_call_cap():
+    """The spare pushes the bootcamp over MAX_SCALE_UP, so the batching loop in
+    provision_workshop_fleet is no longer merely theoretical — it is the path
+    the real 70-seat delivery takes. If someone removes the batching because
+    "we only ever launch four", this fails."""
     from dashboard import fleet
     assert wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")["workers"] \
-        == fleet.MAX_SCALE_UP
+        > fleet.MAX_SCALE_UP
 
 
 # ── ending a workshop must stop its environments ────────────────────────────
@@ -581,3 +604,58 @@ def test_an_absent_worker_id_is_unknown_not_never_started():
                      queues={"queue:pending:queue:test:amd64": [_payload("job-x")]})
     asyncio.run(wf.terminate_workshop_sessions(r, "ws_mine"))
     assert "job:running:job-x" in r.h
+
+
+# ── two tiers of workshop, and the standing lane ────────────────────────────
+
+def test_a_small_workshop_launches_nothing():
+    """The whole reason a workshop box stays warm: a room of seven opens NOW,
+    not in the ~8 minutes it takes to boot and warm an instance."""
+    plan = wf.plan_workshop_capacity(7, rp.K8S_101, "m6a.4xlarge")
+    assert plan["workers"] == 0
+    assert plan["pool_kind"] == "standing"
+    assert "no machines launched" in plan["reason"]
+
+
+def test_one_seat_over_the_threshold_gets_its_own_machines():
+    """8 seats is above the standing reserve, so it must not lean on the box
+    that has to stay free for the next unannounced room."""
+    plan = wf.plan_workshop_capacity(8, rp.K8S_101, "m6a.4xlarge")
+    assert plan["pool_kind"] == "dedicated"
+    assert plan["workers"] == 2, "1 machine for 8 seats + 1 spare"
+
+
+def test_a_big_workshop_is_sized_for_all_its_seats_not_the_remainder():
+    """A dedicated workshop does NOT subtract the standing box's reserve. The
+    reserve is for rooms that open with no notice; spending it on a planned
+    workshop would mean the next ad-hoc room finds nothing."""
+    plan = wf.plan_workshop_capacity(31, rp.K8S_101, "m6a.4xlarge")
+    assert plan["workers"] == 3, "ceil(31/20)=2 machines + 1 spare"
+    assert plan["total_seats"] >= 31
+
+
+def test_the_threshold_is_configurable():
+    """The rehearsal needs to drive both tiers without a 20-person roster."""
+    assert wf.plan_workshop_capacity(
+        3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=2)["pool_kind"] == "dedicated"
+    assert wf.plan_workshop_capacity(
+        3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=3)["pool_kind"] == "standing"
+
+
+def test_lent_seats_count_as_daily_capacity():
+    """The standing workshop box reads the daily queue while under its lend cap,
+    so its lendable seats ARE self-service capacity. Ignoring them makes the
+    planner buy a machine while ten warm seats sit idle."""
+    lender = _worker("w-standing", free=0)
+    lender["borrow_free"] = "10"
+    d = wf.daily_scale_decision([lender], {}, min_free=4)
+    assert d["scale_up"] == 0, "bought a machine while 10 borrowable seats were free"
+
+
+def test_a_full_lender_offers_nothing_and_the_pool_still_scales():
+    """borrow_free is what the box will ACTUALLY take, so a full one must not
+    keep the planner from buying real capacity."""
+    lender = _worker("w-standing", free=0)
+    lender["borrow_free"] = "0"
+    d = wf.daily_scale_decision([lender], {}, min_free=4)
+    assert d["scale_up"] == 1
