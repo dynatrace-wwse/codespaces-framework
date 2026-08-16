@@ -40,10 +40,12 @@ def scrub_for_log(value, limit: int = 200) -> str:
     this way is what lets the analysis see that the path is cut here instead of
     re-reporting every call site. Do not "simplify" it away.
 
-    Falsy values become '' rather than 'None' so an absent field logs as
-    absent.
+    Absent values become '' rather than 'None' so an absent field logs as
+    absent. Absent means None or the empty string — NOT falsy: `0` and `False`
+    are values somebody chose, and a line reading `rows=` when the caller sent
+    `rows=0` is a worse log than one reading `rows=0`.
     """
-    if not value:
+    if value is None or value == "":
         return ""
     text = str(value).replace("\r", " ").replace("\n", " ")
     text = _LOG_UNSAFE.sub(" ", text)

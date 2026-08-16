@@ -3065,7 +3065,7 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
         )
         cmd = ["gh", "codespace", "ssh", "-c", job_id, "--", "-t", inner_shell]
         log.info("Codespace shell open: job=%s rows=%s cols=%s",
-                 scrub_for_log(job_id), rows, cols)
+                 scrub_for_log(job_id), scrub_for_log(rows), scrub_for_log(cols))
         await _pty_bridge(ws, cmd, rows=rows, cols=cols, env=gh_env)
         log.info("Codespace shell closed: job=%s", scrub_for_log(job_id))
         return
@@ -3097,7 +3097,7 @@ async def job_shell_ws(ws: WebSocket, job_id: str, token: str = "", rows: int = 
 
     log.info("Shell open: job=%s worker=%s sb=%s rows=%s cols=%s",
              scrub_for_log(job_id), scrub_for_log(worker_id or "local"),
-             scrub_for_log(sb_name), rows, cols)
+             scrub_for_log(sb_name), scrub_for_log(rows), scrub_for_log(cols))
     await _pty_bridge(ws, cmd, rows=rows, cols=cols)
     log.info("Shell closed: job=%s", scrub_for_log(job_id))
 

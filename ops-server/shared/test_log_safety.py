@@ -45,7 +45,14 @@ def test_caps_length():
 def test_absent_values_log_as_absent():
     assert scrub_for_log(None) == ""
     assert scrub_for_log("") == ""
-    assert scrub_for_log(0) == ""
+
+
+def test_zero_is_a_value_not_an_absence():
+    # A falsy check here would log `rows=` when the caller sent `rows=0`,
+    # which is a worse log line than the one it replaced.
+    assert scrub_for_log(0) == "0"
+    assert scrub_for_log(False) == "False"
+    assert scrub_for_log(0.0) == "0.0"
 
 
 def test_accepts_non_strings():
