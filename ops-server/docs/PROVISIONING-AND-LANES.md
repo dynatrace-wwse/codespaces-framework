@@ -4,6 +4,10 @@ Status: written 2026-08-16 against `main` @ `061d4f0`, with the control loop **l
 (`CONTROL_LOOP_APPLY=1` in `/home/ops/.env`). Every claim below is either a file:line or a
 number read off the running system on that date.
 
+> **Updated the same day, on branch `epic/two-lanes-and-parallel-deploy`.** The steady state
+> described in §7 and most of the gaps in §8 have changed. Read §12 first — it is the
+> after-picture; the rest of the document is the analysis that produced it.
+
 This document answers five questions in order:
 
 1. What are the autoscalers, and which one owns which decision?
@@ -536,3 +540,90 @@ Those two will be always running. Then for planned workshops, the scheduler will
 A lot of tenants will update in the same morning. This is why it's important. I don't want that the application fails before the workshop. This is why we will move number 10 to 0, and then we continue with all the others.
 
 
+
+---
+
+## 12. What changed on 2026-08-16 (branch `epic/two-lanes-and-parallel-deploy`)
+
+### The steady state now
+
+| | |
+|---|---|
+| **amd001** `m6a.4xlarge` | `pool=daily` — self-service only, 20 seats |
+| **amd002** `m6a.4xlarge` | `pool=workshop` — **lends 10 of its 20 seats to daily**, keeps 10 reserved so a workshop can start with no notice |
+| spot workers | **none** — the two that existed were bought by a bug (G10), not by demand |
+
+A workshop of **7 seats or fewer** binds the standing `workshop` lane and **launches nothing**,
+so the room opens immediately instead of waiting ~8 minutes for an instance to boot and warm.
+Above 7 it gets its **own** dedicated pool (`ws-{id}`) and its own machines, sized for all its
+seats **plus one spare**, keeping full isolation between concurrent workshops.
+
+Lending is enforced at **intake**, not by reservation: the borrow queue is dropped from the
+worker's BLPOP key list once the cap is reached. That is the only moment it *can* be enforced —
+a placed Sysbox session cannot be moved afterwards. Key order is priority order, so this box
+always drains its own workshop queue before it takes borrowed work.
+
+New knobs (all defaulted, none required in `.env`):
+`WORKER_BORROW_POOL`, `WORKER_BORROW_FRACTION` (0.5), `WORKSHOP_STANDING_MAX_SEATS` (7),
+`WORKSHOP_REDUNDANCY` (1), `WORKSHOP_LIFETIME_MARGIN_MINUTES` (60),
+`WORKSHOP_WARMING_TIMEOUT_MINUTES` (20), `DEPLOY_UPLOAD_CONCURRENCY` (8).
+
+### Gap status
+
+| Gap | Was | Now |
+|---|---|---|
+| **G10** *(new)* — the warming guard summed `capacity` (= slots **already warm**, 0 during warm-up) so it never fired | bought a machine per worker restart | sums `slots_total`; regression test pins it |
+| G1 — autoscaled daily workers advertised 6 seats | AMI's baked `WORKER_CAPACITY=6` won | daily `scale_up` pins capacity from the unit model |
+| G2 — planners were lane-blind | a scale-down click could cordon a prewarmed workshop | `normalize_worker` carries `pool`; `fleet_state`, `plan_scale_down`, `terminatable` are daily-only |
+| G3 — `_register` wrote no `pool` | workshop worker read as daily for ≤30 s | published from the first heartbeat |
+| G4 — no self-destruct on workshop machines | only the loop's teardown ever killed them | `lifetime_minutes` = prewarm + duration + grace + margin |
+| G5 — no spare in the workshop plan | losing a host stranded 20 learners | `WORKSHOP_REDUNDANCY=1` |
+| G7 — unbounded `warming` wait | one short worker hung a workshop forever | proceeds DEGRADED after 20 min, loudly |
+| UI — no lane anywhere | could not tell which machine was which | lane badge + coloured edge per worker card, lending line, lane strip; `/api/fleet` carries `orbital-pool` |
+| §10 — deploys serialised | one build at a time for every tenant | build once, upload N in parallel |
+| **G6** — daily lane at `DAILY_MAX_WORKERS` | 4/4 | **still open** — decide the bootcamp-day value |
+| **G8** — reaper under workshop teardown at 30; IOPS telemetry | unmeasured | **still open** |
+| **G9** — fail-open routing is silent | one log line | **still open** |
+
+### Parallel deploy — measured, not projected
+
+Precondition proved first: two builds of one commit with different `DT_APP_ENVIRONMENT_URL`
+values produced **33/33 byte-identical files** under `dist/`. The only tenant hostname in the
+bundle is COE, hardcoded in source as the analytics home, identical in both builds.
+
+Credential isolation is structural, not incidental. `dt-app` derives its token cache as
+`<root>/.dt-app/.tokens.json` **with no env override**, so every upload now runs in its own
+hardlinked sandbox with its own empty `.dt-app`. `.dt-app` and `.env` are never copied in; the
+build metadata under `.dt-app/build` is. (dt-app 1.9.0 also short-circuits on
+`DT_APP_PLATFORM_TOKEN` and never consults that cache on our route — but that is a third-party
+code path an upgrade could change, and this does not depend on it.)
+
+Four tenants, reinstalling 1.0.330 concurrently:
+
+| | |
+|---|---|
+| real builds | **1** (31.8 s), 3 reused |
+| wall clock | **66.1 s** |
+| serial equivalent | **227.0 s** — 3.4× |
+| result | 4/4 OK, every tenant verified at 1.0.330 afterwards |
+| sandboxes left behind | 0 |
+
+A separate 6-tenant run through `/api/deploy/oauth` refused two tenants at **preflight**
+(HTTP 412, `pvf2584h` and `bfs7010h`: their OAuth clients lack the document scopes, and SSO
+returns 400 with an **empty** `error_description`). Both were left on their previous versions —
+1.0.323 and 1.0.317 — which is the preflight doing exactly what it promises: refuse and install
+nothing.
+
+### Still to do
+
+1. **Volume IOPS 3,000 → 6,000 on amd001 + amd002.** Both are gp3 300 GiB at 3,000/500 MB/s.
+   Needs *admin* AWS credentials — the `OrbitalFleetAutoscaler` role deliberately cannot
+   `ModifyVolume`, and the `ubuntu` federated session had expired at the time of writing.
+   ```bash
+   aws ec2 modify-volume --volume-id vol-06626d3323a72f97b --iops 6000   # amd001
+   aws ec2 modify-volume --volume-id vol-08e9ee3a2f78f0ceb --iops 6000   # amd002
+   ```
+2. **Merge the branch.** Launched workers sync `origin/main`, so until then any machine the loop
+   launches comes up without the lending code (harmless — only the standing box lends).
+3. Decide `DAILY_MAX_WORKERS` for bootcamp day (G6).
+4. The remaining measurement gaps, G8 and G9.
