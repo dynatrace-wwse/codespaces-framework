@@ -46,6 +46,8 @@ import time
 
 import httpx
 
+from shared.log_safety import scrub_for_log
+
 log = logging.getLogger("ops.content_sync")
 
 APP_ID = "my.dynatrace.enablements"
@@ -171,7 +173,8 @@ async def sync_tenant(tenant_url: str, *, invoke=invoke_import,
         if res.get("error"):
             failed += 1
             errors.append(f"{repo}: {res['error']}")
-            log.warning("content sync %s: %s failed — %s", tenant_url, repo, res["error"])
+            log.warning("content sync %s: %s failed — %s",
+                        scrub_for_log(tenant_url), scrub_for_log(repo), scrub_for_log(res["error"]))
             # A permission problem is not 22 problems. When the first few sources
             # fail the same way, the cause is the credential, not the content, and
             # grinding through the rest only buys an identical error per repo and

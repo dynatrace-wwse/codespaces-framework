@@ -26,6 +26,7 @@ from typing import Optional
 import httpx
 
 from .token_specs import TokenSpec
+from shared.log_safety import scrub_for_log
 
 log = logging.getLogger("ops-provisioning")
 
@@ -146,10 +147,11 @@ class DTTokenProvisioner:
                     data = r.json()
                     env[spec.env_var] = data["token"]
                     token_ids.append(data["id"])
-                    log.info("Created token '%s' (id=%s, expiry=%s)", name, data["id"], expires_iso)
+                    log.info("Created token '%s' (id=%s, expiry=%s)",
+                             scrub_for_log(name), scrub_for_log(data["id"]), expires_iso)
                 except httpx.HTTPStatusError as exc:
                     msg = f"Failed to create token '{name}': HTTP {exc.response.status_code} — {exc.response.text[:200]}"
-                    log.error(msg)
+                    log.error("%s", scrub_for_log(msg, limit=400))
                     errors.append(msg)
 
         if errors:

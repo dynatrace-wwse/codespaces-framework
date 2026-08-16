@@ -48,6 +48,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from webhook.config import REDIS_URL
+from shared.log_safety import scrub_for_log
 
 log = logging.getLogger("ops-dashboard.github-oauth")
 
@@ -173,7 +174,7 @@ async def get_user_token(r: redis.Redis, dt_user: str) -> str | None:
     try:
         return _decrypt(enc)
     except Exception as exc:  # corrupt / key-rotated — treat as not connected
-        log.warning("could not decrypt gh:token for %s: %s", dt_user, exc)
+        log.warning("could not decrypt gh:token for %s: %s", scrub_for_log(dt_user), scrub_for_log(exc))
         return None
 
 
@@ -262,10 +263,10 @@ async def github_status(dtUser: str):
         if r.status_code == 200:
             return {"connected": True, "login": r.json().get("login")}
         # Token present but rejected → treat as not connected (likely expired/revoked).
-        log.info("gh /user returned %s for %s — token stale", r.status_code, dtUser)
+        log.info("gh /user returned %s for %s — token stale", r.status_code, scrub_for_log(dtUser))
         return {"connected": False}
     except Exception as exc:
-        log.warning("gh /user check failed for %s: %s", dtUser, exc)
+        log.warning("gh /user check failed for %s: %s", scrub_for_log(dtUser), scrub_for_log(exc))
         # Token exists; network blip — report connected without a login.
         return {"connected": True}
 
@@ -292,7 +293,7 @@ async def github_disconnect(dtUser: str):
                 )
             revoked = r.status_code in (204, 404)
         except Exception as exc:
-            log.warning("gh grant revoke failed for %s: %s", dtUser, exc)
+            log.warning("gh grant revoke failed for %s: %s", scrub_for_log(dtUser), scrub_for_log(exc))
     return {"disconnected": True, "revoked": revoked}
 
 
@@ -368,7 +369,8 @@ async def github_device_poll(dtUser: str, device_code: str):
                 login = u.json().get("login")
     except Exception:
         pass
-    log.info("GitHub connected via device flow dtUser=%s login=%s", dtUser, login)
+    log.info("GitHub connected via device flow dtUser=%s login=%s",
+             scrub_for_log(dtUser), scrub_for_log(login))
     return {"connected": True, "login": login}
 
 

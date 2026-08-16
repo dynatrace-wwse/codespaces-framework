@@ -192,43 +192,15 @@ def test_mask_chat_keeps_the_callers_own_address():
     assert m.mask_chat([], keep="amy@x.com") == []
 
 
-# ── scrub_for_log (CodeQL py/log-injection) ──────────────────────────────────
+# ── scrub_for_log re-export ──────────────────────────────────────────────────
+# The behaviour is tested in shared/test_log_safety.py, where the function now
+# lives. What is asserted here is the thing this file can break: dashboard code
+# spells it `masking.scrub_for_log`, and that has to keep resolving.
 
-def test_scrub_for_log_leaves_ordinary_values_alone():
-    assert m.scrub_for_log("mk3p9aqz-7f3a") == "mk3p9aqz-7f3a"
-    assert m.scrub_for_log("maria.gonzalez@dynatrace.com") == "maria.gonzalez@dynatrace.com"
-
-
-def test_scrub_for_log_kills_the_forged_second_line():
-    forged = "real-id\n2026-08-14 12:00:00 INFO live: terminate-all everything"
-    out = m.scrub_for_log(forged)
-    assert "\n" not in out and "\r" not in out
-    assert out.startswith("real-id ")
-
-
-def test_scrub_for_log_kills_carriage_returns_and_escapes():
-    # \r alone overwrites the line in a terminal; \x1b starts an ANSI sequence
-    # that can erase the lines above it.
-    assert m.scrub_for_log("a\rb") == "a b"
-    assert m.scrub_for_log("a\x1b[2Kb") == "a [2Kb"
-    assert m.scrub_for_log("a\x00\x0b\x7fb") == "a   b"
-
-
-def test_scrub_for_log_caps_length():
-    out = m.scrub_for_log("x" * 500)
-    assert len(out) == 201 and out.endswith("…")
-    assert m.scrub_for_log("x" * 10, limit=4) == "xxxx…"
-
-
-def test_scrub_for_log_absent_values_log_as_absent():
-    assert m.scrub_for_log(None) == ""
-    assert m.scrub_for_log("") == ""
-    assert m.scrub_for_log(0) == ""
-
-
-def test_scrub_for_log_accepts_non_strings():
-    assert m.scrub_for_log(ValueError("boom\nfake")) == "boom fake"
-    assert m.scrub_for_log(42) == "42"
+def test_masking_still_re_exports_scrub_for_log():
+    from shared import log_safety
+    assert m.scrub_for_log is log_safety.scrub_for_log
+    assert m.scrub_for_log("a\nb") == "a b"
 
 
 if __name__ == "__main__":
