@@ -103,18 +103,26 @@ def environment_id(tenant_url: str) -> str:
 PROBEABLE_SUFFIXES = (".dynatrace.com", ".dynatracelabs.com")
 
 
-def probe_url_for(tenant_url: str) -> str:
-    """The exact URL discovery may fetch for this tenant, or "" for none.
+PROBE_PATH = "/platform/oauth2/authorization/dynatrace-sso"
 
-    ONE parse, and the URL is rebuilt from the hostname that parse produced —
-    the validation and the request can therefore never disagree about what the
-    host is. Validating in one function and re-parsing in another is a parser
-    differential: two `urlparse` calls on the same string agree today, and a
-    single `\\` or `@` in the wrong place is the classic way to make them stop.
 
-    https only — a downgrade would put the probe on the wire in clear — and the
-    host must be a Dynatrace one. Everything else falls back to the domain-suffix
-    map, which needs no network and cannot be pointed anywhere.
+def probeable_host(tenant_url: str) -> str:
+    """The host discovery may fetch for this tenant, or "" for none.
+
+    ONE parse: the caller-supplied string is parsed here and nowhere else, and
+    what comes back is only ever a hostname this function approved. Validating in
+    one place and re-parsing in another is a parser differential — two
+    `urlparse` calls on the same string agree today, and a single backslash or
+    `@` in the wrong place is the classic way to make them stop agreeing.
+
+    Returning the HOST rather than a whole URL keeps the caller's contribution to
+    the request as small as it can be: the scheme and the path are literals at
+    the call site, so the only thing that travels from the caller into the
+    request is a name that ends in a Dynatrace domain.
+
+    https only — a downgrade would put the probe on the wire in clear. Everything
+    else falls back to the domain-suffix map, which needs no network and cannot
+    be pointed anywhere.
     """
     u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
     if u.scheme != "https":
@@ -123,21 +131,29 @@ def probe_url_for(tenant_url: str) -> str:
     if not host or not any(host == s.lstrip(".") or host.endswith(s)
                            for s in PROBEABLE_SUFFIXES):
         return ""
-    return f"https://{host}/platform/oauth2/authorization/dynatrace-sso"
+    return host
+
+
+def probe_url_for(tenant_url: str) -> str:
+    """Full discovery URL for ``tenant_url``, or "" if it must not be fetched."""
+    host = probeable_host(tenant_url)
+    return f"https://{host}{PROBE_PATH}" if host else ""
 
 
 def is_probeable(tenant_url: str) -> bool:
     """Whether discovery may make a network request to this tenant."""
-    return bool(probe_url_for(tenant_url))
+    return bool(probeable_host(tenant_url))
 
 
 async def discover_sso(tenant_url: str) -> str:
     """The tenant's SSO origin (no path). Never raises."""
-    probe = probe_url_for(tenant_url)
-    if not probe:
+    host = probeable_host(tenant_url)
+    if not host:
         log.debug("not probing %s — not an https Dynatrace host; using the domain map",
                   scrub_for_log(_host(tenant_url)))
         return sso_for_known_domain(tenant_url)
+    # Scheme and path are literals here; `host` passed the allowlist above.
+    probe = f"https://{host}{PROBE_PATH}"
     try:
         async with httpx.AsyncClient(timeout=8, follow_redirects=False) as c:
             r = await c.head(probe)
