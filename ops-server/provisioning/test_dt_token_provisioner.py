@@ -141,7 +141,7 @@ def test_the_endpoint_is_chosen_from_the_credential():
     assert classic.token_api == "https://sro97894.live.dynatrace.com/api/v2/apiTokens"
 
     platform = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
-                                  api_token="dt0s16.SOMETHING")
+                                  api_token="dt0s16.not-a-real-token")
     assert not platform.is_classic_token
     assert platform.token_api == ("https://sro97894.apps.dynatrace.com"
                                   "/platform/classic/environment-api/v2/apiTokens")
@@ -153,9 +153,9 @@ def test_the_endpoint_is_chosen_from_the_credential():
 
 def test_a_platform_token_is_sent_as_a_bearer_not_as_an_api_token():
     p = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
-                           api_token="dt0s16.SOMETHING")
+                           api_token="dt0s16.not-a-real-token")
     hdr = asyncio.run(p._auth_headers())
-    assert hdr["Authorization"] == "Bearer dt0s16.SOMETHING"
+    assert hdr["Authorization"] == "Bearer dt0s16.not-a-real-token"
 
 
 def test_create_tokens_revokes_on_partial_failure():
