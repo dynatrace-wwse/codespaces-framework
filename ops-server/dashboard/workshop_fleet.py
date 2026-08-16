@@ -300,9 +300,27 @@ def daily_scale_decision(workers: list[dict], pressure_ticks: dict[str, int],
             brake.append(wid)
             reasons.append(f"{wid} cpu {w.get('cpu_pct')}% sustained — braking")
 
+    # A warming worker contributes 0 free seats, so a pool that is merely
+    # restarting looks exactly like a pool that is full. It is not: those seats
+    # are temporarily ABSENT, not taken, and they return in minutes — whereas a
+    # machine launched now needs its own boot plus warm-up and lands about when
+    # it stops being needed. Unguarded, every worker restart bought a spare
+    # instance and a fleet-wide deploy bought one per worker.
+    #
+    # The guard is deliberately narrow: only wait when the seats already coming
+    # back would COVER the shortfall. A warming worker does not excuse a pool
+    # that will still be short once it lands — that is real demand, and the
+    # machine should be on its way now rather than one warm-up later.
+    incoming = sum(int(w.get("capacity", 0) or 0) for w in workers
+                   if w.get("status") == "warming" and not _truthy(w.get("draining")))
+
     scale_up = 0
-    if free < min_free:
-        reasons.append(f"{free} free seats < {min_free}")
+    if free < min_free and free + incoming >= min_free:
+        reasons.append(f"{free} free seats < {min_free}, but {incoming} seat(s) are "
+                       f"warming back up — waiting for capacity already paid for")
+    elif free < min_free:
+        reasons.append(f"{free} free seats < {min_free}"
+                       + (f" (only {incoming} warming)" if incoming else ""))
         scale_up = 1
     elif shrink:
         # Capacity is about to be withdrawn from the pool, so replace it.

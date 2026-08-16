@@ -148,6 +148,43 @@ def test_low_free_seats_scales_up():
     assert d["scale_up"] == 1
 
 
+def test_seats_coming_back_are_not_a_reason_to_buy_a_machine():
+    """A restarting pool looks exactly like a full one — it is not.
+
+    A warming worker reports 0 free seats, so `free < min_free` fires. But those
+    seats are ABSENT, not taken: they return in minutes, while a machine launched
+    now needs its own boot plus warm-up and lands about when it stops being
+    needed. Unguarded, every worker restart bought a spare instance and a
+    fleet-wide deploy bought one per worker. Seen live on 2026-08-16:
+    "would scale_up=1 — 0 free seats < 4" while both workers were re-warming.
+    """
+    warming = _worker("w1", free=0, status="warming")
+    warming["capacity"] = "20"
+    d = wf.daily_scale_decision([warming], {}, min_free=4)
+    assert d["scale_up"] == 0
+    assert "warming back up" in d["why"]
+
+    # A DRAINING worker is going away for good — its seats are not coming back.
+    gone = _worker("w1", free=0, status="warming", draining="1")
+    gone["capacity"] = "20"
+    assert wf.daily_scale_decision([gone], {}, min_free=4)["scale_up"] == 1
+
+    # A genuinely full pool still scales.
+    full = _worker("w1", free=0, status="ready")
+    assert wf.daily_scale_decision([full], {}, min_free=4)["scale_up"] == 1
+
+
+def test_warming_does_not_excuse_a_pool_that_will_still_be_short():
+    """The guard is narrow on purpose. If the returning seats do not cover the
+    shortfall, that is real demand and the machine should be on its way NOW —
+    not one warm-up later."""
+    small = _worker("w1", free=0, status="warming")
+    small["capacity"] = "2"
+    d = wf.daily_scale_decision([small], {}, min_free=10)
+    assert d["scale_up"] == 1
+    assert "only 2 warming" in d["why"]
+
+
 def test_plenty_of_seats_does_nothing():
     d = wf.daily_scale_decision([_worker(free=20)], {}, min_free=4)
     assert d["scale_up"] == 0 and not d["shrink"] and not d["brake"]
@@ -209,8 +246,17 @@ def test_draining_workers_do_not_count_as_free_capacity():
 
 
 def test_warming_workers_do_not_count_as_free_capacity():
+    """Seats on a machine still warming are not seats YET.
+
+    They are not counted as free — but as of 2026-08-16 that no longer implies a
+    scale-up, because they are about to become free (see
+    test_seats_coming_back_are_not_a_reason_to_buy_a_machine). With no `capacity`
+    on the heartbeat there is nothing known to be coming back, so this still
+    scales.
+    """
     d = wf.daily_scale_decision([_worker(free=20, status="warming")], {}, min_free=4)
     assert d["scale_up"] == 1
+    assert "0 free seats" in d["why"]
 
 
 def test_no_workers_is_reported_not_crashed():
