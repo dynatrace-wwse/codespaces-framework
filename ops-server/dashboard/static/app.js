@@ -621,13 +621,18 @@ function ansi256(n) {
 }
 
 // Every dynamic value in this dashboard goes through here before it reaches
-// innerHTML. Escaping only `& < >` was enough while values were interpolated
-// as element TEXT, but most of them now land inside quoted attributes
-// (`value="…"`, `title="…"`, `data-ws-open="…"`), and a workshop title or a
-// trainer note is free text somebody else typed. A `"` closes the attribute
-// early and the rest of the value is parsed as markup — stored XSS with no
-// `<` in sight. Quotes are escaped here rather than at each call site so a
-// new attribute cannot forget it.
+// innerHTML. There used to be TWO declarations of this function — this one,
+// escaping `& < >`, and a second one further down escaping `& < > "`. The
+// later declaration silently won at runtime, so the weaker one at the top of
+// the file was dead code that read like the authoritative sanitizer. Whoever
+// checked "do we escape quotes?" got a different answer depending on which
+// one they found. There is now exactly one.
+//
+// It escapes quotes because most values no longer land in element TEXT: they
+// land inside quoted attributes (`value="…"`, `title="…"`, `data-ws-open="…"`)
+// and a workshop title or a trainer note is free text somebody else typed.
+// A `"` closes the attribute early and the rest is parsed as markup — XSS with
+// no `<` in sight. `'` is escaped for the same reason in `'`-quoted attributes.
 function escapeHtml(s) {
     return String(s ?? '')
         .replace(/&/g, '&amp;')
@@ -2543,12 +2548,6 @@ document.addEventListener('click', async e => {
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'
-    }[c]));
-}
 
 function formatTrigger(trigger) {
     // "arena" was the old name for the enablement-app provisioner; the Arena product

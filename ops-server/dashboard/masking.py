@@ -17,9 +17,9 @@ a journald line.
 
 import re
 
-# Anything that could end a log line or move the cursor: CR/LF, the C0 range,
-# and DEL. Kept as a character class rather than a `\n`/`\r` pair because a
-# lone \x0b or \x1b[2K in journald is just as good at hiding the next line.
+# Everything else that could move the cursor or hide a line: the rest of the
+# C0 range and DEL. A lone \x0b, or an \x1b[2K, is as good at erasing the line
+# above it as a newline is at forging the line below.
 _LOG_UNSAFE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -33,12 +33,19 @@ def scrub_for_log(value, limit: int = 200) -> str:
     unforgeable. Control characters become spaces and the result is capped,
     so one long id cannot push the rest of a line out of view either.
 
+    The two line terminators are stripped with `str.replace` before the
+    catch-all regex, which is redundant at runtime and deliberate: CodeQL's
+    py/log-injection barrier recognises `replace`, not `re.sub`, so writing it
+    this way is what lets the analysis see that the path is cut here instead of
+    re-reporting every call site.
+
     Falsy values become '' rather than 'None' so an absent field logs as
     absent.
     """
     if not value:
         return ""
-    text = _LOG_UNSAFE.sub(" ", str(value))
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    text = _LOG_UNSAFE.sub(" ", text)
     return text if len(text) <= limit else text[:limit] + "…"
 
 
