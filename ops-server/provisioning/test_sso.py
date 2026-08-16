@@ -49,6 +49,30 @@ def test_discovery_only_probes_https_dynatrace_hosts():
     assert not is_probeable("https://notdynatrace.com/")
 
 
+def test_the_probe_url_is_rebuilt_and_carries_nothing_the_caller_wrote():
+    """The reason validation and request share one parse.
+
+    A tenant URL can smuggle credentials in userinfo, and everything before the
+    LAST '@' is userinfo — so this parses to the legitimate host. The probe is
+    rebuilt from that hostname with a fixed scheme and path, so the userinfo and
+    the decoy host never reach the wire at all. Validating in one function and
+    re-parsing in another would have left two chances to disagree about which
+    half is the host.
+    """
+    from .sso import probe_url_for
+    url = probe_url_for("https://user:pw@evil.example.com\\@sro97894.apps.dynatrace.com/")
+    assert url == ("https://sro97894.apps.dynatrace.com"
+                   "/platform/oauth2/authorization/dynatrace-sso")
+    assert "@" not in url and "evil.example.com" not in url and "pw" not in url
+
+
+def test_a_refused_tenant_yields_no_url_at_all():
+    from .sso import probe_url_for
+    for bad in ("http://169.254.169.254/", "https://169.254.169.254/",
+                "https://evil.example.com/", "http://sro97894.apps.dynatrace.com"):
+        assert probe_url_for(bad) == "", bad
+
+
 def test_an_unprobeable_tenant_still_resolves_offline():
     """Refusing to probe must not refuse to answer — the domain map is the whole
     point of having a fallback."""

@@ -103,31 +103,42 @@ def environment_id(tenant_url: str) -> str:
 PROBEABLE_SUFFIXES = (".dynatrace.com", ".dynatracelabs.com")
 
 
-def is_probeable(tenant_url: str) -> bool:
-    """Whether discovery may make a network request to this tenant.
+def probe_url_for(tenant_url: str) -> str:
+    """The exact URL discovery may fetch for this tenant, or "" for none.
 
-    https only — a downgrade to http would put the probe on the wire in clear —
-    and the host must be a Dynatrace one. Anything else falls back to the
-    domain-suffix map, which needs no network and cannot be pointed anywhere.
+    ONE parse, and the URL is rebuilt from the hostname that parse produced —
+    the validation and the request can therefore never disagree about what the
+    host is. Validating in one function and re-parsing in another is a parser
+    differential: two `urlparse` calls on the same string agree today, and a
+    single `\\` or `@` in the wrong place is the classic way to make them stop.
+
+    https only — a downgrade would put the probe on the wire in clear — and the
+    host must be a Dynatrace one. Everything else falls back to the domain-suffix
+    map, which needs no network and cannot be pointed anywhere.
     """
     u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
     if u.scheme != "https":
-        return False
+        return ""
     host = (u.hostname or "").lower()
-    return any(host == s.lstrip(".") or host.endswith(s) for s in PROBEABLE_SUFFIXES)
+    if not host or not any(host == s.lstrip(".") or host.endswith(s)
+                           for s in PROBEABLE_SUFFIXES):
+        return ""
+    return f"https://{host}/platform/oauth2/authorization/dynatrace-sso"
+
+
+def is_probeable(tenant_url: str) -> bool:
+    """Whether discovery may make a network request to this tenant."""
+    return bool(probe_url_for(tenant_url))
 
 
 async def discover_sso(tenant_url: str) -> str:
     """The tenant's SSO origin (no path). Never raises."""
-    if not is_probeable(tenant_url):
+    probe = probe_url_for(tenant_url)
+    if not probe:
         log.debug("not probing %s — not an https Dynatrace host; using the domain map",
                   scrub_for_log(_host(tenant_url)))
         return sso_for_known_domain(tenant_url)
     try:
-        u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
-        # Rebuilt from the validated hostname and a fixed scheme/path, so nothing
-        # the caller wrote reaches the request except a host that passed above.
-        probe = f"https://{u.hostname}/platform/oauth2/authorization/dynatrace-sso"
         async with httpx.AsyncClient(timeout=8, follow_redirects=False) as c:
             r = await c.head(probe)
             loc = r.headers.get("location")
