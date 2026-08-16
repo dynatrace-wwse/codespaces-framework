@@ -225,6 +225,25 @@ A pull without the restart deploys nothing — the running python process keeps
 its imported code. If a load test / live sessions are running on the worker
 (`docker ps | grep sb-slot`), pull immediately but defer the restart.
 
+**Deploying a BRANCH to the workers needs an explicit refspec.** A worker's clone
+does not track anything but `main`, so `git fetch origin` silently leaves
+`origin/<branch>` at whatever it last saw and the follow-up `reset`/`merge` reports
+"Already up to date" against a stale ref. Measured 2026-08-16: both workers sat six
+commits behind while every command in the loop above returned success.
+
+```bash
+B=epic/workshop-pools-and-autoscale
+for w in autonomous-enablements-worker autonomous-enablements-worker-2; do
+  ssh $w "sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework \
+            fetch origin refs/heads/$B:refs/remotes/origin/$B \
+       && sudo -u ops git -C /home/ops/enablement-framework/codespaces-framework \
+            reset --hard origin/$B \
+       && sudo systemctl restart ops-worker-agent"
+done
+```
+
+Always finish by printing the three HEADs (below) — "up to date" is not evidence.
+
 After editing on master (`ubuntu` path), sync to production (`ops` path) and restart:
 ```bash
 sudo cp /home/ubuntu/enablement-framework/codespaces-framework/ops-server/workers/manager.py \
