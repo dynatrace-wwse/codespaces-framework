@@ -4249,6 +4249,48 @@ async def api_arena_trainings(tenant: str = ""):
     return trainings
 
 
+@app.get("/api/arena/trainings/{training_id}/token-specs")
+async def api_arena_token_specs(training_id: str):
+    """Which Dynatrace tokens this training needs, from the repo's own declaration.
+
+    The app mints per-learner tokens with its own tenant identity — Orbital holds no
+    credential and never sees them. But the app had no way to know a training needs
+    anything other than the standard operator+ingest pair, so a repo declaring extra
+    tokens (`.devcontainer/yaml/dt-tokens.yaml`) was honoured only on the scripted
+    provisioning path and silently ignored for every real learner. The CI/CD workshop
+    gates its whole bootstrap on two such tokens and therefore never ran: sessions came
+    up as empty dev containers with no error.
+
+    Exposing the parsed file keeps ONE source of truth — the repo — instead of a second
+    copy of the same table inside the app, which is exactly the mismatch that hid this.
+    Public, like the rest of `/api/arena/*`: scope names, not secrets.
+    """
+    from provisioning import load_token_specs
+
+    cached = await pool.get(_ARENA_CATALOG_CACHE_KEY)
+    catalog = json.loads(cached) if cached else await _fetch_arena_catalog()
+    training = arena_training_for_id(catalog, training_id)
+    if training is None:
+        raise HTTPException(status_code=404, detail=f"Training '{training_id}' not found")
+
+    repo_nwo = "/".join(training["repoUrl"].rstrip("/").split("/")[-2:])
+    specs = await load_token_specs(repo_nwo, ref=training.get("branch") or "main")
+    return {
+        "trainingId": training["id"],
+        "repo": repo_nwo,
+        "specs": [
+            {
+                "nameSuffix": s.name_suffix,
+                "envVar": s.env_var,
+                "kind": s.kind,
+                "aliasEnvVars": list(s.aliases),
+                "scopes": list(s.scopes),
+            }
+            for s in specs
+        ],
+    }
+
+
 # Ceiling on any caller-supplied session lifetime. A full-day workshop plus
 # overrun still fits; nothing can ask for a daemon that outlives a working day.
 MAX_SESSION_HOURS = 12

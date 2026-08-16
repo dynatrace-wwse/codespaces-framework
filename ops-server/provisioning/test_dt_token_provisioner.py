@@ -200,6 +200,102 @@ def test_revoke_tokens_deletes_each_and_tolerates_404():
     assert len(deletes) == 2
 
 
+# ── kind: platform ───────────────────────────────────────────────────────────
+# The CI/CD workshop declares a classic DT_API_TOKEN *and* a gen3 DT_PLATFORM_TOKEN and
+# gates its whole bootstrap on having both, so one session needs two token families from
+# two different APIs.
+
+MIXED_SPECS = [
+    TokenSpec(name_suffix="api", env_var="DT_API_TOKEN", scopes=["ReadConfig"],
+              aliases=["DT_BIZEVENTS_TOKEN"]),
+    TokenSpec(name_suffix="platform", env_var="DT_PLATFORM_TOKEN", kind="platform",
+              scopes=["document:documents:read", "settings:objects:write"]),
+]
+
+_OAUTH = dict(oauth_client_id="cid", oauth_client_secret="secret",
+              oauth_resource="urn:dtaccount:acc-123",
+              oauth_token_url="https://sso.dynatrace.com/sso/oauth2/token")
+
+
+def _mixed_handler():
+    def h(method, url, **kw):
+        if method == "POST" and url.endswith("/sso/oauth2/token"):
+            return _Resp(200, {"access_token": "BEARER", "expires_in": 300})
+        if method == "POST" and url.endswith("/v2/apiTokens"):
+            return _Resp(201, {"id": "dt0c01.CLASSIC", "token": "dt0c01.VALUE"})
+        if method == "POST" and url.endswith("/platform-tokens"):
+            return _Resp(200, {"tokenId": "dt0s16.PLAT", "token": "dt0s16.VALUE"})
+        if method == "DELETE":
+            return _Resp(204)
+        return _Resp(404, text=f"unexpected {url}")
+    return h
+
+
+def test_platform_spec_goes_to_the_account_api_not_the_token_api():
+    restore, calls = _install_fake(_mixed_handler())
+    try:
+        p = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
+                               api_token="dt0s16.MINTER", **_OAUTH)
+        res = asyncio.run(p.create_tokens("wwse/demo-astroshop-problems", "bob@x.com", MIXED_SPECS))
+    finally:
+        restore()
+
+    assert res.env["DT_API_TOKEN"] == "dt0c01.VALUE"
+    assert res.env["DT_BIZEVENTS_TOKEN"] == "dt0c01.VALUE", "alias not applied"
+    assert res.env["DT_PLATFORM_TOKEN"] == "dt0s16.VALUE"
+    assert res.token_ids == ["dt0c01.CLASSIC", "dt0s16.PLAT"]
+
+    plat = [c for c in calls if c[0] == "POST" and c[1].endswith("/platform-tokens")]
+    assert len(plat) == 1, "platform spec did not reach the account API"
+    assert plat[0][1] == "https://api.dynatrace.com/iam/v1/accounts/acc-123/platform-tokens"
+    body = plat[0][2]["json"]
+    # gen3 scopes pass through untouched — no classic translation
+    assert body["scope"] == ["document:documents:read", "settings:objects:write"]
+    assert body["resource"] == ["urn:dtenvironment:sro97894"]
+    # and it must NOT have been sent to the classic endpoint
+    classic = [c for c in calls if c[0] == "POST" and c[1].endswith("/v2/apiTokens")]
+    assert len(classic) == 1
+    assert classic[0][2]["json"]["scopes"] == ["ReadConfig"]
+
+
+def test_platform_spec_without_an_oauth_client_fails_loudly():
+    # A bare api_token cannot reach the Account Management API however wide its scopes.
+    # Minting it as a classic token instead would drop every gen3 scope in translation
+    # and hand the session a token that authenticates but can do nothing.
+    restore, _ = _install_fake(_mixed_handler())
+    try:
+        p = DTTokenProvisioner("https://sro97894.apps.dynatrace.com", api_token="dt0s16.MINTER")
+        assert p.can_mint_platform is False
+        try:
+            asyncio.run(p.create_tokens("wwse/demo-astroshop-problems", "bob@x.com", MIXED_SPECS))
+        except RuntimeError as exc:
+            assert "kind: platform" in str(exc)
+            return
+        raise AssertionError("expected a RuntimeError naming the missing client")
+    finally:
+        restore()
+
+
+def test_revoke_routes_each_family_to_its_own_api():
+    # A job record stores one flat id list; the family is recoverable from the prefix.
+    restore, calls = _install_fake(_mixed_handler())
+    try:
+        p = DTTokenProvisioner("https://sro97894.apps.dynatrace.com",
+                               api_token="dt0s16.MINTER", **_OAUTH)
+        asyncio.run(p.revoke_tokens(["dt0c01.CLASSIC", "dt0s16.PLAT"]))
+    finally:
+        restore()
+    deletes = [c[1] for c in calls if c[0] == "DELETE"]
+    assert any(u.endswith("/v2/apiTokens/dt0c01.CLASSIC") for u in deletes), deletes
+    assert any(u.endswith("/platform-tokens/dt0s16.PLAT") for u in deletes), deletes
+
+
+def test_sprint_uses_its_own_account_api_host():
+    # Not derivable from the tenant domain — the labs realm answers on an internal host.
+    p = DTTokenProvisioner("https://ydi9582h.sprint.apps.dynatracelabs.com", api_token="dt0c01.X")
+    assert p._account_api_host == "https://api-hardening.internal.dynatracelabs.com"
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items())

@@ -47,6 +47,20 @@ SSO_BY_DOMAIN_SUFFIX = {
 
 TOKEN_PATH = "/sso/oauth2/token"
 
+DEFAULT_ACCOUNT_API = "https://api.dynatrace.com"
+
+# Account Management API host per realm. NOT derivable from the tenant or SSO domain —
+# the labs realms answer on an internal hostname that shares no stem with either, which
+# is why this is a table and why callers may override it. Mirrors
+# dashboard.app_deploy.ACCOUNT_API_BY_DOMAIN; kept here so `provisioning` stays free of
+# any dashboard import (see the module docstring).
+ACCOUNT_API_BY_DOMAIN_SUFFIX = {
+    ".sprint.apps.dynatracelabs.com": "https://api-hardening.internal.dynatracelabs.com",
+    ".sprint.dynatracelabs.com": "https://api-hardening.internal.dynatracelabs.com",
+    ".dev.apps.dynatracelabs.com": "https://api-hardening.internal.dynatracelabs.com",
+    ".dev.dynatracelabs.com": "https://api-hardening.internal.dynatracelabs.com",
+}
+
 
 def _host(tenant_url: str) -> str:
     u = urlparse(tenant_url if "://" in tenant_url else f"https://{tenant_url}")
@@ -63,6 +77,20 @@ def sso_for_known_domain(tenant_url: str) -> str:
         if host.endswith(suffix):
             return SSO_BY_DOMAIN_SUFFIX[suffix]
     return DEFAULT_SSO
+
+
+def account_api_for(tenant_url: str) -> str:
+    """Account Management API origin for ``tenant_url`` — no network."""
+    host = _host(tenant_url).lower()
+    for suffix in sorted(ACCOUNT_API_BY_DOMAIN_SUFFIX, key=len, reverse=True):
+        if host.endswith(suffix):
+            return ACCOUNT_API_BY_DOMAIN_SUFFIX[suffix]
+    return DEFAULT_ACCOUNT_API
+
+
+def environment_id(tenant_url: str) -> str:
+    """The environment id (``sro97894``) from any of its URL shapes."""
+    return _host(tenant_url).split(".")[0].lower()
 
 
 async def discover_sso(tenant_url: str) -> str:
