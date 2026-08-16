@@ -193,7 +193,21 @@ WORKER_SLOT_LIMITS = os.environ.get("WORKER_SLOT_LIMITS", "0").strip().lower() i
 # which means a correct Astroshop session was being killed for being the size
 # it is designed to be. A dedicated workshop pool gets a cap sized from its own
 # repo's units instead (``capacity_units.slot_memory_cap_mb``).
-WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "8192"))
+#
+# Raised again to 20480 on 2026-08-16, from the FIRST real Astroshop measurement
+# — the workshop had never actually bootstrapped before, so every earlier figure
+# described an empty container. Measured steady state is 7,158 MiB per session,
+# not the 6,320 MiB its pod limits declare: declared limits omit k3d itself, the
+# GitLab install and the load generator. Against the old 8,192 cap that is 87%
+# used, so a slightly heavier run would have been OOM-killed mid-workshop.
+#
+# 20480 is ``slot_memory_cap_mb(4 units)`` — the model's own answer for the
+# heaviest profiled training. It is a LIMIT, not a reservation: nothing is set
+# aside, and what actually prevents overcommit is the unit model deciding how
+# many sessions a box accepts. Sizing the cap to the heaviest training only
+# removes a way for a correct session to die; it does not remove the runaway
+# guard, which is what the cap is for.
+WORKER_SLOT_MEMORY_MB = int(os.environ.get("WORKER_SLOT_MEMORY_MB", "20480"))
 # Soft floor: under host pressure the kernel reclaims from slots above this
 # first, so a heavy neighbour is squeezed before a well-behaved one.
 WORKER_SLOT_MEMORY_RESERVATION_MB = int(os.environ.get("WORKER_SLOT_MEMORY_RESERVATION_MB", "2048"))

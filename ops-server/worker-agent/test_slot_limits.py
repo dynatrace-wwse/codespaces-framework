@@ -81,7 +81,10 @@ def test_default_envelope_matches_measurement():
     #
     # Capacity is planned from units, never from this number — this is the
     # *limit* to the unit model's *request*.
-    assert pairs["--memory"] == "8192m"
+    # slot_memory_cap_mb(4 units) — sized to the heaviest MEASURED training
+    # (Astroshop, 7,158 MiB per session), not to the 6,320 MiB its pod limits
+    # declare. Under the previous 8192 cap a correct session ran at 87% of it.
+    assert pairs["--memory"] == "20480m"
     assert pairs["--memory-reservation"] == "2048m"
     assert pairs["--pids-limit"] == "4096"
     assert pairs["--cpu-shares"] == "1024"
