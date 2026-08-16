@@ -8,7 +8,45 @@ public — anonymous callers must only ever see masked values.
 Pure functions, no FastAPI/Redis — unit-tested in dashboard/test_masking.py.
 The identity decision (who is anonymous) lives in app.py; everything here
 just transforms payloads.
+
+`scrub_for_log` lives here too. It is not masking — it is the other direction
+of the same idea: a value the caller controls must not be able to change the
+SHAPE of what we emit, whether that is an HTML attribute, a JSON payload, or
+a journald line.
 """
+
+import re
+
+# Everything else that could move the cursor or hide a line: the rest of the
+# C0 range and DEL. A lone \x0b, or an \x1b[2K, is as good at erasing the line
+# above it as a newline is at forging the line below.
+_LOG_UNSAFE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def scrub_for_log(value, limit: int = 200) -> str:
+    """Flatten a caller-supplied value into one log-safe line.
+
+    Job ids, session ids and emails arrive as path parameters and go straight
+    into log records. A value containing "\\n2026-01-01 INFO forged entry"
+    writes a second line that reads exactly like a real one, so an attacker
+    can invent Orbital history — the log is evidence, and evidence has to be
+    unforgeable. Control characters become spaces and the result is capped,
+    so one long id cannot push the rest of a line out of view either.
+
+    The two line terminators are stripped with `str.replace` before the
+    catch-all regex, which is redundant at runtime and deliberate: CodeQL's
+    py/log-injection barrier recognises `replace`, not `re.sub`, so writing it
+    this way is what lets the analysis see that the path is cut here instead of
+    re-reporting every call site.
+
+    Falsy values become '' rather than 'None' so an absent field logs as
+    absent.
+    """
+    if not value:
+        return ""
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    text = _LOG_UNSAFE.sub(" ", text)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def mask_email(email) -> str:
