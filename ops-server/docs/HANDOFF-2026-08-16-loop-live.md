@@ -138,16 +138,81 @@ the `r`.)
 
 ---
 
+## 5. Two more, found by things going wrong rather than by tests
+
+### A dashboard restart cost 24 live tokens
+
+Restarting `ops-dashboard` mid-run 502s the API for a few seconds and answers with
+an nginx HTML page, which `.json()` raises on. That raise landed **inside** the load
+test's teardown block, so the revoke below it never ran.
+
+The tokens were classic, so no per-owner cap was at risk and they were recovered by
+hand — but the same shape on a gen3 tenant is the 2026-08-08 outage. Two fixes: the
+poll helpers retry (a poll loop that cannot tolerate one bad response is not a poll
+loop, and Orbital restarts are a normal event), and the teardown **diagnostics** now
+sit in their own `try` so a failure to *check* the fleet can never skip the *cleanup*
+underneath it.
+
+### The reconciler fix had a tail
+
+Stopping `worker_id="queued"` from being read as an orphan was right — it was
+deleting live learners' records mid-session. But `"queued"` was also the only thing
+that ever cleaned up a learner who **never started at all**. Such a learner has no
+environment to reap, so after the fix nothing would ever touch their record: five
+survived an ended workshop, reading as running sessions with nothing behind them.
+
+Ending the workshop now drops them, alongside their queued payloads — and **only** on
+the explicit `"queued"` marker. An absent `worker_id` is merely *unknown*, and
+deleting on unknown would take a live learner's record with it. That is the opposite
+asymmetry to `_dead_worker_candidate`, which treats both as not-dead. In each case
+the safe answer is the one that does less.
+
+---
+
+## 6. Security: what CodeQL and GitGuardian found
+
+**CodeQL, 10 alerts**, all on code this branch added after #152 took the repo to zero.
+The load-bearing one: two sites logged a **token endpoint's raw response body**. That
+body is the only useful diagnostic on a 4xx — SSO hard-400s an unheld scope and leaves
+`error_description` empty — and the same shape of body can carry an `access_token`.
+`shared.log_safety.safe_error_detail` now parses, keeps a whitelist of error fields,
+and reports anything else by its key names or its length, never its values.
+
+Also a real **SSRF**: discovery builds a URL from a caller-supplied tenant and fetches
+it from inside the ops server. A tenant of `http://169.254.169.254/` would have made
+Orbital fetch its own instance credentials. `probeable_host()` requires https and a
+Dynatrace host, parses **once**, and returns only a hostname — the scheme and path are
+literals at the call site. It also drops userinfo: `https://user:pw@evil.example.com\
+@sro97894.apps.dynatrace.com/` resolves to the legitimate tenant, and the rebuilt probe
+carries neither the credentials nor the decoy host onto the wire.
+
+What remains flagged is inherent to the features: discovery must fetch a caller-named
+tenant, and a failed mint must be able to say something about the response. Both are
+now mitigated rather than eliminated.
+
+**GitGuardian** flags the literal `dt0s16.SOMETHING` in a test 38 commits back — the
+prefix plus enough uppercase matches its Dynatrace pattern. Renamed at head, but GG
+scans every commit in the PR, so clearing it needs a dismissal or a history rewrite.
+(A separate finding — real, revoked token prefixes quoted in this very document — was
+removed by squashing the commit that introduced them, so it is not recoverable from
+history either.)
+
+---
+
 ## Still owed
 
-1. **The reaper under real load.** Still the biggest unknown. `0ed9560` keys the wait
-   on the container **id** and bounds it, but the failure it fixes
-   (`docker wait` hung forever after a mass teardown, worker advertising 0 free seats
-   while holding 20 idle ones) has not been reproduced against the fix at scale.
-2. **Merge to main.** Autoscaled workers sync from `main` at boot, so until then a
-   machine the loop launches itself comes up **without** any of this.
-3. **Volume IOPS 3,000 → 6,000** (~$15/month/worker). At 3,000 the ceiling is ~18
+1. **Merge to main.** `fleet._build_user_data` syncs a launched worker to
+   `origin/main`, and main's agent has **zero `WORKER_POOL` references** — so until
+   this merges, a machine the loop launches itself comes up poolless and without the
+   unit model. `WORKER_CODE_BRANCH` exists for exactly this and is currently set to
+   the epic branch in `/home/ops/.env`: **remove that line once merged**, or launched
+   workers will keep syncing a branch that is no longer where the work lands.
+2. **Volume IOPS 3,000 → 6,000** (~$15/month/worker). At 3,000 the ceiling is ~18
    concurrent installs and the drip is what keeps us under it.
-4. **A stuck-warming worker now blocks scale-up** by design. If the "came back short"
+3. **A stuck-warming worker now blocks scale-up** by design. If the "came back short"
    bug (`SysboxPool: 18/30 slots ready` reported as *fully warm*) recurs, the pool will
    wait on seats that never arrive. Worth a bounded timeout on that guard.
+4. **The two advisory security checks.** Neither is required (only
+   `codespaces-integration-test-with-dynatrace-deployment` is), and both are described
+   in §6 — the GitGuardian one needs a dashboard dismissal, the CodeQL ones are
+   mitigated-not-eliminable.
