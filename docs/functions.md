@@ -390,7 +390,7 @@ CERTMANAGER_EMAIL="myemail@example.com" certmanagerEnable
 |---|---|
 | `finalizePostCreation` | Entry point called at the end of `post-create.sh`: runs e2e tests if `CODESPACE_NAME` starts with `dttest-`, otherwise verifies creation and sends telemetry |
 | `postCodespaceTracker` | Sends a DT biz event with codespace creation metrics (repo, duration, errors, type, architecture) |
-| `verifyCodespaceCreation` | Parses container/codespace logs for errors, populates `ERROR_COUNT` and `CODESPACE_ERRORS` |
+| `verifyContainerCreation` | Parses container/codespace logs for errors, populates `ERROR_COUNT` and `CODESPACE_ERRORS` |
 | `calculateTime` | Records and exports the codespace creation duration in seconds |
 | `updateEnvVariable` | Updates a variable's value in the count file (handles both bash and zsh indirect expansion) |
 | `deleteCodespace` | Deletes the current codespace via `gh codespace delete` |

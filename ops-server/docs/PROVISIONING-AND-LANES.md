@@ -138,7 +138,8 @@ on the pool queue rather than escaping to daily.
 ### Workshop lane (planned)
 
 ```
- T-45 min          T-0            T+duration      +30 min grace
+ T-lead            T-0            T+duration      +30 min grace
+ (default 45)                        └── or T+hold (default 240), whichever is LATER
     │               │                  │               │
     ├─ prewarm ─────┤                  │               │
     │  launch ceil(seats / seats_per_worker) × m6a.4xlarge, on-demand
@@ -154,7 +155,10 @@ on the pool queue rather than escaping to daily.
     └───────────────────────────────────────────────────────┴─► teardown
 ```
 
-* `due_for_prewarm` (`workshop_fleet.py:165`) is true from `scheduledAt − 45 min` and stays true
+* **Both ends of that window are per workshop and trainer-editable** since 2026-08-17 — see §13.
+  `PREWARM_LEAD_MINUTES` / `WORKSHOP_HOLD_MINUTES` are only the defaults now; ask
+  `session_lead_minutes()` / `session_hold_minutes()`, never the env var.
+* `due_for_prewarm` (`workshop_fleet.py:165`) is true from `scheduledAt − lead` and stays true
   past the start (a trainer who opens the room late must still get machines) **but is bounded by
   teardown** — the two predicates are mutually exclusive on purpose. They were not, and that made
   the loop launch and terminate the same machine forever for any workshop nobody ended.
@@ -216,7 +220,8 @@ session cannot be moved.
 
 * `lifetime_minutes` arms `shutdown -h +N` **inside** the instance plus
   `--instance-initiated-shutdown-behavior terminate` — a kernel timer that needs nothing from
-  Orbital, Redis, AWS creds or a working network. **Not currently passed for workshop launches** — gap G4.
+  Orbital, Redis, AWS creds or a working network. Passed for workshop launches since the two-lanes
+  branch (gap G4, closed), and **derived** from the window rather than recomputed — see §13.
 * Root volume is `DeleteOnTermination: true`, 300 GiB gp3 @ 500 MB/s / 6,000 IOPS, provisioned in
   `BlockDeviceMappings` at launch (`fleet.py:_root_block_device:321`) so no `ModifyVolume`
   cooldown ever applies.
@@ -354,6 +359,11 @@ until someone notices. The EC2 tag query in teardown covers a *lost record*, but
 
 Fix: pass `lifetime_minutes = duration + grace + margin` (e.g. `durationMinutes + 90`). It costs
 nothing and it is the only cost guarantee that survives total control-plane failure.
+
+> **Closed** — `provision_workshop_fleet` now passes `_workshop_lifetime_minutes(session)`.
+> Note the formula above is *no longer correct*: it must be **derived** from
+> `teardown_at − prewarm_at`, not recomputed from duration, or a per-workshop hold pushes
+> teardown past the timer and the machines die mid-session. §13.
 
 ### G5 — No spare machine in the workshop plan
 
@@ -576,7 +586,7 @@ New knobs (all defaulted, none required in `.env`):
 | G1 — autoscaled daily workers advertised 6 seats | AMI's baked `WORKER_CAPACITY=6` won | daily `scale_up` pins capacity from the unit model |
 | G2 — planners were lane-blind | a scale-down click could cordon a prewarmed workshop | `normalize_worker` carries `pool`; `fleet_state`, `plan_scale_down`, `terminatable` are daily-only |
 | G3 — `_register` wrote no `pool` | workshop worker read as daily for ≤30 s | published from the first heartbeat |
-| G4 — no self-destruct on workshop machines | only the loop's teardown ever killed them | `lifetime_minutes` = prewarm + duration + grace + margin |
+| G4 — no self-destruct on workshop machines | only the loop's teardown ever killed them | `lifetime_minutes` **derived** from `teardown_at − prewarm_at` + margin (§13) |
 | G5 — no spare in the workshop plan | losing a host stranded 20 learners | `WORKSHOP_REDUNDANCY=1` |
 | G7 — unbounded `warming` wait | one short worker hung a workshop forever | proceeds DEGRADED after 20 min, loudly |
 | UI — no lane anywhere | could not tell which machine was which | lane badge + coloured edge per worker card, lending line, lane strip; `/api/fleet` carries `orbital-pool` |
@@ -646,3 +656,92 @@ nothing.
    double-count their parent and loop/dm devices are container overlay noise.
 6. Still open: **G8, second half** — the reaper has not been exercised by a *workshop* teardown at
    30 seats (validated on the daily pool only).
+
+---
+
+## 13. The provisioning window became per-workshop and visible (2026-08-17, `e58f274`)
+
+Before this, both ends of the workshop window were process-wide env vars with no override:
+a trainer could not see when machines would appear, could not move it, and — worse — the
+question "will there be machines for my class?" had no answer anywhere in the product.
+`due_for_prewarm` / `due_for_teardown` already accepted `lead_minutes` / `grace_minutes`,
+but the only production callers never passed them.
+
+### The model
+
+| Field on `live:session:{id}` | Default | Ceiling | Effect |
+|---|---|---|---|
+| `prewarmLeadMinutes` | `PREWARM_LEAD_MINUTES` = 45 | `LEAD_MINUTES_CAP` = 360 (6 h) | `prewarm_at = scheduledAt − lead` |
+| `holdMinutes` | `WORKSHOP_HOLD_MINUTES` = 240 | `HOLD_MINUTES_CAP` = 1440 (24 h) | floor under `teardown_at` |
+
+```python
+teardown_at = start + max(durationMinutes + TEARDOWN_GRACE_MINUTES, holdMinutes)
+```
+
+**The hold is a floor, not a replacement.** No workshop ever loses machines earlier than it
+did before the change: a 6 h booking still gets 6 h 30, not truncated to 4 h. The default
+240 lands on "4 h after the start" for app-created workshops only because the app's create
+form **never sends `durationMinutes`**, so they all fall back to the server's 120 — not
+because the formula says four hours. Read that twice before quoting "4 h" as a rule.
+
+Five functions in `workshop_fleet.py` are the whole API, and they are the *only* correct
+way to ask:
+
+| | |
+|---|---|
+| `session_lead_minutes(s)` / `session_hold_minutes(s)` | stored value **clamped on read**, else the default |
+| `prewarm_at(s)` / `teardown_at(s)` | `None` when unscheduled; the two boundaries |
+| `_workshop_lifetime_minutes(s)` | `teardown_at − prewarm_at + WORKSHOP_LIFETIME_MARGIN_MINUTES` |
+
+### The three things that would have broken it
+
+1. **Clamping belongs in the reader, not only the writer.** A value edited straight into
+   Redis, or stored before a ceiling moved, must not be able to hold a fleet for a week.
+   Validation at the API is a courtesy; the clamp is the guarantee.
+2. **`_workshop_lifetime_minutes` must DERIVE, never recompute.** The old
+   `lead + duration + grace` arms `shutdown -h +N` *before* the loop's own teardown as soon
+   as the hold floor pushes teardown out — the class loses its machines mid-session and the
+   kernel timer that did it leaves nothing in Orbital's logs. Worst case is now
+   360 + 1440 + 60 ≈ 31 h, which is the point: the backstop must outlive the plan.
+3. **`due_for_prewarm` still ends `return not due_for_teardown(session, now)`.** Widening the
+   hold is exactly the change that can make both true at once, and that is the bug that made
+   the loop launch and terminate the same machine every 30 s for three days. Pinned by a
+   swept-timeline test at *both* ceilings — dry run cannot catch it, because dry run never
+   transitions state.
+
+### Before restarting, diff the decisions — not the code
+
+Replay old-vs-new `due_for_prewarm`/`due_for_teardown` over every workshop in
+`live:sessions:index` and require **zero** changed decisions. Done for this change: 47
+workshops, 0 changes, so the first tick after the restart provably launched and terminated
+nothing. It costs a minute and it is the only evidence that a scheduling restart is safe.
+
+### The surface it feeds
+
+`GET /api/workshops/{id}/fleet` now **always** answers a schedule block, including when
+there is no fleet record — which is precisely the state the trainer needs the numbers in.
+It used to return `{}` there.
+
+```jsonc
+{
+  "scheduled_at": "…", "prewarm_at": "…", "teardown_at": "…",
+  "lead_minutes": 45, "hold_minutes": 240,
+  "max_lead_minutes": 360, "max_hold_minutes": 1440,
+  "provisioned": false,           // no fleet record yet
+  "standing": true,               // ≤ WORKSHOP_STANDING_MAX_SEATS — launches nothing, by design
+  "standing_max_seats": 7
+  // …the existing 12 keys, only when a fleet record exists
+}
+```
+
+Additive only — the load test's `seats` / `workers` / `state` reads are untouched. Still
+unauthenticated: it carries ids and counts, no credentials.
+
+**`standing` exists because "0 workers" is ambiguous.** A workshop of 7 seats or fewer
+(roster **plus the trainer**) rides the standing box's reserve and launches nothing on
+purpose; rendered from `workers === 0` alone that is indistinguishable from a failed
+launch, and the app shipped exactly that bug for one version. Branch on `standing`.
+
+The app (`FleetWindowBanner`, ≥1.0.332) renders this in two places — Workshops →
+*Show details*, and the trainer's in-workshop view — with an **Adjust** control that PATCHes
+both fields while the workshop is `scheduled` or `open` (Orbital 409s a running edit).

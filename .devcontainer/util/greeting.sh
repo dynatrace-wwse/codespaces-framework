@@ -163,7 +163,7 @@ printCodespacesVerification(){
     echo -e "${CYAN}When you are finished with your codespace, you can comfortably delete it by typing in the Terminal${RESET} deleteCodespace"
     echo -e "                                       " 
     if [ "$ERROR_COUNT" -gt 0 ]; then
-        echo -e "${RED} There has been $ERROR_COUNT errors detected in the creation of the codespace, type ${RESET}verifyCodespaceCreation${RED} to understand more. ${RESET}                          " 
+        echo -e "${RED} There has been $ERROR_COUNT errors detected in the creation of the codespace, type ${RESET}verifyContainerCreation${RED} to understand more. ${RESET}                          " 
     else
         echo -e "${GREEN} There has been no errors detected in the creation of the codespace. ${RESET}                          " 
     fi
@@ -171,8 +171,81 @@ printCodespacesVerification(){
 }
 
 
-printDynatraceLogo
-printKubernetesInformation
-printCodespacesInformation
-printApplications
-printCodespacesVerification
+# ══════════════════════════════════════════════════════════════════════════════
+#  Orbital greeting — shown when the container runs inside the Dynatrace
+#  Enablement App. Deliberately short: the learner already has the training in
+#  a browser tab, so anything the tab shows is noise in the terminal.
+# ══════════════════════════════════════════════════════════════════════════════
+
+printOrbitalGreeting(){
+  local title tenant
+  # variables.sh derives the title from mkdocs.yaml — shared with the p10k prompt.
+  title="${DT_TRAINING_TITLE:-${RepositoryName:-Dynatrace Enablement}}"
+  tenant="${DT_ENVIRONMENT:-}"
+
+  echo -e "${thinline}"
+  echo -e "${GREEN} "
+  echo -e "      ${CYAN}.oyyyyyson+${GREEN}.          sh                               hs                                                         "
+  echo -e "  ${CYAN}.:yhhhhhhhhh/ ${GREEN}oy.   .:HHHHhd /:      /: .:HHH:.   :mHHHm.  dh//-  .mmmm. -mHHHm:   -HHHH.   .:HHHH:.                  "
+  echo -e "  ${BLUE}s.${CYAN}  PPPPPPP ${GREEN}nhhh   od/----yd /m:    sd./d+:  \dy       :do dh    .ms          :do dy:      sd/     d+                 "
+  echo -e "  ${BLUE}hhh.       ${GREEN}ohhhh-  m+     sd  om-  +m- hh     oN. -:mmm:ym dy    -N/    -:mmmm:ym N.       my:mmmdh*                  "
+  echo -e "  ${BLUE}hhh        ${GREEN}shhhh:  m+     sd   sd./m/  hh     oN-hh:    ym dy    -N/   .ds    -ms N.       my                         "
+  echo -e "  ${BLUE}hy ${LILA}::::::: ${GREEN}yhhho   od/---:dh    hdm+   hh     oN-dh:    hh yd:-- -N/   .mo    :mo dy:----  sd:                        "
+  echo -e "  ${BLUE}/ ${LILA}yhhhhhhh-${GREEN}hh+.     .:HHHH:     -Ns    hh     oN  :HHHHH:   :HHH:-N/    .HHHHHH:   -HHHHH.   *HHHH*                   "
+  echo -e "   ${LILA}.osyyhhhh+${GREEN}/*                   yy                                                                                    "
+  echo -e "${RESET}"
+  echo -e "  ${CYAN}${title}${RESET}"
+  # Literal UTF-8 glyphs, not $HEART/$WARNING: those are stored as the six
+  # characters ♥ and bash's echo -e does not expand \uHHHH here, so the
+  # shared vars print raw escapes (visible in the legacy greeting too).
+  echo -e "  ${NORMAL}Delivered through the Dynatrace Enablement App — made with ${RED}♥${NORMAL} by the SE Center of Excellence${RESET}"
+  echo -e ""
+
+  # No Cluster line: K3D_CLUSTER_NAME is not set in an Orbital Sysbox container
+  # (verified live), so it could only ever have rendered blank.
+  [ -n "$tenant" ] && echo -e "  ${LILA}Tenant${RESET}    ${tenant}"
+
+  # Registered apps. Field 1 of the app registry is the app name; the URL is
+  # deliberately not printed — the learner reaches the app through its own tab.
+  if [ -f "$APP_REGISTRY" ] && [ -s "$APP_REGISTRY" ]; then
+    local app_name
+    while IFS='|' read -r app_name _rest; do
+      [ -n "$app_name" ] || continue
+      echo -e "  ${LILA}App${RESET}       ${CYAN}${app_name}${RESET} has been registered in your workspace"
+    done < "$APP_REGISTRY"
+  fi
+
+  echo -e ""
+
+  echo -e "  ${NORMAL}For your best dev experience: ${RESET}k9s kubectl helm k3d node npm jq python3 gh${RESET}"
+
+  # No MCP line here on purpose: the MCP server needs VS Code running with an
+  # agent attached to it, and a plain Orbital container has neither. Advertising
+  # enableMCP would point the learner at something that cannot work yet.
+
+  if [ "${ERROR_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    echo -e "  ${YELLOW}⚠${ORANGE} ${ERROR_COUNT} errors detected while creating your environment${RESET} — type ${RESET}verifyContainerCreation${NORMAL} for details${RESET}"
+  else
+    echo -e "  ${GREEN}✔${RESET} Environment ready — no errors detected."
+  fi
+  echo -e "${thinline}"
+}
+
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+# Orbital (the Dynatrace Enablement App) gets its own minimal greeting: the
+# learner is inside an app tab, so the GitHub URLs, the app URL, the slot
+# hostname, the VS Code port advice and deleteCodespace are all either wrong or
+# already on screen. Every other instantiation type keeps the full greeting.
+case "${INSTANTIATION_TYPE:-}" in
+  orbital|orbital_codespaces)
+    printOrbitalGreeting
+    ;;
+  *)
+    printDynatraceLogo
+    printKubernetesInformation
+    printCodespacesInformation
+    printApplications
+    printCodespacesVerification
+    ;;
+esac

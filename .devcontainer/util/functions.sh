@@ -3069,8 +3069,16 @@ getRunningDockerContainernameByImagePattern(){
 
 }
 
+# Back-compat: the function was called verifyCodespaceCreation until 1.10.0. It
+# verifies a *container* creation regardless of whether that container is a
+# Codespace, an Orbital slot or a local dev container, hence the rename. Older
+# docs and muscle memory still reach for the old name, so keep it working.
 verifyCodespaceCreation(){
-  printInfoSection "Verify Codespace creation"
+  verifyContainerCreation "$@"
+}
+
+verifyContainerCreation(){
+  printInfoSection "Verify container creation"
   calculateTime
 
   # Collect raw logs based on instantiation type
@@ -3214,7 +3222,7 @@ finalizePostCreation(){
       gh codespace delete --codespace "$CODESPACE_NAME" --force
   else
       
-      verifyCodespaceCreation
+      verifyContainerCreation
       postCodespaceTracker
   fi
 }

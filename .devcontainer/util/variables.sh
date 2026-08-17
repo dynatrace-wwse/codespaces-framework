@@ -141,6 +141,29 @@ fi
 
 export INSTANTIATION_TYPE=$INSTANTIATION_TYPE
 
+# ── Training identity, for the greeting and the p10k prompt ───────────────────
+# The human title of this training. mkdocs.yaml is the only place inside the
+# container that knows it; "Dynatrace Enablement Lab: Kubernetes 101" collapses
+# to "Kubernetes 101". Falls back to the repo name.
+DT_TRAINING_TITLE=""
+for _dt_mk in "${REPO_PATH}/mkdocs.yaml" "${REPO_PATH}/mkdocs.yml"; do
+  [ -f "$_dt_mk" ] || continue
+  DT_TRAINING_TITLE=$(sed -n 's/^site_name:[[:space:]]*//p' "$_dt_mk" | head -1)
+  DT_TRAINING_TITLE="${DT_TRAINING_TITLE%\"}"; DT_TRAINING_TITLE="${DT_TRAINING_TITLE#\"}"
+  DT_TRAINING_TITLE="${DT_TRAINING_TITLE%\'}"; DT_TRAINING_TITLE="${DT_TRAINING_TITLE#\'}"
+  DT_TRAINING_TITLE="${DT_TRAINING_TITLE##*: }"
+  break
+done
+unset _dt_mk
+DT_TRAINING_TITLE="${DT_TRAINING_TITLE:-${RepositoryName:-dynatrace-enablement}}"
+export DT_TRAINING_TITLE
+
+# What the prompt shows after "vscode@". Under Orbital the hostname is a bare
+# docker id (2222e938457a) which identifies nothing you can look up; the job id
+# is the key every Orbital API, log and Redis record is indexed by, so it is the
+# faster thing to troubleshoot from. Empty elsewhere → the prompt keeps %m.
+export DT_CONTAINER_LABEL="${ORBITAL_JOB_ID:-}"
+
 if [ -e "$COUNT_FILE" ]; then
   # file exists
   source $COUNT_FILE
