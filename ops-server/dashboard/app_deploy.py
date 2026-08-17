@@ -1484,12 +1484,57 @@ async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
             "rejected": "seed refused: Orbital did not accept the token Orbital sent "
                         "— check ORBITAL_TOKEN on this server",
             "missing-token": "skipped (ORBITAL_TOKEN not configured)",
-        }.get(status, f"seed via app function: {status or 'unknown'} "
-                      f"{(body or {}).get('detail', '')}".strip())
+        }.get(status) or await _explain_unseeded(token, tenant_url, status, (body or {}).get("detail", ""))
     except Exception as exc:
         log.warning("seedOrbitalConfig on %s: %s",
                     scrub_for_log(tenant_url), scrub_for_log(exc))
         return f"unverified (app function error: {exc})"
+
+
+# The app declares app-settings:objects:write and the write still 403s, because an app
+# function invoked by an external bearer runs with the CALLER's permissions — and that
+# scope is not in the account-client catalog at all (SSO 400s the request; measured on
+# SRO, COE and sprint). So this specific failure is a property of the platform, not of
+# our configuration, and printing the raw permission error made every deploy of an
+# unseeded tenant read as broken. Say what is true instead, and check it.
+_UNGRANTABLE_WRITE = "app-settings:objects:write"
+
+
+async def _read_orbital_config(token: str, tenant_url: str) -> bool | None:
+    """Is orbital-config seeded on this tenant? None when we cannot tell.
+
+    Needs app-settings:objects:read, which IS grantable to an account client (unlike its
+    write counterpart) and is requested on the first rung of the scope ladder."""
+    base = tenant_url.rstrip("/") + "/platform/app-settings/v2/objects"
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(base, headers={
+                "Authorization": f"Bearer {token}",
+                "Dt-App-Context": APP_ID,
+                "Dt-App-Version": _app_version(),
+            }, params={"schema-id": ORBITAL_SCHEMA, "add-fields": "value"})
+        if r.status_code != 200:
+            return None
+        items = r.json().get("items", [])
+        return bool(items and (items[0].get("value") or {}).get("token"))
+    except Exception as exc:
+        log.warning("orbital-config read for %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
+        return None
+
+
+async def _explain_unseeded(token: str, tenant_url: str, status: str, detail: str) -> str:
+    """Report the tenant's actual orbital-config state instead of a platform error string."""
+    if _UNGRANTABLE_WRITE in (detail or ""):
+        seeded = await _read_orbital_config(token, tenant_url)
+        if seeded:
+            return "already configured"
+        if seeded is False:
+            return ("not seeded — the app runs on its baked bearer "
+                    f"({_UNGRANTABLE_WRITE} is not grantable to an account OAuth client)")
+        return ("unverified — cannot read app settings "
+                f"({_UNGRANTABLE_WRITE} is not grantable to an account OAuth client)")
+    return f"seed via app function: {status or 'unknown'} {detail}".strip()
 
 
 async def _ensure_orbital_config(token: str, tenant_url: str) -> str:
@@ -2014,6 +2059,14 @@ ACCOUNT_API_BY_DOMAIN = {
 # Environment permissions the client needs for a full deploy. settings:objects:* are
 # best-effort (post-install remote-grail + outbound allowlist) — if the client lacks
 # them SSO 400s the full request and we retry with the minimal set.
+# Three rungs, tried in order. `app-settings:objects:read` is what lets a deploy say
+# whether the tenant's orbital-config is seeded instead of guessing; it is grantable on
+# every account client measured (SRO/COE/sprint, 2026-08-17). Its WRITE counterpart is
+# not grantable to ANY account client — SSO answers 400 invalid_request — which is why
+# seeding cannot happen from here at all; see _ensure_orbital_config.
+OAUTH_DEPLOY_SCOPES_VERIFY = ("app-engine:apps:install app-engine:apps:run "
+                              "settings:objects:read settings:objects:write "
+                              "app-settings:objects:read")
 OAUTH_DEPLOY_SCOPES_FULL = ("app-engine:apps:install app-engine:apps:run "
                             "settings:objects:read settings:objects:write")
 OAUTH_DEPLOY_SCOPES_MIN = "app-engine:apps:install app-engine:apps:run"
@@ -2259,7 +2312,11 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     if action == "undeploy":
         token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_UNDEPLOY_SCOPES)
     else:
-        token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_DEPLOY_SCOPES_FULL)
+        token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_DEPLOY_SCOPES_VERIFY)
+        if token is None and st == 400:
+            # Client cannot read app settings — everything still installs, the deploy
+            # just cannot report whether orbital-config is seeded.
+            token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_DEPLOY_SCOPES_FULL)
         if token is None and st == 400:
             token, st, err = await _oauth_bearer(sso_url, cid, csec, account_urn, OAUTH_DEPLOY_SCOPES_MIN)
             if token:
