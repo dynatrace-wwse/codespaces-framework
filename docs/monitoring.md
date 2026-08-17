@@ -48,9 +48,9 @@
 
 ### 🌎 Codespaces Instantiations
 
-All codespace instantiations are monitored by sending a signal to the Codespaces-Tracker service running in the GKE cluster. This is achieved through the `verifyCodespaceCreation` function, which validates the successful creation of a codespace. 
+All codespace instantiations are monitored by sending a signal to the Codespaces-Tracker service running in the GKE cluster. This is achieved through the `verifyContainerCreation` function, which validates the successful creation of a codespace. 
 
-- **verifyCodespaceCreation:**  
+- **verifyContainerCreation:**  
   Checks that the codespace environment has been set up correctly and all required components are running. Once verification is complete, it calls the `postCodespaceTracker` function.
 - **postCodespaceTracker:**  
   Sends a JSON payload containing metadata about the codespace (such as repository name, user, and environment details) to the Codespaces-Tracker API endpoint. The payload is authenticated and enriched with geo-information, and BizEvents are generated from the logs for further analysis.
