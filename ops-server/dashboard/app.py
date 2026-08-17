@@ -102,7 +102,9 @@ from shared.log_safety import scrub_for_log  # noqa: E402
 from dashboard import training_dedupe  # noqa: E402
 
 _PROFILES_PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<title>Content Profiles</title><style>
+<title>Content Profiles</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+<style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
 header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
 main{max-width:920px;margin:0 auto;padding:22px}
@@ -163,7 +165,9 @@ async def profiles_page():
 
 
 _TENANTS_PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<title>Content Delivery</title><style>
+<title>Content Delivery</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+<style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
 header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
 header a{color:#9d9dff;margin-left:14px;font-weight:400;font-size:14px}
@@ -239,7 +243,9 @@ async def tenants_page():
     return HTMLResponse(_TENANTS_PAGE)
 
 
-_CONTENT_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Content Delivery</title><style>
+_CONTENT_PAGE = """<!doctype html><html><head><meta charset=utf-8><title>Content Delivery</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+<style>
 body{font-family:system-ui,sans-serif;margin:0;background:#0d1117;color:#e6edf3}
 header{padding:14px 22px;background:#161b22;border-bottom:1px solid #30363d;font-weight:600}
 header a{color:#9d9dff;margin-left:14px;font-weight:400;font-size:14px}
@@ -1928,6 +1934,7 @@ async def view_log_fullscreen(job_id: str):
 <html><head>
 <meta charset="utf-8">
 <title>log: """ + job_id + """</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
 <style>
   body { margin:0; background:#0d1117; color:#c9d1d9; font:13px/1.5 ui-monospace,monospace; }
   header { padding:8px 14px; background:#161b22; border-bottom:1px solid #30363d;
@@ -5012,6 +5019,7 @@ async def arena_shell_page(job_id: str):
 <head>
 <meta charset="UTF-8">
 <title>Shell · {job_id}</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 <style>
 @font-face{{font-family:'MesloLGS NF';src:url('https://cdn.jsdelivr.net/gh/romkatv/powerlevel10k-media@master/MesloLGS%20NF%20Regular.ttf') format('truetype');font-weight:normal;font-style:normal}}
@@ -5088,6 +5096,7 @@ async def arena_terminal_page(job_id: str, token: str = ""):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Training Environment</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 <style>
 @font-face {{
