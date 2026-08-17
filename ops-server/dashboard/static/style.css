@@ -203,9 +203,16 @@ main {
     align-items: center;
 }
 
+/* Enumerated by type rather than a bare `input` so checkboxes and radios keep
+   their native rendering. That is also how `number` was missed: the workshop
+   seat filters came out white-on-white against the dark surface, because an
+   unlisted type falls through to the browser default instead of inheriting
+   anything. Add new input types HERE, not as a one-off style attribute. */
 .controls input[type="text"],
 .controls select,
-input[type="text"], input[type="password"], input[type="email"], select {
+input[type="text"], input[type="password"], input[type="email"],
+input[type="number"], input[type="date"], input[type="time"],
+input[type="url"], input[type="tel"], textarea, select {
     background: var(--surface-2);
     border: 1px solid var(--border-soft);
     color: var(--text);
@@ -215,6 +222,13 @@ input[type="text"], input[type="password"], input[type="email"], select {
     font-family: inherit;
     transition: border-color .18s var(--ease);
 }
+
+/* The spinner is drawn by the browser in its own colours and cannot be themed,
+   so it reads as a white block on the dark surface. The arrows earn nothing on
+   a filter that is typed into. */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
 .controls input[type="text"]:focus,
 .controls select:focus,
@@ -1682,3 +1696,68 @@ body.role-writer .tab-writer-only { display: inline-block; }
 .lane-card .lane-stats { font-size: 0.82rem; color: var(--text); }
 .lane-card .lane-stats b { color: var(--accent); font-variant-numeric: tabular-nums; }
 .worker-card .meta .muted { color: var(--text-3); }
+
+/* ─── Workshops: filter bar + calendar ───────────────────────── */
+/* One row for month nav AND every filter. State used to sit alone above the
+   search inputs, which read as two unrelated controls for the same table.
+   `align-items: end` is what keeps the bare buttons on the same baseline as the
+   inputs, which carry a label line above them. */
+.ws-filter-bar {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: end;
+    margin-bottom: 10px;
+}
+.ws-filter-bar > label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 12px;
+    color: var(--text-2);
+}
+/* The note is the only thing that should take the leftover width, so it lands
+   at the right end of the row instead of being squeezed against Reload. */
+.ws-filter-bar #ws-filter-note {
+    flex: 1 1 auto;
+    text-align: right;
+    margin: 0;
+    font-size: 11px;
+    min-width: 120px;
+}
+
+/* A day with eight workshops used to render eight chips into a 64px cell and
+   drag the whole month grid out of shape. Cap the visible ones and fold the
+   rest behind a toggle, so a busy day costs one line, not eight. */
+.ws-cal-day {
+    vertical-align: top;
+    height: 64px;
+    padding: 4px;
+}
+.ws-cal-daynum { font-size: .7rem; opacity: .6; }
+.ws-cal-chip {
+    cursor: pointer;
+    font-size: .68rem;
+    margin-top: 2px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--surface-3, #1b2434);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ws-cal-more {
+    cursor: pointer;
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin-top: 2px;
+    padding: 1px 4px;
+    border: 1px dashed var(--border-soft);
+    border-radius: 4px;
+    background: none;
+    color: var(--text-2);
+    font-size: .68rem;
+    font-family: inherit;
+}
+.ws-cal-more:hover { color: var(--text); border-color: var(--accent); }

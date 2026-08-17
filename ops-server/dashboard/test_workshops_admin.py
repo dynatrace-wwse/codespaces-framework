@@ -370,6 +370,83 @@ def test_schedule_state_filter():
     assert [w["sessionId"] for w in body["workshops"]] == ["ws_early", "ws_late"]
 
 
+# ── search filters ──────────────────────────────────────────────────────────
+# The operator's real question when a fleet misbehaves is "which workshops are
+# on SRO", "which one is Asad's", "what is ws_late" — answerable here instead of
+# by reading Redis by hand.
+
+def _ids(**params):
+    q = "&".join(f"{k}={v}" for k, v in params.items())
+    return [w["sessionId"] for w in
+            client.get(f"/api/workshops/admin/schedule?{q}", headers=WRITER).json()["workshops"]]
+
+
+def test_tenant_filter_takes_a_fragment_not_just_the_whole_url():
+    """A tenant gets pasted as `sro`, `sro97894` or the full URL. All three have
+    to work or the box is useless to the person typing from memory."""
+    _seed_many()
+    assert _ids(tenant="sro") == ["ws_early"]
+    assert _ids(tenant="SRO") == ["ws_early"], "case must not matter"
+    assert _ids(tenant=SRO) == ["ws_early"]
+    assert sorted(_ids(tenant="geu80787")) == ["ws_late", "ws_unsched"]
+
+
+def test_trainer_filter_matches_co_trainers_too():
+    """Asad owns ws_early and is a CO-trainer on ws_late. Excluding the second
+    is how a co-trainer's own workshop becomes invisible to them."""
+    _seed_many()
+    assert _ids(trainer=ASAD) == ["ws_early", "ws_late"]
+    assert _ids(trainer=SERGIO) == ["ws_unsched", "ws_late"]
+
+
+def test_workshop_id_filter_matches_a_fragment():
+    """Ids get pasted in pieces out of a URL."""
+    _seed_many()
+    assert _ids(workshopId="ws_ear") == ["ws_early"]
+    assert _ids(workshopId="nope") == []
+
+
+def test_seat_filters_bound_the_booked_capacity():
+    """Seats filter on maxSeats — the BOOKED number, which is what now sizes the
+    fleet — not on how many people registered. ws_late books 10 and has 2
+    registrants, so a bound of 10 must keep it and a bound of 2 must not."""
+    _seed_many()
+    # Bounded on both sides, so the two unlimited workshops drop out and only
+    # the booked number is under test.
+    assert _ids(seatsMin=10, seatsMax=10) == ["ws_late"]
+    assert _ids(seatsMin=11, seatsMax=99) == []
+    assert _ids(seatsMin=1, seatsMax=2) == [], "2 registrants must not match"
+
+
+def test_unlimited_seats_is_treated_as_infinite_not_zero():
+    """maxSeats 0 means unlimited. Sorting it as 0 would file the biggest
+    workshops under the smallest, which is the wrong way round to be wrong."""
+    _seed_many()                     # ws_early + ws_unsched have no maxSeats
+    assert "ws_early" in _ids(seatsMin=1), "unlimited satisfies any minimum"
+    assert "ws_early" not in _ids(seatsMax=500), "unlimited exceeds any maximum"
+
+
+def test_filters_compose_with_each_other_and_with_state():
+    _seed_many()
+    assert _ids(state="scheduled", tenant="geu80787", trainer=ASAD) == ["ws_late"]
+    assert _ids(state="scheduled", tenant="sro") == []
+
+
+def test_an_empty_filter_is_not_a_filter():
+    """A blank box must not exclude everything — the failure mode where the page
+    loads with empty inputs and shows nothing."""
+    _seed_many()
+    assert len(_ids(tenant="", trainer="", workshopId="", seatsMin="", seatsMax="")) == 3
+
+
+def test_total_counts_everything_while_count_counts_the_matches():
+    """`total` has to keep meaning "workshops that exist", or the operator
+    cannot tell "filtered to one" from "only one exists"."""
+    _seed_many()
+    body = client.get("/api/workshops/admin/schedule?tenant=sro", headers=WRITER).json()
+    assert body["count"] == 1 and body["matched"] == 1 and body["total"] == 3
+
+
 def test_schedule_self_heals_a_stale_index_member():
     _seed_many()
     a.pool.z["live:sessions:index"].append("ws_expired")  # hash already TTL'd

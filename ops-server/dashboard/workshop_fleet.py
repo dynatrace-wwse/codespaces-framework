@@ -63,7 +63,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from dashboard import fleet_policy, pools, repo_profiles
+from dashboard import fleet_policy, live_sessions, pools, repo_profiles
 from shared import capacity_units
 from shared.log_safety import scrub_for_log
 
@@ -137,9 +137,23 @@ WORKSHOP_INSTANCE_TYPE = os.environ.get("WORKSHOP_INSTANCE_TYPE", "m6a.4xlarge")
 # let the first small workshop consume all of it.
 WORKSHOP_STANDING_MAX_SEATS = int(os.environ.get("WORKSHOP_STANDING_MAX_SEATS", "7"))
 # Spare machines on top of the arithmetic, for workshops that get their own.
-# One host lost mid-delivery strands a full machine's worth of learners and the
-# loop will not re-plan a bound workshop, so the spare is the only remedy.
-WORKSHOP_REDUNDANCY = int(os.environ.get("WORKSHOP_REDUNDANCY", "1"))
+# ZERO by design (2026-08-17). The spare was bought against "a host dies
+# mid-delivery and the loop will not re-plan a bound workshop" — but it never
+# bought what that implies: the sessions on a dead host die with it either way,
+# containers and all, so the spare only ever offered somewhere to RE-provision.
+# Replacing a machine takes minutes, which is the same order as re-provisioning
+# onto a spare that was already paid for. What actually has to survive is the
+# lifetime of the containers a connected class is sitting on, and nothing about
+# the spare affects that.
+#
+# The cost it was quietly carrying: `seats_per_worker` is 20 for k8s-101 on an
+# m6a.4xlarge, so EVERY dedicated workshop from 8 to 20 seats was 1 real machine
+# + 1 spare — 100% overhead across the whole band, held for the entire window
+# (prewarm + duration + hold), not just the class.
+#
+# Still an env var: a delivery that genuinely cannot tolerate a re-provision can
+# set WORKSHOP_REDUNDANCY=1 for that fleet without a code change.
+WORKSHOP_REDUNDANCY = int(os.environ.get("WORKSHOP_REDUNDANCY", "0"))
 # Extra minutes on top of prewarm + duration + grace before a workshop machine
 # kills itself. Wide enough that the self-destruct never races a workshop that
 # is merely overrunning — the loop's teardown should always win the race.
@@ -371,7 +385,20 @@ def due_for_teardown(session: dict, now: datetime,
 # fixes lived for weeks as an inline tuple inside `tick`, where nothing but a
 # full fake-Redis harness could reach it and so nothing ever did.
 PREWARMABLE_STATES = (None, "", "failed", DONE)
-TEARDOWNABLE_STATES = (WARMING, READY)
+# DRAINING is in here because a deferred teardown parks the record there and its
+# own comment promises "the next tick DOES re-enter" — which was false, since
+# this tuple was the gate and did not list it. A workshop whose workers still
+# reported sessions was therefore deferred exactly ONCE and then never looked at
+# again: the deferral bound (TEARDOWN_DEFER_MAX_MINUTES) could not expire,
+# because nothing ever came back to check it. Found 2026-08-17 on a record that
+# had been DRAINING since 00:19.
+#
+# Re-entering is safe and converges: `teardown_workshop_fleet` returns early only
+# on DONE, unbinding and cordoning are idempotent, `deferred_since` persists in
+# the record so the bound measures from the FIRST deferral, and past that bound
+# the machines go regardless. So the state either terminates or expires — it
+# cannot sit still.
+TEARDOWNABLE_STATES = (WARMING, READY, DRAINING)
 
 
 def should_prewarm(state, session: dict, now: datetime) -> bool:
@@ -382,6 +409,81 @@ def should_prewarm(state, session: dict, now: datetime) -> bool:
 def should_teardown(state, session: dict, now: datetime) -> bool:
     """Should this tick give the workshop's machines back?"""
     return state in TEARDOWNABLE_STATES and due_for_teardown(session, now)
+
+
+def planned_seats(session: dict, roster_count: int = 0) -> int:
+    """Seats to BUY for a workshop: the capacity it BOOKED, not its turnout.
+
+    A workshop is provisioned for the room it reserved. Sizing it from the
+    roster instead — which is what this did — made every workshop that fills at
+    the door plan for one person: learners join with a code and never appear on
+    a roster, so `scard(roster) + 1` returned 1 for a 40-seat class and the
+    planner put it on the standing lane with nothing launched. The machines have
+    to be up *before* anyone arrives, which is precisely the moment there is
+    nobody to count.
+
+    `maxSeats` is the trainer's own number and wins whenever it is set. 0 means
+    "unlimited", which cannot be planned, so it falls back to the roster. Either
+    way the trainer team is added on top: `maxSeats` caps the ROSTER only, and
+    every trainer takes an environment as well.
+
+    Clamped on read, like the window minutes: a `maxSeats` edited straight into
+    Redis must not be able to buy an unbounded number of machines.
+    """
+    team = max(1, len(live_sessions.trainers_of(session)))
+    try:
+        booked = int(session.get("maxSeats") or 0)
+    except (TypeError, ValueError):
+        booked = 0
+    booked = max(0, min(booked, live_sessions.MAX_SEATS))
+    return (booked if booked > 0 else max(0, roster_count)) + team
+
+
+def needs_bigger_fleet(state, rec: dict, seats: int,
+                       standing_max: int = WORKSHOP_STANDING_MAX_SEATS) -> bool:
+    """Has a workshop on the standing lane outgrown it?
+
+    The lane decision was only ever made once, at prewarm, from whatever the
+    numbers said then. They move afterwards — a trainer raises `maxSeats`, or a
+    roster fills — and without this the workshop rode the standing box's reserve
+    for its whole delivery no matter how big it got.
+
+    Upgrades only. The reverse would terminate machines a room may already be
+    sitting on, to save the cost of a few hours.
+    """
+    return state == READY and bool(rec.get("standing")) and seats > standing_max
+
+
+def orphan_candidates(fleet_ids, indexed_ids, index_ok: bool) -> list[str]:
+    """Fleet records with no workshop left in the index.
+
+    ``index_ok`` is the whole reason this is a function. The reaper's input is
+    "every fleet record the index does not mention", and a FAILED index read
+    produces an empty index — under which every workshop in the fleet, including
+    the ones running a class right now, looks abandoned. One Redis blip would
+    then terminate the entire fleet. So a failed read yields nothing at all: the
+    reaper is an optimisation on cost, and doing nothing costs only money.
+    """
+    if not index_ok:
+        return []
+    indexed = set(indexed_ids or ())
+    return [w for w in (fleet_ids or ()) if w not in indexed]
+
+
+def is_orphaned(state, session_exists) -> bool:
+    """Should this fleet record's machines be given back?
+
+    Only when the workshop is provably gone. ``session_exists`` is tri-state on
+    purpose: ``None`` means the check itself failed, which is NOT evidence of
+    deletion — treating an unreadable key as a missing one is how a reaper turns
+    a Redis hiccup into a terminated fleet.
+
+    ``DONE`` records are skipped so a torn-down workshop is not re-torn every
+    tick; they are cheap to leave, and they are the audit trail.
+    """
+    if session_exists is not False:
+        return False
+    return state not in (None, "", DONE)
 
 
 def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
@@ -421,10 +523,9 @@ def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
         return {"workers": 0, "seats_per_worker": 0, "total_seats": 0,
                 "estimated": profile.estimated, "pool_kind": "dedicated",
                 "reason": f"no capacity model for {instance_type}"}
-    # Round UP, then add a spare. A workshop one seat short is a person without
-    # an environment in front of a room, and the loop does not re-plan a
-    # workshop whose machines are already bound -- so losing a host mid-delivery
-    # has no automatic remedy other than the spare bought here.
+    # Round UP. A workshop one seat short is a person without an environment in
+    # front of a room, so the division never truncates. `redundancy` is 0 by
+    # default -- see WORKSHOP_REDUNDANCY for why the spare stopped being bought.
     workers = -(-max(0, seats) // per) + max(0, redundancy)
     return {
         "workers": workers,
@@ -577,13 +678,14 @@ async def _save_fleet_record(redis, ws_id: str, rec: dict) -> None:
     await redis.hset(FLEET_KEY, ws_id, json.dumps(rec))
 
 
-async def _roster_size(redis, ws_id: str) -> int:
-    """Seats to plan for: the roster plus the trainer, who also gets an
-    environment and is otherwise the one person left without one."""
+async def _planned_seats(redis, ws_id: str, session: dict) -> int:
+    """Seats to plan for — see :func:`planned_seats`. Reads the roster only as
+    the fallback for a workshop that booked no capacity."""
     try:
-        return int(await redis.scard(f"live:session:{ws_id}:roster")) + 1
+        roster = int(await redis.scard(f"live:session:{ws_id}:roster"))
     except Exception:
-        return 1
+        roster = 0
+    return planned_seats(session, roster)
 
 
 async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
@@ -596,12 +698,21 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
     """
     from dashboard import fleet, pools
 
-    existing = await _fleet_record(redis, ws_id)
-    if existing and existing.get("state") in (WARMING, READY):
-        return existing
-
     repo = workshop_repo(session)
-    seats = await _roster_size(redis, ws_id)
+    seats = await _planned_seats(redis, ws_id, session)
+
+    existing = await _fleet_record(redis, ws_id)
+    # An existing fleet is left alone -- UNLESS it is a standing-lane record the
+    # workshop has since outgrown, which is the one case where re-planning buys
+    # something the room does not already have.
+    if existing and existing.get("state") in (WARMING, READY) \
+            and not needs_bigger_fleet(existing.get("state"), existing, seats):
+        return existing
+    if existing and existing.get("standing"):
+        log.info("workshop %s: outgrew the standing lane (%d seats > %d) — "
+                 "planning dedicated machines", ws_id, seats,
+                 WORKSHOP_STANDING_MAX_SEATS)
+
     profile = await repo_profiles.load(redis, repo)
     plan = plan_workshop_capacity(seats, profile)
 
@@ -1146,14 +1257,16 @@ async def tick(redis) -> dict:
     from dashboard import fleet
 
     now = datetime.now(timezone.utc)
-    summary = {"prewarmed": [], "torn_down": [], "daily": {}}
+    summary = {"prewarmed": [], "torn_down": [], "upgraded": [], "reaped": [],
+               "daily": {}}
 
     # ── workshops ───────────────────────────────────────────────────────────
+    index_ok = True
     try:
         ws_ids = await redis.zrevrange(LIVE_INDEX_KEY, 0, -1)
     except Exception as exc:
         log.warning("control loop: cannot read workshop index: %s", exc)
-        ws_ids = []
+        ws_ids, index_ok = [], False
 
     for ws_id in ws_ids:
         try:
@@ -1219,7 +1332,7 @@ async def tick(redis) -> dict:
                 if CONTROL_LOOP_APPLY:
                     await provision_workshop_fleet(redis, ws_id, session)
                 else:
-                    seats = await _roster_size(redis, ws_id)
+                    seats = await _planned_seats(redis, ws_id, session)
                     profile = await repo_profiles.load(redis, workshop_repo(session))
                     plan = plan_workshop_capacity(seats, profile)
                     log.info("DRY-RUN workshop %s (%s): would launch %d × %s "
@@ -1234,9 +1347,75 @@ async def tick(redis) -> dict:
                     log.info("DRY-RUN workshop %s: would tear down %s",
                              ws_id, rec.get("instances") or "(no instances)")
                 summary["torn_down"].append(ws_id)
+            elif state == READY and rec.get("standing"):
+                # Third scheduling predicate, and the comment above about
+                # prewarm/teardown being mutually exclusive applies to it too.
+                # It cannot oscillate with either: it fires only on a record
+                # that launched NOTHING, and the moment it acts the record stops
+                # being standing, so it can never fire on the same workshop
+                # twice. It is checked last so a workshop past its window is
+                # torn down rather than upgraded on its way out.
+                seats = await _planned_seats(redis, ws_id, session)
+                if needs_bigger_fleet(state, rec, seats):
+                    if CONTROL_LOOP_APPLY:
+                        await provision_workshop_fleet(redis, ws_id, session)
+                    else:
+                        log.info("DRY-RUN workshop %s: would UPGRADE off the "
+                                 "standing lane — booked capacity is now %d "
+                                 "seats (> %d)", ws_id, seats,
+                                 WORKSHOP_STANDING_MAX_SEATS)
+                    summary["upgraded"].append(ws_id)
         except Exception as exc:
             # One malformed workshop must not stop the loop serving the others.
             log.warning("control loop: workshop %s failed this tick: %s", ws_id, exc)
+
+    # ── orphaned fleets ─────────────────────────────────────────────────────
+    # The loop above is driven by the workshop INDEX. Deleting a workshop takes
+    # it out of that index and deletes its hash, but leaves its fleet record —
+    # and its machines — behind, where nothing could ever see them again. They
+    # then ran until the in-instance `shutdown -h +N` backstop, hours later.
+    # Measured 2026-08-17: 2 × m6a.4xlarge for a workshop that no longer existed,
+    # plus four more records holding stale pool bindings.
+    #
+    # Driven from the FLEET HASH for exactly that reason: after a delete it is
+    # the only structure that still knows the machines exist. Deliberately a
+    # SEPARATE pass rather than a fourth branch in the loop above, which cannot
+    # reach a workshop it cannot enumerate.
+    #
+    # It cannot fight the other three predicates: they only ever act on indexed
+    # workshops, and this only ever acts on unindexed ones.
+    try:
+        fleet_ids = await redis.hkeys(FLEET_KEY)
+    except Exception as exc:
+        log.warning("control loop: cannot read the fleet hash: %s", exc)
+        fleet_ids = []
+    for ws_id in orphan_candidates(fleet_ids, ws_ids, index_ok):
+        try:
+            if not manages(ws_id):
+                continue
+            # Absent from the index AND absent as a hash. The index self-heals by
+            # dropping members whose hash is gone, so the two normally agree —
+            # requiring both means a half-finished delete cannot cost machines.
+            try:
+                exists = bool(await redis.exists(f"live:session:{ws_id}"))
+            except Exception:
+                exists = None          # unreadable is NOT deleted — see is_orphaned
+            rec = await _fleet_record(redis, ws_id)
+            if not is_orphaned(rec.get("state"), exists):
+                continue
+            instances = rec.get("instances") or []
+            log.warning("workshop %s no longer exists but still holds a fleet "
+                        "(%s, %d instance(s)) — reaping",
+                        scrub_for_log(ws_id), rec.get("state"), len(instances))
+            if CONTROL_LOOP_APPLY:
+                await teardown_workshop_fleet(redis, ws_id)
+            else:
+                log.info("DRY-RUN workshop %s: would reap %s",
+                         ws_id, instances or "(no instances)")
+            summary["reaped"].append(ws_id)
+        except Exception as exc:
+            log.warning("control loop: reaping %s failed this tick: %s",
+                        scrub_for_log(ws_id), exc)
 
     # ── daily pool ──────────────────────────────────────────────────────────
     try:

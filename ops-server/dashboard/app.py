@@ -798,6 +798,12 @@ async def api_workshop_fleet(ws_id: str):
         # workers == 0, which reads identically to "the launch failed".
         "standing": bool(rec.get("standing")),
         "standing_max_seats": workshop_fleet.WORKSHOP_STANDING_MAX_SEATS,
+        # What the workshop is sized FOR: its booked capacity plus the trainer
+        # team, NOT how many people have registered. Reported even before
+        # anything is provisioned, because "will there be machines for my
+        # class?" is a question about the booking, and the moment a trainer
+        # needs the answer is the moment nobody has arrived yet.
+        "planned_seats": await workshop_fleet._planned_seats(pool, ws_id, session),
     }
     # Routing that fell back to the shared queue is reported even when there is
     # no fleet record, because THAT is the case where it matters most: a
@@ -837,6 +843,9 @@ async def api_workshop_fleet(ws_id: str):
 
 @app.get("/api/workshops/admin/schedule")
 async def api_workshops_admin_schedule(request: Request, state: str = "",
+                                       tenant: str = "", trainer: str = "",
+                                       workshopId: str = "",
+                                       seatsMin: str = "", seatsMax: str = "",
                                        limit: int = 500):
     """Every workshop on every tenant, ordered by when it HAPPENS.
 
@@ -852,19 +861,30 @@ async def api_workshops_admin_schedule(request: Request, state: str = "",
     """
     await _require_writer(request)
     wanted_states = {s.strip() for s in (state or "").split(",") if s.strip()}
-    rows = []
+    seats_min = live_sessions.parse_seat_bound(seatsMin)
+    seats_max = live_sessions.parse_seat_bound(seatsMax)
+    rows, matched = [], []
     async for session_id, session in _walk_workshop_index():
         if wanted_states and session.get("state", "") not in wanted_states:
             continue
         _, roster_key, joined_key = _live_keys(session_id)
-        rows.append(live_sessions.shape_admin_row(
+        row = live_sessions.shape_admin_row(
             session_id, session,
             await pool.smembers(roster_key),
             await pool.hgetall(joined_key),
-            await pool.hgetall(_live_tenants_key(session_id))))
-    rows.sort(key=lambda r: r.get("scheduledAt") or r.get("createdAt") or "")
-    capped = rows[:max(1, min(limit, 1000))]
-    return {"workshops": capped, "count": len(capped), "total": len(rows),
+            await pool.hgetall(_live_tenants_key(session_id)))
+        rows.append(row)
+        # Filtered HERE, not in the browser, so `count` stays the truth and a
+        # match past the `limit` cap is still findable — the whole point of a
+        # search box is the row you cannot already see.
+        if live_sessions.matches_admin_filters(
+                row, tenant=tenant, trainer=trainer, workshop_id=workshopId,
+                seats_min=seats_min, seats_max=seats_max):
+            matched.append(row)
+    matched.sort(key=lambda r: r.get("scheduledAt") or r.get("createdAt") or "")
+    capped = matched[:max(1, min(limit, 1000))]
+    return {"workshops": capped, "count": len(capped), "matched": len(matched),
+            "total": len(rows),
             "generatedAt": datetime.now(timezone.utc).isoformat()}
 
 

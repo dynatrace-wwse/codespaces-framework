@@ -6,6 +6,7 @@ Only the pure half is tested here — scheduling, sizing and the scale decision.
 The effectful half talks to EC2 and is exercised by the end-to-end rehearsal.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from dashboard import workshop_fleet as wf
@@ -192,15 +193,34 @@ def test_lead_time_is_configurable_down_to_minutes():
 
 # ── sizing ──────────────────────────────────────────────────────────────────
 
-def test_seventy_seats_of_k8s101_plans_four_machines_plus_a_spare():
+def test_seventy_seats_of_k8s101_plans_four_machines():
     """20 seats per m6a.4xlarge from the unit model, so 70 needs 4 machines —
-    plus one spare, because the loop does not re-plan a workshop whose machines
-    are already bound and losing a host would otherwise strand 20 learners."""
+    and only 4. No spare: see WORKSHOP_REDUNDANCY."""
     plan = wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")
     assert plan["seats_per_worker"] == 20
-    assert plan["workers"] == 5, "4 for the roster + 1 spare"
-    assert plan["total_seats"] == 100, "must exceed the roster, not merely meet it"
+    assert plan["workers"] == 4
+    assert plan["total_seats"] == 80, "must exceed the roster, not merely meet it"
     assert plan["pool_kind"] == "dedicated"
+
+
+def test_no_spare_is_bought_by_default():
+    """The spare was 100% overhead for every workshop from 8 to 20 seats — one
+    real machine plus one idle one, held for the whole window. It bought only
+    somewhere to RE-provision after a host loss, never the survival of the
+    sessions on it, and a replacement machine is minutes away regardless."""
+    assert wf.WORKSHOP_REDUNDANCY == 0
+    for seats in (8, 12, 20):
+        plan = wf.plan_workshop_capacity(seats, rp.K8S_101, "m6a.4xlarge")
+        assert plan["workers"] == 1, f"{seats} seats fit on one machine"
+        assert "spare" not in plan["reason"]
+
+
+def test_a_spare_can_still_be_bought_explicitly():
+    """Kept as an env var, not deleted: a delivery that cannot tolerate a
+    re-provision sets WORKSHOP_REDUNDANCY=1 without a code change."""
+    plan = wf.plan_workshop_capacity(12, rp.K8S_101, "m6a.4xlarge", redundancy=1)
+    assert plan["workers"] == 2
+    assert "+1 spare" in plan["reason"]
 
 
 def test_an_unprofiled_repo_is_planned_as_heavy():
@@ -215,13 +235,10 @@ def test_an_unprofiled_repo_is_planned_as_heavy():
 
 def test_capacity_rounds_up_never_down():
     """A workshop one seat short is a person without an environment in front of
-    a room. 21 seats needs 2 machines by arithmetic, and gets a third as the
-    spare."""
-    plan = wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge")
-    assert plan["workers"] == 3
-    # Without the spare the arithmetic itself must still have rounded UP.
-    bare = wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge", redundancy=0)
-    assert bare["workers"] == 2
+    a room. 21 seats does not fit on one 20-seat machine, so it gets two — the
+    division must never truncate, spare or no spare."""
+    assert wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge")["workers"] == 2
+    assert wf.plan_workshop_capacity(20, rp.K8S_101, "m6a.4xlarge")["workers"] == 1
 
 
 def test_unknown_instance_type_refuses_to_plan():
@@ -482,13 +499,16 @@ def test_a_workshop_larger_than_the_scale_cap_is_batched():
     assert len(batches) > 1
 
 
-def test_seventy_seats_now_EXCEEDS_the_per_call_cap():
-    """The spare pushes the bootcamp over MAX_SCALE_UP, so the batching loop in
-    provision_workshop_fleet is no longer merely theoretical — it is the path
-    the real 70-seat delivery takes. If someone removes the batching because
-    "we only ever launch four", this fails."""
+def test_a_bootcamp_still_EXCEEDS_the_per_call_cap():
+    """`scale_up` refuses more than MAX_SCALE_UP (4) per call, so the batching
+    loop in provision_workshop_fleet is not theoretical. Dropping the spare took
+    70 seats down to exactly 4 — ON the limit, not over it — so this pins a size
+    that is genuinely over. If someone removes the batching because "we only
+    ever launch four", this fails."""
     from dashboard import fleet
     assert wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")["workers"] \
+        == fleet.MAX_SCALE_UP, "70 seats now sits exactly ON the per-call cap"
+    assert wf.plan_workshop_capacity(100, rp.K8S_101, "m6a.4xlarge")["workers"] \
         > fleet.MAX_SCALE_UP
 
 
@@ -716,7 +736,7 @@ def test_one_seat_over_the_threshold_gets_its_own_machines():
     that has to stay free for the next unannounced room."""
     plan = wf.plan_workshop_capacity(8, rp.K8S_101, "m6a.4xlarge")
     assert plan["pool_kind"] == "dedicated"
-    assert plan["workers"] == 2, "1 machine for 8 seats + 1 spare"
+    assert plan["workers"] == 1, "8 seats fit on one 20-seat machine"
 
 
 def test_a_big_workshop_is_sized_for_all_its_seats_not_the_remainder():
@@ -724,7 +744,7 @@ def test_a_big_workshop_is_sized_for_all_its_seats_not_the_remainder():
     reserve is for rooms that open with no notice; spending it on a planned
     workshop would mean the next ad-hoc room finds nothing."""
     plan = wf.plan_workshop_capacity(31, rp.K8S_101, "m6a.4xlarge")
-    assert plan["workers"] == 3, "ceil(31/20)=2 machines + 1 spare"
+    assert plan["workers"] == 2, "ceil(31/20)=2 machines"
     assert plan["total_seats"] >= 31
 
 
@@ -734,6 +754,156 @@ def test_the_threshold_is_configurable():
         3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=2)["pool_kind"] == "dedicated"
     assert wf.plan_workshop_capacity(
         3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=3)["pool_kind"] == "standing"
+
+
+def test_a_deferred_teardown_is_retried_next_tick():
+    """A deferral parks the record in DRAINING and its own comment promises the
+    next tick re-enters. TEARDOWNABLE_STATES was the gate and did not list it, so
+    a workshop whose workers still reported sessions was deferred exactly ONCE
+    and never revisited — the TEARDOWN_DEFER_MAX_MINUTES bound could not expire,
+    because nothing came back to check it. Found on a record DRAINING since
+    00:19 with 5 instances against it."""
+    ended = _session(start_offset_min=-600, state="ended")
+    assert wf.should_teardown(wf.DRAINING, ended, NOW) is True
+    assert wf.DRAINING in wf.TEARDOWNABLE_STATES
+
+
+def test_the_two_terminal_states_are_still_not_torn_down():
+    """DONE is finished and re-entering it is a no-op; a workshop that has not
+    been provisioned has nothing to give back."""
+    ended = _session(start_offset_min=-600, state="ended")
+    assert wf.should_teardown(wf.DONE, ended, NOW) is False
+    assert wf.should_teardown(None, ended, NOW) is False
+
+
+def test_draining_does_not_reopen_the_oscillation():
+    """The third check the control-loop notes demand: a state added to teardown
+    must not also be prewarmable, or the loop launches and terminates the same
+    machine forever."""
+    assert wf.DRAINING not in wf.PREWARMABLE_STATES
+    for offset in (-30, -200, -4320):
+        s = _session(start_offset_min=offset)
+        assert not (wf.should_prewarm(wf.DRAINING, s, NOW)
+                    and wf.should_teardown(wf.DRAINING, s, NOW))
+
+
+# ── reaping a fleet whose workshop was deleted ──────────────────────────────
+
+def test_a_deleted_workshops_fleet_is_found_by_walking_the_FLEET_not_the_index():
+    """Deleting a workshop removes it from the index, which is what the loop
+    iterates — so its machines became unreachable and ran until the in-instance
+    shutdown backstop hours later. The fleet hash is the only structure that
+    still knows they exist."""
+    orphans = wf.orphan_candidates(["ws_live", "ws_deleted"], ["ws_live"],
+                                   index_ok=True)
+    assert orphans == ["ws_deleted"]
+
+
+def test_a_FAILED_index_read_reaps_NOTHING():
+    """The one that matters. A failed read yields an empty index, under which
+    every workshop in the fleet — including one running a class right now —
+    looks abandoned. Without this guard a single Redis blip terminates the whole
+    fleet. Doing nothing costs only money."""
+    assert wf.orphan_candidates(["ws_a", "ws_b"], [], index_ok=False) == []
+    # And an index that is genuinely empty still reaps, so the guard is about
+    # the READ failing, not about the index being small.
+    assert wf.orphan_candidates(["ws_a"], [], index_ok=True) == ["ws_a"]
+
+
+def test_an_unreadable_session_is_not_treated_as_a_deleted_one():
+    """`session_exists` is tri-state: None means the check failed. Treating that
+    as "missing" is how a reaper turns a hiccup into a terminated fleet."""
+    assert wf.is_orphaned(wf.READY, False) is True
+    assert wf.is_orphaned(wf.READY, None) is False, "unreadable is not deleted"
+    assert wf.is_orphaned(wf.READY, True) is False
+
+
+def test_an_already_torn_down_fleet_is_not_reaped_again():
+    """DONE records are the audit trail and cost nothing to leave."""
+    assert wf.is_orphaned(wf.DONE, False) is False
+    assert wf.is_orphaned("", False) is False
+    for state in (wf.WARMING, wf.READY, wf.DRAINING):
+        assert wf.is_orphaned(state, False) is True
+
+
+def test_reaping_cannot_fight_the_other_three_predicates():
+    """Prewarm, teardown and upgrade only ever act on INDEXED workshops; the
+    reaper only ever acts on unindexed ones. The sets are disjoint by
+    construction, which is the check the control-loop notes demand of any new
+    predicate."""
+    indexed = ["ws_a", "ws_b"]
+    assert wf.orphan_candidates(["ws_a", "ws_b"], indexed, index_ok=True) == []
+
+
+# ── what a workshop is sized FOR ────────────────────────────────────────────
+
+def _booked(max_seats, trainers=1):
+    team = ["t%d@example.com" % i for i in range(trainers)]
+    return {"maxSeats": str(max_seats), "trainers": json.dumps(team)}
+
+
+def test_a_workshop_is_sized_for_its_BOOKED_capacity_not_its_turnout():
+    """The bug this exists for: learners join with a code and never touch the
+    roster, so a 40-seat class counted 1 seat, planned for 1, and opened on the
+    standing lane with nothing behind it. Machines must be up BEFORE anyone
+    arrives — the moment there is nobody to count."""
+    assert wf.planned_seats(_booked(40), roster_count=0) == 41
+
+
+def test_the_trainer_team_is_added_on_top_of_the_booked_seats():
+    """maxSeats caps the ROSTER. Every trainer takes an environment too, and a
+    five-trainer team on a 20-seat room is a whole extra machine's worth."""
+    assert wf.planned_seats(_booked(20, trainers=5), roster_count=0) == 25
+
+
+def test_unlimited_seats_falls_back_to_the_roster():
+    """maxSeats 0 means unlimited, which cannot be planned. The roster is the
+    only real number left — but it is a fallback, never the primary source."""
+    assert wf.planned_seats(_booked(0), roster_count=12) == 13
+
+
+def test_a_hand_edited_seat_count_cannot_buy_an_unbounded_fleet():
+    """Clamped on READ, like the window minutes: this feeds RunInstances."""
+    assert wf.planned_seats(_booked(99999)) == 201      # MAX_SEATS + 1 trainer
+    assert wf.planned_seats({"maxSeats": "not-a-number"}) == 1
+    assert wf.planned_seats({}) == 1
+
+
+def test_a_booked_workshop_crosses_the_standing_threshold_on_capacity_alone():
+    """End to end over the two functions, because the defect was the SEAM: the
+    planner was always right about 12 seats, it was never told about them."""
+    seats = wf.planned_seats(_booked(10, trainers=2))
+    assert seats == 12
+    assert wf.plan_workshop_capacity(seats, rp.K8S_101,
+                                     "m6a.4xlarge")["pool_kind"] == "dedicated"
+
+
+def test_a_standing_workshop_that_outgrows_the_lane_is_upgraded():
+    """The lane was decided once, at prewarm. Booked capacity moves afterwards
+    and nothing re-read it, so a workshop that grew rode the standing box's
+    reserve for its whole delivery."""
+    assert wf.needs_bigger_fleet("ready", {"standing": True}, 8) is True
+    assert wf.needs_bigger_fleet("ready", {"standing": True}, 7) is False
+
+
+def test_a_dedicated_workshop_is_never_re_planned():
+    """Only ever upgrades. Downgrading would terminate machines a room may
+    already be sitting on."""
+    assert wf.needs_bigger_fleet("ready", {"standing": False}, 200) is False
+    assert wf.needs_bigger_fleet("warming", {"standing": True}, 200) is False
+    assert wf.needs_bigger_fleet(wf.DONE, {"standing": True}, 200) is False
+
+
+def test_the_upgrade_cannot_oscillate_with_teardown():
+    """The third scheduling predicate, checked against the other two. Prewarm
+    and teardown are mutually exclusive by construction; this one fires only on
+    a record that launched NOTHING, and stops being true the moment it acts."""
+    rec = {"standing": True}
+    s = _session(start_offset_min=-10_000)          # long past its window
+    assert wf.should_teardown(wf.READY, s, NOW) is True
+    # After the upgrade the record is no longer standing, so the predicate that
+    # produced it is false forever after.
+    assert wf.needs_bigger_fleet(wf.READY, {**rec, "standing": False}, 50) is False
 
 
 def test_lent_seats_count_as_daily_capacity():
