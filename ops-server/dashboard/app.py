@@ -1134,9 +1134,9 @@ async def api_repos():
             "builds": builds,
             "history": history_matrix.get(repo_full, {}),
             "latest_tag": _tag_str(release_map.get(repo_full)),
-            # App-delivered labs (repos.yaml tag `dynatrace-app`) can run the
+            # App-delivered labs (repos.yaml tag `enablement-app`) can run the
             # full e2e training test — gates the "Training test" fleet action.
-            "training_test": "dynatrace-app" in (r.get("tags") or []),
+            "training_test": "enablement-app" in (r.get("tags") or []),
         })
 
     return {"repos": repos_out, "total": len(repos_out)}
