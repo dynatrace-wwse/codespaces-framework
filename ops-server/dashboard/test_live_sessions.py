@@ -866,7 +866,9 @@ def test_audit_event_is_flat_strings_for_xadd():
     assert ev["email"] == "a@x.com"
     # Same normalization as the :tenants hash, or the audit trail and the
     # provisioning decision would disagree about which tenant someone is in.
-    assert ev["tenant"] == SRO_T
+    # That shared answer is now an environment ID rather than a URL — the four
+    # shapes a tenant arrives in have no common URL form, only a common id.
+    assert ev["tenant"] == "sro97894"
     assert ev["kind"] == "provision-accepted"
 
 
@@ -1008,3 +1010,60 @@ def test_shape_admin_row_editable_mirrors_the_patch_rule():
 def test_shape_admin_row_survives_a_teamless_session():
     row = ls.shape_admin_row("ws_1", {"title": "x"}, set(), {}, {})
     assert row["owner"] == "" and row["coTrainers"] == []
+
+
+# ── Tenant canonicalisation ───────────────────────────────────────────────────
+# normalize_tenant answers with an environment ID, not a URL, because the same
+# tenant reaches it in four shapes and only the id is common to all of them.
+# Getting this wrong put a red "wrong tenant" flag on healthy learners and told
+# a learner on COE's vanity host that their environment ran somewhere else.
+
+def test_normalize_tenant_reduces_every_shape_to_one_id():
+    for raw in ("https://sro97894.apps.dynatrace.com",
+                "https://sro97894.apps.dynatrace.com/",
+                "HTTPS://SRO97894.apps.dynatrace.com",
+                "https://sro97894-1.apps.dynatrace.com",   # app-function runtime
+                "sro97894",                                 # bare id
+                "sro97894.apps.dynatrace.com"):
+        assert ls.normalize_tenant(raw) == "sro97894", raw
+
+
+def test_normalize_tenant_resolves_the_coe_vanity_alias():
+    """COE answers to two names. The browser reports whichever host the person
+    clicked; an app-function always reports the canonical one. Grail records
+    geu80787, so that is the direction the mapping runs."""
+    for raw in ("https://wwse.apps.dynatrace.com", "wwse",
+                "https://geu80787.apps.dynatrace.com", "geu80787"):
+        assert ls.normalize_tenant(raw) == "geu80787", raw
+
+
+def test_normalize_tenant_strips_the_app_frame_alias_marker():
+    """labSession.getTenantId()'s hostname regex is greedy, so the COE app-frame
+    yields `geu80787--alias`. That value is on live jobs today."""
+    assert ls.normalize_tenant("geu80787--alias") == "geu80787"
+
+
+def test_normalize_tenant_leaves_a_managed_tenant_uuid_intact():
+    """Only a plain alphanumeric label can carry the runtime's -N suffix."""
+    uuid = "abc12345-6789-0abc-def0-123456789abc"
+    assert ls.normalize_tenant(f"https://{uuid}.apps.dynatrace.com") == uuid
+
+
+def test_normalize_tenant_passes_through_empty():
+    assert ls.normalize_tenant("") == ""
+    assert ls.normalize_tenant(None) == ""
+
+
+def test_env_tenant_mismatch_ignores_shape_differences():
+    """The board's ⚠. Both live attendees tripped it while running perfectly:
+    arena_tenant held `geu80787--alias` and `sro97894` while the binding held a
+    full URL."""
+    assert not ls.env_tenant_mismatch("geu80787--alias",
+                                      "https://geu80787.apps.dynatrace.com")
+    assert not ls.env_tenant_mismatch("sro97894",
+                                      "https://sro97894.apps.dynatrace.com")
+    assert not ls.env_tenant_mismatch("https://wwse.apps.dynatrace.com",
+                                      "https://geu80787.apps.dynatrace.com")
+    # A real mismatch must still be reported.
+    assert ls.env_tenant_mismatch("https://ydi9582h.sprint.apps.dynatracelabs.com",
+                                  "https://geu80787.apps.dynatrace.com")

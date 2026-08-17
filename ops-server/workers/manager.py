@@ -1,6 +1,7 @@
 """Worker manager — consumes jobs from Redis queues and dispatches to handlers."""
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -202,6 +203,35 @@ logging.basicConfig(
 log = logging.getLogger("ops-worker")
 
 
+@functools.lru_cache(maxsize=1)
+def _instance_type() -> str:
+    """This box's EC2 instance type, via IMDSv2. "" when not on EC2.
+
+    Deliberately a second, small copy of ``worker-agent/config.py``'s
+    ``_instance_type`` rather than a shared import: that module is loaded on
+    workers, which are sparse checkouts, and it already jumps through hoops to
+    read ``shared/`` by path. Two short readers beat making the worker's startup
+    depend on one more file being present. Keep them in step.
+
+    Cached because the answer cannot change while the process lives, and the
+    master re-registers on a timer.
+    """
+    try:
+        import urllib.request
+
+        def _fetch(url: str, headers: dict, method: str = "GET") -> str:
+            req = urllib.request.Request(url, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=1) as r:
+                return r.read().decode().strip()
+
+        token = _fetch("http://169.254.169.254/latest/api/token",
+                       {"X-aws-ec2-metadata-token-ttl-seconds": "60"}, "PUT")
+        return _fetch("http://169.254.169.254/latest/meta-data/instance-type",
+                      {"X-aws-ec2-metadata-token": token})
+    except Exception:
+        return ""
+
+
 class WorkerManager:
     """Manages concurrent job execution from Redis queues."""
 
@@ -315,6 +345,9 @@ class WorkerManager:
         """
         await self.pool.hset("worker:master-arm64", mapping={
             "arch": "arm64",
+            # Same field the remote agents publish, so the Workers tab can name
+            # every machine's size rather than only the ones with an agent.
+            "instance_type": _instance_type(),
             "role": "master",
             "capacity": str(MAX_PARALLEL_WORKERS),
             # Mirror the remote agents' vocabulary so the fleet controller can

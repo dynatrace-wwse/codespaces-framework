@@ -493,8 +493,8 @@ def test_join_by_code_registers_and_records_where_the_learner_is():
     r = _join_by_code(tenant="https://abc123.apps.dynatrace.com/")
     assert r.status_code == 200
     assert "newbie@x.com" in a.pool.s[f"live:session:{SID}:roster"]
-    assert a.pool.h[f"live:session:{SID}:tenants"]["newbie@x.com"] == \
-        "https://abc123.apps.dynatrace.com"
+    # Bound as the canonical environment id — what every comparison uses.
+    assert a.pool.h[f"live:session:{SID}:tenants"]["newbie@x.com"] == "abc123"
     # Registered, not present — the gates must not move.
     assert "newbie@x.com" not in a.pool.h[f"live:session:{SID}:joined"]
 

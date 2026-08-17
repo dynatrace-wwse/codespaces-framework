@@ -344,7 +344,9 @@ def test_readiness_flags_a_learner_running_in_the_wrong_tenant():
     it can spot this at all. Nothing is torn down — the trainer decides."""
     _job("a", LEARNER, SID, tenant=SRO)          # bound to COE, running on SRO
     row = _row(_readiness(), LEARNER)
-    assert row["envTenant"] == SRO
+    # envTenant is the canonical environment id, not the URL the job recorded —
+    # arena_tenant arrives in several shapes and only the id compares.
+    assert row["envTenant"] == "sro97894"
     assert row["tenantMismatch"] is True
 
 

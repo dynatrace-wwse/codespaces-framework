@@ -4706,7 +4706,13 @@ async def api_arena_provision(body: ArenaProvisionRequest, request: Request):
         "worker_id":    "queued",
         "type":         "daemon",
         "arena_user":   body.userId,
-        "arena_tenant": body.tenantId or tenant_url,
+        # Server-derived tenant URL FIRST. `tenantId` comes from the browser's
+        # own hostname (labSession.getTenantId()), which on the COE app-frame
+        # reads "geu80787--alias" and on SRO reads a bare "sro97894" — three
+        # incompatible shapes for a field the readiness board compares against a
+        # binding stored as a full URL. `tenant_url` is what the app FUNCTION
+        # reported and is canonical everywhere it has been observed.
+        "arena_tenant": tenant_url or body.tenantId,
         # Stage badge shown next to the tenant id in History (production / sprint / dev),
         # derived from the tenant domain (*.apps.dynatrace.com=production,
         # *.sprint.apps.dynatracelabs.com=sprint, *.dev…=dev).
@@ -7106,11 +7112,26 @@ async def api_live_session_readiness(session_id: str, request: Request,
     rows = live_sessions.roster_targets(roster, trainer_emails, include_trainer=True)
     provision_done = await pool.hgetall(_live_provdone_key(session_id))
     results = []
+    caller = live_sessions.normalize_email(trainerEmail)
     for email, role in rows:
-        # The tenant the learner is bound to — the trainer's own for a trainer
-        # row, since they are asking from it and never join their own workshop.
-        row_tenant = tenant if role == "trainer" else joined_tenants.get(email, "")
+        # Where this person runs the workshop. A trainer and a co-trainer are
+        # independent tenants — either may deliver from their own — so a trainer
+        # row is NOT the asking trainer's tenant. It used to be, which stamped
+        # whoever was looking onto every trainer row: the lead saw the co-trainer
+        # on COE while the co-trainer, asking from sprint, saw the lead on sprint,
+        # and neither reading was true.
+        #
+        # Trainers now auto-bind when they open the workshop, so the binding is
+        # the first answer. For workshops created before that shipped there is no
+        # binding, and the environment's own record is the ground truth. Only the
+        # caller falls back to the tenant they are asking from — for anyone else
+        # that value is a guess about a person who is not here.
+        row_tenant = joined_tenants.get(email, "")
         meta = running_by_email.get(email)
+        if not row_tenant and role == "trainer":
+            row_tenant = (meta or {}).get("dt_tenant_url", "")
+            if not row_tenant and email == caller:
+                row_tenant = tenant
         if meta:
             job_id = meta.get("job_id", "")
             livelog = await pool.get(f"job:livelog:{job_id}") if job_id else ""
@@ -8190,6 +8211,12 @@ _PAD_PAGE_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Virtual Room</title>
+<!-- This page declared no icon at all, and Orbital serves no /favicon.ico, so
+     the tab fell back to whatever the browser had cached for this origin — in
+     practice the dashboard's mark. Declared explicitly, same two files the
+     dashboard uses, so the classroom popup and Orbital agree. -->
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
 <style>
 /* Theme tokens. The popup is a SEPARATE top-level window on Orbital's origin, so
    it cannot read the Dynatrace app's data-theme — different document, different
@@ -8239,7 +8266,7 @@ body { display: flex; flex-direction: column; }
   flex-shrink: 0; border-bottom: 1px solid var(--border); gap: 16px; }
 #brand { display: flex; align-items: center; gap: 8px; }
 #brand-logo { display: flex; align-items: center; }
-#brand-logo svg { width: 20px; height: 20px; display: block; }
+#brand-logo img { width: 20px; height: 20px; display: block; }
 #brand-name { color: var(--text-strong); font-weight: 600; font-size: 13px; letter-spacing: .3px; }
 #who { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 #main { flex: 1; overflow-y: auto; padding: 20px; max-width: 860px; width: 100%;
@@ -8339,25 +8366,15 @@ button:disabled { opacity: .5; cursor: default; }
 <body>
 <div id="topbar">
   <div id="brand">
-    <!-- The Enablement app's own icon (ui/assets/icon.svg), inlined: this page
-         is served from Orbital's origin and the app's asset bundle is not
-         reachable from here, so an <img src> would 404. Keep the two in step. -->
+    <!-- The Enablement app's own icon. It used to be an inlined copy of
+         ui/assets/icon.svg with a note to keep the two in step — which is
+         exactly what did not happen: the app moved to the E mark and this page
+         kept showing the old graduation cap for months. Served from /static
+         instead, which is Orbital's own origin, so there is nothing left to
+         keep in step. (The app's *bundle* is still unreachable from here; only
+         this copy under ops-server/dashboard/static/images is.) -->
     <span id="brand-logo" aria-hidden="true">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
-        <defs>
-          <linearGradient id="padHat" x1="14" y1="20" x2="86" y2="84" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stop-color="#1496FF"/>
-            <stop offset="0.55" stop-color="#6F4BF2"/>
-            <stop offset="1" stop-color="#73BE28"/>
-          </linearGradient>
-        </defs>
-        <path d="M50 22 L88 40 L50 58 L12 40 Z" fill="url(#padHat)"/>
-        <path d="M50 30.5 L70.5 40 L50 49.5 L29.5 40 Z" fill="#ffffff" fill-opacity="0.22"/>
-        <path d="M30 47 L30 62 C30 69 39 74 50 74 C61 74 70 69 70 62 L70 47 L50 56.5 Z"
-              fill="url(#padHat)" fill-opacity="0.85"/>
-        <path d="M84 41 L84 60" stroke="url(#padHat)" stroke-width="3.2" stroke-linecap="round"/>
-        <circle cx="84" cy="64" r="4.2" fill="#73BE28"/>
-      </svg>
+      <img src="/static/images/icon-e-64.png" width="20" height="20" alt="">
     </span>
     <span id="brand-name">Virtual Classroom</span>
     <span id="title" style="color:var(--text-dim)"></span>

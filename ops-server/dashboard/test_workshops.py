@@ -321,9 +321,17 @@ SRO = "https://sro97894.apps.dynatrace.com"
 COE = "https://geu80787.apps.dynatrace.com"
 
 
-def test_normalize_tenant_trims_lowercases_and_strips_slash():
-    assert ls.normalize_tenant("  HTTPS://SRO97894.Apps.Dynatrace.com/  ") == SRO
-    assert ls.normalize_tenant(SRO + "///") == SRO
+# normalize_tenant answers with an environment ID, not a URL. The same tenant
+# arrives as a full URL, as the app-function runtime's numbered form, as a bare
+# id and as the app-frame's `geu80787--alias`; the id is the only form all four
+# share, so it is what equality is defined on.
+SRO_ID = "sro97894"
+COE_ID = "geu80787"
+
+
+def test_normalize_tenant_trims_lowercases_and_reduces_to_the_env_id():
+    assert ls.normalize_tenant("  HTTPS://SRO97894.Apps.Dynatrace.com/  ") == SRO_ID
+    assert ls.normalize_tenant(SRO + "///") == SRO_ID
     assert ls.normalize_tenant("") == ""
     assert ls.normalize_tenant(None) == ""
 
@@ -332,11 +340,12 @@ def test_normalize_tenant_strips_the_runtime_suffix():
     """TEN-1: app FUNCTIONS see https://sro97894-1.apps…, the browser sees
     https://sro97894.apps… — same tenant, and they must compare equal or
     provision-all reports a false foreign-tenant skip."""
-    assert ls.normalize_tenant("https://sro97894-1.apps.dynatrace.com") == SRO
-    assert ls.normalize_tenant("https://GEU80787-12.apps.dynatrace.com/") == COE
+    assert ls.normalize_tenant("https://sro97894-1.apps.dynatrace.com") == SRO_ID
+    assert ls.normalize_tenant("https://GEU80787-12.apps.dynatrace.com/") == COE_ID
     assert ls.normalize_tenant("https://sro97894-1.apps.dynatrace.com") == ls.normalize_tenant(SRO)
-    # only the host's numeric suffix goes — a hyphenated tenant name stays intact
-    assert ls.normalize_tenant("https://my-tenant.apps.dynatrace.com") == "https://my-tenant.apps.dynatrace.com"
+    # only a plain alphanumeric label carries a numeric suffix — a hyphenated
+    # tenant name stays intact
+    assert ls.normalize_tenant("https://my-tenant.apps.dynatrace.com") == "my-tenant"
 
 
 def test_provision_skip_tolerates_mixed_runtime_forms():

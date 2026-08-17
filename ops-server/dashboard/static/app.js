@@ -1066,6 +1066,30 @@ function laneClass(w) {
     return laneOf(w) === DAILY_POOL ? 'lane-daily' : 'lane-workshop';
 }
 
+/** EC2 size of the box, appended to the Arch line. Empty when the agent has not
+ *  published one — a worker running code from before instance_type existed, or
+ *  a host that is not on EC2. Rendering nothing is right there: a card that
+ *  guesses a size is worse than a card that admits it does not know. */
+function machineType(w) {
+    const t = (w.instance_type || '').trim();
+    return t ? ' · <strong>' + escapeHtml(t) + '</strong>' : '';
+}
+
+/** The other half of "Active: 0 / 6".
+ *
+ *  `capacity` is WARM slots, not the size of the machine: the agent registers
+ *  with capacity 0 on purpose and raises it as Sysbox slots come up. So a
+ *  20-slot m6a.4xlarge legitimately reads "0 / 6" for the first few minutes of
+ *  its life, and every person who has read that card has asked why. Naming the
+ *  nominal figure next to it turns a number that looks wrong into one that
+ *  explains itself. */
+function slotTotal(w) {
+    const total = parseInt(w.slots_total || '0', 10);
+    if (!total) return '';
+    const warming = w.status === 'warming' ? ', warming' : '';
+    return ` <span class="muted">(${escapeHtml(String(total))} slots${warming})</span>`;
+}
+
 function laneBadge(w) {
     const lane = laneOf(w);
     if (!w.pool) {
@@ -1224,8 +1248,8 @@ async function loadWorkers() {
                 <div class="worker-card ${isMaster ? 'is-master' : ''} ${stale ? 'offline' : ''} ${laneClass(w)}">
                     <h4>${escapeHtml(w.worker_id)} ${badge} ${lanePill} ${statusPill}</h4>
                     <div class="meta">
-                        <div>Arch: <strong>${escapeHtml(w.arch || '')}</strong></div>
-                        <div>Active: ${escapeHtml(String(w.active_jobs || '0'))} / ${escapeHtml(String(w.capacity || '?'))}</div>
+                        <div>Arch: <strong>${escapeHtml(w.arch || '')}</strong>${machineType(w)}</div>
+                        <div>Active: ${escapeHtml(String(w.active_jobs || '0'))} / ${escapeHtml(String(w.capacity || '?'))} warm${slotTotal(w)}</div>
                         ${lendLine}
                         <div>Last heartbeat: ${formatTime(w.last_heartbeat)}</div>
                         ${masterExtras}

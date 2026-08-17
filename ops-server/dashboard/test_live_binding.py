@@ -32,6 +32,14 @@ LEARNER = "learner@customer.com"
 STRANGER = "stranger@customer.com"
 COE = "https://geu80787.apps.dynatrace.com"
 SRO = "https://sro97894.apps.dynatrace.com"
+# What normalize_tenant answers with. Bindings are STORED and COMPARED as an
+# environment id, because the same tenant reaches Orbital as a full URL, as
+# the app-function runtime's numbered form, as a bare id and as the
+# app-frame's `geu80787--alias` — the id is the only form all four share.
+# The tests keep feeding URLs: a binding written before this change must
+# still read back as the same tenant.
+COE_ID = "geu80787"
+SRO_ID = "sro97894"
 
 
 class FakeRedis:
@@ -228,9 +236,9 @@ def test_bind_works_on_a_closed_room_days_before_the_workshop():
     assert r.status_code == 200
     body = r.json()
     assert body["outcome"] == ls.BIND_BOUND
-    assert body["tenant"] == COE and body["boundHere"] is True
+    assert body["tenant"] == COE_ID and body["boundHere"] is True
     assert body["boundAt"]
-    assert _tenants() == {LEARNER: COE}
+    assert _tenants() == {LEARNER: COE_ID}
 
 
 def test_binding_is_not_attendance():
@@ -242,17 +250,17 @@ def test_second_tenant_is_kept_not_moved():
     _bind(LEARNER, COE)
     r = _bind(LEARNER, SRO)
     assert r.json()["outcome"] == ls.BIND_KEPT
-    assert r.json()["tenant"] == COE
+    assert r.json()["tenant"] == COE_ID
     assert r.json()["boundHere"] is False, "they are looking at SRO, bound to COE"
-    assert _tenants() == {LEARNER: COE}
+    assert _tenants() == {LEARNER: COE_ID}
 
 
 def test_explicit_rebind_moves_it():
     _bind(LEARNER, COE)
     r = _bind(LEARNER, SRO, rebind=True)
     assert r.json()["outcome"] == ls.BIND_REBOUND
-    assert r.json()["tenant"] == SRO and r.json()["boundHere"] is True
-    assert _tenants() == {LEARNER: SRO}
+    assert r.json()["tenant"] == SRO_ID and r.json()["boundHere"] is True
+    assert _tenants() == {LEARNER: SRO_ID}
 
 
 def test_rebinding_updates_the_timestamp():
@@ -304,14 +312,14 @@ def test_join_binds_but_no_longer_moves_an_existing_binding():
     r = client.post(f"/api/live/sessions/{SID}/join", headers=BEARER,
                     json={"email": LEARNER, "tenant": SRO})
     assert r.status_code == 200
-    assert _tenants() == {LEARNER: COE}, "join must not silently rebind"
+    assert _tenants() == {LEARNER: COE_ID}, "join must not silently rebind"
     assert LEARNER in _joined(), "join still checks in"
 
 
 def test_join_still_binds_when_nothing_was_bound():
     client.post(f"/api/live/sessions/{SID}/join", headers=BEARER,
                 json={"email": LEARNER, "tenant": SRO})
-    assert _tenants() == {LEARNER: SRO}
+    assert _tenants() == {LEARNER: SRO_ID}
 
 
 def test_join_by_code_binds_and_registers_without_checking_in():
@@ -327,7 +335,7 @@ def test_join_by_code_binds_and_registers_without_checking_in():
     r = client.post("/api/live/sessions/join-by-code", headers=BEARER,
                     json={"code": "ABC123", "email": STRANGER, "tenant": SRO})
     assert r.status_code == 200
-    assert _tenants() == {STRANGER: SRO}
+    assert _tenants() == {STRANGER: SRO_ID}
     assert _joined() == {}, "registering is not checking in"
 
 
@@ -338,7 +346,7 @@ def test_provision_ack_is_the_one_caller_that_overrides_a_binding():
     r = client.post(f"/api/live/sessions/{SID}/provision-ack", headers=BEARER,
                     json={"email": LEARNER, "tenant": SRO, "status": "queued"})
     assert r.status_code == 200
-    assert _tenants() == {LEARNER: SRO}
+    assert _tenants() == {LEARNER: SRO_ID}
 
 
 # ── Payload shaping + masking ────────────────────────────────────────────────
@@ -352,7 +360,7 @@ def test_trainer_sees_every_binding_and_the_seat_summary():
     _bind(LEARNER, COE)
     detail = _detail(TRAINER)
     assert detail["bindings"] == [
-        {"email": LEARNER, "tenant": COE, "boundAt": _boundat()[LEARNER]}]
+        {"email": LEARNER, "tenant": COE_ID, "boundAt": _boundat()[LEARNER]}]
     assert detail["seats"]["seatsTaken"] == 1
     assert detail["seats"]["seatsOpen"] == 19
 
@@ -368,7 +376,7 @@ def test_a_learner_sees_only_their_own_binding():
     _bind(LEARNER, COE)
     _bind(TRAINER, SRO)
     detail = _detail(LEARNER)
-    assert detail["myTenant"] == COE
+    assert detail["myTenant"] == COE_ID
     assert detail["boundAt"] == _boundat()[LEARNER]
     assert "bindings" not in detail and "seats" not in detail
 
@@ -398,5 +406,5 @@ def test_boundat_is_absent_for_a_pre_existing_binding():
     a.pool.h[f"live:session:{SID}:tenants"] = {LEARNER: COE}   # no :boundat
     r = _bind(LEARNER, SRO)
     assert r.json()["outcome"] == ls.BIND_KEPT
-    assert r.json()["tenant"] == COE
+    assert r.json()["tenant"] == COE_ID
     assert _detail(LEARNER)["boundAt"] == ""

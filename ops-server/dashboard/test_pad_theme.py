@@ -16,32 +16,31 @@ _TPL = a._PAD_PAGE_HTML
 
 
 def _body_without_token_declarations() -> str:
-    """The template minus the parts that SHOULD hold literal hex.
+    """The template minus the one part that SHOULD hold literal hex: the
+    `:root` blocks, where the theme tokens are declared.
 
-    Two exemptions, both deliberate:
-
-    - the `:root` blocks, which are where the theme tokens are declared;
-    - the brand mark, an inline copy of the app's own icon (a graduation cap in
-      the Dynatrace gradient). A logo is the one thing on the page that must
-      NOT change with the theme — it is the same mark in the app header, on the
-      tile and here, and re-tinting it per theme would make it a different
-      logo.
+    There used to be a second exemption for the brand mark, which was an
+    inlined copy of the app's icon and therefore carried the gradient's hex
+    literals. The mark is now served from /static, so it contributes no colour
+    to this template at all and needs no carve-out — which is strictly better,
+    since an exemption is a hole in the check.
     """
     _, rest = _TPL.split(':root[data-theme="light"] {', 1)
     _, body = rest.split("}", 1)
-    brand_start = body.index('<span id="brand-logo"')
-    brand_end = body.index("</span>", body.index("</svg>", brand_start))
-    return body[:brand_start] + body[brand_end:]
+    return body
 
 
-def test_the_brand_mark_is_the_only_exempt_colour():
-    """Guards the exemption above: it must cover the logo and nothing else."""
+def test_the_brand_mark_is_served_not_inlined():
+    """A logo must not change with the theme, and an inlined one could not
+    avoid hardcoding colour. Referencing the shared asset also removes the
+    "keep the two in step" duty that had this page showing the app's PREVIOUS
+    icon for months after the app changed it."""
     brand_start = _TPL.index('<span id="brand-logo"')
-    brand_end = _TPL.index("</span>", _TPL.index("</svg>", brand_start))
-    exempt = _TPL[brand_start:brand_end]
-    assert "<svg" in exempt and "linearGradient" in exempt
-    # It is a logo, not a layout: nothing themeable hides inside the exemption.
-    assert "var(--" not in exempt
+    brand = _TPL[brand_start:_TPL.index("</span>", brand_start)]
+    assert "/static/images/icon-e-64.png" in brand
+    assert "<svg" not in brand
+    # It is a logo, not a layout: nothing themeable hides in it.
+    assert "var(--" not in brand
 
 
 def test_both_themes_are_defined():

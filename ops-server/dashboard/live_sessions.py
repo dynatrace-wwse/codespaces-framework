@@ -213,21 +213,54 @@ FOREIGN_TENANT_MESSAGE = "provisions on entry from their own tenant"
 NOT_JOINED_MESSAGE = "hasn't joined yet — will provision on entry"
 
 
-_TENANT_RUNTIME_SUFFIX = re.compile(r"^(https?://[a-z0-9]+)-\d{1,3}(\.)")
+# The app-function runtime's numeric suffix, and ONLY that: the label has to be
+# a plain alphanumeric id for the trailing "-N" to be a suffix at all. A managed
+# tenant's UUID label is full of dashes and must survive untouched, which is why
+# this is anchored at both ends rather than just stripping a trailing -\d{1,3}.
+_TENANT_RUNTIME_SUFFIX = re.compile(r"^([a-z0-9]+)-\d{1,3}$")
+
+# A tenant that answers to more than one name, mapped to the id everything else
+# records it under. COE is reachable as both geu80787.apps.dynatrace.com and the
+# vanity alias wwse.apps.dynatrace.com, and which one arrives depends purely on
+# the URL the person clicked — the browser reports the vanity host while an
+# app-function always reports the canonical one. Grail stores geu80787, so that
+# is the direction the mapping runs.
+#
+# `app_deploy.COE_TENANT_IDS` is the same fact for the deploy path. It is NOT
+# imported here on purpose: this module is pure decision logic with no
+# dependencies, and app_deploy is deploy machinery. Keep the two in step.
+TENANT_ALIASES = {"wwse": "geu80787"}
 
 
 def normalize_tenant(tenant) -> str:
-    """Canonical tenant-URL form for equality checks: trimmed, lowercased,
-    no trailing slash (the app sends https://<env>.apps.dynatrace.com).
+    """Canonical **environment id** for equality checks — 'geu80787', 'sro97894'.
 
-    The app-function runtime's getEnvironmentUrl() returns the environment with a
-    numeric suffix — https://sro97894-1.apps.dynatrace.com — while the browser
-    sends the bare id. Both name the same tenant, so the suffix is stripped;
-    without that, one side joining from the browser and the other from a function
-    compares unequal and provision-all reports a false "foreign-tenant" skip.
+    Returns an id, not a URL, because the same tenant reaches this function in
+    four different shapes and only the id is common to all of them:
+
+      https://geu80787.apps.dynatrace.com   a binding, or an app-function
+      https://sro97894-1.apps.dynatrace.com the app-function runtime's numbered
+                                            internal form
+      geu80787--alias                       the browser hostname regex in
+                                            labSession.getTenantId()
+      sro97894                              a bare id from the same regex
+
+    Comparing those as URLs is what put a red "wrong tenant" flag on healthy
+    learners and told a learner arriving on the COE vanity host that their
+    environment was running somewhere else.
+
+    Both sides of every comparison in this module go through here, so values
+    already stored in the old full-URL shape keep comparing correctly — the
+    change is backward compatible on read.
     """
     t = (tenant or "").strip().rstrip("/").lower()
-    return _TENANT_RUNTIME_SUFFIX.sub(r"\1\2", t)
+    if not t:
+        return ""
+    host = t.split("//")[-1].split("/")[0]         # tolerate a bare id or a full URL
+    env = host.split(".")[0]
+    env = env.split("--")[0]                       # 'geu80787--alias'
+    env = _TENANT_RUNTIME_SUFFIX.sub(r"\1", env)   # 'sro97894-1'
+    return TENANT_ALIASES.get(env, env)
 
 
 def provision_skip_status(has_joined, joined_tenant, workshop_tenant):

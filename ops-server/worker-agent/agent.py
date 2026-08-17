@@ -57,6 +57,7 @@ from .config import (
     borrow_capacity,
     borrow_queue,
     WORKER_CODE_REF,
+    INSTANCE_TYPE,
     WARM_CONCURRENCY,
     WARM_MAX_ATTEMPTS,
     WARM_RETRY_BASE_S,
@@ -913,6 +914,12 @@ class WorkerAgent:
         worker_key = f"worker:{WORKER_ID}"
         fields = {
             "arch": WORKER_ARCH,
+            # The EC2 machine this is, published from the first write so the
+            # fleet views never show a card whose size is unknown. config.py
+            # already asks IMDSv2 for it to size capacity and then dropped it on
+            # the floor; "" here means "not on EC2, or IMDS did not answer",
+            # which the dashboard renders as no type rather than as a guess.
+            "instance_type": INSTANCE_TYPE,
             # capacity == warm slots, NOT the nominal setting. At registration
             # the pool has not warmed a single slot, so the honest answer is 0
             # and it rises as slots come up. Everything that consumes this field
@@ -1139,6 +1146,7 @@ class WorkerAgent:
         # Static fields written every heartbeat so they survive key expiry + recreation.
         static_fields = {
             "arch": WORKER_ARCH,
+            "instance_type": INSTANCE_TYPE,
             "slots_total": str(WORKER_CAPACITY),
             "host": WORKER_HOST,
             "ssh_host": WORKER_SSH_HOST or WORKER_HOST,

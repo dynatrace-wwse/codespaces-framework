@@ -222,7 +222,7 @@ def test_tenant_and_workshop_name_are_carried_through():
         _rec(lp.STARTED, "a@x.com", workshopId="ws-1", workshopName="EMEA Bootcamp"),
     ])
     r = out["results"][0]
-    assert r["tenant"] == "https://sro97894.apps.dynatrace.com"
+    assert r["tenant"] == "sro97894"      # canonical env id, not the URL
     assert (r["workshopId"], r["workshopName"]) == ("ws-1", "EMEA Bootcamp")
 
 
