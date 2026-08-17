@@ -180,34 +180,14 @@ printCodespacesVerification(){
 #  server and the tool belt. Default is A (leanest).
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Training title. mkdocs.yaml is the only place inside the container that knows
-# the human name; fall back to the repo name when it is missing or unreadable.
-_orbitalTrainingTitle(){
-  local title=""
-  local mk
-  for mk in "${REPO_PATH}/mkdocs.yaml" "${REPO_PATH}/mkdocs.yml"; do
-    [ -f "$mk" ] || continue
-    title=$(sed -n 's/^site_name:[[:space:]]*//p' "$mk" | head -1)
-    title="${title%\"}"; title="${title#\"}"
-    title="${title%\'}"; title="${title#\'}"
-    # "Dynatrace Enablement Lab: Kubernetes 101" -> "Kubernetes 101"
-    title="${title##*: }"
-    break
-  done
-  echo "${title:-${RepositoryName:-Dynatrace Enablement}}"
-}
-
-# Cluster name, without shelling out to kubectl (greeting runs on every terminal
-# open and must stay instant). K3D_CLUSTER_NAME is set by the Orbital worker.
-_orbitalClusterName(){
-  echo "${K3D_CLUSTER_NAME:-}"
-}
-
 printOrbitalGreeting(){
   local title tenant cluster
-  title=$(_orbitalTrainingTitle)
+  # variables.sh derives the title from mkdocs.yaml — shared with the p10k prompt.
+  title="${DT_TRAINING_TITLE:-${RepositoryName:-Dynatrace Enablement}}"
   tenant="${DT_ENVIRONMENT:-}"
-  cluster=$(_orbitalClusterName)
+  # K3D_CLUSTER_NAME is NOT set in an Orbital Sysbox container (verified in a live
+  # session), so this line stays hidden there rather than printing an empty value.
+  cluster="${K3D_CLUSTER_NAME:-}"
 
   echo -e "${thinline}"
   echo -e "${GREEN} "

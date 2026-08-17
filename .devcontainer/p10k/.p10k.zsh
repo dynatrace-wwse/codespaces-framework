@@ -30,8 +30,7 @@
 
   # The list of segments shown on the left. Fill it with the most important segments.
   typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(
-    context                 # dynatrace-enablement label
-    dir                     # current directory
+    context                 # training title (DT_TRAINING_TITLE)
     vcs                     # git status
     prompt_char             # prompt symbol
   )
@@ -903,18 +902,18 @@
   # Default context color (no privileges, no SSH).
   typeset -g POWERLEVEL9K_CONTEXT_FOREGROUND=6
 
-  # Left prompt: show "dynatrace-enablement" label (no username — that's on the right)
-  typeset -g POWERLEVEL9K_CONTEXT_ROOT_TEMPLATE='%Bdynatrace-enablement'
-  typeset -g POWERLEVEL9K_CONTEXT_{REMOTE,REMOTE_SUDO}_TEMPLATE='dynatrace-enablement'
-  typeset -g POWERLEVEL9K_CONTEXT_TEMPLATE='dynatrace-enablement'
-  typeset -g POWERLEVEL9K_CONTEXT_DEFAULT_CONTENT_EXPANSION='dynatrace-enablement'
-  typeset -g POWERLEVEL9K_CONTEXT_SUDO_CONTENT_EXPANSION='dynatrace-enablement'
+  # Left prompt: show the training title (set by variables.sh from mkdocs site_name) (no username — that's on the right)
+  typeset -g POWERLEVEL9K_CONTEXT_ROOT_TEMPLATE='%B${DT_TRAINING_TITLE:-dynatrace-enablement}'
+  typeset -g POWERLEVEL9K_CONTEXT_{REMOTE,REMOTE_SUDO}_TEMPLATE='${DT_TRAINING_TITLE:-dynatrace-enablement}'
+  typeset -g POWERLEVEL9K_CONTEXT_TEMPLATE='${DT_TRAINING_TITLE:-dynatrace-enablement}'
+  typeset -g POWERLEVEL9K_CONTEXT_DEFAULT_CONTENT_EXPANSION='${DT_TRAINING_TITLE:-dynatrace-enablement}'
+  typeset -g POWERLEVEL9K_CONTEXT_SUDO_CONTENT_EXPANSION='${DT_TRAINING_TITLE:-dynatrace-enablement}'
   typeset -g POWERLEVEL9K_CONTEXT_VISUAL_IDENTIFIER_EXPANSION='🔬'
   typeset -g POWERLEVEL9K_CONTEXT_PREFIX='%f'
 
-  # Right prompt: custom segment showing user@hostname
+  # Right prompt: user@<orbital job id>, falling back to user@hostname
   function prompt_my_user_host() {
-    p10k segment -f 7 -t "%n@%m"
+    p10k segment -f 7 -t "%n@${DT_CONTAINER_LABEL:-%m}"
   }
   typeset -g POWERLEVEL9K_MY_USER_HOST_FOREGROUND=7
 
