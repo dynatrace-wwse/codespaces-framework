@@ -5,7 +5,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @saikkoj"
     description: "Introduction to Kubernetes fundamentals with Dynatrace. Learn core concepts — pods, deployments, services — and observe a live cluster with full-stack monitoring."
-    tags: [kubernetes, dynatrace-app]
+    tags: [kubernetes, enablement-app]
     title: "Kubernetes 101"
     primary_tag: kubernetes
     duration: "1.5h"
@@ -15,7 +15,7 @@ repos:
     status: active
     maintainer: "@shinojosa"
     description: "DTWiz 101 — the dtwiz CLI, hands-on: install it, point it at a tenant, analyze + recommend, deploy an OpenTelemetry-instrumented demo app, and watch traces land in Grail. Platform-token-native; ~20 min with quizzes."
-    tags: [dtwiz, opentelemetry, dynatrace-app]
+    tags: [dtwiz, opentelemetry, enablement-app]
     title: "DTWiz 101"
     primary_tag: dtwiz
     duration: "20m"
@@ -78,7 +78,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @popecruzdt, @agardnerIT"
     description: "Introduction to log ingestion and analytics. Learn how to ingest, parse, and analyse logs at scale using OpenPipeline and Dynatrace DQL."
-    tags: [logs, kubernetes, dynatrace-app]
+    tags: [logs, kubernetes, enablement-app]
     title: "Log Ingestion 101"
     primary_tag: logs
     arch: amd64
@@ -99,7 +99,7 @@ repos:
     status: active
     maintainer: "@shinojosa, @joshDynatrace, @ericyyuu, @popecruzdt"
     description: "Diagnose production issues in real-world scenarios using Dynatrace Live Debugger — no redeploys, no restarts. Step through running code with full observability context."
-    tags: [live-debugger, devops, dynatrace-app]
+    tags: [live-debugger, devops, enablement-app]
     title: "Live Debugger & Bug Hunting"
     primary_tag: live-debugger
     duration: "2h"

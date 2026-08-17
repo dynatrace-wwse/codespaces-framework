@@ -170,7 +170,7 @@ async def run_nightly(
             await pool.rpush(f"queue:test:{a}", json.dumps(job))
             log.info("Queued: %s → queue:test:%s (order %d)", entry["name"], a, entry["order"])
 
-        # App-delivered labs (tagged `dynatrace-app`) also get a training-test:
+        # App-delivered labs (tagged `enablement-app`) also get a training-test:
         # the full end-to-end path a learner takes through the Enablement App —
         # provision a REAL arena session (token minting, per-user Grail
         # isolation), wait ready, drive every doc step through the arena exec
@@ -179,7 +179,7 @@ async def run_nightly(
         # orchestrator); the session container always runs on the amd64 worker
         # (/api/arena/provision pins the arch — AMD is also the cheaper fleet).
         # Supersedes the in-container app-layer-test nightly enqueue.
-        if "dynatrace-app" in (entry.get("tags") or []):
+        if "enablement-app" in (entry.get("tags") or []):
             tt_job = {
                 "type": "training-test",
                 "repo": entry["repo"],
