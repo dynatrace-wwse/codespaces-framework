@@ -177,7 +177,7 @@ printCodespacesVerification(){
 #  a browser tab, so anything the tab shows is noise in the terminal.
 #
 #  Set ORBITAL_GREETING_VARIANT=B for the variant that also reports the MCP
-#  server and the tool belt. Default is A (leanest).
+#  server. Default is A (leanest).
 # ══════════════════════════════════════════════════════════════════════════════
 
 printOrbitalGreeting(){
@@ -222,11 +222,13 @@ printOrbitalGreeting(){
 
   echo -e ""
 
+  echo -e "  ${NORMAL}For your best dev experience: ${RESET}k9s kubectl helm k3d node npm jq python3 gh${RESET}"
+
   if [ "${ORBITAL_GREETING_VARIANT:-A}" = "B" ]; then
     if [ -f "$REPO_PATH/.vscode/mcp.json" ]; then
-      echo -e "  ${NORMAL}🧠 Dynatrace MCP Server ${GREEN}enabled${NORMAL} · ${RESET}k9s kubectl helm k3d jq gh${NORMAL} available${RESET}"
+      echo -e "  ${NORMAL}🧠 Dynatrace MCP Server ${GREEN}enabled${NORMAL} — type ${RESET}selectEnvironment${NORMAL} to switch tenant${RESET}"
     else
-      echo -e "  ${NORMAL}🧠 Dynatrace MCP Server ${YELLOW}not enabled${NORMAL} · ${RESET}k9s kubectl helm k3d jq gh${NORMAL} available${RESET}"
+      echo -e "  ${NORMAL}🧠 Dynatrace MCP Server ${YELLOW}not enabled${NORMAL} — type ${RESET}enableMCP${NORMAL} to connect${RESET}"
     fi
   fi
 
