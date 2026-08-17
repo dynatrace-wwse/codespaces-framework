@@ -55,13 +55,25 @@ def test_validate_schedule_normalizes_and_stringifies():
                                90, 25)
     assert out == {"scheduledAt": "2026-09-01T09:00:00Z",
                    "timezone": "Europe/Madrid",
-                   "durationMinutes": "90", "maxSeats": "25"}
+                   "durationMinutes": "90", "maxSeats": "25",
+                   # The provisioning window is optional and was not passed, so
+                   # both come back absent — which is what makes the control
+                   # loop fall through to its own defaults rather than reading
+                   # a stored 0 as "prewarm zero minutes ahead".
+                   "prewarmLeadMinutes": "", "holdMinutes": ""}
 
 
 def test_validate_schedule_all_absent_is_fine():
     out = ls.validate_schedule("", "", 0, 0)
     assert out == {"scheduledAt": "", "timezone": "",
-                   "durationMinutes": "", "maxSeats": ""}
+                   "durationMinutes": "", "maxSeats": "",
+                   "prewarmLeadMinutes": "", "holdMinutes": ""}
+
+
+def test_validate_schedule_normalizes_the_provisioning_window():
+    out = ls.validate_schedule("", "", 0, 0, 90, 300)
+    assert out["prewarmLeadMinutes"] == "90"
+    assert out["holdMinutes"] == "300"
 
 
 def test_validate_schedule_rejects_bad_values():
@@ -73,6 +85,23 @@ def test_validate_schedule_rejects_bad_values():
         ls.validate_schedule, "", "", "ninety", 0)
     assert "maxSeats" in _raises_value_error(
         ls.validate_schedule, "", "", 0, -5)
+
+
+def test_validate_schedule_bounds_the_provisioning_window():
+    """The ceilings are the expensive direction: machines idle from prewarm to
+    teardown, so a mistyped lead buys hours of an m6a.4xlarge fleet. Both are
+    clamped on read too — this pins the write side."""
+    assert ls.validate_schedule(
+        "", "", 0, 0, ls.MAX_PREWARM_LEAD_MINUTES, ls.MAX_HOLD_MINUTES
+    ) == {"scheduledAt": "", "timezone": "", "durationMinutes": "",
+          "maxSeats": "", "prewarmLeadMinutes": str(ls.MAX_PREWARM_LEAD_MINUTES),
+          "holdMinutes": str(ls.MAX_HOLD_MINUTES)}
+    assert "prewarmLeadMinutes" in _raises_value_error(
+        ls.validate_schedule, "", "", 0, 0, ls.MAX_PREWARM_LEAD_MINUTES + 1, 0)
+    assert "holdMinutes" in _raises_value_error(
+        ls.validate_schedule, "", "", 0, 0, 0, ls.MAX_HOLD_MINUTES + 1)
+    assert "prewarmLeadMinutes" in _raises_value_error(
+        ls.validate_schedule, "", "", 0, 0, -5, 0)
 
 
 # ── Join codes ───────────────────────────────────────────────────────────────
