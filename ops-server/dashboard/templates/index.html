@@ -7,10 +7,13 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=28">
+    <link rel="stylesheet" href="/static/style.css?v=29">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
-<body>
+<!-- auth-pending hides the nav + every view until loadAuthState() resolves. Without it
+     the fleet view is markup-active on first paint, so a signed-out visitor sees the
+     dashboard shell flash before the gate applies. Removed in the init IIFE. -->
+<body class="auth-pending">
     <header>
         <div class="topbar-inner">
             <a class="brand" href="/">
@@ -62,6 +65,30 @@
     </nav>
 
     <main>
+        <!-- Landing hero — the ONLY thing an anonymous visitor sees besides Register
+             Tenant. Shown/hidden by body.role-anon in style.css, so no data-bearing view
+             is ever rendered for a signed-out browser. This is presentation; the real
+             boundary is nginx auth_request + _require_writer on the API. -->
+        <section id="landing">
+            <div class="hero-mesh"></div>
+            <div class="hero-grid-lines"></div>
+            <canvas id="hero-particles"></canvas>
+            <div class="hero-inner">
+                <div class="hero-badge"><span class="pulse"></span>Worldwide Sales Engineering</div>
+                <h1>Orbital<span class="gradient"> Master Complexity</span></h1>
+                <h2>&ldquo;Real environments. Zero friction. Empowering everyone&rdquo;</h2>
+                <p>The delivery backbone behind every WWSE enablement — provisioning live Kubernetes environments, running the CI fleet, and driving instructor-led workshops at scale.</p>
+                <div class="hero-ctas">
+                    <a class="btn-hero btn-hero-accent" href="/oauth2/start?rd=/">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2z"/></svg>
+                        Sign in with GitHub
+                    </a>
+                    <button class="btn-hero btn-hero-outline" id="landing-register">Register a tenant</button>
+                </div>
+                <p class="hero-note">Dashboard access is limited to members of the Dynatrace WWSE GitHub organisation. Registering a tenant needs no account.</p>
+            </div>
+        </section>
+
         <!-- Fleet View -->
         <section id="view-fleet" class="view active">
             <div class="fleet-trigger" id="fleet-trigger-panel" hidden>
@@ -790,7 +817,11 @@
                     <strong class="content-sub">Domain defaults</strong>
                     <table id="cs-defaults"></table>
                     <strong class="content-sub" style="display:block;margin-top:14px">Tenant overrides</strong>
-                    <table id="cs-tenants"><tbody></tbody></table>
+                    <p class="content-hint" style="margin:0 0 6px">Registered tenants, sorted by type. Registrant, name and plan come from the tenant registry; <code>—</code> means that tenant registered before we captured the field, or its OAuth client could not read it. A <span style="color:var(--accent)">●</span> after a name means it was read from the account API rather than typed by the registrant.</p>
+                    <table id="cs-tenants">
+                        <thead><tr><th>Tenant</th><th>Registrant</th><th>Name</th><th>Type</th><th>Plan</th><th>Profile</th><th></th></tr></thead>
+                        <tbody></tbody>
+                    </table>
                     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                         <input type="text" id="cs-newtid" placeholder="tenant id (e.g. geu80787)" style="width:220px">
                         <select id="cs-newtp"></select>
@@ -919,6 +950,11 @@
 
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">How to create the OAuth client</h4>
                 <p class="content-hint" style="margin:0 0 6px">In your tenant's account: <a href="https://myaccount.dynatrace.com" target="_blank">myaccount.dynatrace.com</a> → Identity &amp; access management → OAuth clients → New. Add <strong>every</strong> scope below — the install is refused if any is missing, because a partly-scoped client produces an app that installs and then fails at runtime.</p>
+                <!-- Collapsed by default: the scope table is reference material you consult
+                     once while creating the client, but it is the tallest thing on the page
+                     and it pushed the actual form below the fold. -->
+                <details class="reg-fold">
+                <summary>All 15 required scopes — 13 environment, 2 account</summary>
                 <table style="width:100%;margin:0 0 8px;font-size:0.78rem">
                     <thead><tr><th style="width:36%">Scope</th><th>Why it is needed</th></tr></thead>
                     <tbody>
@@ -941,8 +977,11 @@
                         <tr><td><code>platform-token:tokens:manage</code></td><td>revoke them when a session ends</td></tr>
                     </tbody>
                 </table>
+                </details>
                 <p class="content-hint" style="margin:0 0 8px">Orbital checks the client against your tenant <em>before</em> installing anything and names any scope that is missing, so a wrong client costs you a message rather than a broken install. Want to verify first without installing anything? Run the <a href="https://autonomous-enablements-check.whydevslovedynatrace.com" target="_blank">tenant readiness check</a> — same probes, nothing deployed. Note: scopes cannot be added to an existing client — if one is missing, create a new client.</p>
 
+                <details class="reg-fold">
+                <summary>After install, and the outbound allowlist</summary>
                 <h4 style="font-size:0.82rem;font-weight:600;color:var(--text);margin:12px 0 6px">After install: nothing, if the client is complete</h4>
                 <p class="content-hint" style="margin:0 0 8px">The install writes the client into your tenant's own <strong>Settings → Training Token Minting</strong> and the app takes it from there — per-learner tokens, and its own updates. The deploy result says <code>stored</code> when that worked; if it says anything else it also says which permission is missing, and you can paste the same client on that Settings page by hand.</p>
                 <p class="content-hint" style="margin:0 0 8px">Why the app must mint at all: creating classic API tokens is being retired per environment, so a tenant that mints them happily today can stop tomorrow while a sibling tenant in the same account carries on. A client with the two <code>platform-token</code> account permissions is what makes that transition a non-event.</p>
@@ -954,14 +993,24 @@
                     <div>raw.githubusercontent.com, api.github.com</div>
                     <div>wwse.apps.dynatrace.com</div>
                 </div>
+                </details>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
                     <input type="text" id="reg-oa-tenant" placeholder="https://abc12345.apps.dynatrace.com" style="width:300px">
                     <input type="text" id="reg-oa-cid" placeholder="client id (dt0s02.…)" style="width:180px">
                     <input type="password" id="reg-oa-secret" placeholder="client secret" style="width:220px">
                     <input type="text" id="reg-oa-urn" placeholder="urn:dtaccount:<uuid>" style="width:280px">
-                    <input type="text" id="reg-oa-email" placeholder="your email (optional)" style="width:220px" title="For install attribution in registry.">
-                    <input type="text" id="reg-oa-name" placeholder="tenant name (optional)" style="width:180px" title="Friendly name shown in registry.">
+                    <!-- No email field: the client-credentials JWT already carries the
+                         address of whoever created the client, so asking was redundant and
+                         unverifiable. What no API can tell us is who the tenant is FOR. -->
+                    <select id="reg-oa-audience" style="width:180px" title="Who is this tenant for? Shown in the tenant registry.">
+                        <option value="">audience (optional)…</option>
+                        <option value="internal">Internal</option>
+                        <option value="customer">Customer</option>
+                        <option value="partner">Partner</option>
+                        <option value="prospect">Prospect</option>
+                    </select>
+                    <input type="text" id="reg-oa-name" placeholder="tenant name (optional)" style="width:180px" title="Friendly name shown in the registry — used when the account name cannot be read.">
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                     <button class="btn btn-small" id="reg-oa-deploy">Bootstrap install / Upgrade</button>
@@ -1099,6 +1148,83 @@ redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
          deployed app.js with an unchanged ?v= is invisible: the new index.html
          renders new markup while the old script wires nothing to it. That looks
          exactly like "the control is there but does not work" — v=31 → v=32. -->
-    <script src="/static/app.js?v=34"></script>
+    <script src="/static/app.js?v=35"></script>
+    <!-- Landing-hero particle field. Self-contained on purpose: the hub uses the
+         particles.js CDN, but this page already pulls xterm from jsDelivr and a third
+         CDN for decoration is not worth the request or the supply-chain surface.
+         Starts only when the hero is actually visible (anonymous), and stops the rAF
+         loop the moment it is hidden — a signed-in dashboard must not burn a frame
+         budget animating a section nobody can see. -->
+    <script>
+    (function () {
+        const cv = document.getElementById('hero-particles');
+        if (!cv || !cv.getContext) return;
+        const ctx = cv.getContext('2d');
+        const DOTS = 55, LINK = 130, ACCENT = '0,180,222';
+        let pts = [], raf = 0, w = 0, h = 0;
+
+        function resize() {
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const r = cv.getBoundingClientRect();
+            w = r.width; h = r.height;
+            cv.width = w * dpr; cv.height = h * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+        function seed() {
+            pts = Array.from({ length: DOTS }, () => ({
+                x: Math.random() * w, y: Math.random() * h,
+                vx: (Math.random() - 0.5) * 0.45, vy: (Math.random() - 0.5) * 0.45,
+                r: Math.random() * 1.6 + 0.8,
+            }));
+        }
+        function frame() {
+            ctx.clearRect(0, 0, w, h);
+            for (const p of pts) {
+                p.x += p.vx; p.y += p.vy;
+                if (p.x < 0 || p.x > w) p.vx *= -1;
+                if (p.y < 0 || p.y > h) p.vy *= -1;
+            }
+            for (let i = 0; i < pts.length; i++) {
+                for (let j = i + 1; j < pts.length; j++) {
+                    const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+                    const d = Math.hypot(dx, dy);
+                    if (d >= LINK) continue;
+                    ctx.strokeStyle = `rgba(${ACCENT},${0.4 * (1 - d / LINK)})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(pts[i].x, pts[i].y);
+                    ctx.lineTo(pts[j].x, pts[j].y);
+                    ctx.stroke();
+                }
+            }
+            ctx.fillStyle = `rgba(${ACCENT},0.75)`;
+            for (const p of pts) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            raf = requestAnimationFrame(frame);
+        }
+        function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+        function start() {
+            if (raf) return;
+            resize();
+            if (!w || !h) return;   // still display:none — nothing to draw into
+            seed();
+            raf = requestAnimationFrame(frame);
+        }
+        // The hero's visibility is driven by body.role-anon, which applyRoleGating()
+        // toggles after /oauth2/userinfo resolves — so watch the class, don't guess.
+        function sync() {
+            if (document.body.classList.contains('role-anon')) start(); else stop();
+        }
+        if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            new MutationObserver(sync).observe(document.body,
+                { attributes: true, attributeFilter: ['class'] });
+            window.addEventListener('resize', () => { if (raf) { resize(); seed(); } });
+            sync();
+        }
+    })();
+    </script>
 </body>
 </html>

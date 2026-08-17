@@ -45,6 +45,49 @@ def test_deploy_vias_match_locked_design():
     assert set(tr.DEPLOY_VIAS) == {"sso-deploy", "auto", "token", "oauth-bootstrap"}
 
 
+# ── audience / accountName / plan ────────────────────────────────────────────
+
+def test_audiences_match_the_register_form():
+    assert set(tr.AUDIENCES) == {"internal", "customer", "partner", "prospect"}
+
+
+def test_normalize_audience_accepts_known_values_case_insensitively():
+    assert tr.normalize_audience(" Customer ") == "customer"
+    assert tr.normalize_audience("PARTNER") == "partner"
+
+
+def test_normalize_audience_rejects_anything_else():
+    # "" is the unselected dropdown; the rest are typos or hand-crafted payloads.
+    for bad in ("", "   ", "internal-ish", "vendor", "Customer;DROP", None):
+        assert tr.normalize_audience(bad) == ""
+
+
+def test_shape_deploy_stores_audience_and_account_readings():
+    f = tr.shape_deploy("oauth-bootstrap", audience="Customer",
+                        account_name="ACME AG", plan="paid", now="t1")
+    assert f["audience"] == "customer"
+    assert f["accountName"] == "ACME AG"
+    assert f["plan"] == "paid"
+
+
+def test_shape_deploy_drops_unknown_audience_rather_than_storing_it():
+    f = tr.shape_deploy("oauth-bootstrap", audience="vendor", now="t1")
+    assert "audience" not in f
+
+
+def test_blank_account_reading_never_blanks_an_earlier_one():
+    # The probe returns "" whenever the client lacks account-idm-read, which is the
+    # COMMON case. A re-register from a narrower client must not erase what a broader
+    # one once read — same drop-empties rule that protects accountUrn/clientId.
+    first = tr.merge_fields({}, tr.shape_deploy(
+        "oauth-bootstrap", audience="customer", account_name="ACME AG",
+        plan="paid", now="t1"))
+    second = tr.merge_fields(first, tr.shape_deploy("oauth-bootstrap", now="t2"))
+    assert "accountName" not in second
+    assert "plan" not in second
+    assert "audience" not in second
+
+
 # ── merge_fields (firstSeen semantics) ───────────────────────────────────────
 
 def test_merge_fields_stamps_first_seen_once():

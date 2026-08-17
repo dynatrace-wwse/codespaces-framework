@@ -646,6 +646,45 @@ def _sees_full_identities(request: Request, caller: str = "") -> bool:
     return False
 
 
+# ── Dashboard-only reads: signed-in (or service bearer) only ─────────────────
+#
+# These paths back the Fleet / History / Workers / Synchronizer / Nightly /
+# Framework tabs. They carry repo topology, CI history, learner emails and tenant
+# URLs, and until now they answered anyone who knew the URL — hiding the tabs in
+# the browser does nothing about `curl`. One middleware instead of a decorator on
+# thirteen handlers, so a new read in these families is covered by default.
+#
+# DELIBERATELY NOT LISTED, because non-browser callers depend on them:
+#   /api/health              — the Hub's status dot polls it cross-origin
+#   /api/jobs/{id}/log|livelog|apps, /api/arena/*, /api/codespace/*
+#   /api/live/*, /api/workshops/*, /api/content/*, /api/deploy/*
+#                            — the enablement app calls these for learners
+# Anything that a learner's browser or the app can reach must stay out of here.
+#
+# The gate is _has_full_access, so the app's service bearer still passes: nginx
+# never strips Authorization, and the anonymous fallback only clears X-Auth-User.
+DASHBOARD_ONLY_READS = re.compile(
+    r"^/api/("
+    r"repos|workers|branches/all|builds/history"
+    r"|nightly/[^/]+"
+    r"|sync/(commands|history|status-summary|prs|issues|audit)"
+    r"|framework/(runs|suites)"
+    r")/?$"
+)
+
+
+@app.middleware("http")
+async def _gate_dashboard_only_reads(request: Request, call_next):
+    if DASHBOARD_ONLY_READS.match(request.url.path) and not _has_full_access(request):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "unauthorized",
+                     "reason": "sign in with GitHub to read the Orbital dashboard",
+                     "sign_in": "/oauth2/sign_in"},
+        )
+    return await call_next(request)
+
+
 async def _require_service_or_writer(request: Request) -> None:
     """Auth gate for live-session write endpoints: the app's service bearer
     OR a signed-in writer. 401 otherwise (403 for a signed-in non-member)."""

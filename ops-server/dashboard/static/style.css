@@ -1761,3 +1761,118 @@ body.role-writer .tab-writer-only { display: inline-block; }
     font-family: inherit;
 }
 .ws-cal-more:hover { color: var(--text); border-color: var(--accent); }
+
+/* ─── Sign-in gate + landing hero ────────────────────────────────────────────
+   Anonymous visitors get the hero and the Register Tenant tab; every other tab
+   and view is removed from the page. This is the PRESENTATION half only — the
+   security boundary is nginx auth_request + _require_writer on the API. Anyone
+   who deletes these rules in DevTools still gets 401/403 from the endpoints.   */
+
+/* Until loadAuthState() resolves, the fleet view is markup-active. Hide the shell
+   rather than let a signed-out visitor watch the dashboard flash and disappear. */
+body.auth-pending nav,
+body.auth-pending main { visibility: hidden; }
+
+body.role-anon nav .tab:not(#tab-register):not(.tab-help) { display: none; }
+body.role-anon .view:not(#view-register) { display: none !important; }
+
+#landing {
+    position: relative; overflow: hidden;
+    padding: 4.5rem 1.5rem 4rem;
+    margin: -20px -24px 0;          /* bleed past main's padding, edge to edge */
+    background: var(--bg);
+    /* Fill what is left below the header + tab bar, so the hero does not end in a
+       band of empty page. display:flex centres the copy in whatever height that is. */
+    min-height: calc(100vh - 108px);
+    display: none;                  /* .active (set by showLanding) reveals it */
+    align-items: center;
+}
+#landing.active { display: flex; }
+#landing .hero-mesh {
+    position: absolute; inset: 0; pointer-events: none;
+    background:
+        radial-gradient(ellipse 80% 60% at 60% 0%, rgba(0,180,222,.22) 0%, transparent 65%),
+        radial-gradient(ellipse 50% 40% at 20% 80%, rgba(124,58,237,.18) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 50% at 90% 70%, rgba(248,113,113,.14) 0%, transparent 55%);
+    animation: heroMeshPulse 8s ease-in-out infinite alternate;
+}
+@keyframes heroMeshPulse { 0% { opacity: .7; } 100% { opacity: 1; } }
+#landing .hero-grid-lines {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image:
+        linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+    background-size: 60px 60px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 0%, transparent 80%);
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 0%, transparent 80%);
+}
+#hero-particles { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+#landing .hero-inner { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; width: 100%; }
+
+#landing .hero-badge {
+    display: inline-flex; align-items: center; gap: .45rem;
+    background: rgba(0,180,222,.1); border: 1px solid rgba(0,180,222,.25);
+    color: var(--accent); font-size: .68rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    padding: .3rem .8rem; border-radius: 99px; margin-bottom: 1.4rem;
+}
+#landing .hero-badge .pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 0 0 var(--accent-glow);
+    animation: heroPulse 2s infinite;
+}
+@keyframes heroPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(0,180,222,.5); }
+    70%  { box-shadow: 0 0 0 7px rgba(0,180,222,0); }
+    100% { box-shadow: 0 0 0 0 rgba(0,180,222,0); }
+}
+#landing h1 {
+    font-size: clamp(2.1rem, 5.5vw, 3.6rem); font-weight: 800;
+    letter-spacing: -.03em; line-height: 1.05; margin: 0 0 .6rem;
+}
+#landing h1 .gradient {
+    background: linear-gradient(135deg, var(--accent) 0%, #60a5fa 50%, #e879f9 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+}
+#landing h2 {
+    font-size: clamp(.95rem, 2vw, 1.2rem); font-weight: 500;
+    color: var(--text-2); margin: 0 0 .9rem; letter-spacing: -.01em;
+}
+#landing p { max-width: 640px; color: var(--text-2); font-size: .9rem; line-height: 1.65; margin: 0 0 1.8rem; }
+#landing .hero-note { font-size: .76rem; opacity: .75; margin: 1.6rem 0 0; }
+
+#landing .hero-ctas { display: flex; gap: .7rem; flex-wrap: wrap; }
+.btn-hero {
+    display: inline-flex; align-items: center; gap: .5rem;
+    padding: .62rem 1.15rem; border-radius: 8px;
+    font-size: .86rem; font-weight: 600; font-family: inherit;
+    cursor: pointer; border: 1px solid transparent;
+    transition: all .18s cubic-bezier(.4,0,.2,1);
+}
+.btn-hero-accent { background: var(--accent); color: #fff; box-shadow: 0 0 20px rgba(0,180,222,.35); }
+.btn-hero-accent:hover { filter: brightness(1.15); transform: translateY(-1px); box-shadow: 0 8px 28px rgba(0,180,222,.5); }
+.btn-hero-outline { background: var(--surface-2); color: var(--text); border-color: rgba(255,255,255,.25); }
+.btn-hero-outline:hover { border-color: rgba(255,255,255,.38); background: var(--surface-3); color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+    #landing .hero-mesh, #landing .hero-badge .pulse { animation: none; }
+}
+
+/* ─── Register Tenant: collapsible reference blocks ──────────────────────────
+   The scope table and the post-install notes are consulted once and then never
+   again, but they were taller than the form itself.                            */
+details.reg-fold { margin: 0 0 10px; }
+details.reg-fold > summary {
+    cursor: pointer; list-style: none;
+    display: inline-flex; align-items: center; gap: .4rem;
+    font-size: .78rem; font-weight: 600; color: var(--accent);
+    padding: 5px 0; user-select: none;
+}
+details.reg-fold > summary::-webkit-details-marker { display: none; }
+details.reg-fold > summary::before { content: '▸'; font-size: .7rem; transition: transform .15s ease; }
+details.reg-fold[open] > summary::before { transform: rotate(90deg); }
+details.reg-fold > summary:hover { filter: brightness(1.2); }
+
+/* Missing registry value — a real "we do not know", not an empty cell. */
+.cs-dash { color: var(--text-3); }

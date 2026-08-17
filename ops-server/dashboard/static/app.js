@@ -82,13 +82,33 @@ function applyRoleGating() {
     const writer = isWriter();
     document.body.classList.toggle('role-guest', !writer);
     document.body.classList.toggle('role-writer', writer);
+    // role-anon is about being SIGNED OUT, which is not the same as role-guest: a
+    // signed-in non-org-member is a guest (read-only) but still sees the dashboard.
+    // Anonymous visitors get the landing hero and Register Tenant, nothing else.
+    document.body.classList.toggle('role-anon', !authState.signedIn);
+    if (!authState.signedIn) showLanding();
 }
 
 // ── Tab Navigation ──────────────────────────────────────────────────────────
 
-function activateTab(view) {
+// Anonymous visitors have exactly one reachable view. Everything else collapses to
+// the hero — including a deep link like /#history, which is why this is enforced in
+// activateTab() and not only by hiding the tab buttons.
+const PUBLIC_VIEWS = new Set(['register']);
+
+function showLanding() {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    const l = document.getElementById('landing');
+    if (l) l.classList.add('active');
+}
+
+function activateTab(view) {
+    if (!authState.signedIn && !PUBLIC_VIEWS.has(view)) { showLanding(); return; }
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    const landing = document.getElementById('landing');
+    if (landing) landing.classList.remove('active');
     const tab = document.querySelector(`.tab[data-view="${view}"]`);
     if (!tab) return;
     tab.classList.add('active');
@@ -107,6 +127,9 @@ function activateTab(view) {
 document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => activateTab(tab.dataset.view));
 });
+
+document.getElementById('landing-register')?.addEventListener(
+    'click', () => activateTab('register'));
 
 // NOTE: tab restore from the URL hash happens in the init IIFE at the bottom of
 // this file — NOT here at parse time. Running activateTab() this early reaches
@@ -3530,33 +3553,48 @@ function triggerAgentFixCI(failedJobId, repo, branch, arch, failedStep, btnEl) {
 
 (async () => {
     await loadAuthState();   // resolves signedIn + role before fleet renders
+    document.body.classList.remove('auth-pending');
+    // /api/health is public by design (the Hub's status dot polls it cross-origin) and
+    // carries no tenant or learner data, so the header badge works signed out too.
+    // Without this it sits on "checking…" forever on the landing page.
     checkHealth();
-    loadFleet();
-    loadFleetTriggerPanel();
-    initAutoscaleControls();  // bind before the first loadWorkers() render
-    loadWorkers();
-    loadNightly();
-    loadNightlyRuns();
+    // An anonymous browser fetches NOTHING else. Firing these for a signed-out visitor
+    // would pull fleet/worker/nightly JSON into a page that never shows it — the data
+    // would still be sitting in the network tab.
+    if (authState.signedIn) {
+        loadFleet();
+        loadFleetTriggerPanel();
+        initAutoscaleControls();  // bind before the first loadWorkers() render
+        loadWorkers();
+        loadNightly();
+        loadNightlyRuns();
+    }
+
+    // Restore the active tab from the URL hash. Deferred with setTimeout(0) so it runs
+    // AFTER this entire script has finished executing — tab handlers read module state
+    // declared lower in the file (e.g. `let regWired` in the Register section, `const
+    // csState` in Content). Calling activateTab() during top-level/init execution hits
+    // those bindings in their temporal dead zone, throwing ReferenceError and (before
+    // this fix) aborting init so loadAuthState() never ran (header stuck on "checking…",
+    // no sign-in button). The macrotask guarantees every declaration is initialized.
+    //
+    // It also has to run AFTER loadAuthState() resolves, not merely after parse: at
+    // parse time authState.signedIn is still its optimistic `false`, so activateTab()
+    // would bounce a signed-in user's deep link (/#history) to the landing hero and
+    // nothing would put it back.
+    setTimeout(() => {
+        try {
+            const hash = location.hash.replace('#', '');
+            if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
+            else if (!authState.signedIn) showLanding();
+        } catch (e) { console.error('tab restore failed', e); }
+    }, 0);
 })();
 
-// Restore the active tab from the URL hash. Deferred with setTimeout(0) so it runs
-// AFTER this entire script has finished executing — tab handlers read module state
-// declared lower in the file (e.g. `let regWired` in the Register section, `const
-// csState` in Content). Calling activateTab() during top-level/init execution hits
-// those bindings in their temporal dead zone, throwing ReferenceError and (before
-// this fix) aborting init so loadAuthState() never ran (header stuck on "checking…",
-// no sign-in button). The macrotask guarantees every declaration is initialized.
-setTimeout(() => {
-    try {
-        const hash = location.hash.replace('#', '');
-        if (hash && document.querySelector(`.tab[data-view="${hash}"]`)) activateTab(hash);
-    } catch (e) { console.error('tab restore failed', e); }
-}, 0);
-
-// Auto-refresh
-setInterval(() => { checkHealth(); loadWorkers(); }, 30000);
-setInterval(loadRunning, 5000);    // spinner liveness
-setInterval(loadFleet, 120000);
+// Auto-refresh — signed-in only, for the same reason the initial loads are.
+setInterval(() => { checkHealth(); if (authState.signedIn) loadWorkers(); }, 30000);
+setInterval(() => { if (authState.signedIn) loadRunning(); }, 5000);    // spinner liveness
+setInterval(() => { if (authState.signedIn) loadFleet(); }, 120000);
 // Refresh running detail when that tab is active
 setInterval(() => {
     const active = document.querySelector('.tab.active')?.dataset.view;
@@ -3598,7 +3636,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Content Service tab ──────────────────────────────────────────────────────
-const csState = { profiles: [], map: { defaults: {}, tenants: {} }, domains: [], catalog: [] };
+const csState = { profiles: [], map: { defaults: {}, tenants: {} }, domains: [], catalog: [], registry: [] };
 let csWired = false;
 
 const csProfileOpts = (sel) =>
@@ -3671,8 +3709,55 @@ function csRenderDelivery() {
     document.getElementById('cs-defaults').innerHTML = '<thead><tr><th>Domain</th><th>Default profile</th></tr></thead><tbody>' +
         csState.domains.map(d => `<tr><td>${escapeHtml(d)}</td><td><select id="cs-d-${escapeHtml(d)}">${csProfileOpts((csState.map.defaults || {})[d])}</select></td></tr>`).join('') + '</tbody>';
     const tb = document.querySelector('#cs-tenants tbody'); tb.innerHTML = '';
-    Object.entries(csState.map.tenants || {}).forEach(([t, p]) => tb.appendChild(csTenantRow(t, p)));
+    // Sorted by audience, then tenant id. AUDIENCE_ORDER puts unclassified tenants last
+    // so the gaps in the registry are visible at the bottom rather than scattered.
+    Object.entries(csState.map.tenants || {})
+        .sort(([a], [b]) => {
+            const ra = csRegistryFor(a), rb = csRegistryFor(b);
+            const oa = AUDIENCE_ORDER.indexOf(ra.audience || ''), ob = AUDIENCE_ORDER.indexOf(rb.audience || '');
+            return oa !== ob ? oa - ob : a.localeCompare(b);
+        })
+        .forEach(([t, p]) => tb.appendChild(csTenantRow(t, p)));
     document.getElementById('cs-newtp').innerHTML = csProfileOpts(csState.profiles[0] && csState.profiles[0].profileId);
+}
+
+// "" (unclassified) sorts last — see csRenderDelivery.
+const AUDIENCE_ORDER = ['internal', 'customer', 'partner', 'prospect', ''];
+const AUDIENCE_COLOR = {
+    internal: ['#1e2a3a', '#7db4e0'],
+    customer: ['#1e3a1e', '#7dd67d'],
+    partner:  ['#2e1e3a', '#c07dd6'],
+    prospect: ['#3a3a1e', '#e0d77d'],
+};
+
+/** Registry entry for a tenant id, or {} when it registered before we captured any.
+ *  The delivery map is keyed by bare id while the registry may hold a full URL, so
+ *  both sides are reduced to the bare id before comparing. */
+function csRegistryFor(tid) {
+    const bare = s => String(s || '').replace(/^https?:\/\//, '').split('.')[0].split('/')[0].toLowerCase();
+    const want = bare(tid);
+    return (csState.registry || []).find(r => bare(r.tenant) === want) || {};
+}
+
+function audienceBadge(a) {
+    if (!a) return '<span class="cs-dash" title="No audience recorded — registered before the field existed, or left unset">—</span>';
+    const [bg, fg] = AUDIENCE_COLOR[a] || ['#2a2a2a', '#aaa'];
+    return `<span style="font-size:0.62rem;padding:1px 6px;border-radius:3px;background:${bg};color:${fg}">${escapeHtml(a)}</span>`;
+}
+
+const csCell = v => (v ? escapeHtml(v) : '<span class="cs-dash">—</span>');
+
+/** The account's real name when we could read it, otherwise the label the registrant
+ *  typed. The dot marks which one you are looking at — an API-read name is evidence,
+ *  a typed one is a claim, and they are worth telling apart when auditing the fleet. */
+function tenantNameCell(reg) {
+    if (reg.accountName) {
+        return `<span title="Read from the account API">${escapeHtml(reg.accountName)}</span>`
+             + ` <span style="color:var(--accent);font-size:.7rem" title="Verified via the account API">●</span>`;
+    }
+    return reg.friendlyName
+        ? `<span title="Supplied by whoever registered this tenant — not verified">${escapeHtml(reg.friendlyName)}</span>`
+        : '<span class="cs-dash">—</span>';
 }
 
 // Known fleet tenants keyed by bare id → stage. A bare id (e.g. "ydi9582h") carries no
@@ -3704,7 +3789,16 @@ function stageBadge(stage) {
 
 function csTenantRow(tid, pid) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td><code>${escapeHtml(tid)}</code>${stageBadge(stageOf(tid))}</td><td><select>${csProfileOpts(pid)}</select></td><td><button class="btn btn-small btn-secondary" type="button">remove</button></td>`;
+    // The profile <select> must stay the ONLY select in the row — csSaveDelivery()
+    // reads it with tr.querySelector('select').
+    const reg = csRegistryFor(tid);
+    tr.innerHTML = `<td><code>${escapeHtml(tid)}</code>${stageBadge(stageOf(tid))}</td>`
+        + `<td>${csCell(reg.deployerEmail || reg.identityEmail)}</td>`
+        + `<td>${tenantNameCell(reg)}</td>`
+        + `<td>${audienceBadge(reg.audience)}</td>`
+        + `<td>${csCell(reg.plan)}</td>`
+        + `<td><select>${csProfileOpts(pid)}</select></td>`
+        + `<td><button class="btn btn-small btn-secondary" type="button">remove</button></td>`;
     tr.dataset.tid = tid;
     tr.querySelector('button').addEventListener('click', () => tr.remove());
     return tr;
@@ -3816,6 +3910,13 @@ async function loadContent() {
         const r = await fetch('/api/content/admin/overview', { credentials: 'same-origin' });
         if (!r.ok) { document.getElementById('content-profiles').innerHTML = '<p class="content-hint">Sign in as an org member to manage content.</p>'; return; }
         Object.assign(csState, await r.json());
+        // Attribution for the Tenants & delivery table. Separate endpoint, separate
+        // gate (service-or-writer) — a failure here must degrade the tenant rows to
+        // "—", never take down the profiles view that shares this handler.
+        try {
+            const rr = await fetch('/api/tenants/registry', { credentials: 'same-origin' });
+            csState.registry = rr.ok ? ((await rr.json()).tenants || []) : [];
+        } catch { csState.registry = []; }
         csRenderProfiles();
         csRenderDelivery();
     } catch (e) {
@@ -4334,7 +4435,7 @@ async function goRegisterOauth(action) {
     const cid = document.getElementById('reg-oa-cid').value.trim();
     const sec = document.getElementById('reg-oa-secret').value.trim();
     const urn = document.getElementById('reg-oa-urn').value.trim();
-    const email = (document.getElementById('reg-oa-email') || { value: '' }).value.trim();
+    const audience = (document.getElementById('reg-oa-audience') || { value: '' }).value.trim();
     const friendly = (document.getElementById('reg-oa-name') || { value: '' }).value.trim();
     const m = document.getElementById('reg-oa-msg');
     if (!t) { m.textContent = 'tenant required'; return; }
@@ -4342,7 +4443,7 @@ async function goRegisterOauth(action) {
     if (!urn.startsWith('urn:dtaccount:')) { m.textContent = 'account URN required (urn:dtaccount:<uuid>)'; return; }
     m.textContent = ''; setRegBusy(true);
     try {
-        const r = await fetch('/api/deploy/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, clientId: cid, clientSecret: sec, accountUrn: urn, deployerEmail: email, friendlyName: friendly }) });
+        const r = await fetch('/api/deploy/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, clientId: cid, clientSecret: sec, accountUrn: urn, audience, friendlyName: friendly }) });
         const raw = await r.text();
         let j = {}; try { j = JSON.parse(raw); } catch (_) { /* non-JSON gateway page */ }
         if (r.ok) {

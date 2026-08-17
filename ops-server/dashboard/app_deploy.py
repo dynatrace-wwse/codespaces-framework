@@ -2090,6 +2090,76 @@ async def _oauth_bearer(sso_url: str, cid: str, csec: str, resource: str,
         return None, 0, str(exc)
 
 
+# ─── Account name / plan — opportunistic, NEVER a required scope ─────────────────────
+#
+# docs/EPIC-002-ws-d-tenant-identity.md established that neither the account's display
+# name nor its commercial plan is reachable for a foreign tenant: they need account-scoped
+# reads on the customer's OWN account, which the 15-scope register list deliberately does
+# not ask for. Scopes cannot be added to an existing OAuth client, so requiring one more
+# would force every already-registered tenant to create a new client and register again.
+#
+# So we ask, and accept "no". Some clients are created with broad account rights and will
+# answer; most will not. A blank name is the EXPECTED outcome, not a failure — the UI
+# falls back to the friendlyName the registrant typed. This must never raise, never block
+# a deploy, and never lengthen it by more than its own timeouts.
+ACCOUNT_READ_SCOPE = "account-idm-read"
+
+
+async def _probe_account_name(sso_url: str, cid: str, csec: str, account_urn: str,
+                              api_host: str) -> tuple[str, str, str]:
+    """(account_name, plan, reason) — best effort. `reason` explains a blank for the
+    deploy response; it is diagnostic text for a human, never an error condition."""
+    uuid = account_urn.rsplit(":", 1)[-1].strip()
+    if not uuid:
+        return "", "", "no account uuid in the URN"
+    # SSO 400s a scope the client does not hold, and does it with an EMPTY
+    # error_description — so the status code is the whole signal. Do not log the body.
+    token, st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, ACCOUNT_READ_SCOPE)
+    if token is None:
+        return "", "", f"client lacks {ACCOUNT_READ_SCOPE} (SSO HTTP {st})"
+    h = {"Authorization": f"Bearer {token}"}
+    name = ""
+    reason = ""
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{api_host}/iam/v1/accounts/{uuid}", headers=h)
+            if r.status_code == 200:
+                name = str((r.json() or {}).get("name") or "").strip()
+            else:
+                reason = f"account lookup HTTP {r.status_code}"
+            # Plan / trial-vs-paid has NO precedent anywhere in this codebase. Probe the
+            # documented subscriptions path once and record only what it answered. If it
+            # does not answer, the column stays blank — a tenant's commercial status is
+            # not something to infer from a URL, an env id, or a token tier.
+            try:
+                rs = await c.get(f"{api_host}/sub/v2/accounts/{uuid}/subscriptions",
+                                 headers=h)
+                plan_reason = f"subscriptions HTTP {rs.status_code}"
+                plan = _plan_from_subscriptions(rs.json()) if rs.status_code == 200 else ""
+            except Exception as exc:
+                plan, plan_reason = "", f"subscriptions probe failed: {exc}"
+    except Exception as exc:
+        return "", "", f"account lookup failed: {exc}"
+    finally:
+        del token
+    return name, plan, "; ".join(x for x in (reason, plan_reason) if x)
+
+
+def _plan_from_subscriptions(payload) -> str:
+    """`trial` when every live subscription says so, `paid` when any does not, "" when
+    the shape is not what we guessed. Unverified against a real response on purpose —
+    a wrong guess must degrade to blank, never to a confident wrong label."""
+    items = payload.get("subscriptions") if isinstance(payload, dict) else payload
+    if not isinstance(items, list) or not items:
+        return ""
+    kinds = {str((s or {}).get("type") or (s or {}).get("subscriptionType") or "").lower()
+             for s in items if isinstance(s, dict)}
+    kinds.discard("")
+    if not kinds:
+        return ""
+    return "trial" if kinds == {"trial"} else "paid"
+
+
 # ─── Registration preflight (2026-08-11 — HANDOFF_TOKEN_AND_DOCUMENT_IDENTITY §8.9) ───
 #
 # A granted scope is not proof. A 200 from the mint API is not proof. The only evidence a
@@ -2262,11 +2332,16 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     cid = (body.get("clientId") or "").strip()
     csec = (body.get("clientSecret") or "").strip()
     account_urn = (body.get("accountUrn") or "").strip()
-    # Optional attribution: the Register Tenant form asks the admin for their email (so the
-    # tenant-attribution registry can answer "who owns this install" later) and a friendly
-    # tenant name (the account name is NOT retrievable via API, so the registrant supplies
-    # it). Never required.
-    deployer_email = (body.get("deployerEmail") or "").strip()
+    # Optional attribution. The form no longer asks for the registrant's email — the
+    # client-credentials JWT carries the client CREATOR's address, so asking was both
+    # redundant and a free-text field nobody could verify (_email_from_bearer below).
+    # What it does ask for is the one thing no API can answer: who this tenant is FOR.
+    # `friendlyName` stays as the fallback label when the account name cannot be read.
+    audience_raw = (body.get("audience") or "").strip()
+    audience = tenant_registry.normalize_audience(audience_raw)
+    if audience_raw and not audience:
+        raise HTTPException(400, "audience must be one of: "
+                                 + ", ".join(tenant_registry.AUDIENCES) + ".")
     friendly_name = (body.get("friendlyName") or "").strip()
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     if not (cid and csec):
@@ -2330,6 +2405,12 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
                                  f"Check client id/secret, the account URN, and that the client has "
                                  f"app-engine:apps:install + app-engine:apps:run on this environment.")
 
+    # Registrant identity, taken HERE and not at the instructor-seeding call below, for
+    # two reasons: that call sits inside `if res["status"] != "error"`, and `del token`
+    # runs before the registry write at the end of this function. Deriving it once, the
+    # moment a bearer exists, is what makes the email available on every path.
+    client_email = _email_from_bearer(token) or ""
+
     if action == "undeploy":
         ok, msg = await _run_undeploy(token, tenant)
         del token
@@ -2355,10 +2436,18 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         domain, LIVE_HOST_BY_DOMAIN["prod"]).format(tid=tenant_id)).hostname
     realm_hosts = [h for h in (urlparse(sso_url).hostname, urlparse(api_host).hostname,
                                live_host) if h]
+    account_name = ""
+    plan = ""
+    account_detail = ""
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant, extra_hosts=realm_hosts)
         remote_grail = await _ensure_remote_grail(token, tenant)
         orbital_cfg = await _ensure_orbital_config(token, tenant)
+
+        # 1b. Account display name + commercial plan, IF this client happens to carry
+        #     account-scoped reads. Blank is the normal answer — see _probe_account_name.
+        account_name, plan, account_detail = await _probe_account_name(
+            sso_url, cid, csec, account_urn, api_host)
 
         # 2. Can this client mint platform tokens? Storing one that cannot would install a
         #    credential that fails at the first hands-on launch instead of here.
@@ -2401,7 +2490,7 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         #    is refused "Only instructors can import content" on their own tenant. The
         #    email is the client creator's (JWT `email` claim = the Dynatrace login that
         #    signs into the app), plus the Register-Tenant form's deployer email if given.
-        seed_emails = [e for e in (_email_from_bearer(token), deployer_email) if e]
+        seed_emails = [e for e in (client_email,) if e]
         instructors = await _store_instructors(token, tenant, seed_emails)
     del token
     del csec  # discard the secret — never persisted
@@ -2444,8 +2533,9 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     # record them (attribution only, never the secret) before they are discarded.
     await tenant_registry.record_deploy(
         _pool(), tenant_id, "oauth-bootstrap", account_urn=account_urn, client_id=cid,
-        deployer=deployer_email or (x_auth_user or ""), friendly_name=friendly_name,
-        app_version=res.get("to") or "")
+        deployer=client_email or (x_auth_user or ""), friendly_name=friendly_name,
+        app_version=res.get("to") or "", audience=audience,
+        account_name=account_name, plan=plan)
     await _audit(user, tenant_id, "deploy", res["status"], via="oauth-bootstrap", client_id=cid,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
@@ -2455,6 +2545,8 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
             "remote_grail": remote_grail, "orbital_config": orbital_cfg,
             "mintReady": mint_ready, "mintClient": mint_client, "instructors": instructors,
+            "registrant": client_email, "audience": audience,
+            "accountName": account_name, "plan": plan, "accountDetail": account_detail,
             "preflight": preflight, "warnings": warnings}
 
 
