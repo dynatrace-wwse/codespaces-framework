@@ -398,8 +398,8 @@ set in `/home/ops/.env`. It launches and terminates EC2 on its own.
 
 | Signal | Action |
 |---|---|
-| a workshop is within `PREWARM_LEAD_MINUTES` (45) of starting, and not past its teardown point | launch `ceil(seats / units-per-worker)` machines into a dedicated pool |
-| the workshop ended, or overran its window + `TEARDOWN_GRACE_MINUTES` (30) | terminate them, unbind the pool, drop their worker records |
+| a workshop is within its **own** lead (`prewarmLeadMinutes`, default `PREWARM_LEAD_MINUTES` 45, capped 360) of starting, and not past its teardown point | launch `ceil(seats / units-per-worker)` machines into a dedicated pool |
+| the workshop ended, or passed `start + max(duration + TEARDOWN_GRACE_MINUTES (30), holdMinutes)` (default hold 240, capped 1440) | terminate them, unbind the pool, drop their worker records |
 | daily free seats < `DAILY_MIN_FREE_SEATS` (4), **and** warming seats will not cover it | launch one daily worker |
 | sustained memory ≥ 70% on a worker | shrink its advertised capacity by 1 |
 | sustained CPU ≥ 70% on a worker | set `admission_brake` (reversible; NOT a scale trigger) |
@@ -420,6 +420,21 @@ Things that will bite you here:
   scheduling predicate, check it against both — two predicates that drive opposite
   actions on the same object made the loop launch and terminate the same machine in
   a cycle, and dry run cannot show that because dry run never transitions state.
+- **The window is per workshop, and both ends are clamped on READ.**
+  `session_lead_minutes()` / `session_hold_minutes()` are the only correct way to ask;
+  `prewarm_at()` / `teardown_at()` are the only correct way to place. Reading the raw
+  hash fields lets a value edited straight into Redis hold a fleet for a week.
+- **The hold is a floor, not a replacement** — `max(duration + grace, hold)`. Widening it
+  is exactly the change that can make the two predicates overlap again, which is why a
+  swept-timeline test pins them at both ceilings.
+- **`_workshop_lifetime_minutes()` must DERIVE from `teardown_at - prewarm_at`**, never
+  recompute `lead + duration + grace`. Get that wrong and the in-instance
+  `shutdown -h +N` fires *before* the loop's own teardown — the workshop loses its
+  machines mid-session, with nothing in Orbital's logs to show for it.
+- **Before restarting with a scheduling change, diff the DECISIONS, not the code.** Replay
+  old-vs-new `due_for_prewarm`/`due_for_teardown` over every indexed workshop and require
+  0 changes; that is the only cheap check that proves the first tick after restart will
+  not launch or kill anything.
 
 ## Fleet autoscaler
 
