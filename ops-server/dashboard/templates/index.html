@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=27">
+    <link rel="stylesheet" href="/static/style.css?v=28">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <body>
@@ -842,13 +842,16 @@
             <div id="ws-view-schedule" class="content-subview">
                 <p class="content-hint">Every workshop across every tenant. Click a row to edit or administer it. Creating workshops stays in the enablement app, where a trainer picks a training from their own tenant's catalogue.</p>
                 <div class="content-card">
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+                    <!-- Month nav, then EVERY filter in one row so State is not the
+                         odd one out sitting on its own line. All of them are applied
+                         on the SERVER, so the count stays honest and a match past the
+                         route's 500-row cap is still findable. -->
+                    <div class="ws-filter-bar">
                         <button id="ws-cal-prev" class="btn btn-small btn-secondary">‹</button>
                         <strong id="ws-cal-label" style="min-width:170px;text-align:center">—</strong>
                         <button id="ws-cal-next" class="btn btn-small btn-secondary">›</button>
                         <button id="ws-cal-today" class="btn btn-small btn-secondary">Today</button>
-                        <span style="flex:1"></span>
-                        <label style="font-size:12px;opacity:.75">State
+                        <label>State
                             <select id="ws-filter-state">
                                 <option value="">all</option>
                                 <option value="scheduled">scheduled</option>
@@ -858,23 +861,19 @@
                                 <option value="cancelled">cancelled</option>
                             </select>
                         </label>
-                        <button id="ws-reload" class="btn btn-small btn-secondary">Reload</button>
-                    </div>
-                    <!-- Search. Filtered on the SERVER, so the count stays honest
-                         and a match past the route's 500-row cap is still findable. -->
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
-                        <label style="font-size:12px;opacity:.75">Tenant
+                        <label>Tenant
                             <input type="text" id="ws-filter-tenant" placeholder="sro / geu80787" style="width:130px"></label>
-                        <label style="font-size:12px;opacity:.75">Trainer
+                        <label>Trainer
                             <input type="text" id="ws-filter-trainer" placeholder="name or domain" style="width:150px"></label>
-                        <label style="font-size:12px;opacity:.75">Workshop id
+                        <label>Workshop id
                             <input type="text" id="ws-filter-id" placeholder="ws_msx…" style="width:150px"></label>
-                        <label style="font-size:12px;opacity:.75">Seats ≥
-                            <input type="number" id="ws-filter-seats-min" min="0" style="width:70px"></label>
-                        <label style="font-size:12px;opacity:.75">Seats ≤
-                            <input type="number" id="ws-filter-seats-max" min="0" style="width:70px"></label>
+                        <label>Seats ≥
+                            <input type="number" id="ws-filter-seats-min" min="0" style="width:72px"></label>
+                        <label>Seats ≤
+                            <input type="number" id="ws-filter-seats-max" min="0" style="width:72px"></label>
                         <button id="ws-filter-clear" class="btn btn-small btn-secondary">Clear</button>
-                        <span id="ws-filter-note" class="content-hint" style="margin:0;font-size:11px"></span>
+                        <button id="ws-reload" class="btn btn-small btn-secondary">Reload</button>
+                        <span id="ws-filter-note" class="content-hint"></span>
                     </div>
                     <div id="ws-calendar"><p class="loading">Loading workshops…</p></div>
                 </div>
@@ -1100,6 +1099,6 @@ redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
          deployed app.js with an unchanged ?v= is invisible: the new index.html
          renders new markup while the old script wires nothing to it. That looks
          exactly like "the control is there but does not work" — v=31 → v=32. -->
-    <script src="/static/app.js?v=32"></script>
+    <script src="/static/app.js?v=33"></script>
 </body>
 </html>

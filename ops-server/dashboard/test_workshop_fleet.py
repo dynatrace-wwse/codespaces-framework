@@ -756,6 +756,37 @@ def test_the_threshold_is_configurable():
         3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=3)["pool_kind"] == "standing"
 
 
+def test_a_deferred_teardown_is_retried_next_tick():
+    """A deferral parks the record in DRAINING and its own comment promises the
+    next tick re-enters. TEARDOWNABLE_STATES was the gate and did not list it, so
+    a workshop whose workers still reported sessions was deferred exactly ONCE
+    and never revisited — the TEARDOWN_DEFER_MAX_MINUTES bound could not expire,
+    because nothing came back to check it. Found on a record DRAINING since
+    00:19 with 5 instances against it."""
+    ended = _session(start_offset_min=-600, state="ended")
+    assert wf.should_teardown(wf.DRAINING, ended, NOW) is True
+    assert wf.DRAINING in wf.TEARDOWNABLE_STATES
+
+
+def test_the_two_terminal_states_are_still_not_torn_down():
+    """DONE is finished and re-entering it is a no-op; a workshop that has not
+    been provisioned has nothing to give back."""
+    ended = _session(start_offset_min=-600, state="ended")
+    assert wf.should_teardown(wf.DONE, ended, NOW) is False
+    assert wf.should_teardown(None, ended, NOW) is False
+
+
+def test_draining_does_not_reopen_the_oscillation():
+    """The third check the control-loop notes demand: a state added to teardown
+    must not also be prewarmable, or the loop launches and terminates the same
+    machine forever."""
+    assert wf.DRAINING not in wf.PREWARMABLE_STATES
+    for offset in (-30, -200, -4320):
+        s = _session(start_offset_min=offset)
+        assert not (wf.should_prewarm(wf.DRAINING, s, NOW)
+                    and wf.should_teardown(wf.DRAINING, s, NOW))
+
+
 # ── reaping a fleet whose workshop was deleted ──────────────────────────────
 
 def test_a_deleted_workshops_fleet_is_found_by_walking_the_FLEET_not_the_index():

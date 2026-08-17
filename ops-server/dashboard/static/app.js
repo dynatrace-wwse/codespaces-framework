@@ -3808,7 +3808,13 @@ async function loadContent() {
 // Writer-gated twice: nginx auth_request on /api/workshops/admin/, and
 // _require_writer in FastAPI. Hiding the tab is a convenience, not the boundary.
 
-const wsState = { workshops: [], trainers: [], month: null, editing: null };
+// Chips shown per calendar day before the rest fold behind a "+N more" toggle.
+const WS_CAL_MAX_CHIPS = 3;
+// `expandedDays` lives in state, not in the DOM, because wsRenderCalendar
+// replaces the whole grid — a toggle held only in markup would collapse again
+// on the next reload, filter change or month switch.
+const wsState = { workshops: [], trainers: [], month: null, editing: null,
+                  expandedDays: new Set() };
 let wsWired = false;
 
 function wireWorkshops() {
@@ -3849,6 +3855,17 @@ function wireWorkshops() {
         if (row) wsOpenEditor(row.dataset.wsOpen);
     });
     document.getElementById('ws-calendar').addEventListener('click', (e) => {
+        // The fold toggle is checked FIRST. It sits inside the same day cell as
+        // the chips, so testing for a workshop first would open one whenever the
+        // two ever end up nested.
+        const toggle = e.target.closest('[data-ws-day]');
+        if (toggle) {
+            const day = toggle.dataset.wsDay;
+            if (wsState.expandedDays.has(day)) wsState.expandedDays.delete(day);
+            else wsState.expandedDays.add(day);
+            wsRenderCalendar();
+            return;
+        }
         const chip = e.target.closest('[data-ws-open]');
         if (chip) wsOpenEditor(chip.dataset.wsOpen);
     });
@@ -4054,13 +4071,25 @@ function wsRenderCalendar() {
     for (let i = 0; i < lead; i++) cells += '<td style="opacity:.25"></td>';
     for (let d = 1; d <= days; d++) {
         const iso = `${month}-${String(d).padStart(2, '0')}`;
-        const chips = (byDay[iso] || []).map(w =>
-            `<div data-ws-open="${escapeHtml(w.sessionId)}" title="${escapeHtml(w.title)} · ${escapeHtml(w.owner)} · ${escapeHtml(wsTenantLabel(w.ownerTenant))}"
-                  style="cursor:pointer;font-size:.68rem;margin-top:2px;padding:1px 4px;border-radius:4px;background:var(--surface-3,#1b2434);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        const all = byDay[iso] || [];
+        // Fold past WS_CAL_MAX_CHIPS. Eight workshops on one day used to render
+        // eight chips into a 64px cell and pull the whole month grid out of
+        // shape, so the busiest days were the least readable ones.
+        const open = wsState.expandedDays.has(iso);
+        const shown = open ? all : all.slice(0, WS_CAL_MAX_CHIPS);
+        const hidden = all.length - shown.length;
+        const chips = shown.map(w =>
+            `<div class="ws-cal-chip" data-ws-open="${escapeHtml(w.sessionId)}" title="${escapeHtml(w.title)} · ${escapeHtml(w.owner)} · ${escapeHtml(wsTenantLabel(w.ownerTenant))}">
                 ${escapeHtml((w.scheduledAt || '').slice(11, 16) || '··')} ${escapeHtml(w.title)}
              </div>`).join('');
-        cells += `<td style="vertical-align:top;height:64px;padding:4px">
-            <div style="font-size:.7rem;opacity:.6">${d}</div>${chips}</td>`;
+        let more = '';
+        if (hidden > 0) {
+            more = `<button class="ws-cal-more" data-ws-day="${iso}"
+                        title="Show the other ${hidden} workshop${hidden === 1 ? '' : 's'} on this day">+${hidden} more</button>`;
+        } else if (open && all.length > WS_CAL_MAX_CHIPS) {
+            more = `<button class="ws-cal-more" data-ws-day="${iso}" title="Collapse this day">− fewer</button>`;
+        }
+        cells += `<td class="ws-cal-day"><div class="ws-cal-daynum">${d}</div>${chips}${more}</td>`;
         if ((lead + d) % 7 === 0) cells += '</tr><tr>';
     }
     cal.innerHTML = `<table style="width:100%;table-layout:fixed">

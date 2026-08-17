@@ -385,7 +385,20 @@ def due_for_teardown(session: dict, now: datetime,
 # fixes lived for weeks as an inline tuple inside `tick`, where nothing but a
 # full fake-Redis harness could reach it and so nothing ever did.
 PREWARMABLE_STATES = (None, "", "failed", DONE)
-TEARDOWNABLE_STATES = (WARMING, READY)
+# DRAINING is in here because a deferred teardown parks the record there and its
+# own comment promises "the next tick DOES re-enter" — which was false, since
+# this tuple was the gate and did not list it. A workshop whose workers still
+# reported sessions was therefore deferred exactly ONCE and then never looked at
+# again: the deferral bound (TEARDOWN_DEFER_MAX_MINUTES) could not expire,
+# because nothing ever came back to check it. Found 2026-08-17 on a record that
+# had been DRAINING since 00:19.
+#
+# Re-entering is safe and converges: `teardown_workshop_fleet` returns early only
+# on DONE, unbinding and cordoning are idempotent, `deferred_since` persists in
+# the record so the bound measures from the FIRST deferral, and past that bound
+# the machines go regardless. So the state either terminates or expires — it
+# cannot sit still.
+TEARDOWNABLE_STATES = (WARMING, READY, DRAINING)
 
 
 def should_prewarm(state, session: dict, now: datetime) -> bool:
