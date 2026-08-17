@@ -626,13 +626,18 @@ nothing.
 
 ### Still to do
 
-1. **Volume IOPS 3,000 → 6,000 on amd001 + amd002.** Both are gp3 300 GiB at 3,000/500 MB/s.
-   Needs *admin* AWS credentials — the `OrbitalFleetAutoscaler` role deliberately cannot
-   `ModifyVolume`, and the `ubuntu` federated session had expired at the time of writing.
+1. ~~**Volume IOPS 3,000 → 6,000 on amd001 + amd002.**~~ **Done 2026-08-17** with the `ubuntu`
+   federated admin session (the `OrbitalFleetAutoscaler` role still deliberately cannot
+   `ModifyVolume`). Both pets now match what `_root_block_device` gives every *launched*
+   worker — 300 GiB gp3 / 500 MB/s / 6,000 IOPS — so the two long-lived boxes are no longer
+   the only machines in the fleet with IOPS in their binding set.
    ```bash
    aws ec2 modify-volume --volume-id vol-06626d3323a72f97b --iops 6000   # amd001
    aws ec2 modify-volume --volume-id vol-08e9ee3a2f78f0ceb --iops 6000   # amd002
    ```
+   The ~6 h cooldown now applies to both volumes; the previous modification was the
+   throughput bump of 2026-08-13. Still unmeasured: nothing has re-run 30 sessions on a
+   6,000-IOPS pet to confirm the projected 18 → 20 seats.
 2. **Merge the branch.** Launched workers sync `origin/main`, so until then any machine the loop
    launches comes up without the lending code (harmless — only the standing box lends).
 3. ~~Decide `DAILY_MAX_WORKERS` for bootcamp day (G6).~~ **Resolved: leave it at 4.** The lane
@@ -745,3 +750,77 @@ launch, and the app shipped exactly that bug for one version. Branch on `standin
 The app (`FleetWindowBanner`, ≥1.0.332) renders this in two places — Workshops →
 *Show details*, and the trainer's in-workshop view — with an **Adjust** control that PATCHes
 both fields while the workshop is `scheduled` or `open` (Orbital 409s a running edit).
+---
+
+## 14. A workshop is sized for the room it BOOKED, not the people who showed up (2026-08-17)
+
+`_roster_size()` was the only seat source the planner ever had:
+
+```python
+return int(await redis.scard(f"live:session:{ws_id}:roster")) + 1
+```
+
+Learners join a workshop **with a code**. They never appear on a roster, and a trainer is under
+no obligation to build one — so for a workshop advertised at 10, 40 or 70 seats this returned
+**1**, every plan landed under `WORKSHOP_STANDING_MAX_SEATS`, and every workshop was quietly put
+on the standing box's reserve with nothing launched. The banner then said so, in a sentence that
+read like a policy rather than a bug: *"1 seat counted, including you."*
+
+The provisioning window exists precisely so machines are up **before** anyone arrives. That is
+the one moment when there is nobody to count, which is why counting was the wrong question.
+
+### The seat source
+
+`planned_seats(session, roster_count)` — pure, in `workshop_fleet.py`:
+
+| Input | Seats planned |
+|---|---|
+| `maxSeats` > 0 | `maxSeats` + trainer team |
+| `maxSeats` == 0 (means *unlimited*, unplannable) | roster + trainer team |
+| `maxSeats` unparseable / absent | trainer team |
+
+`maxSeats` caps the **roster** only, so the trainer team (up to `MAX_TRAINERS` = 5) is added on
+top either way — every trainer takes an environment. Clamped to `live_sessions.MAX_SEATS` **on
+read**, for the same reason the window minutes are: this value feeds `RunInstances`, and a number
+edited straight into Redis must not be able to buy an unbounded fleet.
+
+### The lane decision is no longer permanent
+
+Booked capacity moves after prewarm — a trainer raises the cap, a roster fills — and the lane was
+chosen once and never revisited, so a workshop that grew rode the standing reserve for its whole
+delivery. `needs_bigger_fleet(state, rec, seats)` is a **third scheduling predicate**, and the
+warning in §Control loop (and the same note in §13) about checking a new predicate against the other two applies to it:
+
+* it fires only on a record with `standing: true`, i.e. one that launched **nothing**;
+* it is checked **after** teardown, so a workshop past its window is given back rather than
+  upgraded on its way out;
+* acting clears `standing`, so it can never fire twice on the same workshop — no oscillation.
+
+It **only upgrades**. Downgrading would terminate machines a room may already be sitting on, to
+save a few hours of spend.
+
+`GET /api/workshops/{id}/fleet` gains `planned_seats`, answered **before** provisioning too —
+"will there be machines for my class?" is a question about the booking, and the moment a trainer
+asks it is the moment nobody has registered yet.
+
+### Measured live
+
+Two workshops booked at `maxSeats: 10` with 2 trainers, both sitting on the standing lane at
+`seats: 1`, upgraded on the first tick after the restart and were ready 18 minutes before the
+first one started:
+
+```
+workshop ws_msx6508v-df67cb: outgrew the standing lane (12 seats > 7) — planning dedicated machines
+workshop ws_msx6508v-df67cb: launching 2 × m6a.4xlarge for 12 seats (12 seats ÷ 20/worker +1 spare)
+workshop ws_msx6508v-df67cb: 1 worker(s) ready
+```
+
+Three other standing records in the same tick stayed standing (booked ≤ 7) — the threshold still
+does its job; it was never the threshold that was wrong.
+
+**Two machines for twelve seats is one machine plus a deliberate spare.** `seats_per_worker` is
+`units(m6a.4xlarge) 20 // units(kubernetes-101) 1` = 20, so one host holds the room;
+`WORKSHOP_REDUNDANCY` (1) buys the second, because the loop does not re-plan a workshop once its
+pool is bound and a host lost mid-delivery therefore has no automatic remedy. Note that
+`WORKSHOP_SEAT_SAFETY` does **not** enter this: `seats_per_worker` accepts the argument and
+ignores it, because safety is already baked into the unit table.

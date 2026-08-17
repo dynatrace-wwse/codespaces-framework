@@ -63,7 +63,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from dashboard import fleet_policy, pools, repo_profiles
+from dashboard import fleet_policy, live_sessions, pools, repo_profiles
 from shared import capacity_units
 from shared.log_safety import scrub_for_log
 
@@ -384,6 +384,49 @@ def should_teardown(state, session: dict, now: datetime) -> bool:
     return state in TEARDOWNABLE_STATES and due_for_teardown(session, now)
 
 
+def planned_seats(session: dict, roster_count: int = 0) -> int:
+    """Seats to BUY for a workshop: the capacity it BOOKED, not its turnout.
+
+    A workshop is provisioned for the room it reserved. Sizing it from the
+    roster instead — which is what this did — made every workshop that fills at
+    the door plan for one person: learners join with a code and never appear on
+    a roster, so `scard(roster) + 1` returned 1 for a 40-seat class and the
+    planner put it on the standing lane with nothing launched. The machines have
+    to be up *before* anyone arrives, which is precisely the moment there is
+    nobody to count.
+
+    `maxSeats` is the trainer's own number and wins whenever it is set. 0 means
+    "unlimited", which cannot be planned, so it falls back to the roster. Either
+    way the trainer team is added on top: `maxSeats` caps the ROSTER only, and
+    every trainer takes an environment as well.
+
+    Clamped on read, like the window minutes: a `maxSeats` edited straight into
+    Redis must not be able to buy an unbounded number of machines.
+    """
+    team = max(1, len(live_sessions.trainers_of(session)))
+    try:
+        booked = int(session.get("maxSeats") or 0)
+    except (TypeError, ValueError):
+        booked = 0
+    booked = max(0, min(booked, live_sessions.MAX_SEATS))
+    return (booked if booked > 0 else max(0, roster_count)) + team
+
+
+def needs_bigger_fleet(state, rec: dict, seats: int,
+                       standing_max: int = WORKSHOP_STANDING_MAX_SEATS) -> bool:
+    """Has a workshop on the standing lane outgrown it?
+
+    The lane decision was only ever made once, at prewarm, from whatever the
+    numbers said then. They move afterwards — a trainer raises `maxSeats`, or a
+    roster fills — and without this the workshop rode the standing box's reserve
+    for its whole delivery no matter how big it got.
+
+    Upgrades only. The reverse would terminate machines a room may already be
+    sitting on, to save the cost of a few hours.
+    """
+    return state == READY and bool(rec.get("standing")) and seats > standing_max
+
+
 def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
                            instance_type: str = WORKSHOP_INSTANCE_TYPE,
                            safety: float = WORKSHOP_SEAT_SAFETY,
@@ -577,13 +620,14 @@ async def _save_fleet_record(redis, ws_id: str, rec: dict) -> None:
     await redis.hset(FLEET_KEY, ws_id, json.dumps(rec))
 
 
-async def _roster_size(redis, ws_id: str) -> int:
-    """Seats to plan for: the roster plus the trainer, who also gets an
-    environment and is otherwise the one person left without one."""
+async def _planned_seats(redis, ws_id: str, session: dict) -> int:
+    """Seats to plan for — see :func:`planned_seats`. Reads the roster only as
+    the fallback for a workshop that booked no capacity."""
     try:
-        return int(await redis.scard(f"live:session:{ws_id}:roster")) + 1
+        roster = int(await redis.scard(f"live:session:{ws_id}:roster"))
     except Exception:
-        return 1
+        roster = 0
+    return planned_seats(session, roster)
 
 
 async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
@@ -596,12 +640,21 @@ async def provision_workshop_fleet(redis, ws_id: str, session: dict) -> dict:
     """
     from dashboard import fleet, pools
 
-    existing = await _fleet_record(redis, ws_id)
-    if existing and existing.get("state") in (WARMING, READY):
-        return existing
-
     repo = workshop_repo(session)
-    seats = await _roster_size(redis, ws_id)
+    seats = await _planned_seats(redis, ws_id, session)
+
+    existing = await _fleet_record(redis, ws_id)
+    # An existing fleet is left alone -- UNLESS it is a standing-lane record the
+    # workshop has since outgrown, which is the one case where re-planning buys
+    # something the room does not already have.
+    if existing and existing.get("state") in (WARMING, READY) \
+            and not needs_bigger_fleet(existing.get("state"), existing, seats):
+        return existing
+    if existing and existing.get("standing"):
+        log.info("workshop %s: outgrew the standing lane (%d seats > %d) — "
+                 "planning dedicated machines", ws_id, seats,
+                 WORKSHOP_STANDING_MAX_SEATS)
+
     profile = await repo_profiles.load(redis, repo)
     plan = plan_workshop_capacity(seats, profile)
 
@@ -1146,7 +1199,7 @@ async def tick(redis) -> dict:
     from dashboard import fleet
 
     now = datetime.now(timezone.utc)
-    summary = {"prewarmed": [], "torn_down": [], "daily": {}}
+    summary = {"prewarmed": [], "torn_down": [], "upgraded": [], "daily": {}}
 
     # ── workshops ───────────────────────────────────────────────────────────
     try:
@@ -1219,7 +1272,7 @@ async def tick(redis) -> dict:
                 if CONTROL_LOOP_APPLY:
                     await provision_workshop_fleet(redis, ws_id, session)
                 else:
-                    seats = await _roster_size(redis, ws_id)
+                    seats = await _planned_seats(redis, ws_id, session)
                     profile = await repo_profiles.load(redis, workshop_repo(session))
                     plan = plan_workshop_capacity(seats, profile)
                     log.info("DRY-RUN workshop %s (%s): would launch %d × %s "
@@ -1234,6 +1287,24 @@ async def tick(redis) -> dict:
                     log.info("DRY-RUN workshop %s: would tear down %s",
                              ws_id, rec.get("instances") or "(no instances)")
                 summary["torn_down"].append(ws_id)
+            elif state == READY and rec.get("standing"):
+                # Third scheduling predicate, and the comment above about
+                # prewarm/teardown being mutually exclusive applies to it too.
+                # It cannot oscillate with either: it fires only on a record
+                # that launched NOTHING, and the moment it acts the record stops
+                # being standing, so it can never fire on the same workshop
+                # twice. It is checked last so a workshop past its window is
+                # torn down rather than upgraded on its way out.
+                seats = await _planned_seats(redis, ws_id, session)
+                if needs_bigger_fleet(state, rec, seats):
+                    if CONTROL_LOOP_APPLY:
+                        await provision_workshop_fleet(redis, ws_id, session)
+                    else:
+                        log.info("DRY-RUN workshop %s: would UPGRADE off the "
+                                 "standing lane — booked capacity is now %d "
+                                 "seats (> %d)", ws_id, seats,
+                                 WORKSHOP_STANDING_MAX_SEATS)
+                    summary["upgraded"].append(ws_id)
         except Exception as exc:
             # One malformed workshop must not stop the loop serving the others.
             log.warning("control loop: workshop %s failed this tick: %s", ws_id, exc)

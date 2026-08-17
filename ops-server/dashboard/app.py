@@ -798,6 +798,12 @@ async def api_workshop_fleet(ws_id: str):
         # workers == 0, which reads identically to "the launch failed".
         "standing": bool(rec.get("standing")),
         "standing_max_seats": workshop_fleet.WORKSHOP_STANDING_MAX_SEATS,
+        # What the workshop is sized FOR: its booked capacity plus the trainer
+        # team, NOT how many people have registered. Reported even before
+        # anything is provisioned, because "will there be machines for my
+        # class?" is a question about the booking, and the moment a trainer
+        # needs the answer is the moment nobody has arrived yet.
+        "planned_seats": await workshop_fleet._planned_seats(pool, ws_id, session),
     }
     # Routing that fell back to the shared queue is reported even when there is
     # no fleet record, because THAT is the case where it matters most: a

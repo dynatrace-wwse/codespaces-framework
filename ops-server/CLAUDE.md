@@ -399,6 +399,7 @@ set in `/home/ops/.env`. It launches and terminates EC2 on its own.
 | Signal | Action |
 |---|---|
 | a workshop is within its **own** lead (`prewarmLeadMinutes`, default `PREWARM_LEAD_MINUTES` 45, capped 360) of starting, and not past its teardown point | launch `ceil(seats / units-per-worker)` machines into a dedicated pool |
+| a workshop already on the standing lane has outgrown it (`needs_bigger_fleet`) | upgrade it to its own pool and launch. Never the reverse |
 | the workshop ended, or passed `start + max(duration + TEARDOWN_GRACE_MINUTES (30), holdMinutes)` (default hold 240, capped 1440) | terminate them, unbind the pool, drop their worker records |
 | daily free seats < `DAILY_MIN_FREE_SEATS` (4), **and** warming seats will not cover it | launch one daily worker |
 | sustained memory ≥ 70% on a worker | shrink its advertised capacity by 1 |
@@ -406,6 +407,10 @@ set in `/home/ops/.env`. It launches and terminates EC2 on its own.
 
 Things that will bite you here:
 
+- **Seats come from what the workshop BOOKED (`maxSeats` + the trainer team), not from
+  who registered** — `planned_seats()`. Learners join with a code and never touch a
+  roster, so the roster is 0 for a full class; sizing from it put every workshop on the
+  standing lane with nothing launched. `maxSeats: 0` = unlimited → roster fallback.
 - **Capacity comes from `shared/capacity_units.py`**, not from a typed number.
   `seats = units(instance) // units(training)`; per-repo overrides live in the Redis
   hash `repo:units` and take effect on the next tick with no deploy.

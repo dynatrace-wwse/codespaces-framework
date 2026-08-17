@@ -6,6 +6,7 @@ Only the pure half is tested here — scheduling, sizing and the scale decision.
 The effectful half talks to EC2 and is exercised by the end-to-end rehearsal.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from dashboard import workshop_fleet as wf
@@ -734,6 +735,77 @@ def test_the_threshold_is_configurable():
         3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=2)["pool_kind"] == "dedicated"
     assert wf.plan_workshop_capacity(
         3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=3)["pool_kind"] == "standing"
+
+
+# ── what a workshop is sized FOR ────────────────────────────────────────────
+
+def _booked(max_seats, trainers=1):
+    team = ["t%d@example.com" % i for i in range(trainers)]
+    return {"maxSeats": str(max_seats), "trainers": json.dumps(team)}
+
+
+def test_a_workshop_is_sized_for_its_BOOKED_capacity_not_its_turnout():
+    """The bug this exists for: learners join with a code and never touch the
+    roster, so a 40-seat class counted 1 seat, planned for 1, and opened on the
+    standing lane with nothing behind it. Machines must be up BEFORE anyone
+    arrives — the moment there is nobody to count."""
+    assert wf.planned_seats(_booked(40), roster_count=0) == 41
+
+
+def test_the_trainer_team_is_added_on_top_of_the_booked_seats():
+    """maxSeats caps the ROSTER. Every trainer takes an environment too, and a
+    five-trainer team on a 20-seat room is a whole extra machine's worth."""
+    assert wf.planned_seats(_booked(20, trainers=5), roster_count=0) == 25
+
+
+def test_unlimited_seats_falls_back_to_the_roster():
+    """maxSeats 0 means unlimited, which cannot be planned. The roster is the
+    only real number left — but it is a fallback, never the primary source."""
+    assert wf.planned_seats(_booked(0), roster_count=12) == 13
+
+
+def test_a_hand_edited_seat_count_cannot_buy_an_unbounded_fleet():
+    """Clamped on READ, like the window minutes: this feeds RunInstances."""
+    assert wf.planned_seats(_booked(99999)) == 201      # MAX_SEATS + 1 trainer
+    assert wf.planned_seats({"maxSeats": "not-a-number"}) == 1
+    assert wf.planned_seats({}) == 1
+
+
+def test_a_booked_workshop_crosses_the_standing_threshold_on_capacity_alone():
+    """End to end over the two functions, because the defect was the SEAM: the
+    planner was always right about 12 seats, it was never told about them."""
+    seats = wf.planned_seats(_booked(10, trainers=2))
+    assert seats == 12
+    assert wf.plan_workshop_capacity(seats, rp.K8S_101,
+                                     "m6a.4xlarge")["pool_kind"] == "dedicated"
+
+
+def test_a_standing_workshop_that_outgrows_the_lane_is_upgraded():
+    """The lane was decided once, at prewarm. Booked capacity moves afterwards
+    and nothing re-read it, so a workshop that grew rode the standing box's
+    reserve for its whole delivery."""
+    assert wf.needs_bigger_fleet("ready", {"standing": True}, 8) is True
+    assert wf.needs_bigger_fleet("ready", {"standing": True}, 7) is False
+
+
+def test_a_dedicated_workshop_is_never_re_planned():
+    """Only ever upgrades. Downgrading would terminate machines a room may
+    already be sitting on."""
+    assert wf.needs_bigger_fleet("ready", {"standing": False}, 200) is False
+    assert wf.needs_bigger_fleet("warming", {"standing": True}, 200) is False
+    assert wf.needs_bigger_fleet(wf.DONE, {"standing": True}, 200) is False
+
+
+def test_the_upgrade_cannot_oscillate_with_teardown():
+    """The third scheduling predicate, checked against the other two. Prewarm
+    and teardown are mutually exclusive by construction; this one fires only on
+    a record that launched NOTHING, and stops being true the moment it acts."""
+    rec = {"standing": True}
+    s = _session(start_offset_min=-10_000)          # long past its window
+    assert wf.should_teardown(wf.READY, s, NOW) is True
+    # After the upgrade the record is no longer standing, so the predicate that
+    # produced it is false forever after.
+    assert wf.needs_bigger_fleet(wf.READY, {**rec, "standing": False}, 50) is False
 
 
 def test_lent_seats_count_as_daily_capacity():
