@@ -756,6 +756,54 @@ def test_the_threshold_is_configurable():
         3, rp.K8S_101, "m6a.4xlarge", standing_max_seats=3)["pool_kind"] == "standing"
 
 
+# ── reaping a fleet whose workshop was deleted ──────────────────────────────
+
+def test_a_deleted_workshops_fleet_is_found_by_walking_the_FLEET_not_the_index():
+    """Deleting a workshop removes it from the index, which is what the loop
+    iterates — so its machines became unreachable and ran until the in-instance
+    shutdown backstop hours later. The fleet hash is the only structure that
+    still knows they exist."""
+    orphans = wf.orphan_candidates(["ws_live", "ws_deleted"], ["ws_live"],
+                                   index_ok=True)
+    assert orphans == ["ws_deleted"]
+
+
+def test_a_FAILED_index_read_reaps_NOTHING():
+    """The one that matters. A failed read yields an empty index, under which
+    every workshop in the fleet — including one running a class right now —
+    looks abandoned. Without this guard a single Redis blip terminates the whole
+    fleet. Doing nothing costs only money."""
+    assert wf.orphan_candidates(["ws_a", "ws_b"], [], index_ok=False) == []
+    # And an index that is genuinely empty still reaps, so the guard is about
+    # the READ failing, not about the index being small.
+    assert wf.orphan_candidates(["ws_a"], [], index_ok=True) == ["ws_a"]
+
+
+def test_an_unreadable_session_is_not_treated_as_a_deleted_one():
+    """`session_exists` is tri-state: None means the check failed. Treating that
+    as "missing" is how a reaper turns a hiccup into a terminated fleet."""
+    assert wf.is_orphaned(wf.READY, False) is True
+    assert wf.is_orphaned(wf.READY, None) is False, "unreadable is not deleted"
+    assert wf.is_orphaned(wf.READY, True) is False
+
+
+def test_an_already_torn_down_fleet_is_not_reaped_again():
+    """DONE records are the audit trail and cost nothing to leave."""
+    assert wf.is_orphaned(wf.DONE, False) is False
+    assert wf.is_orphaned("", False) is False
+    for state in (wf.WARMING, wf.READY, wf.DRAINING):
+        assert wf.is_orphaned(state, False) is True
+
+
+def test_reaping_cannot_fight_the_other_three_predicates():
+    """Prewarm, teardown and upgrade only ever act on INDEXED workshops; the
+    reaper only ever acts on unindexed ones. The sets are disjoint by
+    construction, which is the check the control-loop notes demand of any new
+    predicate."""
+    indexed = ["ws_a", "ws_b"]
+    assert wf.orphan_candidates(["ws_a", "ws_b"], indexed, index_ok=True) == []
+
+
 # ── what a workshop is sized FOR ────────────────────────────────────────────
 
 def _booked(max_seats, trainers=1):

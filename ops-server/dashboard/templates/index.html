@@ -1096,6 +1096,10 @@ redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="/static/app.js?v=31"></script>
+    <!-- Bump ?v= on EVERY app.js change. The browser caches per full URL, so a
+         deployed app.js with an unchanged ?v= is invisible: the new index.html
+         renders new markup while the old script wires nothing to it. That looks
+         exactly like "the control is there but does not work" — v=31 → v=32. -->
+    <script src="/static/app.js?v=32"></script>
 </body>
 </html>

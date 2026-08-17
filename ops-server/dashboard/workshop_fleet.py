@@ -441,6 +441,38 @@ def needs_bigger_fleet(state, rec: dict, seats: int,
     return state == READY and bool(rec.get("standing")) and seats > standing_max
 
 
+def orphan_candidates(fleet_ids, indexed_ids, index_ok: bool) -> list[str]:
+    """Fleet records with no workshop left in the index.
+
+    ``index_ok`` is the whole reason this is a function. The reaper's input is
+    "every fleet record the index does not mention", and a FAILED index read
+    produces an empty index — under which every workshop in the fleet, including
+    the ones running a class right now, looks abandoned. One Redis blip would
+    then terminate the entire fleet. So a failed read yields nothing at all: the
+    reaper is an optimisation on cost, and doing nothing costs only money.
+    """
+    if not index_ok:
+        return []
+    indexed = set(indexed_ids or ())
+    return [w for w in (fleet_ids or ()) if w not in indexed]
+
+
+def is_orphaned(state, session_exists) -> bool:
+    """Should this fleet record's machines be given back?
+
+    Only when the workshop is provably gone. ``session_exists`` is tri-state on
+    purpose: ``None`` means the check itself failed, which is NOT evidence of
+    deletion — treating an unreadable key as a missing one is how a reaper turns
+    a Redis hiccup into a terminated fleet.
+
+    ``DONE`` records are skipped so a torn-down workshop is not re-torn every
+    tick; they are cheap to leave, and they are the audit trail.
+    """
+    if session_exists is not False:
+        return False
+    return state not in (None, "", DONE)
+
+
 def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
                            instance_type: str = WORKSHOP_INSTANCE_TYPE,
                            safety: float = WORKSHOP_SEAT_SAFETY,
@@ -1212,14 +1244,16 @@ async def tick(redis) -> dict:
     from dashboard import fleet
 
     now = datetime.now(timezone.utc)
-    summary = {"prewarmed": [], "torn_down": [], "upgraded": [], "daily": {}}
+    summary = {"prewarmed": [], "torn_down": [], "upgraded": [], "reaped": [],
+               "daily": {}}
 
     # ── workshops ───────────────────────────────────────────────────────────
+    index_ok = True
     try:
         ws_ids = await redis.zrevrange(LIVE_INDEX_KEY, 0, -1)
     except Exception as exc:
         log.warning("control loop: cannot read workshop index: %s", exc)
-        ws_ids = []
+        ws_ids, index_ok = [], False
 
     for ws_id in ws_ids:
         try:
@@ -1321,6 +1355,54 @@ async def tick(redis) -> dict:
         except Exception as exc:
             # One malformed workshop must not stop the loop serving the others.
             log.warning("control loop: workshop %s failed this tick: %s", ws_id, exc)
+
+    # ── orphaned fleets ─────────────────────────────────────────────────────
+    # The loop above is driven by the workshop INDEX. Deleting a workshop takes
+    # it out of that index and deletes its hash, but leaves its fleet record —
+    # and its machines — behind, where nothing could ever see them again. They
+    # then ran until the in-instance `shutdown -h +N` backstop, hours later.
+    # Measured 2026-08-17: 2 × m6a.4xlarge for a workshop that no longer existed,
+    # plus four more records holding stale pool bindings.
+    #
+    # Driven from the FLEET HASH for exactly that reason: after a delete it is
+    # the only structure that still knows the machines exist. Deliberately a
+    # SEPARATE pass rather than a fourth branch in the loop above, which cannot
+    # reach a workshop it cannot enumerate.
+    #
+    # It cannot fight the other three predicates: they only ever act on indexed
+    # workshops, and this only ever acts on unindexed ones.
+    try:
+        fleet_ids = await redis.hkeys(FLEET_KEY)
+    except Exception as exc:
+        log.warning("control loop: cannot read the fleet hash: %s", exc)
+        fleet_ids = []
+    for ws_id in orphan_candidates(fleet_ids, ws_ids, index_ok):
+        try:
+            if not manages(ws_id):
+                continue
+            # Absent from the index AND absent as a hash. The index self-heals by
+            # dropping members whose hash is gone, so the two normally agree —
+            # requiring both means a half-finished delete cannot cost machines.
+            try:
+                exists = bool(await redis.exists(f"live:session:{ws_id}"))
+            except Exception:
+                exists = None          # unreadable is NOT deleted — see is_orphaned
+            rec = await _fleet_record(redis, ws_id)
+            if not is_orphaned(rec.get("state"), exists):
+                continue
+            instances = rec.get("instances") or []
+            log.warning("workshop %s no longer exists but still holds a fleet "
+                        "(%s, %d instance(s)) — reaping",
+                        scrub_for_log(ws_id), rec.get("state"), len(instances))
+            if CONTROL_LOOP_APPLY:
+                await teardown_workshop_fleet(redis, ws_id)
+            else:
+                log.info("DRY-RUN workshop %s: would reap %s",
+                         ws_id, instances or "(no instances)")
+            summary["reaped"].append(ws_id)
+        except Exception as exc:
+            log.warning("control loop: reaping %s failed this tick: %s",
+                        scrub_for_log(ws_id), exc)
 
     # ── daily pool ──────────────────────────────────────────────────────────
     try:
