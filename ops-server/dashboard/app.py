@@ -792,6 +792,12 @@ async def api_workshop_fleet(ws_id: str):
         "max_lead_minutes": workshop_fleet.LEAD_MINUTES_CAP,
         "max_hold_minutes": workshop_fleet.HOLD_MINUTES_CAP,
         "provisioned": bool(rec),
+        # A workshop at or under this many seats (roster + the trainer) launches
+        # NOTHING and runs on the standing box's reserve. Reported so a caller
+        # can say which lane a workshop is on instead of inferring it from
+        # workers == 0, which reads identically to "the launch failed".
+        "standing": bool(rec.get("standing")),
+        "standing_max_seats": workshop_fleet.WORKSHOP_STANDING_MAX_SEATS,
     }
     # Routing that fell back to the shared queue is reported even when there is
     # no fleet record, because THAT is the case where it matters most: a
