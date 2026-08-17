@@ -55,9 +55,11 @@ def test_prewarm_and_teardown_are_never_both_due():
 
 
 def test_a_workshop_long_past_its_window_is_not_prewarmed():
-    # 120 min duration + 30 min grace: still due at 149 min late, not at 151.
-    assert wf.due_for_prewarm(_session(start_offset_min=-149), NOW) is True
-    assert wf.due_for_prewarm(_session(start_offset_min=-151), NOW) is False
+    # The window is the HOLD FLOOR here, not duration+grace: 120+30 = 150 is
+    # shorter than the 240-minute floor, so the workshop stays prewarmable until
+    # 240 minutes past its start.
+    assert wf.due_for_prewarm(_session(start_offset_min=-239), NOW) is True
+    assert wf.due_for_prewarm(_session(start_offset_min=-241), NOW) is False
     # The real one: opened three days ago, never ended.
     assert wf.due_for_prewarm(_session(start_offset_min=-3 * 24 * 60), NOW) is False
 
@@ -75,8 +77,12 @@ def test_workshop_without_a_start_time_is_skipped_not_crashed():
 
 def test_teardown_waits_for_the_grace_period():
     """Overruns are normal. A trainer running ten minutes late must not have
-    the room's environments deleted underneath them."""
-    s = _session(start_offset_min=-120, duration=120)      # ended exactly now
+    the room's environments deleted underneath them.
+
+    Long enough that duration+grace, not the hold floor, is the binding window:
+    a 6h booking ends past the 240-minute floor, so grace is what decides.
+    """
+    s = _session(start_offset_min=-360, duration=360)      # ended exactly now
     assert wf.due_for_teardown(s, NOW, grace_minutes=30) is False
     assert wf.due_for_teardown(s, NOW + timedelta(minutes=31),
                                grace_minutes=30) is True
@@ -87,6 +93,94 @@ def test_explicit_end_beats_the_clock():
     rest of the booked window."""
     s = _session(start_offset_min=-10, duration=240, state="ended")
     assert wf.due_for_teardown(s, NOW) is True
+
+
+def test_hold_floor_extends_a_short_workshop():
+    """The app's create form never sends durationMinutes, so every workshop it
+    creates falls back to 120 and would have lost its machines 2h30 after the
+    start. The floor holds them to 4h."""
+    s = _session(start_offset_min=0, duration=120)
+    start = wf.parse_iso(s["scheduledAt"])
+    assert wf.teardown_at(s) == start + timedelta(minutes=240)
+    assert wf.due_for_teardown(s, start + timedelta(minutes=239)) is False
+    assert wf.due_for_teardown(s, start + timedelta(minutes=241)) is True
+
+
+def test_hold_floor_never_truncates_a_long_workshop():
+    """A floor only ever extends. A 6h booking keeps its 6h30, rather than
+    being cut to the 4h floor — that would delete environments mid-session."""
+    s = _session(start_offset_min=0, duration=360)
+    start = wf.parse_iso(s["scheduledAt"])
+    assert wf.teardown_at(s) == start + timedelta(minutes=360 + 30)
+
+
+def test_per_workshop_windows_are_honoured():
+    s = _session(start_offset_min=0, duration=120)
+    s["prewarmLeadMinutes"] = "90"
+    s["holdMinutes"] = "480"
+    start = wf.parse_iso(s["scheduledAt"])
+    assert wf.session_lead_minutes(s) == 90
+    assert wf.session_hold_minutes(s) == 480
+    assert wf.prewarm_at(s) == start - timedelta(minutes=90)
+    assert wf.teardown_at(s) == start + timedelta(minutes=480)
+    # And the predicate moves with them.
+    assert wf.due_for_prewarm(s, start - timedelta(minutes=89)) is True
+    assert wf.due_for_prewarm(s, start - timedelta(minutes=91)) is False
+
+
+def test_stored_windows_are_clamped_when_read():
+    """A value hand-edited into Redis, or stored before a ceiling was lowered,
+    must not be able to hold a fleet for a week."""
+    s = _session()
+    s["prewarmLeadMinutes"], s["holdMinutes"] = "99999", "99999"
+    assert wf.session_lead_minutes(s) == wf.LEAD_MINUTES_CAP
+    assert wf.session_hold_minutes(s) == wf.HOLD_MINUTES_CAP
+    s["prewarmLeadMinutes"], s["holdMinutes"] = "-5", "-5"
+    assert wf.session_lead_minutes(s) == 0
+    assert wf.session_hold_minutes(s) == 0
+
+
+def test_unset_or_unusable_windows_fall_back_to_the_defaults():
+    """0 and '' are what the app sends for an empty numeric field, and the
+    default is the right reading of an empty field — not zero minutes."""
+    for value in ("", "0", 0, None, "not-a-number"):
+        s = _session()
+        s["prewarmLeadMinutes"], s["holdMinutes"] = value, value
+        assert wf.session_lead_minutes(s) == wf.PREWARM_LEAD_MINUTES
+        assert wf.session_hold_minutes(s) == wf.WORKSHOP_HOLD_MINUTES
+
+
+def test_prewarm_and_teardown_are_never_both_due_at_the_widest_windows():
+    """The oscillation guard again, at the ceilings.
+
+    Widening the hold window is exactly the kind of change that could make the
+    two predicates overlap again, and dry run cannot show that because dry run
+    never transitions state. Swept rather than spot-checked for that reason.
+    """
+    s = _session(start_offset_min=0, duration=360)
+    s["prewarmLeadMinutes"] = str(wf.LEAD_MINUTES_CAP)
+    s["holdMinutes"] = str(wf.HOLD_MINUTES_CAP)
+    start = wf.parse_iso(s["scheduledAt"])
+    for minutes in range(-wf.LEAD_MINUTES_CAP - 60, wf.HOLD_MINUTES_CAP + 120, 7):
+        now = start + timedelta(minutes=minutes)
+        assert not (wf.due_for_prewarm(s, now) and wf.due_for_teardown(s, now)), \
+            f"both due at start{minutes:+d}min"
+
+
+def test_self_destruct_always_outlives_the_loops_own_teardown():
+    """`shutdown -h +N` is a backstop, not a competing schedule. When the hold
+    floor pushed teardown past duration+grace, a lifetime still computed as
+    lead+duration+grace armed the timer BEFORE the loop meant to tear the
+    machines down — the workshop would have lost them mid-session."""
+    cases = [
+        _session(start_offset_min=0, duration=120),          # floor binds
+        _session(start_offset_min=0, duration=360),          # duration binds
+        {**_session(duration=120), "prewarmLeadMinutes": "360",
+         "holdMinutes": "1440"},                             # both at the cap
+    ]
+    for s in cases:
+        window = (wf.teardown_at(s) - wf.prewarm_at(s)).total_seconds() // 60
+        assert wf._workshop_lifetime_minutes(s) > window, s
 
 
 def test_lead_time_is_configurable_down_to_minutes():

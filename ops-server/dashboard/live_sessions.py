@@ -435,19 +435,44 @@ def validate_create(title, training_id, trainer_email, roster,
 
 MAX_SEATS = 200
 
-_FIELD_MAX = {"maxSeats": MAX_SEATS}
+# Per-workshop overrides of the fleet control loop's provisioning window. Both
+# are bounds on a TRAINER-SUPPLIED number, and both exist because the window was
+# process-wide env vars that no trainer could see or move.
+#
+# The ceilings are the expensive direction: machines idle from the moment they
+# are prewarmed until the moment they are torn down, so a mistyped "600" would
+# buy ten hours of an m6a.4xlarge fleet before anyone noticed. 6h ahead covers
+# the legitimate case (an overnight prewarm for an early NORAM start); 24h after
+# covers a full-day workshop that overruns.
+MAX_PREWARM_LEAD_MINUTES = 360     # 6h
+MAX_HOLD_MINUTES = 1440            # 24h
+
+_FIELD_MAX = {"maxSeats": MAX_SEATS,
+              "prewarmLeadMinutes": MAX_PREWARM_LEAD_MINUTES,
+              "holdMinutes": MAX_HOLD_MINUTES}
+
+# Fields validated by the same integer rules: non-negative, bounded by
+# _FIELD_MAX, and absent (rather than 0) when unset.
+_INT_FIELDS = ("durationMinutes", "maxSeats", "prewarmLeadMinutes", "holdMinutes")
 
 
 def validate_schedule(scheduled_at, timezone_name, duration_minutes,
-                      max_seats) -> dict:
+                      max_seats, prewarm_lead_minutes=None,
+                      hold_minutes=None) -> dict:
     """Validate + normalize the OPTIONAL workshop scheduling fields.
 
     Returns storage-ready strings ('' = absent — the hash field is simply not
     written, keeping pre-workshop sessions byte-identical). Raises ValueError
     (→ HTTP 400) on a malformed value.
+
+    `prewarmLeadMinutes` / `holdMinutes` move the fleet control loop's
+    provisioning window for THIS workshop; absent means "use the loop's
+    default". 0 is treated as absent for the same reason it is for
+    durationMinutes — the app sends 0 for an empty numeric field, and the
+    default is the right reading of an empty field, not "zero minutes".
     """
     out = {"scheduledAt": "", "timezone": "", "durationMinutes": "",
-           "maxSeats": ""}
+           "maxSeats": "", "prewarmLeadMinutes": "", "holdMinutes": ""}
     when = (scheduled_at or "").strip()
     if when:
         try:
@@ -462,8 +487,9 @@ def validate_schedule(scheduled_at, timezone_name, duration_minutes,
         except Exception:
             raise ValueError(f"timezone is not a valid IANA zone name: '{tz}'")
         out["timezone"] = tz
-    for field, value in (("durationMinutes", duration_minutes),
-                         ("maxSeats", max_seats)):
+    for field, value in zip(_INT_FIELDS,
+                            (duration_minutes, max_seats,
+                             prewarm_lead_minutes, hold_minutes)):
         if value in (None, "", 0):
             continue
         try:
@@ -801,6 +827,12 @@ def is_past(session, roster, email, tenant="") -> bool:
 # trainingId is the Orbital CATALOG id, which is not a repo name. ownerTenant is
 # deliberately NOT echoed — it is an internal scoping field (see is_listed).
 _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
+                    # Per-workshop provisioning window. Echoed so the app can
+                    # show the trainer the CURRENT values in the edit form and
+                    # in the registrants banner — without them the form would
+                    # have to guess, and a re-save would silently reset the
+                    # window to the default.
+                    "prewarmLeadMinutes", "holdMinutes",
                     "cancelledAt", "repoUrl", "branch", "description",
                     "trainerStep", "unlockPath",
                     # Which trainer last moved the class pointer, and when.
@@ -833,8 +865,7 @@ def workshop_fields(session, email) -> dict:
     for field in _WORKSHOP_FIELDS:
         value = session.get(field, "")
         if value:
-            out[field] = (int(value)
-                          if field in ("durationMinutes", "maxSeats") else value)
+            out[field] = int(value) if field in _INT_FIELDS else value
     if session.get("joinCode") and is_trainer(email, session):
         out["joinCode"] = session["joinCode"]
     return out

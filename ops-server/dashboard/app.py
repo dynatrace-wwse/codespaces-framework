@@ -755,19 +755,44 @@ async def api_workshops_admin_trainer_remove(request: Request, email: str):
 
 @app.get("/api/workshops/{ws_id}/fleet")
 async def api_workshop_fleet(ws_id: str):
-    """This workshop's dedicated machines, if the control loop gave it any.
+    """This workshop's provisioning window, and its dedicated machines if the
+    control loop has given it any yet.
 
-    `{}` means it has none and its learners go to the shared daily pool — the
-    correct answer for a small workshop, for one created before pools existed, and
-    for any workshop while the loop is in dry run.
+    `provisioned: false` means it has none and its learners would go to the
+    shared daily pool — the correct answer for a small workshop, for one created
+    before pools existed, for any workshop while the loop is in dry run, and for
+    every workshop before its prewarm point.
 
-    Read-only and public like the rest of the arena surface: instance ids and a
-    state, no credentials. Exists so a caller can tell "the pool is ready" from
-    "there is no pool", which otherwise needs Redis access on the master — the
-    load test could not distinguish them and silently measured the daily pool.
+    The schedule block (`prewarm_at` / `teardown_at` and the two windows behind
+    them) is answered whether or not machines exist, because the un-provisioned
+    case is exactly when a trainer needs to be told WHEN they will: returning
+    `{}` there meant the app could show nothing at all until the machines were
+    already running, which is too late to move the window.
+
+    Read-only and public like the rest of the arena surface: instance ids, times
+    and counts, no credentials. Exists so a caller can tell "the pool is ready"
+    from "there is no pool", which otherwise needs Redis access on the master —
+    the load test could not distinguish them and silently measured the daily pool.
     """
     from dashboard import workshop_fleet
     rec = await workshop_fleet._fleet_record(pool, ws_id)
+    sess_key, _, _ = _live_keys(ws_id)
+    session = await pool.hgetall(sess_key) or {}
+    # Both windows are reported as the loop RESOLVED them — after per-workshop
+    # override and after clamping — not as they were stored. A trainer reading
+    # the banner has to be reading the number the loop will actually act on.
+    prewarm = workshop_fleet.prewarm_at(session)
+    teardown = workshop_fleet.teardown_at(session)
+    schedule = {
+        "scheduled_at": session.get("scheduledAt", ""),
+        "prewarm_at": prewarm.isoformat() if prewarm else "",
+        "teardown_at": teardown.isoformat() if teardown else "",
+        "lead_minutes": workshop_fleet.session_lead_minutes(session),
+        "hold_minutes": workshop_fleet.session_hold_minutes(session),
+        "max_lead_minutes": workshop_fleet.LEAD_MINUTES_CAP,
+        "max_hold_minutes": workshop_fleet.HOLD_MINUTES_CAP,
+        "provisioned": bool(rec),
+    }
     # Routing that fell back to the shared queue is reported even when there is
     # no fleet record, because THAT is the case where it matters most: a
     # workshop with no record is one whose learners all went to the daily pool.
@@ -780,9 +805,11 @@ async def api_workshop_fleet(ws_id: str):
     # the daily queue.
     unbound = pools.unbound_counts().get(ws_id, 0)
     if not rec:
-        return {"failedOpen": fell_open, "unbound": unbound} if (fell_open or unbound) else {}
+        return {"workshopId": ws_id, "failedOpen": fell_open, "unbound": unbound,
+                **schedule}
     return {
         "workshopId": ws_id,
+        **schedule,
         "state": rec.get("state", ""),
         "pool": rec.get("pool", ""),
         # Non-zero means this workshop lost its isolation N times: Redis could
@@ -5724,6 +5751,10 @@ class LiveSessionCreate(BaseModel):
     timezone: str = ""            # IANA zone name
     durationMinutes: int = 0
     maxSeats: int = 0             # 0 = unlimited
+    # Per-workshop provisioning window for the fleet control loop. 0 = use the
+    # loop's own default (45 min ahead / 240 min hold).
+    prewarmLeadMinutes: int = 0   # ≤360 — how far ahead machines are launched
+    holdMinutes: int = 0          # ≤1440 — minimum hold measured from the start
     description: str = ""         # ≤250 chars, shown to learners before start
 
 
@@ -5825,7 +5856,8 @@ async def api_live_session_create(body: LiveSessionCreate, request: Request):
             body.title, body.trainingId, body.trainerEmail, body.roster,
             body.trainers)
         schedule = live_sessions.validate_schedule(
-            body.scheduledAt, body.timezone, body.durationMinutes, body.maxSeats)
+            body.scheduledAt, body.timezone, body.durationMinutes, body.maxSeats,
+            body.prewarmLeadMinutes, body.holdMinutes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -6667,6 +6699,11 @@ class LiveSessionUpdate(BaseModel):
     timezone: str | None = None
     durationMinutes: int | None = None
     maxSeats: int | None = None
+    # Per-workshop provisioning window (≤360 ahead / ≤1440 hold). 0 or absent
+    # keeps whatever is stored — like every other field here, this route cannot
+    # clear a value back to the default, only move it.
+    prewarmLeadMinutes: int | None = None
+    holdMinutes: int | None = None
 
 
 @app.patch("/api/live/sessions/{session_id}")
@@ -6714,7 +6751,11 @@ async def api_live_session_update(session_id: str, body: LiveSessionUpdate, requ
             body.scheduledAt if body.scheduledAt is not None else session.get("scheduledAt", ""),
             body.timezone if body.timezone is not None else session.get("timezone", ""),
             body.durationMinutes if body.durationMinutes is not None else session.get("durationMinutes", ""),
-            body.maxSeats if body.maxSeats is not None else session.get("maxSeats", ""))
+            body.maxSeats if body.maxSeats is not None else session.get("maxSeats", ""),
+            body.prewarmLeadMinutes if body.prewarmLeadMinutes is not None
+            else session.get("prewarmLeadMinutes", ""),
+            body.holdMinutes if body.holdMinutes is not None
+            else session.get("holdMinutes", ""))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     for field, value in sched.items():

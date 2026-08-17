@@ -79,6 +79,23 @@ PREWARM_LEAD_MINUTES = int(os.environ.get("PREWARM_LEAD_MINUTES", "45"))
 # Overruns are normal; a trainer finishing ten minutes late must not have the
 # room's environments deleted underneath them.
 TEARDOWN_GRACE_MINUTES = int(os.environ.get("TEARDOWN_GRACE_MINUTES", "30"))
+# Minimum time from a workshop's START that its machines are held, regardless of
+# the booked duration. A FLOOR on top of duration+grace, never a replacement:
+# `teardown_at` takes the later of the two, so a 6h workshop still gets its
+# 6h30 rather than being truncated to 4h.
+#
+# It exists because the app's create form does not send durationMinutes at all,
+# so every workshop it creates falls back to the server's 120 and would have
+# lost its machines 2h30 after the start — long before a cohort that started
+# late, or ran long, was finished with them.
+WORKSHOP_HOLD_MINUTES = int(os.environ.get("WORKSHOP_HOLD_MINUTES", "240"))
+# Ceilings on the PER-WORKSHOP overrides of the two windows above. Applied when
+# the value is READ, not only when written: a value hand-edited into Redis, or
+# stored before a ceiling was lowered, must not be able to hold a fleet for a
+# week. Mirrors live_sessions.MAX_PREWARM_LEAD_MINUTES / MAX_HOLD_MINUTES, which
+# reject the same values at the API boundary.
+LEAD_MINUTES_CAP = 360     # 6h
+HOLD_MINUTES_CAP = 1440    # 24h
 CONTROL_TICK_S = float(os.environ.get("CONTROL_TICK_S", "30"))
 CONTROL_LOOP_ENABLED = os.environ.get("CONTROL_LOOP_ENABLED", "1").strip().lower() \
     in ("1", "true", "yes")
@@ -188,8 +205,67 @@ def parse_iso(value: str):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _clamped_minutes(session: dict, field: str, cap: int, default: int) -> int:
+    """A per-workshop minute override, or the loop default when unset/unusable.
+
+    Missing, empty, zero and unparseable all mean "the trainer did not choose",
+    which is the default — not zero minutes. Negative and over-cap values are
+    clamped rather than rejected: this runs inside the control loop, where
+    raising on one bad workshop would stop the tick for every other one.
+    """
+    raw = session.get(field, "")
+    if raw in (None, "", 0, "0"):
+        return default
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(n, cap))
+
+
+def session_lead_minutes(session: dict) -> int:
+    """How far ahead of its start this workshop's machines are launched."""
+    return _clamped_minutes(session, "prewarmLeadMinutes",
+                            LEAD_MINUTES_CAP, PREWARM_LEAD_MINUTES)
+
+
+def session_hold_minutes(session: dict) -> int:
+    """Minimum minutes from START that this workshop's machines are held."""
+    return _clamped_minutes(session, "holdMinutes",
+                            HOLD_MINUTES_CAP, WORKSHOP_HOLD_MINUTES)
+
+
+def prewarm_at(session: dict):
+    """When the loop will (or did) start this workshop's machines."""
+    start = parse_iso(session.get("scheduledAt", ""))
+    if start is None:
+        return None
+    return start - timedelta(minutes=session_lead_minutes(session))
+
+
+def teardown_at(session: dict, grace_minutes: int = TEARDOWN_GRACE_MINUTES):
+    """When the loop will give this workshop's machines back.
+
+    The LATER of the two windows — the booked end plus grace, and the hold floor
+    measured from the start. Taking the later is what makes `holdMinutes` a
+    floor rather than a replacement: raising it never shortens a long workshop,
+    and a long `durationMinutes` is never truncated by a shorter hold.
+
+    An explicit end (`state` ended/cancelled/deleted) is NOT considered here —
+    that short-circuit lives in :func:`due_for_teardown`, so a trainer who
+    finishes early still gets an immediate teardown regardless of this window.
+    """
+    start = parse_iso(session.get("scheduledAt", ""))
+    if start is None:
+        return None
+    end = workshop_end(session)
+    by_duration = (end + timedelta(minutes=grace_minutes)) if end else start
+    by_hold = start + timedelta(minutes=session_hold_minutes(session))
+    return max(by_duration, by_hold)
+
+
 def due_for_prewarm(session: dict, now: datetime,
-                    lead_minutes: int = PREWARM_LEAD_MINUTES) -> bool:
+                    lead_minutes: int | None = None) -> bool:
     """Is it time to start this workshop's machines?
 
     A workshop already past its start time is still due: a trainer who opens
@@ -207,12 +283,17 @@ def due_for_prewarm(session: dict, now: datetime,
 
     Making the two mutually exclusive is what stops the oscillation, and it costs the
     late trainer nothing: teardown is not due until the scheduled end PLUS grace.
+
+    `lead_minutes` defaults to this workshop's own :func:`session_lead_minutes`;
+    pass it explicitly only to test the predicate at a chosen lead.
     """
     if session.get("state") in ("ended", "cancelled", "deleted"):
         return False
     start = parse_iso(session.get("scheduledAt", ""))
     if start is None:
         return False
+    if lead_minutes is None:
+        lead_minutes = session_lead_minutes(session)
     if now < start - timedelta(minutes=lead_minutes):
         return False
     return not due_for_teardown(session, now)
@@ -234,17 +315,26 @@ def _workshop_lifetime_minutes(session: dict,
                                margin_minutes: int = WORKSHOP_LIFETIME_MARGIN_MINUTES) -> int:
     """Hard self-destruct offset for a workshop's machines.
 
-    Prewarm lead + the booked duration + the teardown grace + a margin, so the
-    timer can only ever fire AFTER the loop's own teardown would have. It is a
-    backstop against the loop not running at all, not a second schedule
-    competing with it.
+    The whole provisioning window — prewarm point to teardown point — plus a
+    margin, so the timer can only ever fire AFTER the loop's own teardown would
+    have. It is a backstop against the loop not running at all, not a second
+    schedule competing with it.
+
+    Derived from :func:`prewarm_at` / :func:`teardown_at` rather than recomputed
+    from the same parts, because the two must not be able to drift: when the
+    hold floor pushed teardown past duration+grace, a lifetime still computed as
+    lead+duration+grace armed `shutdown -h +N` BEFORE the loop meant to tear the
+    machines down, and the workshop would have lost them mid-session.
     """
-    try:
-        duration = int(session.get("durationMinutes") or 120)
-    except (TypeError, ValueError):
-        duration = 120
-    return (PREWARM_LEAD_MINUTES + max(0, duration)
-            + TEARDOWN_GRACE_MINUTES + max(0, margin_minutes))
+    window = None
+    start, end = prewarm_at(session), teardown_at(session)
+    if start is not None and end is not None:
+        window = int((end - start).total_seconds() // 60)
+    if window is None:
+        # Unscheduled workshop: no window to measure, so fall back to the
+        # widest one it could legitimately have asked for.
+        window = session_lead_minutes(session) + session_hold_minutes(session)
+    return max(0, window) + max(0, margin_minutes)
 
 
 def workshop_end(session: dict):
@@ -260,16 +350,19 @@ def workshop_end(session: dict):
 
 def due_for_teardown(session: dict, now: datetime,
                      grace_minutes: int = TEARDOWN_GRACE_MINUTES) -> bool:
-    """Give the machines back — either the workshop ended, or it overran its
-    scheduled window plus grace.
+    """Give the machines back — either the workshop ended, or it outlived its
+    provisioning window.
 
     An explicit end always wins over the clock: a trainer who finishes early
     should not pay for an hour of idle machines.
+
+    The window itself is :func:`teardown_at` — the later of the booked end plus
+    grace and the workshop's hold floor.
     """
     if session.get("state") in ("ended", "cancelled", "deleted"):
         return True
-    end = workshop_end(session)
-    return end is not None and now >= end + timedelta(minutes=grace_minutes)
+    due = teardown_at(session, grace_minutes=grace_minutes)
+    return due is not None and now >= due
 
 
 # Fleet-record states from which a workshop may be (re)provisioned. DONE is in
@@ -1218,9 +1311,11 @@ async def control_loop(redis) -> None:
     if not CONTROL_LOOP_ENABLED:
         log.info("Control loop disabled (CONTROL_LOOP_ENABLED=0)")
         return
-    log.info("Control loop: prewarm %d min ahead, teardown %d min after, tick %.0fs, "
+    log.info("Control loop: prewarm %d min ahead (≤%d), teardown %d min after end "
+             "or %d min after start (≤%d), whichever is later, tick %.0fs, "
              "workshop seats ×%.2f safety, workshops=%s",
-             PREWARM_LEAD_MINUTES, TEARDOWN_GRACE_MINUTES, CONTROL_TICK_S,
+             PREWARM_LEAD_MINUTES, LEAD_MINUTES_CAP, TEARDOWN_GRACE_MINUTES,
+             WORKSHOP_HOLD_MINUTES, HOLD_MINUTES_CAP, CONTROL_TICK_S,
              WORKSHOP_SEAT_SAFETY, CONTROL_LOOP_WORKSHOPS)
     if not CONTROL_LOOP_APPLY:
         log.warning("Control loop is in DRY RUN — it will log what it would do "
