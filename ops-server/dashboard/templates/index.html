@@ -860,6 +860,22 @@
                         </label>
                         <button id="ws-reload" class="btn btn-small btn-secondary">Reload</button>
                     </div>
+                    <!-- Search. Filtered on the SERVER, so the count stays honest
+                         and a match past the route's 500-row cap is still findable. -->
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+                        <label style="font-size:12px;opacity:.75">Tenant
+                            <input type="text" id="ws-filter-tenant" placeholder="sro / geu80787" style="width:130px"></label>
+                        <label style="font-size:12px;opacity:.75">Trainer
+                            <input type="text" id="ws-filter-trainer" placeholder="name or domain" style="width:150px"></label>
+                        <label style="font-size:12px;opacity:.75">Workshop id
+                            <input type="text" id="ws-filter-id" placeholder="ws_msx…" style="width:150px"></label>
+                        <label style="font-size:12px;opacity:.75">Seats ≥
+                            <input type="number" id="ws-filter-seats-min" min="0" style="width:70px"></label>
+                        <label style="font-size:12px;opacity:.75">Seats ≤
+                            <input type="number" id="ws-filter-seats-max" min="0" style="width:70px"></label>
+                        <button id="ws-filter-clear" class="btn btn-small btn-secondary">Clear</button>
+                        <span id="ws-filter-note" class="content-hint" style="margin:0;font-size:11px"></span>
+                    </div>
                     <div id="ws-calendar"><p class="loading">Loading workshops…</p></div>
                 </div>
                 <div class="content-card">

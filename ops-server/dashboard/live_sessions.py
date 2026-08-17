@@ -1106,6 +1106,73 @@ def shape_admin_row(session_id, session, roster, joined, tenants=None) -> dict:
     }
 
 
+def parse_seat_bound(raw) -> int | None:
+    """A seat filter bound, or None for "unset".
+
+    None and 0 are different answers here and both are reachable from a query
+    string: `seatsMin=` means "no lower bound", `seatsMin=0` means "0 or more",
+    which is every workshop including the unlimited ones. Returning 0 for both
+    would be harmless; returning None for both would silently ignore a bound the
+    operator typed.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return max(0, int(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def matches_admin_filters(row: dict, tenant: str = "", trainer: str = "",
+                          workshop_id: str = "", seats_min=None,
+                          seats_max=None) -> bool:
+    """Does this admin row survive the operator's filters?
+
+    Pure, and separate from the route, because "which workshops are on SRO with
+    more than 30 seats" is the question an operator actually asks when a fleet
+    misbehaves, and it should be answerable without reading Redis by hand.
+
+    All three text filters are **case-insensitive substrings**, deliberately:
+    a tenant is pasted as `sro`, `sro97894` or the whole URL; a trainer is
+    remembered as a surname or a domain; a workshop id is pasted in fragments
+    from a URL. Requiring an exact match would make every one of those miss.
+
+    `trainer` matches ANY member of the team — a co-trainer's workshop is one
+    they are accountable for, and excluding it is how a co-trainer's workshop
+    becomes invisible to the person looking for it.
+
+    Seats are filtered on `maxSeats`, the BOOKED capacity, because that is what
+    now sizes the fleet (see workshop_fleet.planned_seats) and therefore what
+    "find the big ones" means. **`maxSeats` 0 means unlimited**, so it is treated
+    as +∞: it satisfies any minimum and fails any maximum.
+    """
+    def has(value: str, needle: str) -> bool:
+        return needle.strip().lower() in (value or "").lower()
+
+    if tenant.strip() and not has(row.get("ownerTenant", ""), tenant):
+        return False
+    if workshop_id.strip() and not has(row.get("sessionId", ""), workshop_id):
+        return False
+    if trainer.strip():
+        team = row.get("trainers") or []
+        if not any(has(t, trainer) for t in team):
+            return False
+    if seats_min is not None or seats_max is not None:
+        try:
+            booked = int(row.get("maxSeats") or 0)
+        except (TypeError, ValueError):
+            booked = 0
+        unlimited = booked <= 0
+        if seats_min is not None and not unlimited and booked < seats_min:
+            return False
+        if seats_max is not None and (unlimited or booked > seats_max):
+            return False
+    return True
+
+
 def capacity_summary(workers, active_counts, needed) -> dict:
     """GET /api/live/capacity payload from worker heartbeat hashes + per-worker
     active-job counts. Pure math — the endpoint only gathers the inputs."""

@@ -137,9 +137,23 @@ WORKSHOP_INSTANCE_TYPE = os.environ.get("WORKSHOP_INSTANCE_TYPE", "m6a.4xlarge")
 # let the first small workshop consume all of it.
 WORKSHOP_STANDING_MAX_SEATS = int(os.environ.get("WORKSHOP_STANDING_MAX_SEATS", "7"))
 # Spare machines on top of the arithmetic, for workshops that get their own.
-# One host lost mid-delivery strands a full machine's worth of learners and the
-# loop will not re-plan a bound workshop, so the spare is the only remedy.
-WORKSHOP_REDUNDANCY = int(os.environ.get("WORKSHOP_REDUNDANCY", "1"))
+# ZERO by design (2026-08-17). The spare was bought against "a host dies
+# mid-delivery and the loop will not re-plan a bound workshop" — but it never
+# bought what that implies: the sessions on a dead host die with it either way,
+# containers and all, so the spare only ever offered somewhere to RE-provision.
+# Replacing a machine takes minutes, which is the same order as re-provisioning
+# onto a spare that was already paid for. What actually has to survive is the
+# lifetime of the containers a connected class is sitting on, and nothing about
+# the spare affects that.
+#
+# The cost it was quietly carrying: `seats_per_worker` is 20 for k8s-101 on an
+# m6a.4xlarge, so EVERY dedicated workshop from 8 to 20 seats was 1 real machine
+# + 1 spare — 100% overhead across the whole band, held for the entire window
+# (prewarm + duration + hold), not just the class.
+#
+# Still an env var: a delivery that genuinely cannot tolerate a re-provision can
+# set WORKSHOP_REDUNDANCY=1 for that fleet without a code change.
+WORKSHOP_REDUNDANCY = int(os.environ.get("WORKSHOP_REDUNDANCY", "0"))
 # Extra minutes on top of prewarm + duration + grace before a workshop machine
 # kills itself. Wide enough that the self-destruct never races a workshop that
 # is merely overrunning — the loop's teardown should always win the race.
@@ -464,10 +478,9 @@ def plan_workshop_capacity(seats: int, profile: repo_profiles.RepoProfile,
         return {"workers": 0, "seats_per_worker": 0, "total_seats": 0,
                 "estimated": profile.estimated, "pool_kind": "dedicated",
                 "reason": f"no capacity model for {instance_type}"}
-    # Round UP, then add a spare. A workshop one seat short is a person without
-    # an environment in front of a room, and the loop does not re-plan a
-    # workshop whose machines are already bound -- so losing a host mid-delivery
-    # has no automatic remedy other than the spare bought here.
+    # Round UP. A workshop one seat short is a person without an environment in
+    # front of a room, so the division never truncates. `redundancy` is 0 by
+    # default -- see WORKSHOP_REDUNDANCY for why the spare stopped being bought.
     workers = -(-max(0, seats) // per) + max(0, redundancy)
     return {
         "workers": workers,

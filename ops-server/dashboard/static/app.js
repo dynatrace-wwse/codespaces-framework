@@ -3828,6 +3828,19 @@ function wireWorkshops() {
     });
     document.getElementById('ws-reload').addEventListener('click', wsLoadSchedule);
     document.getElementById('ws-filter-state').addEventListener('change', wsLoadSchedule);
+    // Text filters are debounced: every keystroke is a round trip that walks the
+    // whole index doing per-row HGETALL/SCARD, so firing on each one would put
+    // the operator's typing speed in front of Redis.
+    WS_FILTER_IDS.forEach(id => {
+        const el = document.getElementById(id);
+        el.addEventListener('input', wsFilterChanged);
+        el.addEventListener('keydown', (e) => { if (e.key === 'Enter') wsLoadSchedule(); });
+    });
+    document.getElementById('ws-filter-clear').addEventListener('click', () => {
+        WS_FILTER_IDS.forEach(id => { document.getElementById(id).value = ''; });
+        document.getElementById('ws-filter-state').value = '';
+        wsLoadSchedule();
+    });
     document.getElementById('ws-cal-prev').addEventListener('click', () => wsShiftMonth(-1));
     document.getElementById('ws-cal-next').addEventListener('click', () => wsShiftMonth(1));
     document.getElementById('ws-cal-today').addEventListener('click', () => { wsState.month = null; wsRenderCalendar(); });
@@ -3933,12 +3946,38 @@ function wsTenantLabel(url) {
     try { return new URL(url).hostname.split('.')[0]; } catch (e) { return url; }
 }
 
+// Filter inputs, in query-param order. One list so wiring, clearing and reading
+// cannot drift apart — adding a filter here is the only edit needed.
+const WS_FILTER_IDS = ['ws-filter-tenant', 'ws-filter-trainer', 'ws-filter-id',
+                       'ws-filter-seats-min', 'ws-filter-seats-max'];
+const WS_FILTER_PARAMS = { 'ws-filter-tenant': 'tenant', 'ws-filter-trainer': 'trainer',
+                           'ws-filter-id': 'workshopId', 'ws-filter-seats-min': 'seatsMin',
+                           'ws-filter-seats-max': 'seatsMax' };
+let wsFilterTimer = null;
+
+function wsFilterChanged() {
+    clearTimeout(wsFilterTimer);
+    wsFilterTimer = setTimeout(wsLoadSchedule, 300);
+}
+
+function wsFilterQuery() {
+    const q = new URLSearchParams();
+    const state = document.getElementById('ws-filter-state').value;
+    if (state) q.set('state', state);
+    WS_FILTER_IDS.forEach(id => {
+        const v = (document.getElementById(id).value || '').trim();
+        if (v) q.set(WS_FILTER_PARAMS[id], v);
+    });
+    return q;
+}
+
 async function wsLoadSchedule() {
     const cal = document.getElementById('ws-calendar');
     const tbody = document.querySelector('#ws-table tbody');
-    const state = document.getElementById('ws-filter-state').value;
+    const q = wsFilterQuery();
+    const qs = q.toString();
     try {
-        const r = await fetch('/api/workshops/admin/schedule' + (state ? `?state=${encodeURIComponent(state)}` : ''),
+        const r = await fetch('/api/workshops/admin/schedule' + (qs ? `?${qs}` : ''),
                               { credentials: 'same-origin' });
         if (!r.ok) {
             cal.innerHTML = '<p class="content-hint">Sign in as an org member to see workshops.</p>';
@@ -3949,6 +3988,12 @@ async function wsLoadSchedule() {
         wsState.workshops = j.workshops || [];
         document.getElementById('ws-count').textContent =
             `(${j.count}${j.total > j.count ? ` of ${j.total}` : ''})`;
+        // Say plainly that a filter is on. A page showing 1 of 46 with the
+        // reason scrolled out of view reads as "everything is gone".
+        const note = document.getElementById('ws-filter-note');
+        note.textContent = qs
+            ? `filtered — ${j.count} of ${j.total} workshop${j.total === 1 ? '' : 's'}`
+            : '';
         wsRenderCalendar();
         wsRenderTable();
     } catch (e) {
@@ -4049,6 +4094,67 @@ async function wsLiveAction(path, body, method) {
     return r.json().catch(() => ({}));
 }
 
+/** Local time for an ISO instant, or an em dash. Fleet times are UTC on the wire. */
+function wsFleetTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toLocaleString();
+}
+
+/**
+ * Provisioning status for one workshop, from the public read-only fleet route.
+ *
+ * Rendered inline rather than only linked, because "are there machines for this
+ * class" is the question the editor is opened to answer, and a JSON tab is not
+ * an answer at a glance. The raw link stays for the cases the summary flattens.
+ *
+ * Branches on `standing`, never on `workers === 0` — a small workshop launches
+ * nothing ON PURPOSE and reads identically to a failed launch otherwise. That
+ * exact conflation shipped in the app for a version.
+ */
+async function wsLoadFleet(sessionId) {
+    const box = document.getElementById('ws-ed-fleet');
+    if (!box) return;
+    try {
+        const r = await fetch(`/api/workshops/${encodeURIComponent(sessionId)}/fleet`,
+                              { credentials: 'same-origin' });
+        if (!r.ok) { box.innerHTML = `<span style="opacity:.7">Fleet unavailable (HTTP ${r.status}).</span>`; return; }
+        const f = await r.json();
+        const rows = [];
+        rows.push(`<div>Planned for <strong>${f.planned_seats ?? '—'}</strong> seats`
+                + ` — booked capacity plus the trainer team, not registrations.</div>`);
+        rows.push(`<div>Machines appear <strong>${wsFleetTime(f.prewarm_at)}</strong>`
+                + ` (${f.lead_minutes ?? '—'} min before the start), held until`
+                + ` <strong>${wsFleetTime(f.teardown_at)}</strong>.</div>`);
+        if (!f.provisioned) {
+            rows.push('<div style="opacity:.75">Not provisioned yet — nothing has been bought'
+                    + ' for this workshop. It launches at the time above whether or not anyone'
+                    + ' has registered.</div>');
+        } else if (f.standing) {
+            rows.push(`<div>On the <strong>standing</strong> lane — no dedicated machines, by design`
+                    + ` (${f.standing_max_seats ?? '?'} seats or fewer). Raise the seat cap to get`
+                    + ` its own.</div>`);
+        } else {
+            const ready = f.ready_workers ?? 0;
+            rows.push(`<div><strong>${f.workers ?? 0}</strong> machine(s) ×`
+                    + ` ${f.seats_per_worker ?? 0} seats · <strong>${ready}</strong> ready ·`
+                    + ` state <strong>${escapeHtml(f.state || 'unknown')}</strong>`
+                    + `${f.degraded ? ' <span style="color:var(--warn,#fbbf24)">(degraded — some slots came up short)</span>' : ''}</div>`);
+            if ((f.instances || []).length) {
+                rows.push(`<div style="opacity:.7">${f.instances.map(escapeHtml).join(', ')}</div>`);
+            }
+        }
+        const strayed = (f.failedOpen ?? 0) + (f.unbound ?? 0);
+        if (strayed > 0) {
+            rows.push(`<div style="color:var(--warn,#fbbf24)">⚠ ${strayed} learner(s) were served`
+                    + ` from the shared daily pool instead of this workshop's own machines.</div>`);
+        }
+        box.innerHTML = rows.join('');
+    } catch (e) {
+        box.innerHTML = '<span style="opacity:.7">Failed to load fleet.</span>';
+    }
+}
+
 function wsOpenEditor(sessionId) {
     const w = wsState.workshops.find(x => x.sessionId === sessionId);
     if (!w) return;
@@ -4086,6 +4192,17 @@ function wsOpenEditor(sessionId) {
         </div>
         <label style="font-size:.75rem;opacity:.75">Roster (${w.registrants.length} registered, ${w.joinedCount} present, ${w.boundCount} tenant-bound)
             <textarea id="ws-ed-roster" rows="5" ${ro ? 'disabled' : ''} style="width:100%">${escapeHtml(w.registrants.join('\n'))}</textarea></label>
+        <!-- Provisioning. Public, read-only route (no credentials in the payload),
+             so the raw JSON link is safe to hand to anyone already in here. -->
+        <div style="margin-top:12px;border-top:1px solid var(--border,#243043);padding-top:10px">
+            <div style="display:flex;align-items:center;gap:8px">
+                <strong style="font-size:.8rem">Fleet</strong>
+                <button class="btn btn-small btn-secondary" id="ws-ed-fleet-refresh" data-action>Refresh</button>
+                <a class="btn btn-small btn-secondary" id="ws-ed-fleet-raw" target="_blank" rel="noopener"
+                   href="/api/workshops/${encodeURIComponent(sessionId)}/fleet">Open API ↗</a>
+            </div>
+            <div id="ws-ed-fleet" style="font-size:.78rem;margin-top:8px"><span class="loading">Loading fleet…</span></div>
+        </div>
         <div id="ws-ed-msg" style="font-size:12px;min-height:18px;margin:8px 0"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
             ${ro ? '' : '<button class="btn btn-small" id="ws-ed-save" data-action>Save changes</button>'}
@@ -4099,6 +4216,8 @@ function wsOpenEditor(sessionId) {
     document.body.appendChild(el);
     el.addEventListener('click', (e) => { if (e.target === el) wsCloseEditor(); });
     document.getElementById('ws-ed-close').addEventListener('click', wsCloseEditor);
+    document.getElementById('ws-ed-fleet-refresh').addEventListener('click', () => wsLoadFleet(sessionId));
+    wsLoadFleet(sessionId);
 
     const msg = (text, ok) => {
         const m = document.getElementById('ws-ed-msg');

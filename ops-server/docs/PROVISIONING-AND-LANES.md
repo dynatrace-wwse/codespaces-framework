@@ -818,9 +818,45 @@ workshop ws_msx6508v-df67cb: 1 worker(s) ready
 Three other standing records in the same tick stayed standing (booked ≤ 7) — the threshold still
 does its job; it was never the threshold that was wrong.
 
-**Two machines for twelve seats is one machine plus a deliberate spare.** `seats_per_worker` is
-`units(m6a.4xlarge) 20 // units(kubernetes-101) 1` = 20, so one host holds the room;
-`WORKSHOP_REDUNDANCY` (1) buys the second, because the loop does not re-plan a workshop once its
-pool is bound and a host lost mid-delivery therefore has no automatic remedy. Note that
-`WORKSHOP_SEAT_SAFETY` does **not** enter this: `seats_per_worker` accepts the argument and
-ignores it, because safety is already baked into the unit table.
+Those runs each launched **two** machines for twelve seats: one real plus a `WORKSHOP_REDUNDANCY`
+spare. That spare has since been removed — see §15. Note that `WORKSHOP_SEAT_SAFETY` does **not**
+enter the arithmetic at all: `seats_per_worker` accepts the argument and ignores it, because
+safety is already baked into the unit table.
+
+---
+
+## 15. The workshop spare stopped being bought (2026-08-17)
+
+`WORKSHOP_REDUNDANCY` now defaults to **0**.
+
+The spare was justified by "a host dies mid-delivery, and the loop does not re-plan a workshop
+whose pool is already bound, so there is no automatic remedy." True as far as it goes — but it
+never bought what that sentence implies. **The sessions on a dead host die with it**, containers
+and all; a warm spare offers somewhere to *re-provision*, never continuity. And standing up a
+replacement machine takes minutes, which is the same order as re-provisioning onto a spare that
+has been paid for since prewarm.
+
+What actually has to hold is the **lifetime of the containers a connected class is sitting on**,
+and the spare has no bearing on that.
+
+The cost it was carrying was not marginal. `seats_per_worker` is 20 for k8s-101 on an
+m6a.4xlarge, so:
+
+| Booked seats | Machines needed | With the old spare | Overhead |
+|---|---|---|---|
+| 8–20 | 1 | 2 | **100%** |
+| 21–40 | 2 | 3 | 50% |
+| 41–60 | 3 | 4 | 33% |
+| 61–70 | 4 | 5 | 25% |
+
+— held for the whole window (prewarm + duration + hold), not just the class. Combined with the
+standing threshold, one booked seat took a workshop from **0 machines at 7 seats to 2 at 8**.
+
+Kept as an env var rather than deleted: a delivery that genuinely cannot tolerate a re-provision
+sets `WORKSHOP_REDUNDANCY=1` for that fleet with no code change, and `plan_workshop_capacity`
+still takes `redundancy=` explicitly.
+
+One knock-on worth knowing: 70 seats now plans **exactly 4** machines, which sits precisely *on*
+`fleet.MAX_SCALE_UP` rather than over it. The batching loop in `provision_workshop_fleet` is
+therefore no longer exercised by the bootcamp size — `test_a_bootcamp_still_EXCEEDS_the_per_call_cap`
+pins a larger workshop so the loop keeps a test that fails if someone removes it.

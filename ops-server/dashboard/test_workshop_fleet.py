@@ -193,15 +193,34 @@ def test_lead_time_is_configurable_down_to_minutes():
 
 # ── sizing ──────────────────────────────────────────────────────────────────
 
-def test_seventy_seats_of_k8s101_plans_four_machines_plus_a_spare():
+def test_seventy_seats_of_k8s101_plans_four_machines():
     """20 seats per m6a.4xlarge from the unit model, so 70 needs 4 machines —
-    plus one spare, because the loop does not re-plan a workshop whose machines
-    are already bound and losing a host would otherwise strand 20 learners."""
+    and only 4. No spare: see WORKSHOP_REDUNDANCY."""
     plan = wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")
     assert plan["seats_per_worker"] == 20
-    assert plan["workers"] == 5, "4 for the roster + 1 spare"
-    assert plan["total_seats"] == 100, "must exceed the roster, not merely meet it"
+    assert plan["workers"] == 4
+    assert plan["total_seats"] == 80, "must exceed the roster, not merely meet it"
     assert plan["pool_kind"] == "dedicated"
+
+
+def test_no_spare_is_bought_by_default():
+    """The spare was 100% overhead for every workshop from 8 to 20 seats — one
+    real machine plus one idle one, held for the whole window. It bought only
+    somewhere to RE-provision after a host loss, never the survival of the
+    sessions on it, and a replacement machine is minutes away regardless."""
+    assert wf.WORKSHOP_REDUNDANCY == 0
+    for seats in (8, 12, 20):
+        plan = wf.plan_workshop_capacity(seats, rp.K8S_101, "m6a.4xlarge")
+        assert plan["workers"] == 1, f"{seats} seats fit on one machine"
+        assert "spare" not in plan["reason"]
+
+
+def test_a_spare_can_still_be_bought_explicitly():
+    """Kept as an env var, not deleted: a delivery that cannot tolerate a
+    re-provision sets WORKSHOP_REDUNDANCY=1 without a code change."""
+    plan = wf.plan_workshop_capacity(12, rp.K8S_101, "m6a.4xlarge", redundancy=1)
+    assert plan["workers"] == 2
+    assert "+1 spare" in plan["reason"]
 
 
 def test_an_unprofiled_repo_is_planned_as_heavy():
@@ -216,13 +235,10 @@ def test_an_unprofiled_repo_is_planned_as_heavy():
 
 def test_capacity_rounds_up_never_down():
     """A workshop one seat short is a person without an environment in front of
-    a room. 21 seats needs 2 machines by arithmetic, and gets a third as the
-    spare."""
-    plan = wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge")
-    assert plan["workers"] == 3
-    # Without the spare the arithmetic itself must still have rounded UP.
-    bare = wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge", redundancy=0)
-    assert bare["workers"] == 2
+    a room. 21 seats does not fit on one 20-seat machine, so it gets two — the
+    division must never truncate, spare or no spare."""
+    assert wf.plan_workshop_capacity(21, rp.K8S_101, "m6a.4xlarge")["workers"] == 2
+    assert wf.plan_workshop_capacity(20, rp.K8S_101, "m6a.4xlarge")["workers"] == 1
 
 
 def test_unknown_instance_type_refuses_to_plan():
@@ -483,13 +499,16 @@ def test_a_workshop_larger_than_the_scale_cap_is_batched():
     assert len(batches) > 1
 
 
-def test_seventy_seats_now_EXCEEDS_the_per_call_cap():
-    """The spare pushes the bootcamp over MAX_SCALE_UP, so the batching loop in
-    provision_workshop_fleet is no longer merely theoretical — it is the path
-    the real 70-seat delivery takes. If someone removes the batching because
-    "we only ever launch four", this fails."""
+def test_a_bootcamp_still_EXCEEDS_the_per_call_cap():
+    """`scale_up` refuses more than MAX_SCALE_UP (4) per call, so the batching
+    loop in provision_workshop_fleet is not theoretical. Dropping the spare took
+    70 seats down to exactly 4 — ON the limit, not over it — so this pins a size
+    that is genuinely over. If someone removes the batching because "we only
+    ever launch four", this fails."""
     from dashboard import fleet
     assert wf.plan_workshop_capacity(70, rp.K8S_101, "m6a.4xlarge")["workers"] \
+        == fleet.MAX_SCALE_UP, "70 seats now sits exactly ON the per-call cap"
+    assert wf.plan_workshop_capacity(100, rp.K8S_101, "m6a.4xlarge")["workers"] \
         > fleet.MAX_SCALE_UP
 
 
@@ -717,7 +736,7 @@ def test_one_seat_over_the_threshold_gets_its_own_machines():
     that has to stay free for the next unannounced room."""
     plan = wf.plan_workshop_capacity(8, rp.K8S_101, "m6a.4xlarge")
     assert plan["pool_kind"] == "dedicated"
-    assert plan["workers"] == 2, "1 machine for 8 seats + 1 spare"
+    assert plan["workers"] == 1, "8 seats fit on one 20-seat machine"
 
 
 def test_a_big_workshop_is_sized_for_all_its_seats_not_the_remainder():
@@ -725,7 +744,7 @@ def test_a_big_workshop_is_sized_for_all_its_seats_not_the_remainder():
     reserve is for rooms that open with no notice; spending it on a planned
     workshop would mean the next ad-hoc room finds nothing."""
     plan = wf.plan_workshop_capacity(31, rp.K8S_101, "m6a.4xlarge")
-    assert plan["workers"] == 3, "ceil(31/20)=2 machines + 1 spare"
+    assert plan["workers"] == 2, "ceil(31/20)=2 machines"
     assert plan["total_seats"] >= 31
 
 
