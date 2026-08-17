@@ -1479,3 +1479,97 @@ def test_run_deploy_does_not_upload_when_the_build_failed():
 
     assert rc != 0
     assert uploaded == [], "uploaded despite a failed build"
+
+
+# ── Account probes (verified against the COE account, 2026-08-17) ────────────
+#
+# The endpoint/scope pairs below are NOT interchangeable, and the first shipped
+# version of this probe used a third scope that reaches neither of them:
+#   account-env-read → GET /env/v2/accounts/{uuid}/environments  → display name
+#   account-uac-read → GET /sub/v2/accounts/{uuid}/subscriptions → plan
+#   account-idm-read → only /iam/v1/accounts/{uuid}/users; the bare account GET 404s.
+
+def test_plan_reads_the_real_subscription_shape():
+    payload = {"data": [
+        {"uuid": "a", "type": "FREE", "subType": "PROSPECT", "status": "ACTIVE"},
+        {"uuid": "b", "type": "FREE", "subType": "TRIAL", "status": "EXPIRED"},
+    ]}
+    assert dep._plan_from_subscriptions(payload) == "free"
+
+
+def test_plan_trial_only_when_an_ACTIVE_row_says_trial():
+    active_trial = {"data": [{"type": "FREE", "subType": "TRIAL", "status": "ACTIVE"}]}
+    assert dep._plan_from_subscriptions(active_trial) == "trial"
+    # the same row, expired → we know nothing about today's entitlement
+    expired = {"data": [{"type": "FREE", "subType": "TRIAL", "status": "EXPIRED"}]}
+    assert dep._plan_from_subscriptions(expired) == ""
+
+
+def test_plan_paid_when_any_active_row_is_not_free():
+    payload = {"data": [
+        {"type": "FREE", "subType": "PROSPECT", "status": "ACTIVE"},
+        {"type": "SUBSCRIPTION", "subType": "", "status": "ACTIVE"},
+    ]}
+    assert dep._plan_from_subscriptions(payload) == "paid"
+
+
+def test_plan_blank_for_shapes_we_did_not_verify():
+    # A wrong commercial label is worse than an empty cell — every one of these
+    # degrades to "" rather than guessing.
+    for bad in ({}, {"data": []}, {"subscriptions": [{"type": "PAID"}]}, [], None,
+                {"data": [{"status": "ACTIVE"}]}, "nope"):
+        assert dep._plan_from_subscriptions(bad) == "", bad
+
+
+def test_env_name_matches_the_registered_environment_only():
+    """The account list is keyed by env id. A single-entry list is NOT proof the
+    entry belongs to the tenant being registered, so no rows[0] fallback."""
+    import asyncio
+
+    async def fake_bearer(*a, **k):
+        return "tok", 200, ""
+
+    class FakeResp:
+        status_code = 200
+        @staticmethod
+        def json():
+            return {"data": [{"id": "geu80787", "name": "WWSE COE", "active": True}]}
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): return FakeResp()
+
+    saved_bearer, saved_httpx = dep._oauth_bearer, dep.httpx.AsyncClient
+    dep._oauth_bearer = fake_bearer
+    dep.httpx.AsyncClient = FakeClient
+    try:
+        hit = asyncio.run(dep._probe_env_name(
+            "sso", "cid", "sec", "urn:dtaccount:u", "https://api", "u", "geu80787"))
+        miss = asyncio.run(dep._probe_env_name(
+            "sso", "cid", "sec", "urn:dtaccount:u", "https://api", "u", "abc12345"))
+    finally:
+        dep._oauth_bearer, dep.httpx.AsyncClient = saved_bearer, saved_httpx
+
+    assert hit == ("WWSE COE", "")
+    assert miss[0] == "", "matched a name that belongs to a different environment"
+    assert "abc12345" in miss[1]
+
+
+def test_env_name_blank_without_an_env_id_and_never_mints_a_token():
+    import asyncio
+    called = []
+
+    async def spy_bearer(*a, **k):
+        called.append(a); return "tok", 200, ""
+
+    saved = dep._oauth_bearer
+    dep._oauth_bearer = spy_bearer
+    try:
+        out = asyncio.run(dep._probe_env_name(
+            "sso", "cid", "sec", "urn:dtaccount:u", "https://api", "u", ""))
+    finally:
+        dep._oauth_bearer = saved
+    assert out[0] == ""
+    assert called == [], "minted an account bearer with nothing to look up"

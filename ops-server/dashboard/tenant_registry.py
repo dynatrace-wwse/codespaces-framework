@@ -27,6 +27,13 @@ They need account-scoped reads on the customer's own account, which most OAuth
 clients do not carry (docs/EPIC-002-ws-d-tenant-identity.md), so "" is a normal
 value and the UI falls back to the registrant's friendlyName.
 
+`accountName` holds the ENVIRONMENT's display name (from the account's environment
+list, e.g. "WWSE COE" for geu80787), not the account's — a tenant is registered as
+one environment, and an account with several would otherwise label them all alike.
+`plan` is paid|trial|free from ACTIVE subscriptions only. The two come from
+different endpoints behind different scopes, so one can be present without the
+other; see _probe_env_name / _probe_plan in app_deploy.py.
+
 The shaping/merge logic is pure (no Redis) and unit-tested in
 test_tenant_registry.py; the async helpers below are thin wrappers.
 tenant_map.json (content delivery) is intentionally untouched — different

@@ -2102,62 +2102,114 @@ async def _oauth_bearer(sso_url: str, cid: str, csec: str, resource: str,
 # answer; most will not. A blank name is the EXPECTED outcome, not a failure — the UI
 # falls back to the friendlyName the registrant typed. This must never raise, never block
 # a deploy, and never lengthen it by more than its own timeouts.
-ACCOUNT_READ_SCOPE = "account-idm-read"
+# Two INDEPENDENT account scopes, verified against the COE account 2026-08-17.
+# They are not interchangeable and a client may hold either, both or neither:
+#   account-env-read → GET /env/v2/accounts/{uuid}/environments  (the display name)
+#   account-uac-read → GET /sub/v2/accounts/{uuid}/subscriptions (the commercial plan)
+# account-idm-read reaches NEITHER — it only opens /iam/v1/accounts/{uuid}/users,
+# and the bare GET /iam/v1/accounts/{uuid} does not exist at all (404). Mint the two
+# separately so a client holding one still yields half the answer.
+ACCOUNT_ENV_SCOPE = "account-env-read"
+ACCOUNT_SUB_SCOPE = "account-uac-read"
 
 
 async def _probe_account_name(sso_url: str, cid: str, csec: str, account_urn: str,
-                              api_host: str) -> tuple[str, str, str]:
-    """(account_name, plan, reason) — best effort. `reason` explains a blank for the
-    deploy response; it is diagnostic text for a human, never an error condition."""
+                              api_host: str, env_id: str = "") -> tuple[str, str, str]:
+    """(environment_name, plan, reason) — best effort, two independent probes.
+
+    `reason` explains a blank for the deploy response; it is diagnostic text for a
+    human, never an error condition. A client that holds neither account scope (the
+    common case) makes this return ("", "", …) and the UI falls back to the
+    registrant-supplied friendlyName."""
     uuid = account_urn.rsplit(":", 1)[-1].strip()
     if not uuid:
         return "", "", "no account uuid in the URN"
+    name, name_reason = await _probe_env_name(sso_url, cid, csec, account_urn,
+                                              api_host, uuid, env_id)
+    plan, plan_reason = await _probe_plan(sso_url, cid, csec, account_urn,
+                                          api_host, uuid)
+    return name, plan, "; ".join(x for x in (name_reason, plan_reason) if x)
+
+
+async def _probe_env_name(sso_url, cid, csec, account_urn, api_host, uuid,
+                          env_id) -> tuple[str, str]:
+    """The environment's display name from the account's environment list.
+
+    Named per ENVIRONMENT, not per account, and that is the right granularity:
+    a tenant is registered as one environment, and an account holding several
+    would otherwise all show the same label. Requires account-env-read."""
+    if not env_id:
+        return "", "no environment id to match"
     # SSO 400s a scope the client does not hold, and does it with an EMPTY
     # error_description — so the status code is the whole signal. Do not log the body.
-    token, st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, ACCOUNT_READ_SCOPE)
+    token, st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, ACCOUNT_ENV_SCOPE)
     if token is None:
-        return "", "", f"client lacks {ACCOUNT_READ_SCOPE} (SSO HTTP {st})"
-    h = {"Authorization": f"Bearer {token}"}
-    name = ""
-    reason = ""
+        return "", f"client lacks {ACCOUNT_ENV_SCOPE} (SSO HTTP {st})"
     try:
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{api_host}/iam/v1/accounts/{uuid}", headers=h)
-            if r.status_code == 200:
-                name = str((r.json() or {}).get("name") or "").strip()
-            else:
-                reason = f"account lookup HTTP {r.status_code}"
-            # Plan / trial-vs-paid has NO precedent anywhere in this codebase. Probe the
-            # documented subscriptions path once and record only what it answered. If it
-            # does not answer, the column stays blank — a tenant's commercial status is
-            # not something to infer from a URL, an env id, or a token tier.
-            try:
-                rs = await c.get(f"{api_host}/sub/v2/accounts/{uuid}/subscriptions",
-                                 headers=h)
-                plan_reason = f"subscriptions HTTP {rs.status_code}"
-                plan = _plan_from_subscriptions(rs.json()) if rs.status_code == 200 else ""
-            except Exception as exc:
-                plan, plan_reason = "", f"subscriptions probe failed: {exc}"
+            r = await c.get(f"{api_host}/env/v2/accounts/{uuid}/environments",
+                            headers={"Authorization": f"Bearer {token}"})
+        if r.status_code != 200:
+            return "", f"environment list HTTP {r.status_code}"
+        rows = (r.json() or {}).get("data") or []
+        for row in rows:
+            if isinstance(row, dict) and str(row.get("id") or "").strip() == env_id:
+                return str(row.get("name") or "").strip(), ""
+        # Do NOT fall back to rows[0] when there is exactly one environment: the
+        # account may simply be a different one from the tenant being registered,
+        # and a confidently wrong name is worse than none.
+        return "", f"{env_id} not in the account's {len(rows)} environment(s)"
     except Exception as exc:
-        return "", "", f"account lookup failed: {exc}"
+        return "", f"environment list failed: {exc}"
     finally:
         del token
-    return name, plan, "; ".join(x for x in (reason, plan_reason) if x)
+
+
+async def _probe_plan(sso_url, cid, csec, account_urn, api_host, uuid) -> tuple[str, str]:
+    """Commercial plan from the account's subscriptions. Requires account-uac-read —
+    a DIFFERENT scope from the environment list, so one can answer without the other."""
+    token, st, _ = await _oauth_bearer(sso_url, cid, csec, account_urn, ACCOUNT_SUB_SCOPE)
+    if token is None:
+        return "", f"client lacks {ACCOUNT_SUB_SCOPE} (SSO HTTP {st})"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{api_host}/sub/v2/accounts/{uuid}/subscriptions",
+                            headers={"Authorization": f"Bearer {token}"})
+        if r.status_code != 200:
+            return "", f"subscriptions HTTP {r.status_code}"
+        return _plan_from_subscriptions(r.json()), ""
+    except Exception as exc:
+        return "", f"subscriptions probe failed: {exc}"
+    finally:
+        del token
 
 
 def _plan_from_subscriptions(payload) -> str:
-    """`trial` when every live subscription says so, `paid` when any does not, "" when
-    the shape is not what we guessed. Unverified against a real response on purpose —
-    a wrong guess must degrade to blank, never to a confident wrong label."""
-    items = payload.get("subscriptions") if isinstance(payload, dict) else payload
-    if not isinstance(items, list) or not items:
+    """`paid` | `trial` | `free` | "" from the subscription list.
+
+    Shape verified against the COE account 2026-08-17:
+      {"data": [{"uuid", "name", "type": "FREE", "subType": "PROSPECT|TRIAL",
+                 "status": "ACTIVE|EXPIRED", "startTime", "endTime"}]}
+
+    Only ACTIVE rows count — an account whose every subscription has EXPIRED says
+    nothing about what it is entitled to today, so that answers "" rather than a
+    stale label. An unrecognised shape also answers "": a wrong guess about a
+    customer's commercial status is worse than an empty cell."""
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
         return ""
-    kinds = {str((s or {}).get("type") or (s or {}).get("subscriptionType") or "").lower()
-             for s in items if isinstance(s, dict)}
-    kinds.discard("")
-    if not kinds:
+    live = [s for s in items
+            if isinstance(s, dict) and str(s.get("status") or "").upper() == "ACTIVE"]
+    if not live:
         return ""
-    return "trial" if kinds == {"trial"} else "paid"
+    types = {str(s.get("type") or "").upper() for s in live}
+    types.discard("")
+    if not types:
+        return ""
+    if types - {"FREE"}:
+        return "paid"
+    subs = {str(s.get("subType") or "").upper() for s in live}
+    return "trial" if "TRIAL" in subs else "free"
 
 
 # ─── Registration preflight (2026-08-11 — HANDOFF_TOKEN_AND_DOCUMENT_IDENTITY §8.9) ───
@@ -2447,7 +2499,7 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         # 1b. Account display name + commercial plan, IF this client happens to carry
         #     account-scoped reads. Blank is the normal answer — see _probe_account_name.
         account_name, plan, account_detail = await _probe_account_name(
-            sso_url, cid, csec, account_urn, api_host)
+            sso_url, cid, csec, account_urn, api_host, tenant_id)
 
         # 2. Can this client mint platform tokens? Storing one that cannot would install a
         #    credential that fails at the first hands-on launch instead of here.

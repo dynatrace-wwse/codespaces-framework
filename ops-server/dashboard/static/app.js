@@ -3752,8 +3752,8 @@ const csCell = v => (v ? escapeHtml(v) : '<span class="cs-dash">—</span>');
  *  a typed one is a claim, and they are worth telling apart when auditing the fleet. */
 function tenantNameCell(reg) {
     if (reg.accountName) {
-        return `<span title="Read from the account API">${escapeHtml(reg.accountName)}</span>`
-             + ` <span style="color:var(--accent);font-size:.7rem" title="Verified via the account API">●</span>`;
+        return `<span title="Read from the account's environment list">${escapeHtml(reg.accountName)}</span>`
+             + ` <span style="color:var(--accent);font-size:.7rem" title="Verified: the environment's own display name, read at registration">●</span>`;
     }
     return reg.friendlyName
         ? `<span title="Supplied by whoever registered this tenant — not verified">${escapeHtml(reg.friendlyName)}</span>`
