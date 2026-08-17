@@ -175,19 +175,13 @@ printCodespacesVerification(){
 #  Orbital greeting — shown when the container runs inside the Dynatrace
 #  Enablement App. Deliberately short: the learner already has the training in
 #  a browser tab, so anything the tab shows is noise in the terminal.
-#
-#  Set ORBITAL_GREETING_VARIANT=B for the variant that also reports the MCP
-#  server. Default is A (leanest).
 # ══════════════════════════════════════════════════════════════════════════════
 
 printOrbitalGreeting(){
-  local title tenant cluster
+  local title tenant
   # variables.sh derives the title from mkdocs.yaml — shared with the p10k prompt.
   title="${DT_TRAINING_TITLE:-${RepositoryName:-Dynatrace Enablement}}"
   tenant="${DT_ENVIRONMENT:-}"
-  # K3D_CLUSTER_NAME is NOT set in an Orbital Sysbox container (verified in a live
-  # session), so this line stays hidden there rather than printing an empty value.
-  cluster="${K3D_CLUSTER_NAME:-}"
 
   echo -e "${thinline}"
   echo -e "${GREEN} "
@@ -207,8 +201,9 @@ printOrbitalGreeting(){
   echo -e "  ${NORMAL}Delivered through the Dynatrace Enablement App — made with ${RED}♥${NORMAL} by the SE Center of Excellence${RESET}"
   echo -e ""
 
-  [ -n "$tenant" ]  && echo -e "  ${LILA}Tenant${RESET}    ${tenant}"
-  [ -n "$cluster" ] && echo -e "  ${LILA}Cluster${RESET}   ${cluster}"
+  # No Cluster line: K3D_CLUSTER_NAME is not set in an Orbital Sysbox container
+  # (verified live), so it could only ever have rendered blank.
+  [ -n "$tenant" ] && echo -e "  ${LILA}Tenant${RESET}    ${tenant}"
 
   # Registered apps. Field 1 of the app registry is the app name; the URL is
   # deliberately not printed — the learner reaches the app through its own tab.
@@ -224,13 +219,9 @@ printOrbitalGreeting(){
 
   echo -e "  ${NORMAL}For your best dev experience: ${RESET}k9s kubectl helm k3d node npm jq python3 gh${RESET}"
 
-  if [ "${ORBITAL_GREETING_VARIANT:-A}" = "B" ]; then
-    if [ -f "$REPO_PATH/.vscode/mcp.json" ]; then
-      echo -e "  ${NORMAL}🧠 Dynatrace MCP Server ${GREEN}enabled${NORMAL} — type ${RESET}selectEnvironment${NORMAL} to switch tenant${RESET}"
-    else
-      echo -e "  ${NORMAL}🧠 Dynatrace MCP Server ${YELLOW}not enabled${NORMAL} — type ${RESET}enableMCP${NORMAL} to connect${RESET}"
-    fi
-  fi
+  # No MCP line here on purpose: the MCP server needs VS Code running with an
+  # agent attached to it, and a plain Orbital container has neither. Advertising
+  # enableMCP would point the learner at something that cannot work yet.
 
   if [ "${ERROR_COUNT:-0}" -gt 0 ] 2>/dev/null; then
     echo -e "  ${YELLOW}⚠${ORANGE} ${ERROR_COUNT} errors detected while creating your environment${RESET} — type ${RESET}verifyContainerCreation${NORMAL} for details${RESET}"
