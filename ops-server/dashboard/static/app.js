@@ -3605,6 +3605,10 @@ setInterval(() => {
 // ── Help modal ───────────────────────────────────────────────────────────────
 
 function openHelp() {
+    // Help is gated content: it documents the signed-in dashboard, and the tab that
+    // opens it is hidden for role-anon. Guard here too, or the '?' key would still
+    // pop the modal for an anonymous visitor.
+    if (document.body.classList.contains('role-anon')) return;
     document.getElementById('help-modal').hidden = false;
 }
 

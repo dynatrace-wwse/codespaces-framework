@@ -1773,19 +1773,21 @@ body.role-writer .tab-writer-only { display: inline-block; }
 body.auth-pending nav,
 body.auth-pending main { visibility: hidden; }
 
-body.role-anon nav .tab:not(#tab-register):not(.tab-help) { display: none; }
+body.role-anon nav .tab:not(#tab-register) { display: none; }
 body.role-anon .view:not(#view-register) { display: none !important; }
 
 #landing {
     position: relative; overflow: hidden;
-    padding: 4.5rem 1.5rem 4rem;
+    padding: clamp(1.5rem, 6vh, 5rem) 1.5rem 4rem;
     margin: -20px -24px 0;          /* bleed past main's padding, edge to edge */
     background: var(--bg);
     /* Fill what is left below the header + tab bar, so the hero does not end in a
-       band of empty page. display:flex centres the copy in whatever height that is. */
+       band of empty page. The copy itself is NOT vertically centred: flex-start plus
+       the padding above parks it in the upper band, which reads better on tall screens
+       than a block floating dead-centre. */
     min-height: calc(100vh - 108px);
     display: none;                  /* .active (set by showLanding) reveals it */
-    align-items: center;
+    align-items: flex-start;
 }
 #landing.active { display: flex; }
 #landing .hero-mesh {
@@ -1807,7 +1809,7 @@ body.role-anon .view:not(#view-register) { display: none !important; }
     mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 0%, transparent 80%);
 }
 #hero-particles { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
-#landing .hero-inner { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; width: 100%; }
+#landing .hero-inner { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; width: 100%; text-align: center; }
 
 #landing .hero-badge {
     display: inline-flex; align-items: center; gap: .45rem;
@@ -1839,10 +1841,17 @@ body.role-anon .view:not(#view-register) { display: none !important; }
     font-size: clamp(.95rem, 2vw, 1.2rem); font-weight: 500;
     color: var(--text-2); margin: 0 0 .9rem; letter-spacing: -.01em;
 }
-#landing p { max-width: 640px; color: var(--text-2); font-size: .9rem; line-height: 1.65; margin: 0 0 1.8rem; }
-#landing .hero-note { font-size: .76rem; opacity: .75; margin: 1.6rem 0 0; }
+/* "powered by Orbital" credit riding on the tagline. inline-block so the phrase
+   never splits across a wrap on narrow viewports. */
+#landing .hero-powered {
+    display: inline-block; margin-left: .55rem;
+    font-size: .78em; font-weight: 500; opacity: .7; letter-spacing: 0;
+}
+#landing .hero-powered strong { color: var(--accent); font-weight: 700; }
+#landing p { max-width: 640px; color: var(--text-2); font-size: .9rem; line-height: 1.65; margin: 0 auto 1.8rem; }
+#landing .hero-note { font-size: .76rem; opacity: .75; margin: 1.6rem auto 0; }
 
-#landing .hero-ctas { display: flex; gap: .7rem; flex-wrap: wrap; }
+#landing .hero-ctas { display: flex; justify-content: center; gap: .7rem; flex-wrap: wrap; }
 .btn-hero {
     display: inline-flex; align-items: center; gap: .5rem;
     padding: .62rem 1.15rem; border-radius: 8px;
