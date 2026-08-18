@@ -162,6 +162,11 @@ def _terminate(email, trainer=TRAINER, sid=SID):
                        headers=BEARER, json={"trainerEmail": trainer})
 
 
+def _self_terminate(email, sid=SID):
+    return client.post(f"/api/live/sessions/{sid}/my-environment/terminate",
+                       headers=BEARER, json={"email": email})
+
+
 def _reprovision(email, trainer=TRAINER, tenant=COE):
     return client.post(f"/api/live/sessions/{SID}/learner/{email}/reprovision",
                        headers=BEARER, json={"trainerEmail": trainer,
@@ -177,6 +182,70 @@ def _stub_provision(result=None, raises=None):
     _fake.calls = []
     a.api_arena_provision = _fake
     return _fake
+
+
+# ── Self-terminate ───────────────────────────────────────────────────────────
+# The learner discarding their OWN environment, which is the first half of
+# "provision here instead" when they are sitting in a tenant it does not run in.
+# No trainerEmail: the app-function fills `email` from the signed-in user, so the
+# gate is upstream of this route, not in it.
+
+
+def test_self_terminate_kills_the_callers_job_wherever_it_runs():
+    # The whole point: the job is on COE, the learner is asking from SRO, and
+    # nothing in the request names a tenant or a job id.
+    _job("a", LEARNER, SID, tenant=COE)
+    r = _self_terminate(LEARNER)
+    assert r.status_code == 200
+    assert r.json()["terminated"] == ["enablement-a"]
+    assert a.pool.h["job:running:enablement-a"]["terminating"] == "1"
+
+
+def test_self_terminate_touches_nobody_else():
+    _job("mine", LEARNER, SID)
+    _job("theirs", OTHER, SID)
+    assert _self_terminate(LEARNER).json()["terminated"] == ["enablement-mine"]
+    assert a.pool.h["job:running:enablement-theirs"]["terminating"] == ""
+
+
+def test_self_terminate_is_scoped_to_this_workshop():
+    _job("mine", LEARNER, SID)
+    _job("elsewhere", LEARNER, OTHER_SID)
+    assert _self_terminate(LEARNER).json()["terminated"] == ["enablement-mine"]
+    assert a.pool.h["job:running:enablement-elsewhere"]["terminating"] == ""
+
+
+def test_self_terminate_with_no_environment_is_a_quiet_success():
+    assert _self_terminate(LEARNER).json()["count"] == 0
+
+
+def test_self_terminate_is_idempotent():
+    _job("a", LEARNER, SID, terminating="1")
+    assert _self_terminate(LEARNER).json() == {
+        "terminated": [], "count": 0, "alreadyTerminating": 1}
+
+
+def test_self_terminate_rejects_a_malformed_email():
+    assert _self_terminate("not-an-email").status_code == 400
+
+
+def test_self_terminate_404s_on_an_unknown_workshop():
+    assert _self_terminate(LEARNER, sid="ws_nope").status_code == 404
+
+
+def test_self_terminate_requires_authentication():
+    r = client.post(f"/api/live/sessions/{SID}/my-environment/terminate",
+                    json={"email": LEARNER})
+    assert r.status_code == 401
+
+
+def test_self_terminate_records_the_learner_as_the_actor():
+    # Not a trainer action — the board must not read as staff intervention.
+    _job("a", LEARNER, SID)
+    _self_terminate(LEARNER)
+    ev = [e[1] for e in a.pool.x[f"live:session:{SID}:events"]
+          if e[1]["kind"] == ls.EVENT_ENV_TERMINATED]
+    assert ev and ev[-1]["actor"] == LEARNER
 
 
 # ── Terminate ────────────────────────────────────────────────────────────────

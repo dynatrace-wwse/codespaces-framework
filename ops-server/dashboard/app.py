@@ -7067,6 +7067,12 @@ async def api_live_session_terminate_all(session_id: str, body: LiveSessionTrain
             "alreadyTerminating": skipped}
 
 
+class LiveSessionMyEnv(BaseModel):
+    """Body of the learner's own terminate. `email` is filled by the app-function
+    from the signed-in user, never by the browser — see api_live_my_env_terminate."""
+    email: str = ""
+
+
 class LiveSessionLearnerEnv(BaseModel):
     trainerEmail: str = ""
     # Reprovision only: the tenant to build in. The app stamps its own tenant
@@ -7118,6 +7124,53 @@ async def api_live_learner_terminate(session_id: str, email: str,
                                email=email, actor=body.trainerEmail,
                                detail=",".join(terminated)[:200])
     log.info("live: learner terminate %s/%s → %d terminated, %d already terminating",
+             scrub_for_log(session_id), scrub_for_log(email),
+             len(terminated), skipped)
+    return {"terminated": terminated, "count": len(terminated),
+            "alreadyTerminating": skipped}
+
+
+@app.post("/api/live/sessions/{session_id}/my-environment/terminate")
+async def api_live_my_env_terminate(session_id: str,
+                                    body: LiveSessionMyEnv,
+                                    request: Request):
+    """A learner discards their OWN environment for this workshop, wherever it runs.
+
+    The per-learner route above is trainer-gated on purpose. This one is the
+    learner acting on themselves, and it exists for exactly one situation: they
+    are sitting in a tenant that is not the one their environment was built in,
+    and they have chosen to move. The browser asking cannot terminate it itself
+    — a session record is namespaced per tenant origin, so from the new tenant
+    the learner's own job id is unknowable.
+
+    Tenant-agnostic, like the trainer route, because that is the whole point:
+    `_workshop_jobs` matches on (workshop_id, email), so nothing here has to
+    guess a job id or the string shape of a tenant. It follows that this reaps
+    EVERY environment this learner holds for this workshop, on any tenant —
+    which is what "start again here" means, and why the caller terminates first
+    and provisions afterwards.
+
+    Identity is not taken from this body on trust: the app-function fills
+    `email` from getCurrentUserDetails(), the same pattern the workshop grant
+    and unlock functions use, so a client cannot name someone else. Idempotent.
+    """
+    await _require_service_or_writer(request)
+    email = live_sessions.normalize_email(body.email)
+    if not live_sessions.is_valid_email(email):
+        raise HTTPException(status_code=400, detail="a valid email is required")
+    sess_key, _, _ = _live_keys(session_id)
+    session = await pool.hgetall(sess_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    jobs = await _workshop_jobs(session_id, session, {email})
+    terminated, skipped = await _terminate_jobs(jobs)
+    if terminated:
+        # actor == email: the audit trail must show the learner did this to
+        # themselves, not a trainer, or the board reads as staff action.
+        await _emit_live_event(session_id, live_sessions.EVENT_ENV_TERMINATED,
+                               email=email, actor=email,
+                               detail=",".join(terminated)[:200])
+    log.info("live: self terminate %s/%s → %d terminated, %d already terminating",
              scrub_for_log(session_id), scrub_for_log(email),
              len(terminated), skipped)
     return {"terminated": terminated, "count": len(terminated),
