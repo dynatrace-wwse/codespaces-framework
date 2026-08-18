@@ -522,18 +522,26 @@ def test_roster_targets_works_for_a_code_only_workshop():
     assert ls.roster_targets(None, TRAINER, True) == [(TRAINER, "trainer")]
 
 
-def test_trainer_is_exempt_from_the_learner_skips():
-    """The trainer calls provision-all FROM the workshop tenant and never joins
-    their own workshop, so neither skip may ever apply to them — the endpoint
-    enforces this by only consulting provision_skip_status for learners."""
+def test_only_the_CALLER_is_exempt_from_the_binding_rules():
+    """A trainer TEAM spans tenants, so "the trainer is calling from the
+    workshop tenant" is a fact about the caller and about nobody else.
+
+    This used to exempt every trainer row, and provision-all then built each
+    co-trainer a container on the CALLER's tenant — sprint, for a lead bound to
+    COE (ws_msxt044r-bed99c, 2026-08-18). The behavioural half of this rule is
+    pinned in test_live_provisioning.py; here we only keep the blanket
+    role-based exemptions from coming back.
+    """
     import inspect
     from dashboard import app as a
     src = inspect.getsource(a.api_live_session_provision_all)
-    assert 'if role == "learner" else ""' in src, \
-        "provision-all must not run the joined/tenant skips against the trainer"
+    assert 'if role == "learner" else ""' not in src, \
+        "provision-all must place co-trainers by their own binding, not by role"
+    assert "email == caller" in src, \
+        "the caller is the one exemption; it has to be spelled out"
     ready = inspect.getsource(a.api_live_session_readiness)
-    assert '"none" if role == "trainer"' in ready, \
-        "readiness must not report the trainer as not-joined/foreign"
+    assert '"none" if role == "trainer"' not in ready, \
+        "readiness must classify a co-trainer by their binding, not by role"
 
 
 def test_chunk_filter_applies_to_learners_only():

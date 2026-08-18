@@ -860,3 +860,76 @@ One knock-on worth knowing: 70 seats now plans **exactly 4** machines, which sit
 `fleet.MAX_SCALE_UP` rather than over it. The batching loop in `provision_workshop_fleet` is
 therefore no longer exercised by the bootcamp size — `test_a_bootcamp_still_EXCEEDS_the_per_call_cap`
 pins a larger workshop so the loop keeps a test that fails if someone removes it.
+
+---
+
+## 16. The binding is the registry — for learners AND for the trainer team (2026-08-18)
+
+Two bugs on `ws_msxt044r-bed99c`, one root cause.
+
+### What was seen
+
+* **The two trainer boards disagreed.** "Show details" on the Workshops list said
+  `hasn't joined yet — starts when they arrive` about the same two people the board
+  inside the classroom, on the same 10 s poll, was showing as `bound`.
+* **A co-trainer's environment was built on the wrong tenant.** The co-trainer clicking
+  "Provision all environments" was delivering from **sprint**; the lead trainer, bound to
+  **COE**, got a container on sprint. It logged
+  `Sprint environment detected — tenant for API: https://ydi9582h.sprint.dynatracelabs.com`
+  and had to be rebuilt by hand.
+
+### Why
+
+Three facts about a person are recorded, and they are deliberately different (§ the
+"Tenant binding" block in `live_sessions.py`):
+
+| Fact | Key | Means |
+|---|---|---|
+| registered | `:roster` | invited |
+| **bound** | `:tenants` | **we know which tenant to build in** |
+| present | `:joined` | actually in an open room |
+
+`provision_skip_status` and `readiness_gap_state` were both keyed on **presence**. That is
+the wrong fact for both questions they answer:
+
+* Pre-provisioning happens **before the room opens** — that is its entire purpose — so
+  `:joined` is empty when the trainer clicks and *every* row came back `not-joined`.
+* `not-joined` was then rendered as "starts when they arrive", contradicting the
+  attendance chip on the other board, which was reading `:tenants` and was right.
+
+Trainers had a second problem on top: every trainer row was **exempted** from the rules
+entirely, on the reasoning that "the trainer calls from the workshop tenant, so their
+tenant is known by construction". True of the *caller*. False of everyone else on a
+trainer team — and a trainer team spans tenants by design (a co-trainer delivering from
+their own tenant is the feature). Readiness flattened them all to `none`, and
+provision-all built them all on `body.tenant`.
+
+### The rule now
+
+**A binding is sufficient and presence is not required.** One rule, applied to learners
+and to the whole trainer team alike:
+
+| State | provision-all | readiness |
+|---|---|---|
+| bound to the caller's tenant | build here | `none` (or `ready`/`failed`…) |
+| bound to another tenant | `requested` — their own app builds it | `foreign` |
+| no binding at all | `requested`, reason `not-joined` — nothing is built | `not-joined` |
+
+The single exemption is the **caller**: they are here, asking from `body.tenant`, so their
+tenant is known even on a workshop created before trainers auto-bound. It is spelled out
+as `email == caller` rather than inferred from a role, and `test_live_sessions.py` fails if
+a role-based exemption comes back.
+
+`not-joined` now means *no binding*, which is the only case that genuinely has to wait for
+the person to show up — and showing up is what binds them. Same registry as the students:
+entering the classroom.
+
+### Keep this true
+
+* **Never re-key these two functions on `:joined`.** They are the pair that must agree with
+  the attendance chip; if one moves, the boards contradict each other again.
+* **Never re-add a blanket `role == "trainer"` shortcut.** Whatever it says will be a claim
+  about the caller applied to people on other tenants.
+* Trainer rows carry a real `attendance` value (`registered`/`bound`/`present`) instead of a
+  flat `trainer` chip — a co-trainer who never opened the workshop has to look different
+  from one who is bound and ready, because only one of them can be provisioned.

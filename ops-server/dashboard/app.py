@@ -6686,9 +6686,13 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
                            detail=f"{len(roster)} on roster")
     wanted = {e.strip().lower() for e in body.emails if e.strip()} if body.emails else None
     results = []
-    # WS-4: the trainer is provisioned like a learner but is never subject to the
-    # joined/tenant skips — they are calling from body.tenant, so their tenant is
-    # known by construction and they never "join" their own workshop.
+    caller = live_sessions.normalize_email(body.trainerEmail)
+    # WS-4: the trainer is provisioned like a learner — and, since a trainer team
+    # spans tenants, subject to the SAME binding rules. It used to exempt every
+    # trainer row from them, which read as "their tenant is known by
+    # construction". True of the caller; false of everyone else on the team. A
+    # co-trainer delivering from sprint clicked "Provision all" and built the
+    # lead an environment on sprint, in a tenant the lead has no account on.
     # `emails` is the caller's chunk of the roster, so it filters LEARNERS
     # only — includeTrainer is explicit intent and must not be cancelled out by
     # a chunk that happens not to contain the trainer's address.
@@ -6704,9 +6708,14 @@ async def api_live_session_provision_all(session_id: str, body: LiveSessionProvi
     if targets:
         await pool.hdel(provdone_key, *[e for e, _ in targets])
     for email, role in targets:
-        skip = (live_sessions.provision_skip_status(
-            email in joined, joined_tenants.get(email, ""), body.tenant)
-            if role == "learner" else "")
+        # The caller is exempt from the binding lookup and only the caller: they
+        # are here, asking from body.tenant, so their tenant is known even on a
+        # workshop created before trainers auto-bound. Everyone else — learner
+        # and co-trainer alike — is placed by their own binding.
+        bound = joined_tenants.get(email, "") or (
+            body.tenant if email == caller else "")
+        skip = live_sessions.provision_skip_status(
+            email in joined or email == caller, bound, body.tenant)
         # A foreign-tenant learner always goes through the pull channel: only their own
         # tenant's app can mint for them. Orbital used to shortcut this for the handful of
         # accounts it held credentials for, which made one tenant behave unlike every other
@@ -7298,14 +7307,23 @@ async def api_live_session_readiness(session_id: str, request: Request,
                             "state": "failed",
                             "jobId": failed_by_email[email]})
         else:
+            # A trainer is classified exactly like a learner, off their own
+            # binding. Flattening every trainer row to "none" was a claim about
+            # the ASKING trainer applied to the whole team: a co-trainer bound
+            # to another tenant read as "no environment yet, provisioning from
+            # here", and provision-all then did precisely that — built them a
+            # container on the caller's tenant. They are independent tenants;
+            # the board has to say so.
             results.append({"email": email, "role": role, "tenant": row_tenant,
-                            # The trainer's tenant is the one they are asking from,
-                            # and they never join their own workshop — so the
-                            # foreign/not-joined classifications don't apply.
-                            "state": "none" if role == "trainer"
-                            else live_sessions.readiness_gap_state(
+                            "state": live_sessions.readiness_gap_state(
                                 email in joined,
-                                joined_tenants.get(email, ""), tenant,
+                                # Trainers auto-bind on entry; row_tenant carries
+                                # the pre-binding fallbacks (their environment's
+                                # own record, or — for the caller alone — the
+                                # tenant they are asking from).
+                                joined_tenants.get(email, "") or (
+                                    row_tenant if role == "trainer" else ""),
+                                tenant,
                                 requested=live_sessions.provision_request_pending(
                                     session, email, provision_done))})
     # Two fields the board needs that are not derivable client-side:
@@ -7319,9 +7337,14 @@ async def api_live_session_readiness(session_id: str, request: Request,
     #                  nothing is torn down automatically.
     for row in results:
         email = row["email"]
-        row["attendance"] = ("trainer" if row.get("role") == "trainer"
-                             else live_sessions.attendance_state(
-                                 email, roster, joined, joined_tenants))
+        # Trainers get a real attendance value too, against the trainer team
+        # instead of the roster. A flat "trainer" chip hid the one fact the
+        # board exists to show — whether we know where to build for them — so a
+        # co-trainer who had never opened the workshop looked identical to one
+        # who was bound and ready.
+        row["attendance"] = live_sessions.attendance_state(
+            email, trainer_emails if row.get("role") == "trainer" else roster,
+            joined, joined_tenants)
         meta = running_by_email.get(email)
         env_tenant = live_sessions.normalize_tenant(meta.get("arena_tenant")) if meta else ""
         if env_tenant:

@@ -395,9 +395,22 @@ def test_provision_skip_foreign_tenant():
 
 
 def test_provision_skip_not_joined():
+    # not-joined means we do not know WHERE to build: no binding, not present.
     assert ls.provision_skip_status(False, "", COE) == "not-joined"
-    # never joined even with a stale tenant record → still not-joined
-    assert ls.provision_skip_status(False, SRO, COE) == "not-joined"
+
+
+def test_provision_skip_binding_is_enough_without_presence():
+    """The binding is the registry — presence is not required to provision.
+
+    Pre-provisioning happens BEFORE the room opens, so nobody is in :joined
+    when the trainer clicks. Requiring presence made every row of a workshop
+    provisioned ahead of time come back "not-joined", which is also what the
+    trainer board said about learners it was simultaneously showing as `bound`.
+    """
+    # bound to the caller's own tenant → build it here, now
+    assert ls.provision_skip_status(False, COE, COE) is None
+    # bound elsewhere → their own app builds it there
+    assert ls.provision_skip_status(False, SRO, COE) == "foreign-tenant"
 
 
 def test_provision_skip_backward_compatible_when_tenant_absent():
@@ -409,6 +422,10 @@ def test_provision_skip_backward_compatible_when_tenant_absent():
 
 def test_readiness_gap_state_with_trainer_tenant():
     assert ls.readiness_gap_state(False, "", COE) == "not-joined"
+    # bound but not yet present is NOT "not-joined" — the classroom board calls
+    # that person `bound`, and the two surfaces read the same poll.
+    assert ls.readiness_gap_state(False, COE, COE) == "none"
+    assert ls.readiness_gap_state(False, SRO, COE) == "foreign"
     assert ls.readiness_gap_state(True, SRO, COE) == "foreign"
     assert ls.readiness_gap_state(True, COE, COE) == "none"
     # joined pre-fix (tenant unrecorded) → not provably foreign → none

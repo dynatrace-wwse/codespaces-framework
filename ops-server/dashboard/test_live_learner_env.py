@@ -330,7 +330,16 @@ def test_readiness_reports_attendance_states():
     rows = _readiness()
     assert _row(rows, LEARNER)["attendance"] == ls.ATTENDANCE_PRESENT
     assert _row(rows, OTHER)["attendance"] == ls.ATTENDANCE_BOUND
-    assert _row(rows, TRAINER)["attendance"] == "trainer"
+
+
+def test_a_trainer_gets_a_real_attendance_value_too():
+    """A flat "trainer" chip hid the only thing the column answers: do we know
+    where to build for this person? A co-trainer who had never opened the
+    workshop looked exactly like one who was bound and ready."""
+    a.pool.h[f"live:session:{SID}:tenants"][TRAINER] = COE
+    assert _row(_readiness(), TRAINER)["attendance"] == ls.ATTENDANCE_BOUND
+    # On the trainer team but bound nowhere — the row a trainer has to act on.
+    assert _row(_readiness(), CO)["attendance"] == ls.ATTENDANCE_REGISTERED
 
 
 def test_readiness_reports_registered_when_only_on_the_roster():

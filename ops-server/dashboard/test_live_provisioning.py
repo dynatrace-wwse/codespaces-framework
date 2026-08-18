@@ -213,6 +213,105 @@ def test_foreign_learner_is_requested_not_abandoned():
     assert reasons[ABSENT] == "not-joined"
 
 
+# ── a trainer team spans tenants ─────────────────────────────────────────────
+#
+# ws_msxt044r-bed99c, 2026-08-18: a co-trainer delivering from sprint clicked
+# "Provision all environments" with "include my own environment" on. The LEAD
+# trainer — bound to COE — got a container built on sprint, which logged
+# "Sprint environment detected" and failed. Every trainer row was exempted from
+# the binding rules on the grounds that "their tenant is known by construction";
+# that is true of the caller and of nobody else on the team.
+
+COTRAINER = "cotrainer@dynatrace.com"   # on the trainer team, bound to SRO
+
+
+def _add_cotrainer(bound=SRO):
+    """Put a second trainer on the team, bound to their own tenant."""
+    a.pool.h[f"live:session:{SID}"]["trainers"] = json.dumps([TRAINER, COTRAINER])
+    if bound:
+        a.pool.h[f"live:session:{SID}:tenants"][COTRAINER] = bound
+
+
+def test_a_cotrainer_is_never_provisioned_on_the_callers_tenant():
+    _add_cotrainer()
+    body = _provision_all(include_trainer=True).json()
+    rows = {r["email"]: r for r in body["results"]}
+    # The caller runs here, as always.
+    assert rows[TRAINER]["status"] == "queued"
+    # The co-trainer is bound elsewhere: their own app builds it, in their own
+    # tenant. Building it here is the bug this test exists for.
+    assert rows[COTRAINER]["status"] == "requested"
+    assert rows[COTRAINER]["reason"] == "foreign-tenant"
+
+
+def test_a_cotrainer_bound_here_is_provisioned_here():
+    _add_cotrainer(bound=COE)
+    rows = {r["email"]: r for r in _provision_all(include_trainer=True).json()["results"]}
+    assert rows[COTRAINER]["status"] == "queued"
+
+
+def test_an_unbound_cotrainer_is_not_provisioned_anywhere():
+    """"Not registered" is the same answer for a trainer as for a learner: we do
+    not know which tenant to build in, so nothing is built until they enter the
+    classroom — which is what binds them."""
+    _add_cotrainer(bound=None)
+    rows = {r["email"]: r for r in _provision_all(include_trainer=True).json()["results"]}
+    assert rows[COTRAINER]["status"] == "requested"
+    assert rows[COTRAINER]["reason"] == "not-joined"
+
+
+def test_the_caller_provisions_even_with_no_binding_recorded():
+    """Workshops created before trainers auto-bound have no binding for the
+    trainer. The caller is here, asking from their own tenant — that is knowledge
+    enough, and only for them."""
+    a.pool.h[f"live:session:{SID}:tenants"].pop(TRAINER, None)
+    rows = {r["email"]: r for r in _provision_all(include_trainer=True).json()["results"]}
+    assert rows[TRAINER]["status"] == "queued"
+
+
+def test_readiness_classifies_a_cotrainer_by_their_own_binding():
+    """The board used to flatten every trainer row to "none" — "no environment
+    yet, provisioning from here" — about a person on another tenant."""
+    _add_cotrainer()
+    rows = {r["email"]: r for r in _readiness().json()["results"]}
+    assert rows[COTRAINER]["state"] == "foreign"
+    assert rows[COTRAINER]["tenant"] == SRO
+    assert rows[COTRAINER]["attendance"] == "bound"
+    # The caller still reads as their own tenant, unprovisioned.
+    assert rows[TRAINER]["state"] == "none"
+
+
+def test_readiness_shows_an_unbound_cotrainer_as_not_joined():
+    _add_cotrainer(bound=None)
+    rows = {r["email"]: r for r in _readiness().json()["results"]}
+    assert rows[COTRAINER]["state"] == "not-joined"
+    assert rows[COTRAINER]["attendance"] == "registered"
+
+
+# ── binding is the registry ──────────────────────────────────────────────────
+
+def test_a_bound_learner_who_is_not_present_still_provisions():
+    """Pre-provisioning runs BEFORE the room opens, so :joined is empty and the
+    binding is the only thing that says where to build. Requiring presence made
+    every row of a pre-provisioned workshop come back "not-joined" while the
+    classroom board, reading the same poll, showed those learners as `bound`."""
+    a.pool.h[f"live:session:{SID}:joined"] = {}
+    rows = {r["email"]: r for r in _provision_all().json()["results"]}
+    assert rows[SAME]["status"] == "queued"              # bound to COE
+    assert rows[FOREIGN]["status"] == "requested"        # bound to SRO
+    assert rows[FOREIGN]["reason"] == "foreign-tenant"
+    assert rows[ABSENT]["reason"] == "not-joined"        # no binding at all
+
+
+def test_readiness_never_calls_a_bound_learner_not_joined():
+    a.pool.h[f"live:session:{SID}:joined"] = {}
+    rows = {r["email"]: r for r in _readiness().json()["results"]}
+    assert rows[SAME]["state"] == "none"        # bound here, nothing built yet
+    assert rows[SAME]["attendance"] == "bound"
+    assert rows[FOREIGN]["state"] == "foreign"
+    assert rows[ABSENT]["state"] == "not-joined"
+
+
 def test_provision_all_records_the_intent_on_the_session():
     _provision_all()
     session = a.pool.h[f"live:session:{SID}"]

@@ -264,19 +264,29 @@ def normalize_tenant(tenant) -> str:
 
 
 def provision_skip_status(has_joined, joined_tenant, workshop_tenant):
-    """Decide whether provision-all may provision a roster email.
+    """Decide whether provision-all may provision a workshop member.
 
     Returns None → provision; otherwise the skip status string:
-      "not-joined"     — never joined, tenant unknown (provisions on entry)
-      "foreign-tenant" — joined from a DIFFERENT tenant than the workshop's
-                         provisioning tenant (provisions on entry there)
+      "not-joined"     — no binding and never present: we do not know which
+                         tenant to build in, so it happens when they arrive
+      "foreign-tenant" — bound to a DIFFERENT tenant than the caller's
+                         provisioning tenant (their own app builds it there)
 
-    Backward compatible: a joined entry WITHOUT a recorded tenant (pre-fix
-    join) or a missing workshop tenant keeps the legacy behavior (provision).
+    THE BINDING IS THE REGISTRY, not the presence record. A person who walked
+    into the lobby days ago is bound — `:tenants` names the tenant to build in —
+    and that is the whole reason binding was split out of attendance. Keying
+    this on `:joined` instead made pre-provisioning impossible for exactly the
+    cohort it exists for: the trainer clicks "Provision all" before the room
+    opens, nobody is in `:joined` yet, and every single row came back
+    "not-joined — starts when they arrive".
+
+    A binding is therefore sufficient on its own; presence without a recorded
+    tenant (a pre-binding join) still provisions, on the caller's tenant, which
+    is the legacy behaviour.
     """
-    if not has_joined:
-        return "not-joined"
     jt = normalize_tenant(joined_tenant)
+    if not has_joined and not jt:
+        return "not-joined"
     wt = normalize_tenant(workshop_tenant)
     if jt and wt and jt != wt:
         return "foreign-tenant"
@@ -302,15 +312,23 @@ def readiness_gap_state(has_joined, joined_tenant, trainer_tenant,
     outrank "not-joined" — a learner who never arrived is the one case the
     trainer has to act on, and hiding that behind "requested" would make an
     empty room look like a busy one.
+
+    "not-joined" means NO BINDING AND NOT PRESENT — the same rule as
+    provision_skip_status, because the two must never disagree. They did: this
+    said "hasn't joined yet — starts when they arrive" about a learner the
+    classroom board was, correctly and at the same moment, showing as `bound`.
+    Two surfaces, one readiness poll, two contradictory answers about the same
+    person. A binding is knowledge of where to build, so it is never
+    "not-joined".
     """
     tt = normalize_tenant(trainer_tenant)
     if not tt:
         return "none"
-    if not has_joined:
+    jt = normalize_tenant(joined_tenant)
+    if not has_joined and not jt:
         return "not-joined"
     if requested:
         return "requested"
-    jt = normalize_tenant(joined_tenant)
     if jt and jt != tt:
         return "foreign"
     return "none"
