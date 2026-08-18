@@ -136,6 +136,48 @@ have `worker_id == "master"` and run locally — no SSH.)
 
 **Important:** shell sessions into `integration-test` jobs disconnect when the test finishes and the container is torn down.  Use `daemon` jobs for interactive training sessions — the container stays alive until manually terminated.
 
+### Finding a learner's environment in the dashboard History tab
+
+`GET /api/builds/history` is the troubleshooting entry point. Filters (all
+optional, combinable; substring + case-insensitive unless noted):
+
+| Param | Matches |
+|---|---|
+| `type=daemon` | provisioning jobs only — the training container a learner is using |
+| `trigger=enablement-app` | provisioned from the Enablement App. **Exact**, on the collapsed family |
+| `tenant=` | the tenant the job bound to (`job["tenant"]`, set at enqueue) |
+| `user=` | learner email / GitHub login (`tenant_user` → `user` → `requested_by`) |
+| `daemon=` | the **job id**, which is also the container hostname |
+| `repo=` `arch=` `branch=` `status=` `limit=` | as before |
+
+The daemon filter is the one that closes the loop from a stuck learner to a
+shell: a provisioning job's id is `enablement-<12 hex>` and its container is
+`sb-<job_id>`, so `docker ps` on the worker and the History filter take the
+same string.
+
+```bash
+ssh autonomous-enablements-worker docker exec -it sb-enablement-126cf7812984 \
+    docker exec -it -w /workspaces/<repo> dt zsh
+```
+
+Two things that are easy to get wrong here:
+
+- **`trigger` is filtered on a *family*, not the raw string** (`_trigger_family`).
+  `rerun-by-<login>` and `pull_request.<action>` are unbounded in cardinality and
+  would put one dropdown entry per person; and `arena` is the **pre-rename value
+  for `enablement-app`** — left un-collapsed, filtering by Enablement App silently
+  misses every older provisioning job.
+- **Rows are sorted by timestamp, after the merge and the filters, before the
+  limit.** List order is *not* time order: `_merge_agent_history` appends the
+  agent/sync archives to the tail regardless of age, so reverse-iterating the
+  merged list led with the oldest agent job. Truncating before sorting would drop
+  rows that belong on page one.
+
+Identities are returned unmasked. That is safe only because the endpoint sits
+behind the `DASHBOARD_ONLY_READS` middleware (signed-in org member or service
+bearer); if it is ever removed from that regex, the tenant/user fields need
+`masking.mask_email` and a tenant scrub.
+
 ## Weighted scheduling & lane routing (worker-agent only)
 
 Lives in `worker-agent/scheduler.py` (`WeightedScheduler`). It gates every job

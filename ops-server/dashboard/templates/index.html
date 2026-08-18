@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=30">
+    <link rel="stylesheet" href="/static/style.css?v=31">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <!-- auth-pending hides the nav + every view until loadAuthState() resolves. Without it
@@ -227,6 +227,10 @@
                 </select>
                 <select id="history-type">
                     <option value="">All types</option>
+                    <!-- `daemon` is the Enablement App's provisioning job: the long-lived
+                         training container a learner is handed. It was the one job type
+                         History could show but not filter for. -->
+                    <option value="daemon">Training env (daemon)</option>
                     <option value="integration-test">Integration test</option>
                     <option value="training-test">Training test</option>
                     <option value="app-layer-test">App-layer test</option>
@@ -234,6 +238,14 @@
                     <option value="fix-ci">Fix CI</option>
                     <option value="fix-issue">Fix Issue</option>
                 </select>
+                <!-- Trigger is what "filter by Enablement App" means: the app-provisioned
+                     jobs all carry trigger=enablement-app. Options are filled from the
+                     data (collapsed families) by loadHistory(). -->
+                <select id="history-trigger"><option value="">All triggers</option></select>
+                <input type="text" id="history-tenant" placeholder="Filter tenant…" style="width:150px">
+                <input type="text" id="history-user" placeholder="Filter user…" style="width:150px">
+                <input type="text" id="history-daemon" placeholder="Filter daemon / container…" style="width:190px"
+                       title="Job id — also the container hostname: the job runs in sb-&lt;job id&gt; on the worker.">
                 <select id="history-limit" title="Rows per page">
                     <option value="50" selected>50 rows</option>
                     <option value="100">100 rows</option>
@@ -243,6 +255,10 @@
                 <button class="btn btn-small btn-secondary" id="history-refresh" title="Refresh">↻</button>
                 <span id="history-count" style="color: var(--text-muted); font-size: 0.85rem;"></span>
             </div>
+            <!-- 14 columns. `table{width:100%}` + `body{overflow-x:hidden}` would
+                 crush the repo/branch/tenant cells to a few characters each rather
+                 than scroll, so the table gets a min-width and its own scroller. -->
+            <div class="table-scroll">
             <table id="history-table">
                 <thead>
                     <tr>
@@ -254,15 +270,19 @@
                         <th>Status</th>
                         <th>Action</th>
                         <th>Trigger</th>
+                        <th>Tenant</th>
+                        <th>User</th>
+                        <th title="Job id — also the container hostname (sb-&lt;job id&gt; on the worker)">Daemon</th>
                         <th>Worker</th>
                         <th>Log</th>
                         <th>Rerun</th>
                     </tr>
                 </thead>
                 <tbody id="history-body">
-                    <tr><td colspan="11" class="loading">Loading history…</td></tr>
+                    <tr><td colspan="14" class="loading">Loading history…</td></tr>
                 </tbody>
             </table>
+            </div>
         </section>
 
         <!-- Synchronizer View -->
@@ -944,6 +964,19 @@
         </section>
 
         <section id="view-register" class="view">
+            <!-- Sub-tabs. Registration is the only PUBLIC one — an anonymous visitor
+                 sees the form and nothing else. Deploy activity and Tenant registry
+                 carry deployer emails, account URNs and tenant URLs, and their
+                 endpoints are writer-gated, so their tabs use .tab-writer-only
+                 (display:none unless body.role-writer). Hiding the tab is cosmetic;
+                 the 401 on /api/deploy/audit and /api/tenants/registry is the gate. -->
+            <nav class="content-subnav">
+                <button class="content-tab active" data-reg-view="registration">Registration</button>
+                <button class="content-tab tab-writer-only" data-reg-view="activity">Deploy activity</button>
+                <button class="content-tab tab-writer-only" data-reg-view="registry">Tenant registry</button>
+            </nav>
+
+            <div id="reg-view-registration" class="reg-subview">
             <div class="content-card">
                 <h3 style="margin:0 0 8px">Account OAuth client <span style="font-size:0.72rem;background:#1f6feb;color:#fff;border-radius:10px;padding:2px 8px;vertical-align:middle">bootstrap install only</span></h3>
                 <p class="content-hint" style="margin:0 0 8px"><strong>Paste it once. Nothing is stored here.</strong> Orbital uses the OAuth client to deploy the app, writes it into <em>your tenant's own</em> settings, and then discards it — it is never written to Orbital's disk, database or logs. From that moment the app is self-sufficient: it mints its own per-learner tokens and updates itself, on any tenant in any account, with no credential of yours living on this server.</p>
@@ -1024,16 +1057,48 @@
                  it powers the in-app Admin "Update now" flow (stash + app-start). -->
             <div id="reg-spin" class="reg-spin"><div class="reg-spinner"></div><span>Working… building &amp; deploying the app. This can take a minute or two — <strong>please don't refresh or close this page.</strong></span></div>
             <div id="reg-bar" class="reg-bar" hidden><i></i></div>
-            <h3 style="margin:24px 0 8px">Recent deploy activity</h3>
-            <table id="reg-audit">
-                <thead><tr><th>When</th><th>User</th><th>Tenant</th><th>Stage</th><th>Action</th><th>Result</th><th>Version</th><th>Via</th></tr></thead>
-                <tbody><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
-            </table>
-            <h3 style="margin:24px 0 8px">Tenants <span class="content-hint" style="font-weight:normal">(attribution registry — who deployed where; org members only)</span></h3>
-            <table id="reg-tenants">
-                <thead><tr><th>Tenant</th><th>Name</th><th>Deployer</th><th>Identity</th><th>Account URN</th><th>Via</th><th>Version</th><th>First seen</th><th>Last deploy</th></tr></thead>
-                <tbody><tr><td colspan="9" class="loading">Loading…</td></tr></tbody>
-            </table>
+            </div><!-- /reg-view-registration -->
+
+            <div id="reg-view-activity" class="reg-subview" hidden>
+                <p class="content-hint" style="margin:0 0 10px">Every deploy, upgrade, undeploy and preflight refusal, newest first. Filters apply to the rows already fetched — raise the row count to widen the window.</p>
+                <div class="reg-filters">
+                    <input type="text" id="reg-audit-user" placeholder="Filter user…" style="width:170px">
+                    <input type="text" id="reg-audit-tenant" placeholder="Filter tenant…" style="width:170px">
+                    <select id="reg-audit-stage"><option value="">All stages</option></select>
+                    <select id="reg-audit-action"><option value="">All actions</option></select>
+                    <select id="reg-audit-result"><option value="">All results</option></select>
+                    <select id="reg-audit-via"><option value="">All vias</option></select>
+                    <select id="reg-audit-limit" title="Rows fetched">
+                        <option value="30" selected>30 rows</option>
+                        <option value="100">100 rows</option>
+                        <option value="250">250 rows</option>
+                        <option value="500">All</option>
+                    </select>
+                    <button class="btn btn-small btn-secondary" id="reg-audit-refresh" title="Refresh">↻</button>
+                    <span id="reg-audit-count" class="reg-count"></span>
+                </div>
+                <table id="reg-audit">
+                    <thead><tr><th>When</th><th>User</th><th>Tenant</th><th>Stage</th><th>Action</th><th>Result</th><th>Version</th><th>Via</th></tr></thead>
+                    <tbody><tr><td colspan="8" class="loading">Loading…</td></tr></tbody>
+                </table>
+            </div><!-- /reg-view-activity -->
+
+            <div id="reg-view-registry" class="reg-subview" hidden>
+                <p class="content-hint" style="margin:0 0 10px">Attribution registry — who deployed where. One row per registered install; org members only.</p>
+                <div class="reg-filters">
+                    <input type="text" id="reg-tn-search" placeholder="Tenant, name, account, deployer…" style="width:250px">
+                    <select id="reg-tn-stage"><option value="">All stages</option></select>
+                    <select id="reg-tn-audience"><option value="">All audiences</option></select>
+                    <select id="reg-tn-via"><option value="">All vias</option></select>
+                    <select id="reg-tn-version"><option value="">All versions</option></select>
+                    <button class="btn btn-small btn-secondary" id="reg-tn-refresh" title="Refresh">↻</button>
+                    <span id="reg-tn-count" class="reg-count"></span>
+                </div>
+                <table id="reg-tenants">
+                    <thead><tr><th>Tenant</th><th>Name</th><th>Audience</th><th>Deployer</th><th>Identity</th><th>Account URN</th><th>Via</th><th>Version</th><th>First seen</th><th>Last deploy</th></tr></thead>
+                    <tbody><tr><td colspan="10" class="loading">Loading…</td></tr></tbody>
+                </table>
+            </div><!-- /reg-view-registry -->
         </section>
     </main>
 
@@ -1148,7 +1213,7 @@ redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
          deployed app.js with an unchanged ?v= is invisible: the new index.html
          renders new markup while the old script wires nothing to it. That looks
          exactly like "the control is there but does not work" — v=31 → v=32. -->
-    <script src="/static/app.js?v=37"></script>
+    <script src="/static/app.js?v=38"></script>
     <!-- Landing-hero particle field. Self-contained on purpose: the hub uses the
          particles.js CDN, but this page already pulls xterm from jsDelivr and a third
          CDN for decoration is not worth the request or the supply-chain surface.

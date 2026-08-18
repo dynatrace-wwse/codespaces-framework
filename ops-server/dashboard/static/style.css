@@ -1885,3 +1885,35 @@ details.reg-fold > summary:hover { filter: brightness(1.2); }
 
 /* Missing registry value — a real "we do not know", not an empty cell. */
 .cs-dash { color: var(--text-3); }
+
+/* ─── History: provisioning-job columns (tenant / user / daemon) ──────────── */
+/* These three are only populated for Enablement-App daemon jobs, so most rows
+   show the em dash. Keep them narrow and monospaced — the daemon id is copied
+   into `docker exec` and misreading a character costs a troubleshooting cycle. */
+.hist-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--text-2);
+  max-width: 180px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.hist-empty { color: var(--text-muted); }
+
+/* ─── Register Tenant sub-tabs ───────────────────────────────────────────── */
+/* The registration form is public; the two data tables are org-member only and
+   their tabs are hidden by .tab-writer-only (display:none unless body.role-writer). */
+.reg-filters {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 12px;
+}
+.reg-filters input, .reg-filters select { font-size: 0.8rem; }
+.reg-count { color: var(--text-muted); font-size: 0.85rem; }
+
+/* A wide table scrolls inside its own box instead of being squeezed by
+   table{width:100%} — body has overflow-x:hidden, so without this the
+   overflow is simply lost. */
+.table-scroll { overflow-x: auto; }
+.table-scroll > table { min-width: 1100px; }

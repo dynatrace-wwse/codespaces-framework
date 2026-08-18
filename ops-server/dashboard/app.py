@@ -2814,6 +2814,69 @@ def _infer_started_at(job: dict, result: dict) -> str:
     return finished or ""
 
 
+def _trigger_family(trigger: str) -> str:
+    """Collapse a raw ``trigger`` string into the family the History filter offers.
+
+    ``rerun-by-<login>`` and ``pull_request.<action>`` are unbounded in
+    cardinality — left raw they would put one dropdown entry per user and per
+    GitHub action, which is what made the trigger unfilterable in practice.
+    Empty means "came in over the webhook before triggers were recorded", which
+    is how api_builds_history has always read it.
+    """
+    t = (trigger or "").strip()
+    if t.startswith("rerun-by-"):
+        return "rerun"
+    if t.startswith("pull_request"):
+        return "webhook"
+    # "arena" is the pre-rename value for the same provisioner. Left un-collapsed
+    # it splits the Enablement App into two dropdown entries and makes
+    # trigger=enablement-app silently miss every older row.
+    if t == "arena":
+        return "enablement-app"
+    return t or "webhook"
+
+
+def _job_user(job: dict) -> str:
+    """Who asked for this job. Same precedence as workers/manager.py: the
+    tenant-side identity wins over the dashboard/GitHub one, and
+    ``requested_by`` is the field every enqueue path sets (learner email for
+    enablement-app provisioning, GitHub login for webhook, role user for the
+    dashboard)."""
+    return (job.get("tenant_user") or job.get("user")
+            or job.get("requested_by") or "")
+
+
+def _job_tenant(job: dict) -> str:
+    """Dynatrace tenant the job was provisioned against. Set at enqueue for
+    enablement-app daemon jobs; blank for CI/framework work, which has no
+    tenant."""
+    return job.get("tenant") or ""
+
+
+def _ts_sort_key(row: dict) -> float:
+    """Epoch seconds for History ordering: started_at, else finished_at, else 0.
+
+    History must be newest-first *by timestamp*, not by position in
+    ``jobs:completed``. Those differ for two reasons: `_merge_agent_history`
+    appends the archived agent/sync records after the tail of the main list
+    (so reversing put the OLDEST agent job at the top), and a long job can
+    finish after a short one that started later. Unparseable and missing
+    timestamps sort to the bottom rather than crashing the sort.
+    """
+    for field in ("started_at", "finished_at"):
+        raw = row.get(field)
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if dt.tzinfo is None:  # legacy naive records are UTC by convention
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return 0.0
+
+
 def _merge_agent_history(completed_raw: list, agent_raw: list) -> list:
     """Append archived agent-job records that aren't already in jobs:completed
     (dedupe by job_id). Pure — unit-tested. Bad JSON entries are passed through
@@ -2843,13 +2906,32 @@ async def api_builds_history(
     branch: str | None = None,
     status: str | None = None,
     type: str | None = None,
+    trigger: str | None = None,
+    tenant: str | None = None,
+    user: str | None = None,
+    daemon: str | None = None,
     limit: int = 200,
 ):
-    """Past runs from ``jobs:completed``, filterable.
+    """Past runs from ``jobs:completed``, filterable, newest first.
 
     No type param (or type=all) returns all job types.
-    Pass ``type=integration-test``, ``type=deploy-ghpages``, etc. to filter.
-    ``repo`` is a substring match (case-insensitive) so the search bar works.
+    Pass ``type=integration-test``, ``type=daemon`` (the Enablement App's
+    provisioning jobs), ``type=deploy-ghpages``, etc. to filter.
+
+    Substring, case-insensitive: ``repo``, ``tenant``, ``user``, ``daemon``
+    (the job id, which is also the container hostname — a provisioning job runs
+    in ``sb-<job_id>``, e.g. ``sb-enablement-126cf7812984``, so the value a
+    troubleshooter reads off the worker pastes straight into this filter).
+    Exact, on the collapsed family: ``trigger`` (see ``_trigger_family``) —
+    ``trigger=enablement-app`` is "provisioned from the Enablement App".
+
+    Ordering is by timestamp descending, computed AFTER the merge and the
+    filters — see ``_ts_sort_key`` for why list order is not timestamp order.
+
+    Identities (learner email, tenant URL) are unmasked. The endpoint is behind
+    ``DASHBOARD_ONLY_READS``, so every caller here is a signed-in org member or
+    the service bearer; masking would be dead code. The bearer's own exposure is
+    the pre-existing, tracked caveat documented on ``_sees_full_identities``.
     """
     completed_raw = await pool.lrange("jobs:completed", -1500, -1)
     # Merge the dedicated agent-job archive (agent jobs are rare and otherwise roll off
@@ -2860,8 +2942,13 @@ async def api_builds_history(
     distinct_repos: set[str] = set()
     distinct_branches: set[str] = set()
     distinct_arches: set[str] = set()
+    distinct_triggers: set[str] = set()
+    distinct_tenants: set[str] = set()
     repo_lower = repo.lower() if repo else ""
-    for raw in reversed(completed_raw):  # newest first
+    tenant_lower = tenant.lower() if tenant else ""
+    user_lower = user.lower() if user else ""
+    daemon_lower = daemon.lower() if daemon else ""
+    for raw in completed_raw:
         try:
             j = json.loads(raw)
         except Exception:
@@ -2874,12 +2961,28 @@ async def api_builds_history(
         row_arch = j.get("arch") or result.get("arch") or j.get("worker_arch", "") or "unknown"
         row_branch = j.get("ref") or j.get("head_branch") or result.get("ref", "") or "main"
         row_status = j.get("status", "completed")
+        row_job_id = j.get("job_id", "")
+        row_user = _job_user(j)
+        row_tenant = _job_tenant(j)
+        # Trigger inference: nightly if id matches, else dashboard/webhook
+        nightly_id = j.get("nightly_run_id", "")
+        raw_trigger = j.get("trigger") or (
+            "nightly" if nightly_id.startswith("nightly-")
+            else ("manual" if nightly_id.startswith("manual") else "")
+        ) or "webhook"
+        family = _trigger_family(raw_trigger)
         distinct_repos.add(row_repo)
         if row_branch: distinct_branches.add(row_branch)
         if row_arch: distinct_arches.add(row_arch)
+        if family: distinct_triggers.add(family)
+        if row_tenant: distinct_tenants.add(row_tenant)
         if repo_lower and repo_lower not in row_repo.lower(): continue
         if arch and row_arch != arch: continue
         if branch and row_branch != branch: continue
+        if trigger and family != trigger: continue
+        if tenant_lower and tenant_lower not in row_tenant.lower(): continue
+        if user_lower and user_lower not in row_user.lower(): continue
+        if daemon_lower and daemon_lower not in row_job_id.lower(): continue
         if status == 'failed':
             # FAIL = non-terminated jobs whose tests didn't pass
             if row_status == 'terminated': continue
@@ -2890,14 +2993,8 @@ async def api_builds_history(
             if not result.get('passed'): continue
         elif status and row_status != status:
             continue
-        # Trigger inference: nightly if id matches, else dashboard/webhook
-        nightly_id = j.get("nightly_run_id", "")
-        trigger = j.get("trigger") or (
-            "nightly" if nightly_id.startswith("nightly-")
-            else ("manual" if nightly_id.startswith("manual") else "")
-        ) or "webhook"
         rows.append({
-            "job_id": j.get("job_id", ""),
+            "job_id": row_job_id,
             "repo": row_repo,
             "arch": row_arch,
             "branch": row_branch,
@@ -2907,20 +3004,30 @@ async def api_builds_history(
             "exit_code": result.get("exit_code"),
             "started_at": _infer_started_at(j, result),
             "finished_at": j.get("finished_at"),
-            "trigger": trigger,
+            "trigger": raw_trigger,
+            "trigger_family": family,
             "nightly_run_id": nightly_id,
             "worker_id": j.get("worker_id", "master"),
-            "type": j.get("type", "integration-test"),
+            "type": job_type,
+            "user": row_user,
+            "tenant": row_tenant,
             "result": result,
         })
-        if len(rows) >= limit: break
+    # Sort AFTER filtering, then truncate — truncating first would drop rows that
+    # belong on page one whenever list order and timestamp order disagree.
+    rows.sort(key=_ts_sort_key, reverse=True)
+    total_matched = len(rows)
+    rows = rows[:max(0, limit)]
     return {
         "rows": rows,
         "total_returned": len(rows),
+        "total_matched": total_matched,
         "filters": {
             "repos": sorted(distinct_repos),
             "arches": sorted(distinct_arches),
             "branches": sorted(distinct_branches),
+            "triggers": sorted(distinct_triggers),
+            "tenants": sorted(distinct_tenants),
         },
     }
 

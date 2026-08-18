@@ -1834,42 +1834,87 @@ document.getElementById('nightly-status-filter')?.addEventListener('change', app
 // ── History View ────────────────────────────────────────────────────────────
 
 let historyFilters = {};
-let historyDistinct = { repos: [], arches: [], branches: [] };
+let historyDistinct = { repos: [], arches: [], branches: [], triggers: [], tenants: [] };
+
+// Trigger families the API collapses to (see _trigger_family). Anything the API
+// reports that isn't listed here is still offered, using its raw value as label.
+const TRIGGER_LABELS = {
+    'dashboard': 'Dashboard',
+    'nightly': 'Nightly',
+    'webhook': 'Webhook',
+    'rerun': 'Rerun',
+    'fleet': 'Fleet',
+    'framework': 'Framework',
+    'manual': 'Manual',
+    'stress-test': 'Stress test',
+};
+
+function triggerLabel(t) {
+    // formatTrigger owns the enablement-app/arena label — don't restate it here.
+    return TRIGGER_LABELS[t] || formatTrigger(t) || '—';
+}
+
+// Repopulate a <select> from a distinct-value list without losing the current
+// selection. Returns nothing; the select keeps its value when it still exists.
+function fillFilterSelect(id, values, allLabel, labelFn) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">${escapeHtml(allLabel)}</option>` +
+        values.map(v => `<option value="${escapeHtml(v)}"${v === cur ? ' selected' : ''}>` +
+            `${escapeHtml(labelFn ? labelFn(v) : v)}</option>`).join('');
+    // A value that vanished from the data would otherwise silently reset to
+    // "all" while the table still showed the old filtered result.
+    if (cur && !values.includes(cur)) sel.value = '';
+}
 
 async function loadHistory() {
     const params = new URLSearchParams();
-    const repo   = document.getElementById('history-repo').value.trim();
-    const arch   = document.getElementById('history-arch').value;
-    const branch = document.getElementById('history-branch').value;
-    const status = document.getElementById('history-status').value;
-    const type   = document.getElementById('history-type')?.value || '';
-    if (repo)   params.set('repo', repo);
-    if (arch)   params.set('arch', arch);
-    if (branch) params.set('branch', branch);
-    if (status) params.set('status', status);
-    if (type)   params.set('type', type);
+    const repo    = document.getElementById('history-repo').value.trim();
+    const arch    = document.getElementById('history-arch').value;
+    const branch  = document.getElementById('history-branch').value;
+    const status  = document.getElementById('history-status').value;
+    const type    = document.getElementById('history-type')?.value || '';
+    const trigger = document.getElementById('history-trigger')?.value || '';
+    const tenant  = document.getElementById('history-tenant')?.value.trim() || '';
+    const user    = document.getElementById('history-user')?.value.trim() || '';
+    const daemon  = document.getElementById('history-daemon')?.value.trim() || '';
+    if (repo)    params.set('repo', repo);
+    if (arch)    params.set('arch', arch);
+    if (branch)  params.set('branch', branch);
+    if (status)  params.set('status', status);
+    if (type)    params.set('type', type);
+    if (trigger) params.set('trigger', trigger);
+    if (tenant)  params.set('tenant', tenant);
+    if (user)    params.set('user', user);
+    if (daemon)  params.set('daemon', daemon);
     const limit = document.getElementById('history-limit')?.value || '50';
     params.set('limit', limit);
 
     const tbody = document.getElementById('history-body');
-    tbody.innerHTML = '<tr><td colspan="11" class="loading">Loading history…</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="loading">Loading history…</td></tr>';
     try {
         const res = await fetch(`${API}/api/builds/history?` + params.toString());
         const data = await res.json();
-        // Populate branch dropdown from returned distinct values
-        if (JSON.stringify(data.filters.branches) !== JSON.stringify(historyDistinct.branches)) {
-            historyDistinct = data.filters;
-            const branchSel = document.getElementById('history-branch');
-            const cur = branchSel.value;
-            branchSel.innerHTML = `<option value="">All branches</option>` +
-                data.filters.branches.map(v =>
-                    `<option value="${escapeHtml(v)}"${v === cur ? ' selected' : ''}>${escapeHtml(v)}</option>`
-                ).join('');
+        // Populate the value-driven dropdowns from returned distinct values
+        const f = data.filters || {};
+        if (JSON.stringify(f.branches) !== JSON.stringify(historyDistinct.branches)) {
+            fillFilterSelect('history-branch', f.branches || [], 'All branches');
         }
-        document.getElementById('history-count').textContent = `${data.total_returned} runs`;
+        if (JSON.stringify(f.triggers) !== JSON.stringify(historyDistinct.triggers)) {
+            fillFilterSelect('history-trigger', f.triggers || [], 'All triggers', triggerLabel);
+        }
+        historyDistinct = { ...historyDistinct, ...f };
+        // "50 of 213 runs" once the limit is actually biting, so a truncated
+        // page never reads as the complete result set.
+        const matched = data.total_matched ?? data.total_returned;
+        document.getElementById('history-count').textContent =
+            matched > data.total_returned
+                ? `${data.total_returned} of ${matched} runs`
+                : `${data.total_returned} runs`;
 
         if (!data.rows.length) {
-            tbody.innerHTML = '<tr><td colspan="11" class="loading">No matching runs.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="14" class="loading">No matching runs.</td></tr>';
             return;
         }
         tbody.innerHTML = data.rows.map(r => {
@@ -1887,6 +1932,20 @@ async function loadHistory() {
             const rerunBtn = (r.job_id && r.type === 'integration-test' && isWriter())
                 ? `<button class="btn btn-small btn-secondary row-rerun" data-action data-job-id="${escapeHtml(r.job_id)}" title="Re-queue this job" aria-label="Re-run this integration test">↻ Rerun</button>`
                 : '—';
+            // Tenant/user/daemon are only populated for app-provisioned work; CI
+            // rows show an em dash rather than an empty cell.
+            const tenantId = r.tenant ? String(r.tenant).replace(/^https?:\/\//, '').split('.')[0] : '';
+            const tenantCell = r.tenant
+                ? `<code class="hist-id" title="${escapeHtml(r.tenant)}">${escapeHtml(tenantId)}</code>${stageBadge(stageOf(r.tenant))}`
+                : '<span class="hist-empty">—</span>';
+            const userCell = r.user
+                ? `<span class="hist-id" title="${escapeHtml(r.user)}">${escapeHtml(r.user)}</span>`
+                : '<span class="hist-empty">—</span>';
+            // The container on the worker is sb-<job id>; show the id and put the
+            // full docker name in the tooltip so it can be copied for a `docker exec`.
+            const daemonCell = r.job_id
+                ? `<code class="hist-id" title="container: sb-${escapeHtml(r.job_id)}">${escapeHtml(r.job_id)}</code>`
+                : '<span class="hist-empty">—</span>';
             return `<tr>
                 <td title="${escapeHtml(r.started_at || '')}">${formatTime(r.started_at)}</td>
                 <td>${repoLink}</td>
@@ -1895,26 +1954,30 @@ async function loadHistory() {
                 <td>${dur}</td>
                 <td><span class="${statusCls}">${statusLabel}</span></td>
                 <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(r.type))}</td>
-                <td>${escapeHtml(formatTrigger(r.trigger))}</td>
+                <td title="${escapeHtml(r.trigger || '')}">${escapeHtml(formatTrigger(r.trigger))}</td>
+                <td>${tenantCell}</td>
+                <td>${userCell}</td>
+                <td>${daemonCell}</td>
                 <td><span style="font-size:0.75rem;color:var(--text-muted)">${escapeHtml(r.worker_id || '')}</span></td>
                 <td>${logLink}</td>
                 <td>${rerunBtn}</td>
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="11" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="14" class="loading">Error loading history: ${escapeHtml(String(e))}</td></tr>`;
     }
 }
 
-// Debounce the search bar, instant for selects
+// Debounce the search bars, instant for selects
 let _historySearchTimer;
+const HISTORY_TEXT_FILTERS = ['history-repo', 'history-tenant', 'history-user', 'history-daemon'];
 document.addEventListener('input', e => {
-    if (e.target.id === 'history-repo') {
+    if (HISTORY_TEXT_FILTERS.includes(e.target.id)) {
         clearTimeout(_historySearchTimer);
         _historySearchTimer = setTimeout(loadHistory, 300);
     }
 });
-['history-arch', 'history-branch', 'history-status', 'history-type', 'history-limit'].forEach(id => {
+['history-arch', 'history-branch', 'history-status', 'history-type', 'history-trigger', 'history-limit'].forEach(id => {
     document.addEventListener('change', e => {
         if (e.target.id === id) loadHistory();
     });
@@ -2727,7 +2790,7 @@ function formatTrigger(trigger) {
 
 function formatJobType(type) {
     if (!type || type === 'integration-test') return 'Integration test';
-    if (type === 'daemon') return 'Training';
+    if (type === 'daemon') return 'Training env';  // provisioned session, not the training-TEST job
     if (type === 'sync-command') return 'Sync';
     if (type === 'deploy-ghpages') return 'Deploy Pages';
     if (['fix-issue','fix-ci','review-pr','migrate-gen3','scaffold-lab','validate-after-push'].includes(type)) return 'Agent';
@@ -4486,16 +4549,80 @@ async function goRegisterOauth(action) {
 // goRegister (token-paste deploy) removed with its UI card — /api/deploy/token remains
 // for the in-app Admin "Update now" flow (stash + app-start).
 
+// ── Register sub-tabs ────────────────────────────────────────────────────────
+// Registration is public. Deploy activity and Tenant registry are org-member
+// only: their tab buttons carry .tab-writer-only, and we never fetch their
+// endpoints for a non-writer (both answer 401, which would only produce noise
+// in the console and an empty table).
+let activeRegView = 'registration';
+
+document.addEventListener('click', e => {
+    const tab = e.target.closest('[data-reg-view]');
+    if (!tab) return;
+    const view = tab.dataset.regView;
+    activeRegView = view;
+    document.querySelectorAll('[data-reg-view]').forEach(t => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.reg-subview').forEach(v => { v.hidden = (v.id !== `reg-view-${view}`); });
+    if (view === 'activity') loadRegisterAudit();
+    if (view === 'registry') loadTenantRegistry();
+});
+
+// Rows as fetched, so a filter change re-renders without a round trip.
+let regAuditRows = [];
+let regTenantRows = [];
+
+function regStageOf(tenant) { return tenant ? stageOf(tenant) : ''; }
+
+// Distinct, sorted, blanks dropped — what the filter dropdowns are built from.
+function regDistinct(rows, fn) {
+    return [...new Set(rows.map(fn).filter(Boolean))].sort();
+}
+
 async function loadRegisterAudit() {
+    if (!isWriter()) return;
+    const b = document.querySelector('#reg-audit tbody');
+    const limit = document.getElementById('reg-audit-limit')?.value || '30';
     try {
-        const r = await fetch('/api/deploy/audit?limit=30', { credentials: 'same-origin' });
-        const data = r.ok ? await r.json() : { audit: [] };
-        const audit = data.audit || [];
-        const b = document.querySelector('#reg-audit tbody');
-        b.innerHTML = audit.length
-            ? audit.map(a => `<tr><td>${escapeHtml((a.ts || '').replace('T', ' ').slice(0, 19))}</td><td>${escapeHtml(a.user || '')}</td><td>${escapeHtml(a.tenant || '')}</td><td>${a.tenant ? stageBadge(stageOf(a.tenant)) : '<span class="content-hint">—</span>'}</td><td>${escapeHtml(a.action || '')}</td><td>${escapeHtml(a.result || '')}</td><td>${escapeHtml(a.to || a.version || '')}</td><td>${escapeHtml(a.via || '')}</td></tr>`).join('')
-            : '<tr><td colspan="8" class="content-hint">none yet</td></tr>';
+        const r = await fetch(`/api/deploy/audit?limit=${encodeURIComponent(limit)}`, { credentials: 'same-origin' });
+        if (!r.ok) {
+            regAuditRows = [];
+            if (b) b.innerHTML = '<tr><td colspan="8" class="content-hint">Sign in as an org member to view deploy activity.</td></tr>';
+            return;
+        }
+        regAuditRows = (await r.json()).audit || [];
+        // Newest first. The API lpush-es, so the list is already in that order —
+        // sorting on ts keeps it true if a record ever lands out of band.
+        regAuditRows.sort((x, y) => String(y.ts || '').localeCompare(String(x.ts || '')));
+        fillFilterSelect('reg-audit-stage',  regDistinct(regAuditRows, a => regStageOf(a.tenant)), 'All stages');
+        fillFilterSelect('reg-audit-action', regDistinct(regAuditRows, a => a.action), 'All actions');
+        fillFilterSelect('reg-audit-result', regDistinct(regAuditRows, a => a.result), 'All results');
+        fillFilterSelect('reg-audit-via',    regDistinct(regAuditRows, a => a.via),    'All vias');
+        renderRegisterAudit();
     } catch (e) { /* ignore */ }
+}
+
+function renderRegisterAudit() {
+    const b = document.querySelector('#reg-audit tbody');
+    if (!b) return;
+    const v = id => (document.getElementById(id)?.value || '').trim().toLowerCase();
+    const fUser = v('reg-audit-user'), fTenant = v('reg-audit-tenant');
+    const fStage = v('reg-audit-stage'), fAction = v('reg-audit-action');
+    const fResult = v('reg-audit-result'), fVia = v('reg-audit-via');
+    const rows = regAuditRows.filter(a => {
+        if (fUser && !String(a.user || '').toLowerCase().includes(fUser)) return false;
+        if (fTenant && !String(a.tenant || '').toLowerCase().includes(fTenant)) return false;
+        if (fStage && regStageOf(a.tenant) !== fStage) return false;
+        if (fAction && String(a.action || '').toLowerCase() !== fAction) return false;
+        if (fResult && String(a.result || '').toLowerCase() !== fResult) return false;
+        if (fVia && String(a.via || '').toLowerCase() !== fVia) return false;
+        return true;
+    });
+    const c = document.getElementById('reg-audit-count');
+    if (c) c.textContent = rows.length === regAuditRows.length
+        ? `${rows.length} entries` : `${rows.length} of ${regAuditRows.length} entries`;
+    b.innerHTML = rows.length
+        ? rows.map(a => `<tr><td>${escapeHtml((a.ts || '').replace('T', ' ').slice(0, 19))}</td><td>${escapeHtml(a.user || '')}</td><td>${escapeHtml(a.tenant || '')}</td><td>${a.tenant ? stageBadge(stageOf(a.tenant)) : '<span class="content-hint">—</span>'}</td><td>${escapeHtml(a.action || '')}</td><td>${escapeHtml(a.result || '')}</td><td>${escapeHtml(a.to || a.version || '')}</td><td>${escapeHtml(a.via || '')}</td></tr>`).join('')
+        : '<tr><td colspan="8" class="content-hint">no matching entries</td></tr>';
 }
 
 // Tenant-attribution registry (EPIC-002 §9) — who deployed where. Writer-gated:
@@ -4503,20 +4630,79 @@ async function loadRegisterAudit() {
 async function loadTenantRegistry() {
     const b = document.querySelector('#reg-tenants tbody');
     if (!b) return;
+    if (!isWriter()) {
+        b.innerHTML = '<tr><td colspan="10" class="content-hint">Sign in as an org member to view the tenant registry.</td></tr>';
+        return;
+    }
     try {
         const r = await fetch('/api/tenants/registry', { credentials: 'same-origin' });
-        if (!r.ok) { b.innerHTML = '<tr><td colspan="9" class="content-hint">Sign in as an org member to view the tenant registry.</td></tr>'; return; }
-        const rows = (await r.json()).tenants || [];
-        const d = s => escapeHtml((s || '').replace('T', ' ').slice(0, 19));
-        b.innerHTML = rows.length
-            ? rows.map(t => `<tr><td><code>${escapeHtml(t.tenant || '')}</code></td><td>${escapeHtml(t.friendlyName || '')}</td><td>${escapeHtml(t.deployerEmail || '')}</td><td>${escapeHtml(t.identityName ? `${t.identityName} <${t.identityEmail || ''}>` : (t.identityEmail || ''))}</td><td><code>${escapeHtml(t.accountUrn || '')}</code></td><td>${escapeHtml(t.via || '')}</td><td>${escapeHtml(t.appVersion || '')}</td><td>${d(t.firstSeen)}</td><td>${d(t.lastDeploy)}</td></tr>`).join('')
-            : '<tr><td colspan="9" class="content-hint">none yet</td></tr>';
+        if (!r.ok) {
+            regTenantRows = [];
+            b.innerHTML = '<tr><td colspan="10" class="content-hint">Sign in as an org member to view the tenant registry.</td></tr>';
+            return;
+        }
+        regTenantRows = (await r.json()).tenants || [];
+        fillFilterSelect('reg-tn-stage',    regDistinct(regTenantRows, t => regStageOf(t.tenant)), 'All stages');
+        fillFilterSelect('reg-tn-audience', regDistinct(regTenantRows, t => t.audience),   'All audiences');
+        fillFilterSelect('reg-tn-via',      regDistinct(regTenantRows, t => t.via),        'All vias');
+        fillFilterSelect('reg-tn-version',  regDistinct(regTenantRows, t => t.appVersion), 'All versions');
+        renderTenantRegistry();
     } catch (e) { /* ignore */ }
 }
 
+function renderTenantRegistry() {
+    const b = document.querySelector('#reg-tenants tbody');
+    if (!b) return;
+    const v = id => (document.getElementById(id)?.value || '').trim().toLowerCase();
+    const q = v('reg-tn-search'), fStage = v('reg-tn-stage'), fAud = v('reg-tn-audience');
+    const fVia = v('reg-tn-via'), fVer = v('reg-tn-version');
+    const rows = regTenantRows.filter(t => {
+        // One search box over every identifying field — the registry is small and
+        // a per-column input for each of five identity columns is worse than useless.
+        if (q) {
+            const hay = [t.tenant, t.friendlyName, t.accountName, t.accountUrn,
+                         t.deployerEmail, t.identityName, t.identityEmail]
+                .map(x => String(x || '').toLowerCase()).join(' ');
+            if (!hay.includes(q)) return false;
+        }
+        if (fStage && regStageOf(t.tenant) !== fStage) return false;
+        if (fAud && String(t.audience || '').toLowerCase() !== fAud) return false;
+        if (fVia && String(t.via || '').toLowerCase() !== fVia) return false;
+        if (fVer && String(t.appVersion || '').toLowerCase() !== fVer) return false;
+        return true;
+    });
+    const c = document.getElementById('reg-tn-count');
+    if (c) c.textContent = rows.length === regTenantRows.length
+        ? `${rows.length} tenants` : `${rows.length} of ${regTenantRows.length} tenants`;
+    const d = s => escapeHtml((s || '').replace('T', ' ').slice(0, 19));
+    b.innerHTML = rows.length
+        ? rows.map(t => `<tr><td><code>${escapeHtml(t.tenant || '')}</code>${t.tenant ? stageBadge(stageOf(t.tenant)) : ''}</td><td title="${escapeHtml(t.accountName || '')}">${escapeHtml(t.friendlyName || t.accountName || '')}</td><td>${escapeHtml(t.audience || '')}</td><td>${escapeHtml(t.deployerEmail || '')}</td><td>${escapeHtml(t.identityName ? `${t.identityName} <${t.identityEmail || ''}>` : (t.identityEmail || ''))}</td><td><code>${escapeHtml(t.accountUrn || '')}</code></td><td>${escapeHtml(t.via || '')}</td><td>${escapeHtml(t.appVersion || '')}</td><td>${d(t.firstSeen)}</td><td>${d(t.lastDeploy)}</td></tr>`).join('')
+        : '<tr><td colspan="10" class="content-hint">no matching tenants</td></tr>';
+}
+
+// Filter wiring. Text inputs re-render locally (no fetch); the row-count select
+// is the only control that goes back to the API.
+const REG_AUDIT_TEXT = ['reg-audit-user', 'reg-audit-tenant'];
+const REG_AUDIT_SELECTS = ['reg-audit-stage', 'reg-audit-action', 'reg-audit-result', 'reg-audit-via'];
+const REG_TN_SELECTS = ['reg-tn-stage', 'reg-tn-audience', 'reg-tn-via', 'reg-tn-version'];
+document.addEventListener('input', e => {
+    if (REG_AUDIT_TEXT.includes(e.target.id)) renderRegisterAudit();
+    if (e.target.id === 'reg-tn-search') renderTenantRegistry();
+});
+document.addEventListener('change', e => {
+    if (REG_AUDIT_SELECTS.includes(e.target.id)) renderRegisterAudit();
+    if (REG_TN_SELECTS.includes(e.target.id)) renderTenantRegistry();
+    if (e.target.id === 'reg-audit-limit') loadRegisterAudit();
+});
+document.addEventListener('click', e => {
+    if (e.target.id === 'reg-audit-refresh') loadRegisterAudit();
+    if (e.target.id === 'reg-tn-refresh') loadTenantRegistry();
+});
+
 function loadRegister() {
     wireRegister();
-    loadRegisterAudit();
-    loadTenantRegistry();
+    // Only the tab in view is fetched — the other two tabs load on first click.
+    if (activeRegView === 'activity') loadRegisterAudit();
+    if (activeRegView === 'registry') loadTenantRegistry();
 }
 
