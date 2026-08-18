@@ -1916,4 +1916,4 @@ details.reg-fold > summary:hover { filter: brightness(1.2); }
    table{width:100%} — body has overflow-x:hidden, so without this the
    overflow is simply lost. */
 .table-scroll { overflow-x: auto; }
-.table-scroll > table { min-width: 1100px; }
+.table-scroll > table { min-width: 1500px; }

@@ -1954,7 +1954,7 @@ async function loadHistory() {
                 <td>${dur}</td>
                 <td><span class="${statusCls}">${statusLabel}</span></td>
                 <td style="font-size:0.8rem;color:var(--text-2)">${escapeHtml(formatJobType(r.type))}</td>
-                <td title="${escapeHtml(r.trigger || '')}">${escapeHtml(formatTrigger(r.trigger))}</td>
+                <td title="${escapeHtml(r.trigger || '')}">${escapeHtml(triggerLabel(r.trigger_family || r.trigger))}</td>
                 <td>${tenantCell}</td>
                 <td>${userCell}</td>
                 <td>${daemonCell}</td>

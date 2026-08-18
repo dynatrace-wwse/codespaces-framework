@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <meta name="theme-color" content="#080c14">
-    <link rel="stylesheet" href="/static/style.css?v=31">
+    <link rel="stylesheet" href="/static/style.css?v=32">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 </head>
 <!-- auth-pending hides the nav + every view until loadAuthState() resolves. Without it
@@ -1213,7 +1213,7 @@ redis-cli -a $REDIS_PASS HGETALL worker:worker-x86_64-amd002</pre>
          deployed app.js with an unchanged ?v= is invisible: the new index.html
          renders new markup while the old script wires nothing to it. That looks
          exactly like "the control is there but does not work" — v=31 → v=32. -->
-    <script src="/static/app.js?v=38"></script>
+    <script src="/static/app.js?v=39"></script>
     <!-- Landing-hero particle field. Self-contained on purpose: the hub uses the
          particles.js CDN, but this page already pulls xterm from jsDelivr and a third
          CDN for decoration is not worth the request or the supply-chain surface.
