@@ -403,6 +403,27 @@ def test_shape_summary_learner():
     }
 
 
+def test_shape_summary_echoes_when_provisioning_was_requested():
+    """The registrants panel shows "requested at" from the LIST row.
+
+    Without it on the summary a trainer had no on-screen record that their
+    press landed, and the honest response to "did that work?" was to press
+    Start provisioning again. Truthy-only, like every other workshop field:
+    a workshop nobody has provisioned adds no key at all.
+    """
+    quiet = ls.shape_summary("sid-1", _session(), set(), {}, TRAINER)
+    assert "provisionRequestedAt" not in quiet
+
+    asked = _session()
+    asked["provisionRequestedAt"] = "2026-08-18T08:32:00+00:00"
+    # Stored alongside it, deliberately NOT echoed — the app shows a time, and
+    # which trainer pressed the button is nobody else's business.
+    asked["provisionRequestedBy"] = TRAINER
+    item = ls.shape_summary("sid-1", asked, set(), {}, "learner@x.com")
+    assert item["provisionRequestedAt"] == "2026-08-18T08:32:00+00:00"
+    assert "provisionRequestedBy" not in item
+
+
 def test_shape_summary_trainer_not_joined():
     item = ls.shape_summary("sid-1", _session(), {"alice@x.com"}, {}, TRAINER)
     assert item["isTrainer"] is True

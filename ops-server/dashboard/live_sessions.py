@@ -890,6 +890,13 @@ _WORKSHOP_FIELDS = ("scheduledAt", "timezone", "durationMinutes", "maxSeats",
                     # Only meaningful with >1 trainer, and absent until someone
                     # moves it — so truthy-only echoing is exactly right.
                     "pacingBy", "pacingAt",
+                    # When a trainer last asked for the cohort's environments.
+                    # Echoed on the SUMMARY as well as the detail so the
+                    # registrants panel can show "requested at" without pulling
+                    # a full detail per row — a trainer with no visible record
+                    # of their press pressed it again. A timestamp, no identity:
+                    # provisionRequestedBy stays internal.
+                    "provisionRequestedAt",
                     # Only set once a workshop has finished, so it costs live
                     # payloads nothing and dates the row in the past listing.
                     "endedAt")
