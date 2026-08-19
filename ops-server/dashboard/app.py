@@ -6844,7 +6844,7 @@ async def api_live_session_provision_ack(session_id: str,
     log.info("Live session %s provision-ack %s from %s: %s%s",
              scrub_for_log(session_id), scrub_for_log(email),
              scrub_for_log(body.tenant or "?"), scrub_for_log(status),
-             scrub_for_log(f" ({body.error[:120]})") if body.error else "")
+             scrub_for_log(f" ({body.error[:600]})") if body.error else "")
     return {"ok": True, "status": status}
 
 
@@ -9117,22 +9117,15 @@ async def api_health():
 # cap, terminate-only-spot-workers, creds-expiry classification) live there
 # as pure functions with tests in dashboard/test_fleet.py.
 
-async def _fleet_workers() -> list[dict]:
-    """Registered worker:{id} hashes (same scan as /api/workers)."""
-    workers = []
-    async for key in pool.scan_iter("worker:*", count=500):
-        # Skip port-pool lists (worker:<id>:app_ports_free) — Redis lists,
-        # not hashes; hgetall would raise WRONGTYPE.
-        if key.endswith(":app_ports_free"):
-            continue
-        try:
-            data = await pool.hgetall(key)
-        except Exception:
-            continue
-        if data:
-            data["worker_id"] = key.replace("worker:", "")
-            workers.append(data)
-    return workers
+# NOTE: `_fleet_workers()` used to be defined HERE as well, returning the raw
+# `worker:{id}` hash. It was dead code: the second definition (further down,
+# near the autoscaler) shadowed it at import, so every caller — /api/fleet,
+# /api/live/capacity, the scale-down guard and the reaper — already received
+# the NORMALIZED shape from `fleet_policy.normalize_worker`. Deleting the
+# shadowed twin is therefore a zero-runtime-change edit; what it fixes is the
+# next reader, who could not tell which body ran. The visible symptom it
+# explains (`/api/live/capacity` reporting 0 on a healthy fleet) is fixed in
+# `live_sessions.capacity_summary`, which now reads `slots_total`.
 
 
 @app.get("/api/fleet")

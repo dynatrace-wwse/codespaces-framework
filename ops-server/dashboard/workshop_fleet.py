@@ -644,6 +644,19 @@ def _truthy(value) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes")
 
 
+def _int(value, default: int = 0) -> int:
+    """Redis hash field -> int, never raising.
+
+    Every value in a fleet record arrives as a string, and this runs inside the
+    control loop: a ValueError here would abort the tick for EVERY workshop,
+    not just the one with the bad field. Total-function by construction.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def update_pressure(pressure_ticks: dict[str, int], workers: list[dict]) -> dict[str, int]:
     """Count consecutive ticks a worker has been hot; reset the moment it is not.
 
@@ -1313,6 +1326,40 @@ async def tick(redis) -> dict:
                               "seats may be short",
                               scrub_for_log(ws_id), scrub_for_log(pool_name),
                               WORKSHOP_WARMING_TIMEOUT_MINUTES, degraded)
+
+            elif state == READY:
+                # `ready_workers` was written ONCE, at the WARMING → READY
+                # transition above, and never again. Machines that warm up a
+                # moment later never got counted, so the number stayed at
+                # whatever the first tick happened to catch — the APAC bootcamp
+                # showed a trainer "1 ready" for the whole delivery while six
+                # workers were up at 15/15 slots each.
+                #
+                # It is worth refreshing precisely because of WHEN a trainer
+                # reads it: during provisioning, to decide whether to start. A
+                # stale low number there reads as a broken fleet and invites
+                # exactly the wrong action.
+                #
+                # Recount with the SAME predicate the record was written with —
+                # a degraded pool must not silently start reporting the strict
+                # count, or "degraded" and "ready_workers" would contradict each
+                # other. A degraded pool that fully warms later clears the flag.
+                degraded_rec = _truthy(rec.get("degraded"))
+                pool_name = rec.get("pool", "")
+                strict = await _pool_workers_ready(redis, pool_name)
+                fresh = strict if not degraded_rec else max(
+                    strict, await _pool_workers_any(redis, pool_name))
+                changed = {}
+                if fresh != _int(rec.get("ready_workers")):
+                    changed["ready_workers"] = fresh
+                if degraded_rec and strict and strict >= _int(rec.get("workers")):
+                    # Every machine eventually came up: stop calling it degraded.
+                    changed["degraded"] = ""
+                if changed:
+                    rec.update(changed)
+                    await _save_fleet_record(redis, ws_id, rec)
+                    log.info("workshop %s: %d worker(s) ready%s", scrub_for_log(ws_id),
+                             fresh, " (degraded cleared)" if "degraded" in changed else "")
 
             # DONE is re-armable, and that is the whole point of listing it.
             # Teardown leaves the record at DONE and deletes the pool binding.

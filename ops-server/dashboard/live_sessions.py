@@ -416,6 +416,16 @@ def audit_event(kind, email="", tenant="", actor="", detail="", now=None) -> dic
     Redis stream fields are strings, so everything is stringified here rather
     than at each of the seven call sites. Empty fields are dropped so a reader
     never has to distinguish "absent" from "empty string".
+
+    `detail` carries the provisioning failure reason, and this stream is the
+    surface a TRAINER reads mid-delivery. The cap was 200, and the boilerplate
+    a mint failure arrives with ("Could not mint Dynatrace tokens on this
+    tenant, so the training was not started. platform mint failed: ") eats 113
+    of it — so the APAC bootcamp recorded `Blocked request to
+    'sso.dynatrace.com' (host not in allowlist). To find out about how to m`
+    with the remediation sentence, the part that says what to DO, cut off.
+    600 keeps a full platform error plus its fix hint. Streams are capped by
+    EVENTS_MAXLEN, so this costs bounded memory, not unbounded.
     """
     if kind not in EVENT_KINDS:
         raise ValueError(f"unknown audit event kind: {kind}")
@@ -425,7 +435,7 @@ def audit_event(kind, email="", tenant="", actor="", detail="", now=None) -> dic
         "email": normalize_email(email),
         "tenant": normalize_tenant(tenant),
         "actor": normalize_email(actor),
-        "detail": str(detail or "")[:200],
+        "detail": str(detail or "")[:600],
     }
     return {k: v for k, v in fields.items() if v}
 
@@ -1233,18 +1243,36 @@ def matches_admin_filters(row: dict, tenant: str = "", trainer: str = "",
 
 def capacity_summary(workers, active_counts, needed) -> dict:
     """GET /api/live/capacity payload from worker heartbeat hashes + per-worker
-    active-job counts. Pure math — the endpoint only gathers the inputs."""
-    def _int(v):
+    active-job counts. Pure math — the endpoint only gathers the inputs.
+
+    Reads `slots_total` in preference to `capacity`, falling back either way.
+    That is not cosmetic: app.py defined `_fleet_workers()` TWICE, and Python
+    kept the second, which returns `fleet_policy.normalize_worker(...)` — a
+    shape with no `capacity` key at all. So this function read 0 for every
+    worker and the endpoint answered `sufficient: False` against a fully
+    healthy fleet (measured 2026-08-19: 13 workers, `capacity 0`, needed 72).
+    The duplicate is gone now, but accepting both spellings is what makes this
+    correct against a raw heartbeat hash AND a normalized one — the same
+    both-ways fallback `normalize_worker` itself uses for rolling deploys.
+
+    Note what this deliberately does NOT do: filter by pool, `draining` or
+    staleness. It sums the whole fleet, so a workshop-pool machine counts
+    toward a daily-lane question. No caller relies on it today; a caller that
+    needs lane-accurate numbers should use `fleet_policy.fleet_state()`, which
+    already does that filtering, rather than this being quietly changed
+    underneath the tests that pin its current arithmetic.
+    """
+    def _int(v, default=0):
         try:
-            return int(v or 0)
+            return int(v) if v not in (None, "") else default
         except (TypeError, ValueError):
-            return 0
+            return default
 
     items, total_capacity, total_active = [], 0, 0
     for worker in sorted(workers or [], key=lambda w: w.get("worker_id", "")):
         wid = worker.get("worker_id", "")
-        capacity = _int(worker.get("capacity"))
-        active = _int((active_counts or {}).get(wid))
+        capacity = _int(worker.get("slots_total"), _int(worker.get("capacity")))
+        active = _int((active_counts or {}).get(wid), _int(worker.get("active_jobs")))
         total_capacity += capacity
         total_active += active
         items.append({"id": wid, "capacity": capacity, "active": active})

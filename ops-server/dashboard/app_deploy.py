@@ -41,7 +41,7 @@ from dashboard.content_service import classify_tenant, register_tenant
 from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KEY) — COE token + stashed deploy token
 from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
 from provisioning.sso import DEFAULT_SSO, discover_sso as _discover_sso
-from shared.log_safety import scrub_for_log
+from shared.log_safety import safe_error_detail, scrub_for_log
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -363,7 +363,19 @@ def _scope_warnings(allowlist: str, remote_grail: str, orbital_config: str = "")
     if "token lacks settings" in (allowlist or ""):
         warnings.append(
             "outbound allowlist NOT updated: the deploy token is missing settings:objects:write.")
-    if (orbital_config or "").startswith("seed refused"):
+    if (orbital_config or "").startswith("app cannot reach Orbital"):
+        # The one that was misdiagnosed for a whole bootcamp. Nothing on this
+        # server is wrong; the tenant's JS runtime is refusing the egress, and
+        # the fix is on the tenant. Said plainly so nobody goes looking at
+        # /home/ops/.env again.
+        warnings.append(
+            "ACTION REQUIRED — this tenant's app cannot reach Orbital "
+            "(autonomous-enablements.whydevslovedynatrace.com). Nothing is wrong with "
+            "ORBITAL_TOKEN on the server: add the host to Settings > Outbound "
+            "connections on this environment (schema "
+            "builtin:dt-javascript-runtime.allowed-outbound-connections) and redeploy. "
+            "Until then the app cannot provision environments or run workshops.")
+    elif (orbital_config or "").startswith("seed refused"):
         # The only genuinely actionable branch. The app asked Orbital about the
         # token Orbital itself sent, and Orbital said no — which means the value
         # in ORBITAL_TOKEN is stale. The bearer baked into the shipped app is
@@ -1156,7 +1168,8 @@ def _outbound_hosts_for(tenant_url: str) -> list[str]:
 
 
 async def _ensure_outbound_allowlist(token: str, tenant_url: str,
-                                     extra_hosts: list[str] | None = None) -> str:
+                                     extra_hosts: list[str] | None = None,
+                                     proven_blocked: bool = False) -> str:
     """If the tenant enforces a JS-runtime outbound allowlist (sprint/dev do, prod usually
     doesn't), add the content-delivery hosts so the app's functions can reach Orbital + GitHub.
     Only ever adds hosts to an existing enforced list — never creates or tightens a restriction.
@@ -1187,8 +1200,18 @@ async def _ensure_outbound_allowlist(token: str, tenant_url: str,
                 # hosts. Prod with no object means outbound is open → never create one
                 # there (that would tighten prod).
                 _, domain = classify_tenant(tenant_url)
-                if domain not in ("sprint", "dev"):
-                    return "no allowlist object (prod — outbound open)"
+                # `proven_blocked` means the app itself just told us, from inside
+                # this tenant's runtime, that it cannot reach a required host.
+                # Measured on uxn36332 (2026-08-19): NO settings object at ANY
+                # scope, and the app still answered
+                #   Blocked request to 'autonomous-enablements…' (host not in allowlist)
+                # So "prod + no object = outbound open" is false, and refusing to
+                # create here left the tenant permanently broken. Creating a list
+                # of exactly the hosts the app needs is strictly MORE permissive
+                # than a default-deny, so it repairs rather than tightens — but
+                # only ever on proof, never on the guess that got us here.
+                if domain not in ("sprint", "dev") and not proven_blocked:
+                    return "no allowlist object (prod — outbound not verified)"
                 cr = await c.post(base, headers={**h, "Content-Type": "application/json"}, json=[{
                     "schemaId": OUTBOUND_SCHEMA, "scope": "environment",
                     "value": {"allowedOutboundConnections": {"enforced": True, "hostList": list(wanted)}},
@@ -1483,6 +1506,12 @@ async def _seed_via_app_function(token: str, tenant_url: str) -> str | None:
             "already-configured": "already configured",
             "rejected": "seed refused: Orbital did not accept the token Orbital sent "
                         "— check ORBITAL_TOKEN on this server",
+            # NOT "rejected". The app could not reach Orbital at all, which says
+            # nothing about the token. Before the app distinguished these, every
+            # blocked tenant was reported as a bad server token: 26 times on
+            # 2026-08-19 alone, while that token was demonstrably valid (probed:
+            # HTTP 200). Two SEs spent a delivery debugging the wrong system.
+            "unreachable": "app cannot reach Orbital from this tenant — outbound blocked",
             "missing-token": "skipped (ORBITAL_TOKEN not configured)",
         }.get(status) or await _explain_unseeded(token, tenant_url, status, (body or {}).get("detail", ""))
     except Exception as exc:
@@ -1923,8 +1952,14 @@ async def _deploy_token_flow(user: str, body: dict) -> dict:
     allowlist = ""
     remote_grail = ""
     orbital_cfg = ""
+    selftest: dict = {"status": "unknown", "blocked": [], "detail": "deploy failed"}
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant)  # use token before discarding
+        # Same gate as the bootstrap path: prove the app can reach what it needs
+        # from inside the tenant's runtime, and repair the allowlist on proof of
+        # a block. This is the route "Update now" and the auto-deploys use, so
+        # without it the MAIN deploy path would keep shipping unverified installs.
+        selftest = await _selftest_and_repair(token, tenant)
         remote_grail = await _ensure_remote_grail(token, tenant)     # auto-enable cross-tenant forwarding
         orbital_cfg = await _ensure_orbital_config(token, tenant)    # so app functions can reach Orbital
     del token
@@ -1938,16 +1973,30 @@ async def _deploy_token_flow(user: str, body: dict) -> dict:
     profile = (reg or {}).get("profile")
     url = _app_url(tenant)
     warnings = _scope_warnings(allowlist, remote_grail, orbital_cfg)
+    if selftest.get("status") == "blocked":
+        blocked = ", ".join(selftest.get("blocked") or [])
+        if not allow_partial:
+            await _audit(user, tenant_id, "deploy", "outbound-blocked", via=via, detail=blocked)
+            raise HTTPException(412,
+                f"App {res.get('to') or 'version'} installed, but this tenant's app runtime "
+                f"cannot reach: {blocked}. Until that is fixed the app CANNOT provision "
+                f"environments, mint learner tokens or run workshops. "
+                + (selftest.get("detail") or "")
+                + " Send allowPartial:true to accept the install anyway.")
+        warnings.append("outbound blocked, overridden by allowPartial: " + blocked)
+    elif selftest.get("status") == "unknown":
+        warnings.append(f"outbound NOT verified ({selftest.get('detail')}) — the install is "
+                        "unproven until this check passes.")
     await tenant_registry.record_deploy(
         _pool(), tenant_id, "auto" if auto else "token",
         deployer="" if user == "anonymous" else user, app_version=res.get("to") or "")
     await _audit(user, tenant_id, "deploy", res["status"], via=via,
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
-                 warnings=warnings)
+                 selftest=selftest, warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "credential": source,
-            "allowlist": allowlist, "remote_grail": remote_grail,
+            "allowlist": allowlist, "remote_grail": remote_grail, "selfTest": selftest,
             "orbital_config": orbital_cfg, "warnings": warnings}
 
 
@@ -2044,6 +2093,14 @@ MINT_SCOPE = "platform-token:tokens:write platform-token:tokens:manage"
 # Environment-scoped, and NOT covered by MINT_SCOPE: DynaKube's per-session ActiveGate
 # token. Mirrors AG_SCOPE in the app's api/mintCredentials.function.ts.
 AG_SCOPE = "environment-api:activegate-tokens:write"
+# ...and its gen3 twin. The classic scope above is NOT in every account client's
+# catalog, and SSO says so with HTTP 400 at the TOKEN endpoint — before any API
+# call, so no IAM binding can rescue it. Measured 2026-08-19 on hpm49270, where
+# it killed a learner's session mid-workshop. `fleet-management:*` mints the same
+# dt0g02 against the same endpoint and exists exactly where the classic one does
+# not, so the preflight tries both before calling a tenant unfit.
+# Order and spelling must match AG_SCOPES in the app's api/_platform-mint.ts.
+AG_SCOPES = (AG_SCOPE, "fleet-management:activegate.tokens:write")
 # Realm SSO token endpoints + Account Management API hosts per domain class
 # (classify_tenant → prod/sprint/dev). Overridable per request for unusual realms.
 SSO_TOKEN_URL_BY_DOMAIN = {
@@ -2336,6 +2393,252 @@ async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: s
         return {"tier": "none", "detail": "; ".join(detail)}
 
 
+# ── Verified capability, not inferred capability ─────────────────────────────
+#
+# Everything below exists because the deploy used to REPORT capabilities it had
+# never exercised, and the APAC bootcamp (2026-08-19) cashed in every one of
+# those guesses at once. The rule these follow:
+#
+#   Never report a capability that was inferred. Either resolve it against the
+#   effective-permissions API, or exercise it for real. Anything that cannot be
+#   established is reported as UNKNOWN — never as fine.
+
+EFFECTIVE_PERMISSIONS_PATH = "/platform/management/v1/effective-permissions:resolve"
+
+
+async def _effective_permissions(token: str, tenant_url: str,
+                                 permissions: list[str]) -> dict[str, str] | None:
+    """Which of `permissions` this bearer can ACTUALLY exercise here.
+
+    Returns {permission: "true"|"false"|"condition"}, or None when the platform
+    does not offer the endpoint (older environments) so callers can fall back
+    to a live probe rather than treat "could not ask" as "no".
+
+    Why this is not the same as reading the token's `scope` claim: SSO stamps
+    scope names WITHOUT an entitlement check, and effective permission is
+    `scopes ∩ the owner's IAM policy`. That gap is not academic — it is
+    precisely what silently broke content on bos01241, where a token carrying
+    `document:documents:admin` was refused by every call that used it:
+
+        403 {"error":{"code":403,"message":"Document not accessible: 8ff8e6fd-…"}}
+
+    The import then failed on exactly the repos whose document already existed
+    under another owner, and reported `errors=3` to a browser console nobody
+    was reading. Four trainings were missing from that tenant's catalog for the
+    whole delivery, and it read to the learner as a permissions bug in the app.
+
+    Request/response shape is taken from the vendored SDK
+    (@dynatrace-sdk/client-platform-management-service), not guessed:
+        POST  {"permissions": [{"permission": "..."}]}
+        200   [{"permission": "...", "granted": "true"|"false"|"condition"}]
+
+    ⚠️ THE TRAP, measured on COE 2026-08-19 — `token` MUST already carry the
+    permissions you are asking about. The API resolves for the PRESENTED TOKEN
+    (its scopes ∩ the owner's IAM), not for what the client could obtain. Ask
+    with a bearer that lacks the scope and every answer is `"false"`:
+
+        bearer scoped app-engine:apps:run only
+          → document:documents:admin  "false"   ← says nothing about IAM
+        bearer scoped ...+document:documents:admin
+          → document:documents:admin  "true"
+
+    On COE both answers came back for a client that demonstrably CAN write
+    documents. Wiring this to the deploy bearer would therefore have printed
+    "ACTION REQUIRED — document:documents:admin is not effective" on every
+    single deploy — the same cry-wolf failure this whole change exists to
+    remove. Mint a bearer for the scopes first; see `_documents_admin_effective`.
+    """
+    if not permissions:
+        return {}
+    url = f"{tenant_url.rstrip('/')}{EFFECTIVE_PERMISSIONS_PATH}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(url, headers={"Authorization": f"Bearer {token}",
+                                           "Content-Type": "application/json"},
+                             # The API caps a request at 100 permissions.
+                             json={"permissions": [{"permission": p}
+                                                   for p in permissions[:100]]})
+        if r.status_code != 200:
+            log.info("effective-permissions unavailable on %s (HTTP %s)",
+                     scrub_for_log(tenant_url), r.status_code)
+            return None
+        rows = r.json() or []
+        return {str(row.get("permission", "")): str(row.get("granted", "")) for row in rows}
+    except Exception as exc:
+        log.warning("effective-permissions on %s: %s",
+                    scrub_for_log(tenant_url), scrub_for_log(exc))
+        return None
+
+
+async def _documents_admin_effective(sso_url: str, cid: str, csec: str, tenant: str,
+                                     tenant_id: str) -> str:
+    """Is `document:documents:admin` actually exercisable here?
+
+    Returns "true" | "false" | "condition" | "" (unknown).
+
+    Asks with a bearer that CARRIES the document scopes, because the resolve API
+    answers for the presented token — see the warning in `_effective_permissions`.
+    An SSO refusal is reported as unknown rather than false: that is a scope
+    catalog gap, which the preflight already reports on its own, and calling it
+    an IAM problem would send the operator to the wrong fix.
+    """
+    # DOC_SCOPE is read/write/delete — it does NOT include admin, which is the
+    # one being asked about. Asking with it would reproduce the very trap this
+    # function exists to avoid, so admin is named explicitly.
+    bearer, _st, _err = await _oauth_bearer(
+        sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}",
+        f"app-engine:apps:run {DOC_SCOPE} document:documents:admin")
+    if bearer is None:
+        return ""
+    eff = await _effective_permissions(bearer, tenant, ["document:documents:admin"])
+    if eff is None:
+        return ""
+    return eff.get("document:documents:admin", "")
+
+
+async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
+                                tenant_id: str) -> tuple[bool, str]:
+    """Can this tenant mint the ActiveGate token (dt0g02) a DynaKube needs?
+
+    Mints a REAL token and deletes it. Asking SSO for a bearer is not enough —
+    that is what the deploy used to do, and it only ever ran AFTER the install,
+    as a warning, gated behind `mint_ready` so a tenant failing both produced no
+    warning at all. hpm49270 passed every check the deploy made and then failed
+    the learner four hours later, inside the operator install, with:
+
+        ActiveGate token mint failed: SSO client_credentials failed (HTTP 400)
+
+    Tries both scope families (see AG_SCOPES). Every Kubernetes training needs
+    this, so a tenant that can mint neither is refused rather than installed.
+    """
+    proxy = f"{tenant.rstrip('/')}/platform/classic/environment-api/v2/activeGateTokens"
+    refusals: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            for scope in AG_SCOPES:
+                bearer, st, err = await _oauth_bearer(
+                    sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}", scope)
+                if bearer is None:
+                    refusals.append(f"{scope}: SSO HTTP {st}")
+                    continue
+                hdr = {"Authorization": f"Bearer {bearer}"}
+                r = await c.post(proxy, headers=hdr, json={
+                    "name": "enbl-preflight-ag", "activeGateType": "ENVIRONMENT",
+                    "expirationDate": _preflight_expiry()})
+                if r.status_code in (200, 201):
+                    tok_id = (r.json() or {}).get("id")
+                    if tok_id:
+                        await c.delete(f"{proxy}/{tok_id}", headers=hdr)
+                    return True, f"ActiveGate token minted via {scope}"
+                # A bearer that WAS issued and is then refused by the API is an
+                # IAM binding problem, not a catalog problem. Record it and try
+                # the other family anyway — they are granted independently.
+                refusals.append(f"{scope}: mint HTTP {r.status_code} "
+                                f"{safe_error_detail(r.text)}")
+    except httpx.HTTPError as e:
+        return False, f"ActiveGate probe error: {e}"
+    return False, ("cannot mint an ActiveGate token, so every Kubernetes training will "
+                   "fail when DynaKube starts. Grant the OAuth client one of "
+                   f"{' or '.join(AG_SCOPES)} on this environment — scopes cannot be "
+                   "edited on an existing client, so this means creating a new one. "
+                   f"Tried: {'; '.join(refusals)}")
+
+
+async def _selftest_outbound(token: str, tenant_url: str) -> dict:
+    """Ask the APP, from inside the tenant's own JS runtime, what it can reach.
+
+    This replaces an inference that was simply wrong. `_ensure_outbound_allowlist`
+    reads the allowlist settings object and concludes that a prod tenant with no
+    object has open egress. On 2026-08-19 twelve tenants got that verdict; eight
+    of them never provisioned anything, and on jxh41488 a learner's mint died on
+
+        Blocked request to 'sso.dynatrace.com' (host not in allowlist)
+
+    an hour after the deploy recorded `no allowlist object (prod — outbound open)`.
+
+    There is no API that returns the effective allowlist and no way to ask
+    whether a host would be permitted, so the only instrument that answers is a
+    real outbound call from inside the runtime.
+
+    Returns {"status": ..., "blocked": [...], "detail": ...}. `status` is
+    "ok" | "blocked" | "unknown" — and "unknown" is deliberately not "ok": an
+    app too old to carry the function, or one we could not reach, has not
+    proven anything. Only a definite "blocked" is treated as a failure, so a
+    tenant is never refused over a check that did not run.
+    """
+    fn = (f"{tenant_url.rstrip('/')}/platform/app-engine/app-functions/v1/apps/"
+          f"{APP_ID}/api/selfTest")
+    hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    try:
+        # An app is not routable the instant its install returns — the first call
+        # after an upgrade answers "App not found" and the same call seconds later
+        # succeeds. Same ladder as _seed_via_app_function, for the same reason.
+        r = None
+        for pause in (0, 5, 10):
+            if pause:
+                await asyncio.sleep(pause)
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.post(fn, headers=hdr, json={})
+            if r.status_code in (200, 404):
+                break
+        if r.status_code == 404:
+            return {"status": "unknown", "blocked": [],
+                    "detail": "installed app has no selfTest function yet (pre-1.0.351)"}
+        if r.status_code != 200:
+            return {"status": "unknown", "blocked": [],
+                    "detail": f"selfTest unreachable (HTTP {r.status_code})"}
+        body = r.json() if r.content else {}
+        blocked = list(body.get("blocked") or [])
+        if blocked:
+            return {"status": "blocked", "blocked": blocked,
+                    "detail": body.get("remedy") or "outbound hosts blocked"}
+        if body.get("ok"):
+            return {"status": "ok", "blocked": [], "detail": "all required hosts reachable"}
+        # Reachability could not be proven for every host, but nothing was
+        # definitively blocked — a transient network error, most likely.
+        unreachable = [h.get("host") for h in (body.get("hosts") or [])
+                       if h.get("outcome") != "ok"]
+        return {"status": "unknown", "blocked": [],
+                "detail": f"could not prove reachability for: {', '.join(filter(None, unreachable))}"}
+    except Exception as exc:
+        log.warning("selfTest on %s: %s", scrub_for_log(tenant_url), scrub_for_log(exc))
+        return {"status": "unknown", "blocked": [], "detail": f"selfTest error: {exc}"}
+
+
+async def _selftest_and_repair(token: str, tenant_url: str,
+                               extra_hosts: list[str] | None = None) -> dict:
+    """Self-test; if hosts are blocked, write the allowlist and test again.
+
+    The repair only ever runs on PROOF of a block, which is what makes it safe
+    to do on a customer's prod tenant: we are restoring egress the app already
+    needs, never tightening a tenant that was open. `_ensure_outbound_allowlist`
+    itself only ever ADDS hosts to an existing enforced list.
+
+    The second self-test is not ceremony. The propagation delay between writing
+    that settings object and the runtime honouring it is undocumented, so the
+    only way to know the repair worked is to ask again.
+    """
+    result = await _selftest_outbound(token, tenant_url)
+    if result["status"] != "blocked":
+        return result
+    log.warning("outbound blocked on %s: %s — repairing allowlist",
+                scrub_for_log(tenant_url), scrub_for_log(", ".join(result["blocked"])))
+    repair = await _ensure_outbound_allowlist(token, tenant_url, extra_hosts=extra_hosts,
+                                             proven_blocked=True)
+    for pause in (2, 5, 10):
+        await asyncio.sleep(pause)
+        again = await _selftest_outbound(token, tenant_url)
+        if again["status"] == "ok":
+            again["detail"] = f"outbound repaired ({repair}); all required hosts reachable"
+            again["repaired"] = True
+            return again
+        result = again
+        if again["status"] != "blocked":
+            break
+    result["repair"] = repair
+    return result
+
+
 async def _preflight_documents(sso_url: str, cid: str, csec: str, tenant: str,
                                tenant_id: str) -> tuple[bool, str]:
     """The path the content importer uses: create a document AS THE APP's service
@@ -2415,13 +2718,19 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         learner = await _preflight_learner_tokens(
             sso_url, cid, csec, tenant, tenant_id, domain, account_urn, api_host)
         docs_ok, docs_detail = await _preflight_documents(sso_url, cid, csec, tenant, tenant_id)
+        # Every Kubernetes training needs a dt0g02. This used to be a post-install
+        # warning; hpm49270 proved a warning is not enough (see _preflight_activegate).
+        ag_ok, ag_detail = await _preflight_activegate(sso_url, cid, csec, tenant, tenant_id)
         preflight = {"learnerTokenTier": learner["tier"], "learnerDetail": learner["detail"],
-                     "documentsReady": docs_ok, "documentsDetail": docs_detail}
+                     "documentsReady": docs_ok, "documentsDetail": docs_detail,
+                     "activeGateReady": ag_ok, "activeGateDetail": ag_detail}
         failures = []
         if learner["tier"] == "none":
             failures.append(f"no working learner-token path — {learner['detail']}")
         if not docs_ok:
             failures.append(f"content documents cannot be written as the app — {docs_detail}")
+        if not ag_ok:
+            failures.append(ag_detail)
         if failures:
             if not allow_partial:
                 await _audit(user, tenant_id, "deploy", "preflight-refused",
@@ -2476,6 +2785,8 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     allowlist = ""
     remote_grail = ""
     orbital_cfg = ""
+    selftest: dict = {"status": "unknown", "blocked": [], "detail": "deploy failed"}
+    docs_admin = ""
     mint_client = "skipped (deploy failed)"
     instructors = "skipped (deploy failed)"
     mint_ready = False
@@ -2493,6 +2804,20 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     account_detail = ""
     if res["status"] != "error":
         allowlist = await _ensure_outbound_allowlist(token, tenant, extra_hosts=realm_hosts)
+        # PROVE the app can reach what it needs, from inside the tenant's own
+        # runtime. The allowlist write above is a best guess based on a settings
+        # object; this is the only thing that knows whether it worked. Repairs on
+        # proof of a block, then re-tests. See _selftest_and_repair.
+        selftest = await _selftest_and_repair(token, tenant, extra_hosts=realm_hosts)
+        # `document:documents:admin` is stamped by SSO without an entitlement
+        # check, and a tenant where it is not EFFECTIVE cannot update a lab
+        # document that already exists under another owner — which is how four
+        # trainings went missing on bos01241 while every readback said "held".
+        # NOT asked with `token`: the resolve API answers for the presented
+        # bearer, and the deploy bearer holds no document scopes, so that would
+        # report "not effective" on every tenant. See _documents_admin_effective.
+        docs_admin = await _documents_admin_effective(
+            sso_url, cid, csec, tenant, tenant_id)
         remote_grail = await _ensure_remote_grail(token, tenant)
         orbital_cfg = await _ensure_orbital_config(token, tenant)
 
@@ -2508,21 +2833,12 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         if mint_bearer:
             del mint_bearer
 
-        # 2b. DynaKube mints an ActiveGate token per session, and a platform token cannot
-        #     carry that scope — it is environment-scoped and separate. Without it every
-        #     Kubernetes training dies at ActiveGate with an error that looks nothing like
-        #     a credential problem. mintCredentials checks this before storing when a human
-        #     pastes the client; check it here too, for the path where nobody does.
-        ag_bearer, ag_st, _ = await _oauth_bearer(
-            sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}", AG_SCOPE)
-        ag_ready = ag_bearer is not None
-        if ag_bearer:
-            del ag_bearer
-        if mint_ready and not ag_ready:
-            scope_warnings.append(
-                f"ActiveGate tokens NOT available (SSO HTTP {ag_st}): grant "
-                f"{AG_SCOPE} on this environment, or Kubernetes trainings will fail when "
-                f"DynaKube starts. Everything else works without it.")
+        # 2b. The ActiveGate check moved to the PREFLIGHT (_preflight_activegate),
+        #     where it mints a real dt0g02 across both scope families and refuses
+        #     the deploy when neither works. It used to live here: an SSO-bearer
+        #     probe, post-install, warning-only, and gated behind `mint_ready` so
+        #     a tenant failing both produced no warning at all. hpm49270 passed
+        #     it and killed a learner's session four hours later.
 
         # 3. Hand the client to the TENANT — the step that makes it self-sufficient. From
         #    here the app mints its own per-learner tokens and its own install bearer for
@@ -2550,6 +2866,42 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         await _audit(user, tenant_id, "deploy", "deploy-error", via="oauth-bootstrap",
                      client_id=cid, rc=res.get("rc"))
         raise HTTPException(502, f"Deploy failed (exit {res.get('rc')}): {res.get('output','')}")
+
+    # An app that cannot reach Orbital is not a working install, and shipping it as
+    # one is exactly what happened to Edrick Leong (bth17199) and Cruz Lim
+    # (uxn36332): the deploy reported success, the app could not call out, and the
+    # only signal they got blamed a server they do not own. Refuse, and name the
+    # hosts. The app stays installed — uninstalling would destroy app-state on a
+    # tenant that may have been working on an older version — but the caller is
+    # told plainly that it is not functional.
+    if selftest.get("status") == "blocked" and not allow_partial:
+        blocked = ", ".join(selftest.get("blocked") or [])
+        await _audit(user, tenant_id, "deploy", "outbound-blocked", via="oauth-bootstrap",
+                     client_id=cid, detail=blocked)
+        raise HTTPException(412,
+            f"App {res.get('to') or 'version'} installed, but this tenant's app runtime "
+            f"cannot reach: {blocked}. Until that is fixed the app CANNOT provision "
+            f"environments, mint learner tokens or run workshops. "
+            + (selftest.get("detail") or "")
+            + " Orbital tried to add the hosts automatically and could not "
+              f"({selftest.get('repair', 'no settings access')}). Send allowPartial:true "
+              "to accept the install anyway.")
+    if selftest.get("status") == "blocked":
+        scope_warnings.append("outbound blocked, overridden by allowPartial: "
+                              + ", ".join(selftest.get("blocked") or []))
+    elif selftest.get("status") == "unknown":
+        scope_warnings.append(
+            f"outbound NOT verified ({selftest.get('detail')}). This is the check that "
+            "catches a tenant whose app cannot reach Orbital; treat the install as "
+            "unproven until it passes.")
+    if docs_admin == "false":
+        scope_warnings.append(
+            "ACTION REQUIRED — document:documents:admin is granted by SSO but NOT "
+            "effective on this environment. The app cannot update a lab document that "
+            "already exists under another owner, so those trainings will silently stay "
+            "missing from the catalog (measured on bos01241: 4 trainings). Bind an IAM "
+            "policy carrying document:documents:admin to the OAuth client's service user "
+            "at environment level.")
 
     if not mint_ready and preflight.get("learnerTokenTier") == "classic":
         scope_warnings.append(
@@ -2592,9 +2944,11 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
                  **{k: res[k] for k in ("from", "to") if res.get(k)}, url=url, profile=profile,
                  allowlist=allowlist, remote_grail=remote_grail, orbital_config=orbital_cfg,
                  mint_ready=mint_ready, mint_client=mint_client, instructors=instructors,
-                 preflight=preflight, warnings=warnings)
+                 preflight=preflight, selftest=selftest, documents_admin=docs_admin,
+                 warnings=warnings)
     return {"ok": True, "tenant": tenant_id, "status": res["status"], "from": res.get("from"),
             "version": res.get("to"), "url": url, "profile": profile, "allowlist": allowlist,
+            "selfTest": selftest, "documentsAdminEffective": docs_admin,
             "remote_grail": remote_grail, "orbital_config": orbital_cfg,
             "mintReady": mint_ready, "mintClient": mint_client, "instructors": instructors,
             "registrant": client_email, "audience": audience,

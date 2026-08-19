@@ -918,8 +918,29 @@ def test_audit_event_rejects_an_unknown_kind():
 
 
 def test_audit_event_truncates_detail():
-    ev = ls.audit_event(ls.EVENT_PROVISION_FAILED, detail="x" * 500)
-    assert len(ev["detail"]) == 200
+    ev = ls.audit_event(ls.EVENT_PROVISION_FAILED, detail="x" * 5000)
+    assert len(ev["detail"]) == 600
+
+
+def test_audit_event_keeps_the_REASON_of_a_mint_failure_not_just_its_preamble():
+    """The cap must clear the boilerplate a mint failure arrives with.
+
+    At 200 the APAC bootcamp recorded this, in the stream a trainer reads
+    mid-delivery, with the remediation sentence cut off:
+
+        …platform mint failed: Blocked request to 'sso.dynatrace.com' (host
+        not in allowlist). To find out about how to m
+
+    The preamble alone is 113 characters, so the cap has to be generous enough
+    that the part naming the CAUSE and the FIX both survive.
+    """
+    real = ("Could not mint Dynatrace tokens on this tenant, so the training was not "
+            "started. platform mint failed: Blocked request to 'sso.dynatrace.com' "
+            "(host not in allowlist). To find out about how to allow outbound "
+            "connections, see the documentation.")
+    ev = ls.audit_event(ls.EVENT_PROVISION_FAILED, detail=real)
+    assert ev["detail"] == real, "a real mint failure must survive intact"
+    assert "host not in allowlist" in ev["detail"]
 
 
 def test_shape_events_keeps_the_stream_id_for_paging():
