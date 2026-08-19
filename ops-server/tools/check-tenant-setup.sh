@@ -1,0 +1,1 @@
+tenant-check-page/check-tenant-setup.sh

@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-check
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tenant-check
+  namespace: tenant-check
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: tenant-check}
+  template:
+    metadata:
+      labels: {app: tenant-check}
+    spec:
+      containers:
+      - name: tenant-check
+        image: IMAGE_PLACEHOLDER
+        ports: [{containerPort: 8080}]
+        env:
+        - name: AUDIT_TOKEN
+          valueFrom: {secretKeyRef: {name: tenant-check-audit, key: token}}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          initialDelaySeconds: 3
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tenant-check
+  namespace: tenant-check
+spec:
+  selector: {app: tenant-check}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tenant-check-ingress
+  namespace: tenant-check
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  rules:
+  - host: autonomous-enablements-check.whydevslovedynatrace.com
+    http:
+      paths:
+      - backend:
+          service:
+            name: tenant-check
+            port: {number: 8080}
+        path: /
+        pathType: Prefix
+  tls:
+  - hosts: [autonomous-enablements-check.whydevslovedynatrace.com]
+    secretName: autonomous-enablements-check-tls
