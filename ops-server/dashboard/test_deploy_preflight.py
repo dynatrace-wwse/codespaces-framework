@@ -422,3 +422,32 @@ def test_repair_path_always_passes_proof(monkeypatch):
     _no_sleep(monkeypatch)
     asyncio.run(dep._selftest_and_repair("bearer", "https://t.apps.dynatrace.com"))
     assert seen["proven"] is True
+
+
+def test_selftest_retries_a_404_because_a_fresh_upgrade_is_not_routable_yet(monkeypatch):
+    """The bug the first real 1.0.351 deploy exposed.
+
+    Breaking the ladder on 404 made the sprint deploy report "installed app has
+    no selfTest function yet" for an app that had just shipped one — the app was
+    simply not routable in the second after install. Unlike the seed function,
+    where 404 means "this version lacks it", here it usually means "not yet".
+    """
+    codes = iter([404, 404, 200])
+    payloads = {200: {"ok": True, "blocked": [], "hosts": []}}
+
+    def _handler(method, url, body):
+        c = next(codes)
+        return _Resp(c, payloads.get(c))
+
+    _patch_client(monkeypatch, _handler)
+    _no_sleep(monkeypatch)
+    out = asyncio.run(dep._selftest_outbound("bearer", "https://t.apps.dynatrace.com"))
+    assert out["status"] == "ok", "a transient 404 must not be read as 'no function'"
+
+
+def test_a_persistent_404_is_still_reported_as_absent(monkeypatch):
+    _patch_client(monkeypatch, lambda m, u, b: _Resp(404))
+    _no_sleep(monkeypatch)
+    out = asyncio.run(dep._selftest_outbound("bearer", "https://t.apps.dynatrace.com"))
+    assert out["status"] == "unknown"
+    assert "no selfTest function" in out["detail"]

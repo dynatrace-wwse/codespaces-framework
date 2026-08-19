@@ -2572,14 +2572,23 @@ async def _selftest_outbound(token: str, tenant_url: str) -> dict:
     try:
         # An app is not routable the instant its install returns — the first call
         # after an upgrade answers "App not found" and the same call seconds later
-        # succeeds. Same ladder as _seed_via_app_function, for the same reason.
+        # succeeds.
+        #
+        # Unlike _seed_via_app_function, 404 is NOT a reason to stop early here.
+        # There it means "this app version has no such function", a terminal
+        # answer. Here we have just UPGRADED the app, so a 404 far more often
+        # means "not routable yet" — and breaking on it made the very first
+        # 1.0.351 deploy (sprint) report `no selfTest function yet` for an app
+        # that had one. The same deploy's orbital-config step said "App not
+        # found" in the same breath, which is what gave it away. So retry 404
+        # too, and only call it absent once the ladder is exhausted.
         r = None
-        for pause in (0, 5, 10):
+        for pause in (0, 5, 10, 15):
             if pause:
                 await asyncio.sleep(pause)
             async with httpx.AsyncClient(timeout=60) as c:
                 r = await c.post(fn, headers=hdr, json={})
-            if r.status_code in (200, 404):
+            if r.status_code == 200:
                 break
         if r.status_code == 404:
             return {"status": "unknown", "blocked": [],
