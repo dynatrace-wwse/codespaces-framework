@@ -451,3 +451,30 @@ def test_a_persistent_404_is_still_reported_as_absent(monkeypatch):
     out = asyncio.run(dep._selftest_outbound("bearer", "https://t.apps.dynatrace.com"))
     assert out["status"] == "unknown"
     assert "no selfTest function" in out["detail"]
+
+
+def test_repaired_is_only_claimed_when_the_write_changed_something(monkeypatch):
+    """A transient first probe must not be reported as a repair.
+
+    The allowlist call is idempotent, so a retry that succeeds after a no-op
+    write ("allowlist already complete") would otherwise be credited as
+    "outbound repaired" — a fix that never happened.
+    """
+    results = iter([
+        {"status": "blocked", "blocked": ["h"], "detail": "blocked"},
+        {"status": "ok", "blocked": [], "detail": "fine"},
+    ])
+
+    async def _selftest_stub(_t, _u):
+        return next(results)
+
+    async def _ensure(*a, **k):
+        return "allowlist already complete"
+
+    monkeypatch.setattr(dep, "_selftest_outbound", _selftest_stub)
+    monkeypatch.setattr(dep, "_ensure_outbound_allowlist", _ensure)
+    _no_sleep(monkeypatch)
+    out = asyncio.run(dep._selftest_and_repair("bearer", "https://t.apps.dynatrace.com"))
+    assert out["status"] == "ok"
+    assert out["repaired"] is False
+    assert "unchanged" in out["detail"]

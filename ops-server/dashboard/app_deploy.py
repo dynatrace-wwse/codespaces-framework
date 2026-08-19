@@ -2638,8 +2638,17 @@ async def _selftest_and_repair(token: str, tenant_url: str,
         await asyncio.sleep(pause)
         again = await _selftest_outbound(token, tenant_url)
         if again["status"] == "ok":
-            again["detail"] = f"outbound repaired ({repair}); all required hosts reachable"
-            again["repaired"] = True
+            # Only claim a repair if the write actually changed something. The
+            # allowlist call is idempotent, so a transient first probe (an app
+            # mid-swap, say) reaches here with "allowlist already complete" —
+            # reporting that as "outbound repaired" credits a fix that never
+            # happened, which is precisely the sort of confident-but-wrong
+            # output this whole change set exists to remove.
+            wrote = repair.startswith(("added", "created"))
+            again["detail"] = (f"outbound repaired ({repair}); all required hosts reachable"
+                               if wrote else
+                               f"outbound reachable on retry; allowlist unchanged ({repair})")
+            again["repaired"] = wrote
             return again
         result = again
         if again["status"] != "blocked":
