@@ -692,3 +692,31 @@ def test_the_register_route_refuses_a_platform_token_with_400_not_412(monkeypatc
     assert exc.value.status_code == 400
     assert "platform token" in exc.value.detail
     assert audited["result"] == "bad-credential-shape"
+
+
+def test_activegate_names_the_tenant_not_the_client_when_the_api_refused(monkeypatch):
+    """SRO, 2026-08-24: the bearer was issued (the scope IS held) and the tenant answered
+    404 "Environment deactivated". Advising a new OAuth client there is the same
+    assert-a-cause-you-cannot-prove mistake the module exists to stop."""
+    async def _bearer(*_a, **_k):
+        return ("bearer", 200, "")
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
+    _patch_client(monkeypatch, lambda m, u, b: _Resp(
+        404, None, text='{"error":{"code":404,"message":"Environment deactivated"}}'))
+    ok, detail = asyncio.run(pf._preflight_activegate(
+        "https://sso", _GOOD_ID, _GOOD_SECRET, "https://t.apps.dynatrace.com", "t",
+        client_exists=True))
+    assert ok is False
+    assert "the scope IS held" in detail
+    assert "creating a new one" not in detail
+
+
+def test_activegate_still_advises_a_new_client_on_a_catalog_gap(monkeypatch):
+    async def _bearer(*_a, **_k):
+        return (None, 400, '{"error":"invalid_request","error_description":""}')
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
+    ok, detail = asyncio.run(pf._preflight_activegate(
+        "https://sso", _GOOD_ID, _GOOD_SECRET, "https://t.apps.dynatrace.com", "t",
+        client_exists=True))
+    assert ok is False
+    assert "creating a new one" in detail

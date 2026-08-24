@@ -5,15 +5,26 @@ reach for when a tenant misbehaves afterwards:
 
 **https://autonomous-enablements-check.whydevslovedynatrace.com**
 
-A thin Flask wrapper (`app.py`) around `check-tenant-setup.sh`. The page renders
-whatever the script prints, so **adding a check means editing the script only** —
-no Python change, no template change.
+A thin Flask wrapper (`app.py`) around `check-tenant-setup.sh`, which is itself a
+thin client of Orbital's `POST /api/deploy/preflight`.
+
+**The checks do not live here.** They live in
+`ops-server/dashboard/tenant_preflight.py`, and Register Tenant runs the same
+function — so **adding or changing a check means editing that module, not this
+script.** Rebuild the image only when the *rendering* changes.
+
+That indirection is the whole point. This page used to re-implement the gate in
+267 lines of bash. The two drifted (different document probe, different gen3 probe
+host, skip-vs-fail, a different settings schema, no install probe at all), and on
+2026-08-24 an SE saw this page go all-green and Register Tenant answer HTTP 412 in
+the same minute. `dashboard/test_preflight_parity.py` now fails if the script
+starts probing tenants directly again, or if either side grows its own scope list.
 
 ## Layout, and why
 
 | Path | What |
 |---|---|
-| `check-tenant-setup.sh` | the checks. **Canonical copy** |
+| `check-tenant-setup.sh` | POSTs to Orbital and renders the report. **Canonical copy** — the checks themselves are in `dashboard/tenant_preflight.py` |
 | `../check-tenant-setup.sh` | symlink to it, for running from the CLI |
 | `app.py` | form + runner + one JSON audit line per run (never the secret) |
 | `Dockerfile` / `k8s.yaml` | image + deployment |
@@ -25,9 +36,13 @@ how the page ended up unable to check the thing it was being recommended for.
 
 ## What it checks
 
-1. **Scopes granted** — does SSO issue a bearer for each one.
+1. **Scope catalog** — one scope-less `client_credentials` grant returns the client's
+   ENTIRE granted catalog, so the missing scopes are a set difference rather than 15
+   round-trips. A 400 on that bare grant means the id/secret is wrong, which is the only
+   way to tell that apart from a missing scope (SSO returns a byte-identical 400 for both).
 2. **Capabilities** — mints a real learner token, a real ActiveGate token, writes a
-   real settings object, stores a real document. A granted scope is not proof.
+   real settings object, stores a real document, reads the app registry, and mints the
+   account-scoped install bearer. A granted scope is not proof.
 3. **Outbound connections** — the JS-runtime allowlist. *Absence of a list does not
    mean outbound is open* (measured on `uxn36332`, 2026-08-19: blocked with no
    settings object at any scope), so a missing object is reported as unproven, not
@@ -55,7 +70,7 @@ kubectl -n tenant-check rollout status deploy/tenant-check
 
 Cluster: GKE `hot-diagnostics-beta`, zone `europe-central2-a`, project
 `sales-engineering-emea` — the same cluster and ingress as codespaces-tracker.
-3 replicas. Current image: **1.5** (2026-08-19).
+3 replicas. Current image: **1.6** (2026-08-24).
 
 **Verify the rollout reached every replica**, because a partial rollout serves old
 answers to some visitors:
@@ -74,3 +89,24 @@ done
   exists and requires that you have SEEN the app report a block.
 - `apac-followup-status.sh` — reads Orbital's deploy audit and reports which of the
   APAC-bootcamp tenants have healed, so nobody has to be chased for a reply.
+
+
+## Dependency: Orbital must be reachable from this cluster
+
+The page now needs egress to
+`https://autonomous-enablements.whydevslovedynatrace.com` (override with
+`ORBITAL_URL`). Two things depend on it:
+
+* `POST /api/deploy/preflight` — the checks.
+* `GET /api/deploy/preflight-scopes` — the required-scope panel.
+
+Both fail **loudly and honestly**. An unreachable Orbital renders *"NOT VERIFIED —
+the check did not run"*, never a verdict, and the scope panel says it could not be
+loaded rather than showing a baked-in copy. A stale list that looks authoritative is
+the failure this design removes.
+
+⚠️ Those two paths must stay in the anonymous-allowed nginx alternation on Orbital
+(`nginx/ops-server.conf`, `location ~ ^/api/deploy/(token|…|preflight|preflight-scopes)$`).
+The generic `^/api/deploy/` block requires an oauth2-proxy session; this page calls
+server-to-server and has none, so a route that slips into the catch-all 401s in
+production while passing every unit test. `test_preflight_parity.py` pins it.

@@ -392,6 +392,7 @@ async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
     """
     proxy = f"{tenant.rstrip('/')}/platform/classic/environment-api/v2/activeGateTokens"
     refusals: list[str] = []
+    api_refused = False   # did a bearer SSO issued get refused by the tenant API?
     try:
         async with httpx.AsyncClient(timeout=25) as c:
             for scope in AG_SCOPES:
@@ -414,13 +415,26 @@ async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
                 # the other family anyway — they are granted independently.
                 refusals.append(f"{scope}: mint HTTP {r.status_code} "
                                 f"{safe_error_detail(r.text)}")
+                api_refused = True
     except httpx.HTTPError as e:
         return False, f"ActiveGate probe error: {e}"
-    return False, ("cannot mint an ActiveGate token, so every Kubernetes training will "
-                   "fail when DynaKube starts. Grant the OAuth client one of "
-                   f"{' or '.join(AG_SCOPES)} on this environment — scopes cannot be "
-                   "edited on an existing client, so this means creating a new one. "
-                   f"Tried: {'; '.join(refusals)}")
+    # Which remedy to name depends on WHERE it failed, and the two are opposite advice.
+    # SSO refusing the bearer is a catalog gap → a new client. The API refusing a bearer
+    # SSO did issue is not: the scope is held, and the tenant said no for its own reason
+    # (an IAM binding, or an environment that is simply deactivated). Telling someone to
+    # re-create their OAuth client over "Environment deactivated" is the same
+    # assert-a-cause-you-cannot-prove mistake this module exists to stop making.
+    head = ("cannot mint an ActiveGate token, so every Kubernetes training will fail when "
+            "DynaKube starts. ")
+    if api_refused:
+        return False, head + ("SSO issued the bearer, so the scope IS held — the tenant "
+                              "itself refused the mint. Read the status below before "
+                              "touching the OAuth client. "
+                              f"Tried: {'; '.join(refusals)}")
+    return False, head + ("Grant the OAuth client one of "
+                          f"{' or '.join(AG_SCOPES)} on this environment — scopes cannot be "
+                          "edited on an existing client, so this means creating a new one. "
+                          f"Tried: {'; '.join(refusals)}")
 
 
 # ─── checks the checker page used to re-implement, badly ─────────────────────────────

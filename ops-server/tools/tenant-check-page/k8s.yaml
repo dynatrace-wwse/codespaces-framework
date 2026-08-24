@@ -9,7 +9,7 @@ metadata:
   name: tenant-check
   namespace: tenant-check
 spec:
-  replicas: 2
+  replicas: 3   # matches what is deployed; was 2 here and 3 in the cluster
   selector:
     matchLabels: {app: tenant-check}
   template:

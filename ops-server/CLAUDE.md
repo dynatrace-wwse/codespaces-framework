@@ -567,3 +567,35 @@ Redis keys:
 TTL: on `end` the three `live:session:{id}*` keys get a 7-day TTL (matches
 `job:final` retention). The index entry is kept — the list endpoint skips
 members whose hash has expired.
+
+
+## Tenant preflight — one gate, two front doors
+
+`dashboard/tenant_preflight.py` is the ONLY implementation of "can this tenant + OAuth
+client run the app". Two routes call `preflight_all()`:
+
+| Route | Caller | Behaviour |
+|---|---|---|
+| `POST /api/deploy/oauth` | Register Tenant | refuses 412 on `report.blocking_failures`, `allowPartial:true` overrides |
+| `POST /api/deploy/preflight` | the public tenant checker (GKE) | same checks, installs nothing, rate-limited 5 / 5 min per IP |
+| `GET /api/deploy/preflight-scopes` | the checker's scope panel | `REGISTER_SCOPES` as data |
+
+Things that will bite you here:
+
+- **Add a new `/api/deploy/*` route and it lands in the catch-all nginx block that
+  requires an oauth2-proxy session.** The checker calls server-to-server and has none, so
+  it 401s in production while every unit test passes. Add it to the alternation at
+  `nginx/ops-server.conf` — `test_preflight_parity.py` pins this.
+- **A scope-less `client_credentials` grant returns 200 and the client's ENTIRE scope
+  catalog.** That is the cheapest capability read there is, and the only way to tell a
+  wrong id/secret from a missing scope: SSO answers a **byte-identical** `400
+  invalid_request` with an empty `error_description` for no-such-client, wrong-secret,
+  and scope-not-in-catalog. Never assert one of those without `client_exists`.
+- **`skip` is not `pass`.** `PreflightReport.ready` ignores skips as failures but reports
+  them as `unproven`; the checker used to fold an unreachable probe into a green verdict.
+- **Never re-implement a check in the checker script.** That is what drifted and produced
+  a green page next to a 412 register (`bnk46244`, 2026-08-24). The script POSTs and
+  renders; the parity test fails if it starts calling SSO or a tenant API again.
+- Credential SHAPE is checked before anything else (`dashboard/tenant_credentials.py`) —
+  a `dt0s16` platform token pasted into the client-id field used to reach SSO and come
+  back as "your tenant is missing scopes".
