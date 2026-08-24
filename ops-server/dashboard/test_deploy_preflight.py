@@ -478,3 +478,137 @@ def test_repaired_is_only_claimed_when_the_write_changed_something(monkeypatch):
     assert out["status"] == "ok"
     assert out["repaired"] is False
     assert "unchanged" in out["detail"]
+
+
+# ── Credential SHAPE, before any scope question ──────────────────────────────
+#
+# bnk46244, 2026-08-24: `saikkoj` registered six times. Three attempts pasted a
+# PLATFORM TOKEN (dt0s16.GP6CHX54, dt0s16.YM7EA5CJ) into the OAuth client-id
+# field. Orbital forwarded it to SSO, SSO answered 400 with an empty
+# error_description for every scope family, and the preflight reported
+# "SSO refused environment-api:api-tokens:write" — blaming the tenant's scopes
+# for a credential that was never an OAuth client. The public tenant checker has
+# rejected that shape since 2026-08-11, which is exactly why it could show green
+# while the register refused: it cannot be handed the input that failed.
+
+from dashboard.tenant_credentials import credential_problem, sso_failure_cause
+
+_GOOD_ID = "dt0s02.4H4SREXX"
+_GOOD_SECRET = "dt0s02.4H4SREXX." + "A" * 50
+_GOOD_URN = "urn:dtaccount:11111111-2222-3333-4444-555555555555"
+
+
+def test_a_well_formed_triple_has_no_shape_problem():
+    assert credential_problem(_GOOD_ID, _GOOD_SECRET, _GOOD_URN) == ""
+
+
+def test_a_platform_token_in_the_client_id_field_is_named_for_what_it_is():
+    problem = credential_problem("dt0s16.GP6CHX54", _GOOD_SECRET, _GOOD_URN)
+    assert "platform token" in problem
+    # It must NOT read as a scope problem — that is the whole defect.
+    assert "scope" not in problem.lower()
+    assert "dt0s02" in problem
+
+
+def test_a_classic_token_in_the_client_id_field_is_also_caught():
+    assert "classic API token" in credential_problem("dt0c01.ABCDEFGH", _GOOD_SECRET, _GOOD_URN)
+
+
+def test_a_secret_from_a_different_client_is_caught_before_sso_401s():
+    problem = credential_problem("dt0s02.ABCDEFGH", _GOOD_SECRET, _GOOD_URN)
+    assert "different OAuth client" in problem
+
+
+def test_a_truncated_secret_is_rejected():
+    assert "client secret" in credential_problem(_GOOD_ID, "dt0s02.4H4SREXX.SHORT", _GOOD_URN).lower()
+
+
+def test_a_malformed_account_urn_is_rejected():
+    assert "accountUrn" in credential_problem(_GOOD_ID, _GOOD_SECRET, "urn:dtaccount:nope")
+
+
+# ── One SSO status, several meanings ─────────────────────────────────────────
+#
+# Same class as the `rejected` vs `unreachable` conflation that misdiagnosed 26
+# deploys in the APAC incident: _oauth_bearer returns the same (status, body) for
+# causes that need OPPOSITE fixes.
+
+def test_an_empty_error_description_is_the_scope_catalog_gap():
+    cause = sso_failure_cause(400, '{"error":"invalid_request","error_description":""}', _GOOD_ID)
+    assert "not in this OAuth client's catalog" in cause
+    # ...and only THIS case may advise creating a new client.
+    assert "NEW client" in cause
+
+
+def test_a_401_is_a_wrong_secret_not_a_missing_scope():
+    cause = sso_failure_cause(401, "", _GOOD_ID)
+    assert "not a scope problem" in cause
+
+
+def test_an_unreachable_sso_is_not_evidence_about_scopes():
+    cause = sso_failure_cause(0, "connect timeout", _GOOD_ID)
+    assert "NOT evidence" in cause
+
+
+def test_the_cause_blames_the_credential_when_the_client_id_is_not_a_client():
+    """The bnk46244 shape, at the layer that renders the preflight detail."""
+    cause = sso_failure_cause(400, '{"error":"invalid_request","error_description":""}',
+                              "dt0s16.GP6CHX54")
+    assert "platform token" in cause
+    assert "catalog" not in cause
+
+
+def test_the_cause_never_quotes_a_token_endpoint_body_verbatim():
+    leaky = '{"access_token":"dt0s16.LEAKED.SECRETVALUE","error_description":"nope"}'
+    assert "LEAKED" not in sso_failure_cause(400, leaky, _GOOD_ID)
+
+
+# ── The preflight now renders the cause, not a scope accusation ──────────────
+
+def test_document_preflight_reports_the_cause_and_not_the_raw_sso_body(monkeypatch):
+    async def _bearer(*_a, **_k):
+        return (None, 400, '{"error":"invalid_request","error_description":"",'
+                           '"access_token":"dt0s16.LEAKED.X"}')
+    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    ok, detail = asyncio.run(dep._preflight_documents(
+        "https://sso", _GOOD_ID, _GOOD_SECRET, "https://t.apps.dynatrace.com", "t"))
+    assert ok is False
+    assert "LEAKED" not in detail
+    assert "catalog" in detail
+
+
+def test_learner_preflight_blames_the_credential_when_it_is_a_platform_token(monkeypatch):
+    async def _bearer(*_a, **_k):
+        return (None, 400, '{"error":"invalid_request","error_description":""}')
+    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    _patch_client(monkeypatch, lambda m, u, b: _Resp(400, None, text="{}"))
+    out = asyncio.run(dep._preflight_learner_tokens(
+        "https://sso", "dt0s16.GP6CHX54", _GOOD_SECRET, "https://t.apps.dynatrace.com",
+        "t", "prod", _GOOD_URN, "https://api.dynatrace.com"))
+    assert out["tier"] == "none"
+    assert "platform token" in out["detail"]
+
+
+def test_the_register_route_refuses_a_platform_token_with_400_not_412(monkeypatch):
+    """400, not 412. A 412 means "this client is under-scoped" and sends the SE to
+    re-create a client; the credential being the wrong KIND is a different fix."""
+    audited = {}
+
+    async def _audit(_user, _tenant, _action, result, **extra):
+        audited.update({"result": result, **extra})
+    monkeypatch.setattr(dep, "_audit", _audit)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("SSO must never be reached with a malformed credential")
+    monkeypatch.setattr(dep, "_oauth_bearer", _boom)
+
+    with pytest.raises(dep.HTTPException) as exc:
+        asyncio.run(dep.deploy_with_oauth({
+            "tenant": "https://bnk46244.apps.dynatrace.com",
+            "clientId": "dt0s16.GP6CHX54",
+            "clientSecret": _GOOD_SECRET,
+            "accountUrn": _GOOD_URN,
+        }, x_auth_user="saikkoj"))
+    assert exc.value.status_code == 400
+    assert "platform token" in exc.value.detail
+    assert audited["result"] == "bad-credential-shape"

@@ -42,6 +42,7 @@ from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KE
 from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
 from provisioning.sso import DEFAULT_SSO, discover_sso as _discover_sso
 from shared.log_safety import safe_error_detail, scrub_for_log
+from dashboard.tenant_credentials import credential_problem, sso_failure_cause
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -2328,10 +2329,10 @@ async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: s
         async with httpx.AsyncClient(timeout=25) as c:
             bearer, st, _err = await _oauth_bearer(sso_url, cid, csec,
                                                    f"urn:dtenvironment:{tenant_id}",
-                                                   CLASSIC_MINT_SCOPE)
+                                                   CLASSIC_MINT_SCOPE)  # _err feeds sso_failure_cause
             if bearer is None:
-                detail.append(f"classic path unavailable: SSO refused {CLASSIC_MINT_SCOPE} "
-                              f"(HTTP {st})")
+                detail.append(f"classic path unavailable ({CLASSIC_MINT_SCOPE}): "
+                              f"{sso_failure_cause(st, _err, cid)}")
             else:
                 hdr = {"Authorization": f"Bearer {bearer}"}
                 r = await c.post(proxy, headers=hdr, json={
@@ -2359,8 +2360,8 @@ async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: s
             pt_bearer, st2, _err2 = await _oauth_bearer(sso_url, cid, csec, account_urn,
                                                         MINT_SCOPE)
             if pt_bearer is None:
-                detail.append(f"platform path unavailable: SSO refused the account mint "
-                              f"permissions (HTTP {st2})")
+                detail.append(f"platform path unavailable ({MINT_SCOPE}): "
+                              f"{sso_failure_cause(st2, _err2, cid)}")
                 return {"tier": "none", "detail": "; ".join(detail)}
             acct = account_urn.split(":")[-1]
             base = f"{api_host.rstrip('/')}/iam/v1/accounts/{acct}/platform-tokens"
@@ -2519,7 +2520,7 @@ async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
                 bearer, st, err = await _oauth_bearer(
                     sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}", scope)
                 if bearer is None:
-                    refusals.append(f"{scope}: SSO HTTP {st}")
+                    refusals.append(f"{scope}: {sso_failure_cause(st, err, cid)}")
                     continue
                 hdr = {"Authorization": f"Bearer {bearer}"}
                 r = await c.post(proxy, headers=hdr, json={
@@ -2665,7 +2666,7 @@ async def _preflight_documents(sso_url: str, cid: str, csec: str, tenant: str,
     bearer, st, err = await _oauth_bearer(sso_url, cid, csec,
                                           f"urn:dtenvironment:{tenant_id}", DOC_SCOPE)
     if bearer is None:
-        return False, f"SSO refused the document scopes (HTTP {st}): {err}"
+        return False, f"the document scopes ({DOC_SCOPE}): {sso_failure_cause(st, err, cid)}"
     base = f"{tenant.rstrip('/')}/platform/document/v1/documents"
     hdr = {"Authorization": f"Bearer {bearer}"}
     try:
@@ -2719,8 +2720,16 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     tenant_id, domain = classify_tenant(tenant)  # 403 if not a Dynatrace domain
     if not (cid and csec):
         raise HTTPException(400, "clientId and clientSecret are required.")
-    if not account_urn.startswith("urn:dtaccount:"):
-        raise HTTPException(400, "accountUrn must look like urn:dtaccount:<uuid>.")
+    # Shape before scopes. A credential of the WRONG KIND (a dt0s16 platform token pasted
+    # into the client-id field) makes SSO 400 every scope request with an empty reason,
+    # which the preflight below would then report as "your tenant is missing scopes" —
+    # sending the operator to re-create a client that was never the problem. 400, not 412:
+    # 412 means "this client is under-scoped", and that is a different conversation.
+    problem = credential_problem(cid, csec, account_urn)
+    if problem:
+        await _audit(user, tenant_id, action, "bad-credential-shape",
+                     via="oauth-bootstrap", detail=problem)
+        raise HTTPException(400, problem)
     sso_url = (body.get("ssoUrl") or "").strip() or SSO_TOKEN_URL_BY_DOMAIN.get(
         domain, SSO_TOKEN_URL_BY_DOMAIN["prod"])
 

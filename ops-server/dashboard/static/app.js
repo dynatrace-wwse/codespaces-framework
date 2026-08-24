@@ -4507,7 +4507,26 @@ async function goRegisterOauth(action) {
     const m = document.getElementById('reg-oa-msg');
     if (!t) { m.textContent = 'tenant required'; return; }
     if (!cid || !sec) { m.textContent = 'client id + secret required'; return; }
-    if (!urn.startsWith('urn:dtaccount:')) { m.textContent = 'account URN required (urn:dtaccount:<uuid>)'; return; }
+    // Shape check mirrors dashboard/tenant_credentials.py. A dt0s16 platform token pasted
+    // here used to reach SSO and come back as "your tenant is missing scopes" (bnk46244,
+    // 2026-08-24). The server rejects it too — this just saves the round-trip.
+    if (!/^dt0s02\.[A-Z0-9]{6,12}$/.test(cid)) {
+      m.textContent = cid.startsWith('dt0s16.') || cid.startsWith('dt0c01.') || cid.startsWith('dt0g02.')
+        ? 'that is a token, not an OAuth client — Register Tenant needs a dt0s02… client id from myaccount.dynatrace.com'
+        : 'client id must look like dt0s02.XXXXXXXX';
+      return;
+    }
+    if (!/^dt0s02\.[A-Z0-9]{6,12}\.[A-Z0-9]{40,90}$/.test(sec)) {
+      m.textContent = 'client secret must be the full dt0s02.<id>.<secret> string shown once at creation';
+      return;
+    }
+    if (sec.split('.')[1] !== cid.split('.')[1]) {
+      m.textContent = 'client secret belongs to a different OAuth client than the client id';
+      return;
+    }
+    if (!/^urn:dtaccount:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(urn)) {
+      m.textContent = 'account URN required (urn:dtaccount:<uuid>)'; return;
+    }
     m.textContent = ''; setRegBusy(true);
     try {
         const r = await fetch('/api/deploy/oauth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ action, tenant: t, clientId: cid, clientSecret: sec, accountUrn: urn, audience, friendlyName: friendly }) });
