@@ -9,6 +9,7 @@ client secret is never logged, echoed, or written anywhere. One JSON audit line 
 so Cloud Logging keeps a follow-up trail.
 """
 import base64
+import html
 import json
 import os
 import re
@@ -38,6 +39,39 @@ SECRET_RE = re.compile(r"^dt0s02\.[A-Z0-9]{6,12}\.[A-Z0-9]{40,90}$")
 URN_RE = re.compile(r"^urn:dtaccount:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+ORBITAL_URL = os.environ.get(
+    "ORBITAL_URL", "https://autonomous-enablements.whydevslovedynatrace.com")
+_SCOPES_CACHE: dict = {"at": 0.0, "html": ""}
+
+
+def _scope_panel_html() -> str:
+    """The required-scope list, fetched from the gate that enforces it.
+
+    Never falls back to a baked-in list. A stale list that LOOKS authoritative is the
+    failure this whole change exists to remove — if the list cannot be fetched, say so.
+    """
+    now = time.time()
+    if _SCOPES_CACHE["html"] and now - _SCOPES_CACHE["at"] < 300:
+        return _SCOPES_CACHE["html"]
+    try:
+        with urllib.request.urlopen(
+                f"{ORBITAL_URL}/api/deploy/preflight-scopes", timeout=10) as r:
+            data = json.loads(r.read().decode())
+        entries = data.get("scopes") or []
+        if not entries:
+            raise ValueError("empty scope list")
+        rows = "\n".join(html.escape(" or ".join(e)) for e in entries)
+        out = (f'<div class="grp">{len(entries)} scopes:</div><pre>{rows}</pre>')
+    except Exception:
+        out = ('<div class="note">The scope list could not be loaded from the '
+               'verification service just now. Re-open this page in a moment — it is not '
+               'shown from a local copy on purpose, because a stale list is worse than '
+               'no list.</div>')
+    _SCOPES_CACHE.update({"at": now, "html": out})
+    return out
+
+
 
 # Naive in-memory limits: enough to stop a scripted abuser on a page only ~70 people
 # will ever use. Per-IP window + a global concurrency cap (each run holds an outbound
@@ -77,27 +111,11 @@ logged, never stored, never shown to anyone. Every test credential the check cre
 deleted before the page responds. Prefer not to paste a secret into a web page? Run the
 <a href="/check-tenant-setup.sh">same script yourself</a> — identical checks, identical verdict.</div>
 <details>
-<summary>The 15 scopes your OAuth client needs (create it with all of them)</summary>
+<summary>The scopes your OAuth client needs (create it with all of them)</summary>
 <div class="grp">In <a href="https://myaccount.dynatrace.com" target="_blank">myaccount.dynatrace.com</a>
-→ Identity &amp; access management → OAuth clients → New. Scopes cannot be added to an
+&rarr; Identity &amp; access management &rarr; OAuth clients &rarr; New. Scopes cannot be added to an
 existing client afterwards — if one is missing, create a new client.</div>
-<div class="grp">Environment (13):</div>
-<pre>app-engine:apps:install
-app-engine:apps:run
-app-engine:apps:delete
-settings:objects:read
-settings:objects:write
-app-settings:objects:read
-environment-api:api-tokens:read
-environment-api:api-tokens:write
-environment-api:activegate-tokens:write
-document:documents:read
-document:documents:write
-document:documents:delete
-document:documents:admin</pre>
-<div class="grp">Account (2):</div>
-<pre>platform-token:tokens:write
-platform-token:tokens:manage</pre>
+{{ scope_panel|safe }}
 </details>
 <form method="post" action="/check" id="f">
  <label>Tenant URL (prod or sprint)</label>
@@ -117,31 +135,31 @@ platform-token:tokens:manage</pre>
 
 def _derive_email(cid: str, secret: str, urn: str, tenant: str) -> str:
     """The SSO bearer JWT carries the client creator's email — grab it so the page never
-    has to ask. Tries an account scope first, then an env scope, since either may be the
-    one the client is missing. Best-effort: '?' on any failure, never blocks the check."""
+    has to ask.
+
+    Uses a SCOPE-LESS client_credentials grant: it succeeds for any real client and needs
+    no guess about which scopes this one holds. The previous version named two scopes and
+    tried each in turn, which meant the page carried its own copy of scope strings — the
+    same hardcoded-list problem that let the page and the gate drift apart.
+
+    Best-effort: '?' on any failure, never blocks the check.
+    """
     host = ("https://sso-sprint.dynatracelabs.com" if ".sprint." in tenant
             else "https://sso-dev.dynatracelabs.com" if ".dev." in tenant
             else "https://sso.dynatrace.com")
-    envid = tenant.split("//")[1].split(".")[0]
-    for scope, res in (("platform-token:tokens:write", urn),
-                       ("app-engine:apps:run", f"urn:dtenvironment:{envid}")):
-        try:
-            data = urllib.parse.urlencode({
-                "grant_type": "client_credentials", "client_id": cid,
-                "client_secret": secret, "scope": scope, "resource": res}).encode()
-            with urllib.request.urlopen(
-                    urllib.request.Request(host + "/sso/oauth2/token", data=data), timeout=15) as r:
-                tok = json.load(r).get("access_token", "")
-            payload = tok.split(".")[1]
-            payload += "=" * (-len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            email = claims.get("email") or claims.get("preferred_username") or ""
-            if email:
-                return email
-        except Exception:
-            continue
-    return "?"
-
+    try:
+        data = urllib.parse.urlencode({
+            "grant_type": "client_credentials", "client_id": cid,
+            "client_secret": secret}).encode()
+        with urllib.request.urlopen(
+                urllib.request.Request(host + "/sso/oauth2/token", data=data), timeout=15) as r:
+            tok = json.load(r).get("access_token", "")
+        payload = tok.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        return claims.get("email") or claims.get("preferred_username") or "?"
+    except Exception:
+        return "?"
 
 def _client_ip() -> str:
     fwd = request.headers.get("X-Forwarded-For", "")
@@ -184,7 +202,8 @@ def _render(raw: str, exit_code: int) -> str:
 
 @app.get("/")
 def index():
-    return render_template_string(PAGE, result="")
+    return render_template_string(
+        PAGE, scope_panel=_scope_panel_html(), result="")
 
 
 @app.get("/check-tenant-setup.sh")
@@ -211,7 +230,7 @@ def check():
     ip = _client_ip()
     if _rate_limited(ip):
         return render_template_string(
-            PAGE, result='<p class="notready">Too many checks from your address — '
+        PAGE, scope_panel=_scope_panel_html(), result='<p class="notready">Too many checks from your address — '
                          'wait a few minutes and try again.</p>'), 429
 
     tenant = request.form.get("tenant", "").strip().rstrip("/")
@@ -231,12 +250,12 @@ def check():
         problems.append("account URN must look like urn:dtaccount:&lt;uuid&gt;")
     if problems:
         return render_template_string(
-            PAGE, result='<p class="notready">Fix these first:</p><ul><li>'
+        PAGE, scope_panel=_scope_panel_html(), result='<p class="notready">Fix these first:</p><ul><li>'
                          + "</li><li>".join(problems) + "</li></ul>"), 400
 
     if not RUNNING.acquire(timeout=5):
         return render_template_string(
-            PAGE, result='<p class="notready">The checker is busy — try again in a '
+        PAGE, scope_panel=_scope_panel_html(), result='<p class="notready">The checker is busy — try again in a '
                          'minute.</p>'), 503
     try:
         proc = subprocess.run(
@@ -260,7 +279,8 @@ def check():
     }
     AUDIT.append(record)
     print("AUDIT " + json.dumps(record), flush=True)
-    return render_template_string(PAGE, result=_render(out, exit_code))
+    return render_template_string(
+        PAGE, scope_panel=_scope_panel_html(), result=_render(out, exit_code))
 
 
 if __name__ == "__main__":

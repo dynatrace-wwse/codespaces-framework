@@ -27,6 +27,7 @@ import logging
 import os
 import secrets
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -42,8 +43,15 @@ from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KE
 from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
 from provisioning.sso import DEFAULT_SSO, discover_sso as _discover_sso
 from shared.log_safety import safe_error_detail, scrub_for_log
-from dashboard.tenant_credentials import (credential_problem, missing_from_catalog,
-                                          sso_failure_cause)
+from dashboard.tenant_credentials import credential_problem, sso_failure_cause
+# The deploy gate itself. Both front doors — Register Tenant and the public checker —
+# run these same probes; see dashboard/tenant_preflight.py for why that matters.
+from dashboard.tenant_preflight import (  # noqa: F401  (several are re-exported for callers)
+    ACCOUNT_API_BY_DOMAIN, AG_SCOPE, AG_SCOPES, CLASSIC_MINT_SCOPE, DOC_SCOPE,
+    EFFECTIVE_PERMISSIONS_PATH, LIVE_HOST_BY_DOMAIN, MINT_SCOPE, PLATFORM_LEARNER_SCOPES,
+    SSO_TOKEN_URL_BY_DOMAIN, _client_catalog, _documents_admin_effective,
+    _effective_permissions, _oauth_bearer, _preflight_activegate, _preflight_documents,
+    _preflight_expiry, _preflight_learner_tokens, _registry_url, preflight_all)
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -404,9 +412,6 @@ def _app_url(tenant_url: str) -> str:
     return f"{tenant_url.rstrip('/')}/ui/apps/{APP_ID}"
 
 
-def _registry_url(tenant_url: str, app_id: str | None = None) -> str:
-    base = f"{tenant_url.rstrip('/')}/platform/app-engine/registry/v1/apps"
-    return f"{base}/{app_id}" if app_id else base
 
 
 def _app_version() -> str:
@@ -2091,30 +2096,6 @@ async def deploy_with_token_status(deploy_id: str):
 #
 # Design + threat model: ops-server/docs/tenant-credentials.md.
 
-MINT_SCOPE = "platform-token:tokens:write platform-token:tokens:manage"
-# Environment-scoped, and NOT covered by MINT_SCOPE: DynaKube's per-session ActiveGate
-# token. Mirrors AG_SCOPE in the app's api/mintCredentials.function.ts.
-AG_SCOPE = "environment-api:activegate-tokens:write"
-# ...and its gen3 twin. The classic scope above is NOT in every account client's
-# catalog, and SSO says so with HTTP 400 at the TOKEN endpoint — before any API
-# call, so no IAM binding can rescue it. Measured 2026-08-19 on hpm49270, where
-# it killed a learner's session mid-workshop. `fleet-management:*` mints the same
-# dt0g02 against the same endpoint and exists exactly where the classic one does
-# not, so the preflight tries both before calling a tenant unfit.
-# Order and spelling must match AG_SCOPES in the app's api/_platform-mint.ts.
-AG_SCOPES = (AG_SCOPE, "fleet-management:activegate.tokens:write")
-# Realm SSO token endpoints + Account Management API hosts per domain class
-# (classify_tenant → prod/sprint/dev). Overridable per request for unusual realms.
-SSO_TOKEN_URL_BY_DOMAIN = {
-    "prod": "https://sso.dynatrace.com/sso/oauth2/token",
-    "sprint": "https://sso-sprint.dynatracelabs.com/sso/oauth2/token",
-    "dev": "https://sso-dev.dynatracelabs.com/sso/oauth2/token",
-}
-ACCOUNT_API_BY_DOMAIN = {
-    "prod": "https://api.dynatrace.com",
-    "sprint": "https://api-hardening.internal.dynatracelabs.com",
-    "dev": "https://api-hardening.internal.dynatracelabs.com",
-}
 # Environment permissions the client needs for a full deploy. settings:objects:* are
 # best-effort (post-install remote-grail + outbound allowlist) — if the client lacks
 # them SSO 400s the full request and we retry with the minimal set.
@@ -2132,49 +2113,8 @@ OAUTH_DEPLOY_SCOPES_MIN = "app-engine:apps:install app-engine:apps:run"
 OAUTH_UNDEPLOY_SCOPES = "app-engine:apps:delete"
 
 
-async def _oauth_bearer(sso_url: str, cid: str, csec: str, resource: str,
-                        scope: str) -> tuple[str | None, int, str]:
-    """client_credentials grant. Returns (access_token|None, http_status, error_snippet).
-    The secret goes into the form only — never logged."""
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(sso_url, data={
-                "grant_type": "client_credentials", "client_id": cid,
-                "client_secret": csec, "resource": resource, "scope": scope,
-            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        if r.status_code == 200:
-            return r.json().get("access_token"), 200, ""
-        return None, r.status_code, r.text[:200]
-    except Exception as exc:
-        return None, 0, str(exc)
 
 
-async def _client_catalog(sso_url: str, cid: str, csec: str) -> tuple[set | None, int, str]:
-    """Every scope this OAuth client actually holds, in ONE request.
-
-    A client_credentials grant sent WITHOUT a `scope` parameter returns 200 and lists the
-    client's entire granted catalog in the response `scope` field (measured against
-    sso.dynatrace.com, 2026-08-24). That makes it the only way to separate the three causes
-    SSO hides behind an identical `400 invalid_request` + empty `error_description`:
-
-        bare grant 400  → the client id or secret is wrong, or no such client
-        bare grant 200  → the client is real, so a 400 on a SCOPED grant is a catalog gap
-
-    It also turns "which of the 15 scopes is missing" into a set difference instead of 15
-    round-trips, which is what the checker page does today.
-
-    Returns (scopes|None, status, error-snippet). None means the grant itself failed.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(sso_url, data={
-                "grant_type": "client_credentials", "client_id": cid, "client_secret": csec,
-            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        if r.status_code == 200:
-            return set((r.json().get("scope") or "").split()), 200, ""
-        return None, r.status_code, r.text[:200]
-    except Exception as exc:
-        return None, 0, str(exc)
 
 
 # ─── Account name / plan — opportunistic, NEVER a required scope ─────────────────────
@@ -2306,121 +2246,10 @@ def _plan_from_subscriptions(payload) -> str:
 # will — so that is what registration does now, BEFORE anything is installed. Everything
 # the preflight creates is deleted before it returns.
 
-LIVE_HOST_BY_DOMAIN = {
-    # The host that authenticates raw token values — sprint has NO `.live.`.
-    "prod": "https://{tid}.live.dynatrace.com",
-    "sprint": "https://{tid}.sprint.dynatracelabs.com",
-    "dev": "https://{tid}.dev.dynatracelabs.com",
-}
-CLASSIC_MINT_SCOPE = "environment-api:api-tokens:write"
-DOC_SCOPE = ("document:documents:read document:documents:write "
-             "document:documents:delete")
-# What the app's PLATFORM_SPECS translate to (api/_platform-mint.ts toPlatformScopes) —
-# the preflight mints the same shape the first learner will get.
-PLATFORM_LEARNER_SCOPES = [
-    "fleet-management:activegate.connection-info:read",
-    "fleet-management:activegate.tokens:create",
-    "fleet-management:activegate.tokens:write",
-    "fleet-management:container-images:read",
-    "fleet-management:oneagent.connection-info:read",
-    "fleet-management:oneagents:download",
-    "settings:objects:read",
-    "settings:objects:write",
-    "storage:entities:read",
-    "storage:events:write",
-    "storage:logs:write",
-    "storage:metrics:write",
-]
 
 
-def _preflight_expiry() -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: str,
-                                    tenant_id: str, domain: str, account_urn: str,
-                                    api_host: str, client_exists: bool | None = None) -> dict:
-    """Which learner-token tier this tenant+client can actually deliver.
-
-    Classic first: mint a real dt0c01 through the client and call the live domain with
-    it (self-contained scopes — no owner-IAM intersection). Where classic creation is
-    retired (HTTP 400, rolled out per ENVIRONMENT), mint a real platform token and probe
-    it the same way — the only check that exposes the `scopes ∩ owner IAM policy` trap,
-    because the mint API stamps scope names without any entitlement check (measured on
-    scu37051: 12 scopes ACTIVE, every call "Permission denied.").
-
-    Returns {"tier": "classic"|"platform"|"none", "detail": str}.
-    """
-    live = LIVE_HOST_BY_DOMAIN.get(domain, LIVE_HOST_BY_DOMAIN["prod"]).format(tid=tenant_id)
-    proxy = f"{tenant.rstrip('/')}/platform/classic/environment-api/v2/apiTokens"
-    detail: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=25) as c:
-            bearer, st, _err = await _oauth_bearer(sso_url, cid, csec,
-                                                   f"urn:dtenvironment:{tenant_id}",
-                                                   CLASSIC_MINT_SCOPE)  # _err feeds sso_failure_cause
-            if bearer is None:
-                detail.append(f"classic path unavailable ({CLASSIC_MINT_SCOPE}): "
-                              f"{sso_failure_cause(st, _err, cid, client_exists)}")
-            else:
-                hdr = {"Authorization": f"Bearer {bearer}"}
-                r = await c.post(proxy, headers=hdr, json={
-                    "name": "enbl-preflight", "scopes": ["InstallerDownload"],
-                    "expirationDate": _preflight_expiry()})
-                if r.status_code == 201:
-                    d = r.json()
-                    probe = await c.get(
-                        f"{live}/api/v1/deployment/installer/agent/connectioninfo",
-                        headers={"Authorization": f"Api-Token {d.get('token', '')}"})
-                    if d.get("id"):
-                        await c.delete(f"{proxy}/{d['id']}", headers=hdr)
-                    if probe.status_code == 200:
-                        return {"tier": "classic",
-                                "detail": "classic dt0c01 minted and proven live"}
-                    detail.append(f"classic token minted but refused live "
-                                  f"(HTTP {probe.status_code})")
-                elif r.status_code == 400:
-                    detail.append("classic API-token creation is retired on this "
-                                  "environment (HTTP 400)")
-                else:
-                    detail.append(f"classic mint refused (HTTP {r.status_code}): "
-                                  f"{r.text[:160]}")
-
-            pt_bearer, st2, _err2 = await _oauth_bearer(sso_url, cid, csec, account_urn,
-                                                        MINT_SCOPE)
-            if pt_bearer is None:
-                detail.append(f"platform path unavailable ({MINT_SCOPE}): "
-                              f"{sso_failure_cause(st2, _err2, cid, client_exists)}")
-                return {"tier": "none", "detail": "; ".join(detail)}
-            acct = account_urn.split(":")[-1]
-            base = f"{api_host.rstrip('/')}/iam/v1/accounts/{acct}/platform-tokens"
-            hdr = {"Authorization": f"Bearer {pt_bearer}"}
-            r = await c.post(base, headers=hdr, json={
-                "name": "enbl-preflight", "scope": PLATFORM_LEARNER_SCOPES,
-                "resource": [f"urn:dtenvironment:{tenant_id}"],
-                "tags": ["enablement", "preflight"],
-                "expirationDate": _preflight_expiry()})
-            if r.status_code not in (200, 201):
-                detail.append(f"platform mint refused (HTTP {r.status_code}): {r.text[:160]}")
-                return {"tier": "none", "detail": "; ".join(detail)}
-            d = r.json()
-            probe = await c.get(f"{live}/api/v1/deployment/installer/agent/connectioninfo",
-                                headers={"Authorization": f"Api-Token {d.get('token', '')}"})
-            tok_id = d.get("tokenId") or d.get("id")
-            if tok_id:
-                await c.delete(f"{base}/{tok_id}", headers=hdr)
-            if probe.status_code == 200:
-                return {"tier": "platform", "detail": "; ".join(detail)}
-            detail.append(
-                f"platform token minted but the live environment refused it "
-                f"(HTTP {probe.status_code}). A platform token's effective permissions are "
-                f"its scopes ∩ the IAM policy of its OWNER — the person who created this "
-                f"OAuth client — and the mint API does not check that. Recreate the client "
-                f"as a user with admin rights on this environment.")
-            return {"tier": "none", "detail": "; ".join(detail)}
-    except httpx.HTTPError as e:
-        detail.append(f"preflight error: {e}")
-        return {"tier": "none", "detail": "; ".join(detail)}
 
 
 # ── Verified capability, not inferred capability ─────────────────────────────
@@ -2433,146 +2262,12 @@ async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: s
 #   effective-permissions API, or exercise it for real. Anything that cannot be
 #   established is reported as UNKNOWN — never as fine.
 
-EFFECTIVE_PERMISSIONS_PATH = "/platform/management/v1/effective-permissions:resolve"
 
 
-async def _effective_permissions(token: str, tenant_url: str,
-                                 permissions: list[str]) -> dict[str, str] | None:
-    """Which of `permissions` this bearer can ACTUALLY exercise here.
-
-    Returns {permission: "true"|"false"|"condition"}, or None when the platform
-    does not offer the endpoint (older environments) so callers can fall back
-    to a live probe rather than treat "could not ask" as "no".
-
-    Why this is not the same as reading the token's `scope` claim: SSO stamps
-    scope names WITHOUT an entitlement check, and effective permission is
-    `scopes ∩ the owner's IAM policy`. That gap is not academic — it is
-    precisely what silently broke content on bos01241, where a token carrying
-    `document:documents:admin` was refused by every call that used it:
-
-        403 {"error":{"code":403,"message":"Document not accessible: 8ff8e6fd-…"}}
-
-    The import then failed on exactly the repos whose document already existed
-    under another owner, and reported `errors=3` to a browser console nobody
-    was reading. Four trainings were missing from that tenant's catalog for the
-    whole delivery, and it read to the learner as a permissions bug in the app.
-
-    Request/response shape is taken from the vendored SDK
-    (@dynatrace-sdk/client-platform-management-service), not guessed:
-        POST  {"permissions": [{"permission": "..."}]}
-        200   [{"permission": "...", "granted": "true"|"false"|"condition"}]
-
-    ⚠️ THE TRAP, measured on COE 2026-08-19 — `token` MUST already carry the
-    permissions you are asking about. The API resolves for the PRESENTED TOKEN
-    (its scopes ∩ the owner's IAM), not for what the client could obtain. Ask
-    with a bearer that lacks the scope and every answer is `"false"`:
-
-        bearer scoped app-engine:apps:run only
-          → document:documents:admin  "false"   ← says nothing about IAM
-        bearer scoped ...+document:documents:admin
-          → document:documents:admin  "true"
-
-    On COE both answers came back for a client that demonstrably CAN write
-    documents. Wiring this to the deploy bearer would therefore have printed
-    "ACTION REQUIRED — document:documents:admin is not effective" on every
-    single deploy — the same cry-wolf failure this whole change exists to
-    remove. Mint a bearer for the scopes first; see `_documents_admin_effective`.
-    """
-    if not permissions:
-        return {}
-    url = f"{tenant_url.rstrip('/')}{EFFECTIVE_PERMISSIONS_PATH}"
-    try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.post(url, headers={"Authorization": f"Bearer {token}",
-                                           "Content-Type": "application/json"},
-                             # The API caps a request at 100 permissions.
-                             json={"permissions": [{"permission": p}
-                                                   for p in permissions[:100]]})
-        if r.status_code != 200:
-            log.info("effective-permissions unavailable on %s (HTTP %s)",
-                     scrub_for_log(tenant_url), r.status_code)
-            return None
-        rows = r.json() or []
-        return {str(row.get("permission", "")): str(row.get("granted", "")) for row in rows}
-    except Exception as exc:
-        log.warning("effective-permissions on %s: %s",
-                    scrub_for_log(tenant_url), scrub_for_log(exc))
-        return None
 
 
-async def _documents_admin_effective(sso_url: str, cid: str, csec: str, tenant: str,
-                                     tenant_id: str) -> str:
-    """Is `document:documents:admin` actually exercisable here?
-
-    Returns "true" | "false" | "condition" | "" (unknown).
-
-    Asks with a bearer that CARRIES the document scopes, because the resolve API
-    answers for the presented token — see the warning in `_effective_permissions`.
-    An SSO refusal is reported as unknown rather than false: that is a scope
-    catalog gap, which the preflight already reports on its own, and calling it
-    an IAM problem would send the operator to the wrong fix.
-    """
-    # DOC_SCOPE is read/write/delete — it does NOT include admin, which is the
-    # one being asked about. Asking with it would reproduce the very trap this
-    # function exists to avoid, so admin is named explicitly.
-    bearer, _st, _err = await _oauth_bearer(
-        sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}",
-        f"app-engine:apps:run {DOC_SCOPE} document:documents:admin")
-    if bearer is None:
-        return ""
-    eff = await _effective_permissions(bearer, tenant, ["document:documents:admin"])
-    if eff is None:
-        return ""
-    return eff.get("document:documents:admin", "")
 
 
-async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
-                                tenant_id: str,
-                                client_exists: bool | None = None) -> tuple[bool, str]:
-    """Can this tenant mint the ActiveGate token (dt0g02) a DynaKube needs?
-
-    Mints a REAL token and deletes it. Asking SSO for a bearer is not enough —
-    that is what the deploy used to do, and it only ever ran AFTER the install,
-    as a warning, gated behind `mint_ready` so a tenant failing both produced no
-    warning at all. hpm49270 passed every check the deploy made and then failed
-    the learner four hours later, inside the operator install, with:
-
-        ActiveGate token mint failed: SSO client_credentials failed (HTTP 400)
-
-    Tries both scope families (see AG_SCOPES). Every Kubernetes training needs
-    this, so a tenant that can mint neither is refused rather than installed.
-    """
-    proxy = f"{tenant.rstrip('/')}/platform/classic/environment-api/v2/activeGateTokens"
-    refusals: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=25) as c:
-            for scope in AG_SCOPES:
-                bearer, st, err = await _oauth_bearer(
-                    sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}", scope)
-                if bearer is None:
-                    refusals.append(f"{scope}: {sso_failure_cause(st, err, cid, client_exists)}")
-                    continue
-                hdr = {"Authorization": f"Bearer {bearer}"}
-                r = await c.post(proxy, headers=hdr, json={
-                    "name": "enbl-preflight-ag", "activeGateType": "ENVIRONMENT",
-                    "expirationDate": _preflight_expiry()})
-                if r.status_code in (200, 201):
-                    tok_id = (r.json() or {}).get("id")
-                    if tok_id:
-                        await c.delete(f"{proxy}/{tok_id}", headers=hdr)
-                    return True, f"ActiveGate token minted via {scope}"
-                # A bearer that WAS issued and is then refused by the API is an
-                # IAM binding problem, not a catalog problem. Record it and try
-                # the other family anyway — they are granted independently.
-                refusals.append(f"{scope}: mint HTTP {r.status_code} "
-                                f"{safe_error_detail(r.text)}")
-    except httpx.HTTPError as e:
-        return False, f"ActiveGate probe error: {e}"
-    return False, ("cannot mint an ActiveGate token, so every Kubernetes training will "
-                   "fail when DynaKube starts. Grant the OAuth client one of "
-                   f"{' or '.join(AG_SCOPES)} on this environment — scopes cannot be "
-                   "edited on an existing client, so this means creating a new one. "
-                   f"Tried: {'; '.join(refusals)}")
 
 
 async def _selftest_outbound(token: str, tenant_url: str) -> dict:
@@ -2688,33 +2383,82 @@ async def _selftest_and_repair(token: str, tenant_url: str,
     return result
 
 
-async def _preflight_documents(sso_url: str, cid: str, csec: str, tenant: str,
-                               tenant_id: str,
-                               client_exists: bool | None = None) -> tuple[bool, str]:
-    """The path the content importer uses: create a document AS THE APP's service
-    identity (env-scoped client-credentials bearer) and delete it again. This is what
-    failed on Asad's tenant while every scope readback said fine."""
-    bearer, st, err = await _oauth_bearer(sso_url, cid, csec,
-                                          f"urn:dtenvironment:{tenant_id}", DOC_SCOPE)
-    if bearer is None:
-        return False, f"the document scopes ({DOC_SCOPE}): {sso_failure_cause(st, err, cid, client_exists)}"
-    base = f"{tenant.rstrip('/')}/platform/document/v1/documents"
-    hdr = {"Authorization": f"Bearer {bearer}"}
-    try:
-        async with httpx.AsyncClient(timeout=25) as c:
-            r = await c.post(base, headers=hdr,
-                             data={"name": "enbl-preflight", "type": "enablement-preflight"},
-                             files={"content": ("content", b"{}", "application/json")})
-            if r.status_code not in (200, 201):
-                return False, f"document create refused (HTTP {r.status_code}): {r.text[:160]}"
-            d = r.json()
-            doc_id, ver = d.get("id"), d.get("version", 1)
-            if doc_id:
-                await c.delete(f"{base}/{doc_id}", headers=hdr,
-                               params={"optimistic-locking-version": str(ver)})
-            return True, "document created and deleted as the service identity"
-    except httpx.HTTPError as e:
-        return False, f"document probe error: {e}"
+
+
+# Naive per-IP limit. This route mints and deletes REAL tokens on a customer tenant, so
+# it is not free to call — the checker page has enforced the same 5-per-5-minutes ceiling
+# since it went live, and moving the checks server-side must not drop that.
+_PREFLIGHT_HITS: dict = {}
+PREFLIGHT_RATE_WINDOW = 300
+PREFLIGHT_RATE_MAX = 5
+
+
+def _preflight_rate_ok(ip: str, now: float) -> bool:
+    hits = [t for t in _PREFLIGHT_HITS.get(ip, []) if now - t < PREFLIGHT_RATE_WINDOW]
+    if len(hits) >= PREFLIGHT_RATE_MAX:
+        _PREFLIGHT_HITS[ip] = hits
+        return False
+    hits.append(now)
+    _PREFLIGHT_HITS[ip] = hits
+    if len(_PREFLIGHT_HITS) > 5000:                      # unbounded dict = a memory leak
+        for k in [k for k, v in _PREFLIGHT_HITS.items()
+                  if not v or now - v[-1] > PREFLIGHT_RATE_WINDOW][:2500]:
+            _PREFLIGHT_HITS.pop(k, None)
+    return True
+
+
+@router.get("/api/deploy/preflight-scopes")
+async def deploy_preflight_scopes():
+    """The scopes an OAuth client needs, as data, from the one list that decides.
+
+    The checker page renders its "scopes your client needs" panel from THIS, rather than
+    from a hardcoded copy. The copy had already drifted: it listed only the classic
+    ActiveGate scope, while the gate has accepted either that or the fleet-management twin
+    since 2026-08-19 — so the page told SEs to add a scope some catalogs do not offer.
+
+    Each entry is a list of alternatives; holding ANY one of them satisfies it.
+    """
+    from dashboard.tenant_credentials import REGISTER_SCOPES
+    return {"scopes": [sorted(entry) for entry in REGISTER_SCOPES],
+            "count": len(REGISTER_SCOPES)}
+
+
+@router.post("/api/deploy/preflight")
+async def deploy_preflight(body: dict, request: Request):
+    """Can this tenant + OAuth client run the Enablement app? Installs NOTHING.
+
+    This is the public tenant checker's engine. The checker used to re-implement these
+    probes in bash, which is how an SE could see an all-green page and a 412 from Register
+    Tenant in the same minute (`bnk46244`, 2026-08-24) — the two implementations had
+    drifted on the document probe, the gen3 probe host, skip-vs-fail, the settings schema,
+    and the install path, and nothing tested one against the other.
+
+    The credential is used in memory for this call and discarded: Orbital stores NOTHING,
+    exactly as `/api/deploy/oauth` does. Every probe deletes what it creates.
+    """
+    ip = (request.client.host if request.client else "") or "unknown"
+    if not _preflight_rate_ok(ip, time.time()):
+        raise HTTPException(429, "Too many checks from this address — try again in a few "
+                                 "minutes. Each check mints real tokens on the tenant.")
+    tenant = (body.get("tenant") or "").strip()
+    cid = (body.get("clientId") or "").strip()
+    csec = (body.get("clientSecret") or "").strip()
+    account_urn = (body.get("accountUrn") or "").strip()
+    tenant_id, domain = classify_tenant(tenant)          # 403 on any non-Dynatrace host
+    if not (cid and csec):
+        raise HTTPException(400, "clientId and clientSecret are required.")
+    problem = credential_problem(cid, csec, account_urn)
+    if problem:
+        raise HTTPException(400, problem)
+    sso_url = (body.get("ssoUrl") or "").strip() or SSO_TOKEN_URL_BY_DOMAIN.get(
+        domain, SSO_TOKEN_URL_BY_DOMAIN["prod"])
+    api_host = ACCOUNT_API_BY_DOMAIN.get(domain, ACCOUNT_API_BY_DOMAIN["prod"])
+    report = await preflight_all(sso_url, cid, csec, tenant, tenant_id, domain,
+                                 account_urn, api_host)
+    del csec
+    log.info("preflight for %s: ready=%s blocking=%d",
+             scrub_for_log(tenant_id), report.ready, len(report.blocking_failures))
+    return {"tenant": tenant_id, **report.as_dict()}
 
 
 @router.post("/api/deploy/oauth")
@@ -2777,7 +2521,6 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         await _audit(user, tenant_id, action, "bad-credential", via="oauth-bootstrap",
                      client_id=cid, status=cat_st, detail=detail)
         raise HTTPException(400, detail)
-    missing_scopes = missing_from_catalog(catalog) if catalog is not None else []
 
     scope_warnings: list[str] = []
     api_host = ACCOUNT_API_BY_DOMAIN.get(domain, ACCOUNT_API_BY_DOMAIN["prod"])
@@ -2786,36 +2529,27 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     # 0. PREFLIGHT (deploy only) — refuse and install NOTHING when this tenant+client
     #    cannot hand a learner a working token or cannot own its content documents.
     #    HTTP 412 names what failed; allowPartial:true is the explicit human override.
+    #
+    #    Runs preflight_all() — the SAME function the public checker calls through
+    #    /api/deploy/preflight. That sharing is the fix for a class of bug, not a tidy-up:
+    #    the checker used to be an independent bash re-implementation, and on 2026-08-24 it
+    #    passed a client the register refused in the same minute. `report.ready` is the one
+    #    verdict; neither door is allowed its own opinion.
     preflight: dict = {}
     if action == "deploy":
-        known = catalog is not None  # the scope-less grant already proved the client is real
-        learner = await _preflight_learner_tokens(
-            sso_url, cid, csec, tenant, tenant_id, domain, account_urn, api_host,
-            client_exists=known or None)
-        docs_ok, docs_detail = await _preflight_documents(sso_url, cid, csec, tenant, tenant_id,
-                                                          client_exists=known or None)
-        # Every Kubernetes training needs a dt0g02. This used to be a post-install
-        # warning; hpm49270 proved a warning is not enough (see _preflight_activegate).
-        ag_ok, ag_detail = await _preflight_activegate(sso_url, cid, csec, tenant, tenant_id,
-                                                       client_exists=known or None)
-        preflight = {"learnerTokenTier": learner["tier"], "learnerDetail": learner["detail"],
-                     "documentsReady": docs_ok, "documentsDetail": docs_detail,
-                     "activeGateReady": ag_ok, "activeGateDetail": ag_detail}
-        failures = []
-        if learner["tier"] == "none":
-            failures.append(f"no working learner-token path — {learner['detail']}")
-        if not docs_ok:
-            failures.append(f"content documents cannot be written as the app — {docs_detail}")
-        if not ag_ok:
-            failures.append(ag_detail)
+        report = await preflight_all(sso_url, cid, csec, tenant, tenant_id, domain,
+                                     account_urn, api_host, catalog=catalog)
+        preflight = report.as_dict()
+        failures = list(report.blocking_failures)
         if failures:
-            if missing_scopes:
+            if report.missing_scopes:
                 failures.append("this client's scope catalog is missing: "
-                                + ", ".join(missing_scopes))
+                                + ", ".join(report.missing_scopes))
             if not allow_partial:
                 await _audit(user, tenant_id, "deploy", "preflight-refused",
                              via="oauth-bootstrap", client_id=cid,
-                             detail=" | ".join(failures), missing_scopes=missing_scopes)
+                             detail=" | ".join(failures),
+                             missing_scopes=report.missing_scopes)
                 raise HTTPException(412,
                     "Preflight refused — nothing was installed. " + " | ".join(failures)
                     + " Scopes cannot be added to an existing OAuth client: create a new one "

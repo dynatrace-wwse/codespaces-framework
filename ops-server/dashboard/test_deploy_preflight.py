@@ -24,6 +24,9 @@ import asyncio
 import pytest
 
 from dashboard import app_deploy as dep
+# The probes moved to their own module; both doors call them there, so tests must
+# patch them THERE — patching app_deploy's re-export would silently miss.
+from dashboard import tenant_preflight as pf
 
 
 class _Resp:
@@ -60,7 +63,8 @@ class _Client:
 
 
 def _patch_client(monkeypatch, handler):
-    monkeypatch.setattr(dep.httpx, "AsyncClient", lambda *a, **k: _Client(handler))
+    for mod in (dep, pf):
+        monkeypatch.setattr(mod.httpx, "AsyncClient", lambda *a, **k: _Client(handler))
 
 
 def _no_sleep(monkeypatch):
@@ -76,31 +80,31 @@ def _ag(monkeypatch, *, grantable, mint_status=201):
     """Run _preflight_activegate with SSO granting only `grantable` scopes."""
     async def _bearer(_sso, _cid, _csec, _resource, scope):
         return ("bearer", 200, "") if scope in grantable else (None, 400, "invalid_request")
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
     _patch_client(monkeypatch, lambda method, url, body:
                   _Resp(mint_status, {"id": "ag-1"} if mint_status in (200, 201) else None,
                         text='{"error":"denied"}'))
-    return asyncio.run(dep._preflight_activegate(
+    return asyncio.run(pf._preflight_activegate(
         "https://sso", "cid", "sec", "https://t.apps.dynatrace.com", "t"))
 
 
 def test_activegate_ok_on_the_classic_scope(monkeypatch):
-    ok, detail = _ag(monkeypatch, grantable={dep.AG_SCOPES[0]})
+    ok, detail = _ag(monkeypatch, grantable={pf.AG_SCOPES[0]})
     assert ok is True
-    assert dep.AG_SCOPES[0] in detail
+    assert pf.AG_SCOPES[0] in detail
 
 
 def test_activegate_falls_back_to_the_gen3_scope(monkeypatch):
     """The hpm49270 shape: the classic scope is not in the client's catalog."""
-    ok, detail = _ag(monkeypatch, grantable={dep.AG_SCOPES[1]})
+    ok, detail = _ag(monkeypatch, grantable={pf.AG_SCOPES[1]})
     assert ok is True
-    assert dep.AG_SCOPES[1] in detail
+    assert pf.AG_SCOPES[1] in detail
 
 
 def test_activegate_failure_names_both_scopes_and_the_recreate_rule(monkeypatch):
     ok, detail = _ag(monkeypatch, grantable=set())
     assert ok is False
-    for scope in dep.AG_SCOPES:
+    for scope in pf.AG_SCOPES:
         assert scope in detail
     # Scopes cannot be edited on an existing client — saying "grant it" without
     # that sends an SE to a UI that will not let them do it.
@@ -112,10 +116,10 @@ def test_activegate_failure_does_not_leak_the_response_body(monkeypatch):
     """Token-endpoint bodies can carry an access_token; safe_error_detail gates them."""
     async def _bearer(*a, **k):
         return ("bearer", 200, "")
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
     _patch_client(monkeypatch, lambda m, u, b: _Resp(
         403, None, text='{"access_token":"SECRET-VALUE","error":"denied"}'))
-    ok, detail = asyncio.run(dep._preflight_activegate(
+    ok, detail = asyncio.run(pf._preflight_activegate(
         "https://sso", "cid", "sec", "https://t.apps.dynatrace.com", "t"))
     assert ok is False
     assert "SECRET-VALUE" not in detail
@@ -249,7 +253,7 @@ def test_effective_permissions_parses_the_documented_shape(monkeypatch):
         ])
 
     _patch_client(monkeypatch, _handler)
-    out = asyncio.run(dep._effective_permissions(
+    out = asyncio.run(pf._effective_permissions(
         "bearer", "https://t.apps.dynatrace.com",
         ["document:documents:admin", "settings:objects:write"]))
     assert out == {"document:documents:admin": "false", "settings:objects:write": "true"}
@@ -262,7 +266,7 @@ def test_effective_permissions_parses_the_documented_shape(monkeypatch):
 def test_effective_permissions_returns_None_when_unavailable(monkeypatch):
     """None means "could not ask", which callers must not read as "no"."""
     _patch_client(monkeypatch, lambda m, u, b: _Resp(404))
-    out = asyncio.run(dep._effective_permissions("bearer", "https://t", ["x"]))
+    out = asyncio.run(pf._effective_permissions("bearer", "https://t", ["x"]))
     assert out is None
 
 
@@ -275,7 +279,7 @@ def test_effective_permissions_caps_the_request_at_the_api_limit(monkeypatch):
         return _Resp(200, [])
 
     _patch_client(monkeypatch, _handler)
-    asyncio.run(dep._effective_permissions("bearer", "https://t", [f"p:{i}" for i in range(150)]))
+    asyncio.run(pf._effective_permissions("bearer", "https://t", [f"p:{i}" for i in range(150)]))
     assert seen["n"] == 100
 
 
@@ -283,14 +287,14 @@ def test_effective_permissions_survives_a_network_error(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("reset")
     _patch_client(monkeypatch, _boom)
-    assert asyncio.run(dep._effective_permissions("bearer", "https://t", ["x"])) is None
+    assert asyncio.run(pf._effective_permissions("bearer", "https://t", ["x"])) is None
 
 
 def test_no_permissions_asked_means_no_call(monkeypatch):
     def _fail(*a, **k):
         raise AssertionError("should not have called the API")
     _patch_client(monkeypatch, _fail)
-    assert asyncio.run(dep._effective_permissions("bearer", "https://t", [])) == {}
+    assert asyncio.run(pf._effective_permissions("bearer", "https://t", [])) == {}
 
 
 # ── The resolve-API trap ─────────────────────────────────────────────────────
@@ -319,9 +323,9 @@ def test_documents_admin_is_asked_with_a_bearer_that_carries_the_scopes(monkeypa
         seen["auth_used"] = True
         return _Resp(200, [{"permission": "document:documents:admin", "granted": "true"}])
 
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
     _patch_client(monkeypatch, _handler)
-    out = asyncio.run(dep._documents_admin_effective(
+    out = asyncio.run(pf._documents_admin_effective(
         "https://sso", "cid", "sec", "https://t.apps.dynatrace.com", "t"))
     assert out == "true"
     assert "document:documents:admin" in asked["scope"], \
@@ -334,8 +338,8 @@ def test_an_sso_refusal_is_unknown_not_false(monkeypatch):
     """A scope-catalog gap is not an IAM gap, and must not be reported as one."""
     async def _bearer(*a, **k):
         return (None, 400, "invalid_request")
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
-    out = asyncio.run(dep._documents_admin_effective(
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
+    out = asyncio.run(pf._documents_admin_effective(
         "https://sso", "cid", "sec", "https://t.apps.dynatrace.com", "t"))
     assert out == "", "unknown, so the deploy stays quiet instead of blaming IAM"
 
@@ -343,9 +347,9 @@ def test_an_sso_refusal_is_unknown_not_false(monkeypatch):
 def test_resolve_unavailable_is_unknown_not_false(monkeypatch):
     async def _bearer(*a, **k):
         return ("doc-bearer", 200, "")
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
     _patch_client(monkeypatch, lambda m, u, b: _Resp(404))
-    out = asyncio.run(dep._documents_admin_effective(
+    out = asyncio.run(pf._documents_admin_effective(
         "https://sso", "cid", "sec", "https://t.apps.dynatrace.com", "t"))
     assert out == ""
 
@@ -599,6 +603,8 @@ def test_a_client_sso_will_not_grant_at_all_is_400_and_never_reaches_the_preflig
 
     async def _catalog(*_a, **_k):
         return None, 400, _EMPTY_400
+    # Patch on `dep`: the ROUTE resolves this name in app_deploy's namespace (it was
+    # imported there), so patching the defining module would not take.
     monkeypatch.setattr(dep, "_client_catalog", _catalog)
 
     async def _boom(*_a, **_k):
@@ -643,8 +649,8 @@ def test_document_preflight_reports_the_cause_and_not_the_raw_sso_body(monkeypat
     async def _bearer(*_a, **_k):
         return (None, 400, '{"error":"invalid_request","error_description":"",'
                            '"access_token":"dt0s16.LEAKED.X"}')
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
-    ok, detail = asyncio.run(dep._preflight_documents(
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
+    ok, detail = asyncio.run(pf._preflight_documents(
         "https://sso", _GOOD_ID, _GOOD_SECRET, "https://t.apps.dynatrace.com", "t"))
     assert ok is False
     assert "LEAKED" not in detail
@@ -654,9 +660,9 @@ def test_document_preflight_reports_the_cause_and_not_the_raw_sso_body(monkeypat
 def test_learner_preflight_blames_the_credential_when_it_is_a_platform_token(monkeypatch):
     async def _bearer(*_a, **_k):
         return (None, 400, '{"error":"invalid_request","error_description":""}')
-    monkeypatch.setattr(dep, "_oauth_bearer", _bearer)
+    monkeypatch.setattr(pf, "_oauth_bearer", _bearer)
     _patch_client(monkeypatch, lambda m, u, b: _Resp(400, None, text="{}"))
-    out = asyncio.run(dep._preflight_learner_tokens(
+    out = asyncio.run(pf._preflight_learner_tokens(
         "https://sso", "dt0s16.GP6CHX54", _GOOD_SECRET, "https://t.apps.dynatrace.com",
         "t", "prod", _GOOD_URN, "https://api.dynatrace.com"))
     assert out["tier"] == "none"
@@ -674,7 +680,7 @@ def test_the_register_route_refuses_a_platform_token_with_400_not_412(monkeypatc
 
     def _boom(*_a, **_k):
         raise AssertionError("SSO must never be reached with a malformed credential")
-    monkeypatch.setattr(dep, "_oauth_bearer", _boom)
+    monkeypatch.setattr(pf, "_oauth_bearer", _boom)
 
     with pytest.raises(dep.HTTPException) as exc:
         asyncio.run(dep.deploy_with_oauth({
