@@ -81,7 +81,42 @@ def credential_problem(client_id: str, client_secret: str, account_urn: str) -> 
     return ""
 
 
-def sso_failure_cause(status: int, err: str, client_id: str = "") -> str:
+# The 15 scopes Register Tenant needs, as data. The ActiveGate entry is an EITHER-OR:
+# the classic scope is missing from some clients' catalogs and the fleet-management twin
+# exists exactly where it does not (hpm49270, 2026-08-19), so requiring the classic one by
+# name refuses clients that can do the job.
+REGISTER_SCOPES: tuple[frozenset, ...] = (
+    frozenset({"app-engine:apps:install"}),
+    frozenset({"app-engine:apps:run"}),
+    frozenset({"app-engine:apps:delete"}),
+    frozenset({"settings:objects:read"}),
+    frozenset({"settings:objects:write"}),
+    frozenset({"app-settings:objects:read"}),
+    frozenset({"environment-api:api-tokens:read"}),
+    frozenset({"environment-api:api-tokens:write"}),
+    frozenset({"environment-api:activegate-tokens:write",
+               "fleet-management:activegate.tokens:write"}),
+    frozenset({"document:documents:read"}),
+    frozenset({"document:documents:write"}),
+    frozenset({"document:documents:delete"}),
+    frozenset({"document:documents:admin"}),
+    frozenset({"platform-token:tokens:write"}),
+    frozenset({"platform-token:tokens:manage"}),
+)
+
+
+def missing_from_catalog(catalog) -> list[str]:
+    """Which required scopes this client's catalog cannot satisfy.
+
+    An either-or entry is satisfied by any one of its alternatives, and is reported as
+    "a or b" so the operator is not told to add a scope their catalog does not offer.
+    """
+    held = set(catalog or ())
+    return [" or ".join(sorted(entry)) for entry in REGISTER_SCOPES if not (entry & held)]
+
+
+def sso_failure_cause(status: int, err: str, client_id: str = "",
+                      client_exists: bool | None = None) -> str:
     """Why SSO refused a client_credentials grant, in the operator's terms.
 
     `_oauth_bearer` returns the same (status, body) for causes that need OPPOSITE fixes, and
@@ -103,12 +138,25 @@ def sso_failure_cause(status: int, err: str, client_id: str = "") -> str:
     if status == 403:
         return "SSO rejected this client (HTTP 403)"
     if status == 400:
-        # SSO stamps no reason when the scope simply is not in the client's catalog. An
-        # empty error_description on a well-formed client is therefore the catalog gap —
-        # and the ONLY case where "create a new client" is the right advice.
+        # SSO answers 400 invalid_request with an EMPTY error_description for THREE
+        # different causes — no such client, wrong secret, and scope-not-in-catalog —
+        # and the bodies are byte-identical (measured against sso.dynatrace.com,
+        # 2026-08-24). The status alone therefore cannot tell them apart, and guessing
+        # "catalog gap" sends an operator to re-create a client when their secret was
+        # simply wrong. `client_exists` carries the answer from a SCOPE-LESS grant,
+        # which is the only thing that separates them (see _client_catalog).
         detail = safe_error_detail(err) if err else ""
-        if not err or "error_description" not in err or '"error_description":""' in err.replace(" ", ""):
-            return ("the scope is not in this OAuth client's catalog (SSO 400, no reason given). "
-                    "Scopes cannot be added to an existing client — this needs a NEW client")
-        return f"SSO refused the grant (HTTP 400): {detail}"
+        described = bool(err) and "error_description" in err and '"error_description":""' not in err.replace(" ", "")
+        if described:
+            return f"SSO refused the grant (HTTP 400): {detail}"
+        if client_exists is False:
+            return ("the client id or secret is wrong, or the client does not exist "
+                    "(SSO 400) — this is NOT a scope problem")
+        if client_exists is True:
+            return ("the scope is not in this OAuth client's catalog (SSO 400, no reason "
+                    "given). Scopes cannot be added to an existing client — this needs a "
+                    "NEW client")
+        return ("SSO 400 with no reason given — this is EITHER a scope missing from the "
+                "client's catalog OR a wrong client id/secret; the two are "
+                "indistinguishable here")
     return f"SSO refused the grant (HTTP {status})"

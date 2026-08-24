@@ -42,7 +42,8 @@ from dashboard.github_oauth import _decrypt, _encrypt  # Fernet (GH_OAUTH_ENC_KE
 from dashboard import tenant_registry  # durable WHO-deployed-WHERE attribution (EPIC-002 §9)
 from provisioning.sso import DEFAULT_SSO, discover_sso as _discover_sso
 from shared.log_safety import safe_error_detail, scrub_for_log
-from dashboard.tenant_credentials import credential_problem, sso_failure_cause
+from dashboard.tenant_credentials import (credential_problem, missing_from_catalog,
+                                          sso_failure_cause)
 
 log = logging.getLogger("ops-dashboard.deploy")
 
@@ -2148,6 +2149,34 @@ async def _oauth_bearer(sso_url: str, cid: str, csec: str, resource: str,
         return None, 0, str(exc)
 
 
+async def _client_catalog(sso_url: str, cid: str, csec: str) -> tuple[set | None, int, str]:
+    """Every scope this OAuth client actually holds, in ONE request.
+
+    A client_credentials grant sent WITHOUT a `scope` parameter returns 200 and lists the
+    client's entire granted catalog in the response `scope` field (measured against
+    sso.dynatrace.com, 2026-08-24). That makes it the only way to separate the three causes
+    SSO hides behind an identical `400 invalid_request` + empty `error_description`:
+
+        bare grant 400  → the client id or secret is wrong, or no such client
+        bare grant 200  → the client is real, so a 400 on a SCOPED grant is a catalog gap
+
+    It also turns "which of the 15 scopes is missing" into a set difference instead of 15
+    round-trips, which is what the checker page does today.
+
+    Returns (scopes|None, status, error-snippet). None means the grant itself failed.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(sso_url, data={
+                "grant_type": "client_credentials", "client_id": cid, "client_secret": csec,
+            }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        if r.status_code == 200:
+            return set((r.json().get("scope") or "").split()), 200, ""
+        return None, r.status_code, r.text[:200]
+    except Exception as exc:
+        return None, 0, str(exc)
+
+
 # ─── Account name / plan — opportunistic, NEVER a required scope ─────────────────────
 #
 # docs/EPIC-002-ws-d-tenant-identity.md established that neither the account's display
@@ -2310,7 +2339,7 @@ def _preflight_expiry() -> str:
 
 async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: str,
                                     tenant_id: str, domain: str, account_urn: str,
-                                    api_host: str) -> dict:
+                                    api_host: str, client_exists: bool | None = None) -> dict:
     """Which learner-token tier this tenant+client can actually deliver.
 
     Classic first: mint a real dt0c01 through the client and call the live domain with
@@ -2332,7 +2361,7 @@ async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: s
                                                    CLASSIC_MINT_SCOPE)  # _err feeds sso_failure_cause
             if bearer is None:
                 detail.append(f"classic path unavailable ({CLASSIC_MINT_SCOPE}): "
-                              f"{sso_failure_cause(st, _err, cid)}")
+                              f"{sso_failure_cause(st, _err, cid, client_exists)}")
             else:
                 hdr = {"Authorization": f"Bearer {bearer}"}
                 r = await c.post(proxy, headers=hdr, json={
@@ -2361,7 +2390,7 @@ async def _preflight_learner_tokens(sso_url: str, cid: str, csec: str, tenant: s
                                                         MINT_SCOPE)
             if pt_bearer is None:
                 detail.append(f"platform path unavailable ({MINT_SCOPE}): "
-                              f"{sso_failure_cause(st2, _err2, cid)}")
+                              f"{sso_failure_cause(st2, _err2, cid, client_exists)}")
                 return {"tier": "none", "detail": "; ".join(detail)}
             acct = account_urn.split(":")[-1]
             base = f"{api_host.rstrip('/')}/iam/v1/accounts/{acct}/platform-tokens"
@@ -2498,7 +2527,8 @@ async def _documents_admin_effective(sso_url: str, cid: str, csec: str, tenant: 
 
 
 async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
-                                tenant_id: str) -> tuple[bool, str]:
+                                tenant_id: str,
+                                client_exists: bool | None = None) -> tuple[bool, str]:
     """Can this tenant mint the ActiveGate token (dt0g02) a DynaKube needs?
 
     Mints a REAL token and deletes it. Asking SSO for a bearer is not enough —
@@ -2520,7 +2550,7 @@ async def _preflight_activegate(sso_url: str, cid: str, csec: str, tenant: str,
                 bearer, st, err = await _oauth_bearer(
                     sso_url, cid, csec, f"urn:dtenvironment:{tenant_id}", scope)
                 if bearer is None:
-                    refusals.append(f"{scope}: {sso_failure_cause(st, err, cid)}")
+                    refusals.append(f"{scope}: {sso_failure_cause(st, err, cid, client_exists)}")
                     continue
                 hdr = {"Authorization": f"Bearer {bearer}"}
                 r = await c.post(proxy, headers=hdr, json={
@@ -2659,14 +2689,15 @@ async def _selftest_and_repair(token: str, tenant_url: str,
 
 
 async def _preflight_documents(sso_url: str, cid: str, csec: str, tenant: str,
-                               tenant_id: str) -> tuple[bool, str]:
+                               tenant_id: str,
+                               client_exists: bool | None = None) -> tuple[bool, str]:
     """The path the content importer uses: create a document AS THE APP's service
     identity (env-scoped client-credentials bearer) and delete it again. This is what
     failed on Asad's tenant while every scope readback said fine."""
     bearer, st, err = await _oauth_bearer(sso_url, cid, csec,
                                           f"urn:dtenvironment:{tenant_id}", DOC_SCOPE)
     if bearer is None:
-        return False, f"the document scopes ({DOC_SCOPE}): {sso_failure_cause(st, err, cid)}"
+        return False, f"the document scopes ({DOC_SCOPE}): {sso_failure_cause(st, err, cid, client_exists)}"
     base = f"{tenant.rstrip('/')}/platform/document/v1/documents"
     hdr = {"Authorization": f"Bearer {bearer}"}
     try:
@@ -2730,8 +2761,23 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         await _audit(user, tenant_id, action, "bad-credential-shape",
                      via="oauth-bootstrap", detail=problem)
         raise HTTPException(400, problem)
+
     sso_url = (body.get("ssoUrl") or "").strip() or SSO_TOKEN_URL_BY_DOMAIN.get(
         domain, SSO_TOKEN_URL_BY_DOMAIN["prod"])
+    # Does this client exist at all, and what does it hold? One scope-less grant answers
+    # both, and it is the ONLY thing that distinguishes "wrong secret" from "missing
+    # scope" — SSO returns a byte-identical 400 for either. Without it the preflight
+    # below has to guess, and guessing "missing scope" tells an operator to re-create a
+    # client when their secret was simply mistyped.
+    catalog, cat_st, cat_err = await _client_catalog(sso_url, cid, csec)
+    if catalog is None and cat_st in (400, 401, 403):
+        detail = ("SSO would not issue a token for this client at all: "
+                  + sso_failure_cause(cat_st, cat_err, cid, client_exists=False)
+                  + ". Check the client id and secret before looking at scopes.")
+        await _audit(user, tenant_id, action, "bad-credential", via="oauth-bootstrap",
+                     client_id=cid, status=cat_st, detail=detail)
+        raise HTTPException(400, detail)
+    missing_scopes = missing_from_catalog(catalog) if catalog is not None else []
 
     scope_warnings: list[str] = []
     api_host = ACCOUNT_API_BY_DOMAIN.get(domain, ACCOUNT_API_BY_DOMAIN["prod"])
@@ -2742,12 +2788,16 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
     #    HTTP 412 names what failed; allowPartial:true is the explicit human override.
     preflight: dict = {}
     if action == "deploy":
+        known = catalog is not None  # the scope-less grant already proved the client is real
         learner = await _preflight_learner_tokens(
-            sso_url, cid, csec, tenant, tenant_id, domain, account_urn, api_host)
-        docs_ok, docs_detail = await _preflight_documents(sso_url, cid, csec, tenant, tenant_id)
+            sso_url, cid, csec, tenant, tenant_id, domain, account_urn, api_host,
+            client_exists=known or None)
+        docs_ok, docs_detail = await _preflight_documents(sso_url, cid, csec, tenant, tenant_id,
+                                                          client_exists=known or None)
         # Every Kubernetes training needs a dt0g02. This used to be a post-install
         # warning; hpm49270 proved a warning is not enough (see _preflight_activegate).
-        ag_ok, ag_detail = await _preflight_activegate(sso_url, cid, csec, tenant, tenant_id)
+        ag_ok, ag_detail = await _preflight_activegate(sso_url, cid, csec, tenant, tenant_id,
+                                                       client_exists=known or None)
         preflight = {"learnerTokenTier": learner["tier"], "learnerDetail": learner["detail"],
                      "documentsReady": docs_ok, "documentsDetail": docs_detail,
                      "activeGateReady": ag_ok, "activeGateDetail": ag_detail}
@@ -2759,9 +2809,13 @@ async def deploy_with_oauth(body: dict, x_auth_user: str | None = Header(default
         if not ag_ok:
             failures.append(ag_detail)
         if failures:
+            if missing_scopes:
+                failures.append("this client's scope catalog is missing: "
+                                + ", ".join(missing_scopes))
             if not allow_partial:
                 await _audit(user, tenant_id, "deploy", "preflight-refused",
-                             via="oauth-bootstrap", client_id=cid, detail=" | ".join(failures))
+                             via="oauth-bootstrap", client_id=cid,
+                             detail=" | ".join(failures), missing_scopes=missing_scopes)
                 raise HTTPException(412,
                     "Preflight refused — nothing was installed. " + " | ".join(failures)
                     + " Scopes cannot be added to an existing OAuth client: create a new one "

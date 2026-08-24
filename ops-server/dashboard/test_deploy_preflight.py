@@ -533,11 +533,85 @@ def test_a_malformed_account_urn_is_rejected():
 # deploys in the APAC incident: _oauth_bearer returns the same (status, body) for
 # causes that need OPPOSITE fixes.
 
-def test_an_empty_error_description_is_the_scope_catalog_gap():
-    cause = sso_failure_cause(400, '{"error":"invalid_request","error_description":""}', _GOOD_ID)
+_EMPTY_400 = '{"error":"invalid_request","error_description":""}'
+
+
+def test_an_empty_400_is_ambiguous_until_the_client_is_proven_real():
+    """Measured against sso.dynatrace.com on 2026-08-24: a non-existent client, a wrong
+    secret, and a scope outside the catalog all return a BYTE-IDENTICAL 400. Claiming
+    "missing scope" here sends an operator to re-create a client over a typo."""
+    cause = sso_failure_cause(400, _EMPTY_400, _GOOD_ID)
+    assert "EITHER" in cause and "indistinguishable" in cause
+    assert "NEW client" not in cause
+
+
+def test_a_proven_client_turns_the_same_400_into_the_catalog_gap():
+    cause = sso_failure_cause(400, _EMPTY_400, _GOOD_ID, client_exists=True)
     assert "not in this OAuth client's catalog" in cause
-    # ...and only THIS case may advise creating a new client.
+    # ...and ONLY this case may advise creating a new client.
     assert "NEW client" in cause
+
+
+def test_a_client_that_cannot_grant_at_all_is_not_a_scope_problem():
+    cause = sso_failure_cause(400, _EMPTY_400, _GOOD_ID, client_exists=False)
+    assert "NOT a scope problem" in cause
+    assert "NEW client" not in cause
+
+
+# ── The scope-less grant: one request, the whole catalog ─────────────────────
+
+def test_missing_from_catalog_accepts_either_activegate_scope():
+    from dashboard.tenant_credentials import missing_from_catalog, REGISTER_SCOPES
+    full = {min(e) for e in REGISTER_SCOPES}   # min() = deterministic pick
+    assert missing_from_catalog(full) == []
+    gen3 = (full - {"environment-api:activegate-tokens:write"}) | {
+        "fleet-management:activegate.tokens:write"}
+    assert missing_from_catalog(gen3) == [], "the gen3 twin must satisfy the ActiveGate entry"
+
+
+def test_missing_from_catalog_reports_an_either_or_as_one_entry():
+    from dashboard.tenant_credentials import missing_from_catalog, REGISTER_SCOPES
+    full = {min(e) for e in REGISTER_SCOPES}   # min() = deterministic pick
+    missing = missing_from_catalog(full - {"environment-api:activegate-tokens:write"})
+    assert missing == ["environment-api:activegate-tokens:write or "
+                       "fleet-management:activegate.tokens:write"]
+
+
+def test_the_real_sro_catalog_is_reported_scope_by_scope():
+    """The shape a live client actually returns from a scope-less grant."""
+    from dashboard.tenant_credentials import missing_from_catalog
+    sro = ("app-engine:apps:run app-engine:apps:install settings:objects:read "
+           "settings:objects:write environment-api:activegate-tokens:write "
+           "platform-token:tokens:manage platform-token:tokens:write "
+           "app-engine:apps:delete app-settings:objects:read").split()
+    assert missing_from_catalog(sro) == [
+        "environment-api:api-tokens:read", "environment-api:api-tokens:write",
+        "document:documents:read", "document:documents:write",
+        "document:documents:delete", "document:documents:admin"]
+
+
+def test_a_client_sso_will_not_grant_at_all_is_400_and_never_reaches_the_preflight(monkeypatch):
+    audited = {}
+
+    async def _audit(_u, _t, _a, result, **extra):
+        audited.update({"result": result, **extra})
+    monkeypatch.setattr(dep, "_audit", _audit)
+
+    async def _catalog(*_a, **_k):
+        return None, 400, _EMPTY_400
+    monkeypatch.setattr(dep, "_client_catalog", _catalog)
+
+    async def _boom(*_a, **_k):
+        raise AssertionError("the preflight must not run for an unusable client")
+    monkeypatch.setattr(dep, "_preflight_learner_tokens", _boom)
+
+    with pytest.raises(dep.HTTPException) as exc:
+        asyncio.run(dep.deploy_with_oauth({
+            "tenant": "https://bnk46244.apps.dynatrace.com", "clientId": _GOOD_ID,
+            "clientSecret": _GOOD_SECRET, "accountUrn": _GOOD_URN}, x_auth_user="saikkoj"))
+    assert exc.value.status_code == 400
+    assert "NOT a scope problem" in exc.value.detail
+    assert audited["result"] == "bad-credential"
 
 
 def test_a_401_is_a_wrong_secret_not_a_missing_scope():
