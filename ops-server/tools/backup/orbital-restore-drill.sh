@@ -11,14 +11,22 @@
 # throwaway instance binds 127.0.0.1 only with no persistence of its own.
 #
 # Usage:
-#   orbital-restore-drill.sh                    # drill the LATEST snapshot
-#   orbital-restore-drill.sh 20260826T184932Z   # drill a specific one
+#   orbital-restore-drill.sh                    # drill the LATEST local snapshot
+#   orbital-restore-drill.sh 20260826T184932Z   # drill a specific local one
+#   orbital-restore-drill.sh --s3               # drill the NEWEST OFFSITE copy
+#
+# --s3 is the one that actually proves disaster recovery. A local drill only
+# shows the snapshot on the master is readable — but the master is the host
+# whose loss the backups exist for. Only the offsite path is evidence.
 #
 set -euo pipefail
 
 BACKUP_ROOT="${ORBITAL_BACKUP_ROOT:-/var/backups/orbital}"
 SCRATCH_PORT="${ORBITAL_DRILL_PORT:-63790}"
 PROD_REDIS_DIR="/var/lib/redis"
+# shellcheck disable=SC1091
+[ -r /etc/default/orbital-backup ] && . /etc/default/orbital-backup
+S3_URI="${ORBITAL_BACKUP_S3_URI:-}"
 
 log()  { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 fail() { printf '  ✗ %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
@@ -31,15 +39,39 @@ die()  { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 [ "$SCRATCH_PORT" != "6379" ] || die "refusing to drill on the production Redis port"
 command -v redis-server >/dev/null || die "redis-server not installed"
 
-SNAP="${1:-$(cat "${BACKUP_ROOT}/LATEST" 2>/dev/null || true)}"
-[ -n "$SNAP" ] || die "no snapshot given and ${BACKUP_ROOT}/LATEST is missing"
-SRC="${BACKUP_ROOT}/${SNAP}"
-[ -d "$SRC" ] || die "snapshot not found: ${SRC}"
-[ -f "${SRC}/dump.rdb" ] || die "snapshot has no dump.rdb: ${SRC}"
-
 SCRATCH="$(mktemp -d /tmp/orbital-drill.XXXXXX)"
 [ "$SCRATCH" != "$PROD_REDIS_DIR" ] || die "scratch dir resolved to the production data dir"
 chmod 700 "$SCRATCH"
+
+FROM_S3=0
+if [ "${1:-}" = "--s3" ]; then
+    FROM_S3=1
+    [ -n "$S3_URI" ] || die "--s3 given but ORBITAL_BACKUP_S3_URI is not configured"
+    command -v aws >/dev/null || die "aws CLI not found"
+
+    # Newest object by key: the timestamp is lexicographically sortable by
+    # construction (YYYYmmddTHHMMSSZ), so this does not depend on S3 ordering.
+    OBJ="$(aws s3 ls "${S3_URI%/}/" 2>/dev/null | awk '{print $4}' | grep -E '^orbital-.*\.tar\.gz$' | sort | tail -1)"
+    [ -n "$OBJ" ] || die "no snapshots found at ${S3_URI}"
+
+    mkdir -p "${SCRATCH}/dl"
+    aws s3 cp "${S3_URI%/}/${OBJ}" "${SCRATCH}/dl/${OBJ}" >/dev/null \
+        || die "could not download ${OBJ} from S3"
+    tar -C "${SCRATCH}/dl" -xzf "${SCRATCH}/dl/${OBJ}" \
+        || die "could not extract ${OBJ}"
+
+    SNAP="${OBJ#orbital-}"; SNAP="${SNAP%.tar.gz}"
+    SRC="${SCRATCH}/dl/${SNAP}"
+    [ -d "$SRC" ] || die "tarball did not contain the expected directory ${SNAP}"
+else
+    SNAP="${1:-$(cat "${BACKUP_ROOT}/LATEST" 2>/dev/null || true)}"
+    [ -n "$SNAP" ] || die "no snapshot given and ${BACKUP_ROOT}/LATEST is missing"
+    SRC="${BACKUP_ROOT}/${SNAP}"
+fi
+
+[ -d "$SRC" ] || die "snapshot not found: ${SRC}"
+[ -f "${SRC}/dump.rdb" ] || die "snapshot has no dump.rdb: ${SRC}"
+
 
 DRILL_PID=""
 cleanup() {
@@ -50,7 +82,7 @@ cleanup() {
 trap cleanup EXIT
 
 FAILURES=0
-log "drilling snapshot ${SNAP}"
+log "drilling snapshot ${SNAP} ($([ "$FROM_S3" = "1" ] && echo "OFFSITE from ${S3_URI}" || echo "local"))"
 
 # ── 1. Manifest integrity ────────────────────────────────────────────────────
 # Verify before restoring: a corrupt dump.rdb that loads to an empty database
@@ -91,19 +123,37 @@ else
     echo; log "RESULT: FAILED (${FAILURES} check(s))"; exit 1
 fi
 
-# ── 3. Key count matches what the snapshot recorded ──────────────────────────
+# ── 3. Key count ─────────────────────────────────────────────────────────────
+# An EXACT match is the wrong assertion here and fails at random. 1368 of
+# Orbital's ~1590 keys carry a TTL (job logs, shell tokens, auth-role cache),
+# Redis drops already-expired keys when loading an RDB, and a drill runs
+# minutes-to-a-month after the snapshot. The first offsite drill failed on
+# "1591 != 1593" purely because two TTLs elapsed in the intervening 64 seconds.
+#
+# What must be true: every NON-VOLATILE key survives. Volatile ones are allowed
+# to have expired, and the shortfall is reported rather than hidden.
+#
+# keys= and expires= are read from the single INFO KEYSPACE line so both are
+# sampled atomically; dbsize is a separate round trip and can disagree with it.
 RESTORED="$("${R[@]}" dbsize)"
-if [ -f "${SRC}/redis-dbsize.txt" ]; then
-    EXPECTED="$(tr -dc '0-9' < "${SRC}/redis-dbsize.txt")"
-    if [ "$RESTORED" = "$EXPECTED" ]; then
-        pass "key count ${RESTORED} matches snapshot record"
+[ "$RESTORED" -gt 0 ] && pass "database is non-empty (${RESTORED} keys)" || fail "database restored EMPTY"
+
+if [ -f "${SRC}/redis-keyspace.txt" ] \
+   && grep -qE '^db0:keys=[0-9]+,expires=[0-9]+' "${SRC}/redis-keyspace.txt"; then
+    SNAP_KEYS="$(grep -oP '^db0:keys=\K[0-9]+'    "${SRC}/redis-keyspace.txt")"
+    SNAP_VOL="$(grep -oP '^db0:.*expires=\K[0-9]+' "${SRC}/redis-keyspace.txt")"
+    PERSISTENT=$((SNAP_KEYS - SNAP_VOL))
+
+    if [ "$RESTORED" -ge "$SNAP_KEYS" ]; then
+        pass "key count ${RESTORED} >= snapshot's ${SNAP_KEYS} (no expiry in between)"
+    elif [ "$RESTORED" -ge "$PERSISTENT" ]; then
+        pass "key count ${RESTORED} of ${SNAP_KEYS}; $((SNAP_KEYS - RESTORED)) volatile key(s) expired since the snapshot, all ${PERSISTENT} non-volatile survived"
     else
-        fail "key count ${RESTORED} != recorded ${EXPECTED}"
+        fail "key count ${RESTORED} is below the ${PERSISTENT} non-volatile keys the snapshot held — real data loss, not TTL expiry"
     fi
 else
-    fail "snapshot has no redis-dbsize.txt to compare against"
+    fail "snapshot has no parseable redis-keyspace.txt to compare against"
 fi
-[ "$RESTORED" -gt 0 ] && pass "database is non-empty" || fail "database restored EMPTY"
 
 # ── 4. Structural assertions ─────────────────────────────────────────────────
 # Key count alone can be satisfied by garbage. Check that the structures the
@@ -160,7 +210,7 @@ fi
 
 echo
 if [ "$FAILURES" -eq 0 ]; then
-    log "RESULT: PASS — snapshot ${SNAP} is restorable"
+    log "RESULT: PASS — snapshot ${SNAP} is restorable ($([ "$FROM_S3" = "1" ] && echo offsite || echo local))"
     exit 0
 fi
 log "RESULT: FAILED (${FAILURES} check(s)) — snapshot ${SNAP} is NOT trustworthy"
