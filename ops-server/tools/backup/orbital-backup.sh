@@ -180,7 +180,14 @@ backup_envs
 backup_config
 write_manifest
 chmod -R go-rwx "$DEST"
+
+# LATEST is published BEFORE the offsite attempt. The local snapshot is complete
+# and verifiable at this point, and with ORBITAL_BACKUP_S3_REQUIRED=1 a failed
+# upload aborts the run — publishing afterwards would leave LATEST pointing at
+# yesterday, so the restore drill would silently keep validating a stale
+# snapshot while today's good one sat there unreferenced.
+echo "$TS" > "${BACKUP_ROOT}/LATEST"
+
 offsite
 prune
-echo "$TS" > "${BACKUP_ROOT}/LATEST"
 log "done: $(du -sh "$DEST" | cut -f1) in ${DEST}"

@@ -98,6 +98,19 @@ inventory() {
     echo '```'
 
     sec "TLS certificates"
+    # The expiry DATE moves on every renewal, so it is volatile. What must hold
+    # is that nothing is close to expiring — memory records a wildcard cert that
+    # died after its renewal hook failed silently for ~90 days.
+    echo '```'
+    local d name_ok=yes
+    for d in /etc/letsencrypt/live/*/; do
+        [ -f "${d}cert.pem" ] || continue
+        openssl x509 -checkend $((30*86400)) -noout -in "${d}cert.pem" >/dev/null 2>&1 \
+            || name_ok=no
+    done
+    printf 'all certs valid for >30 days: %s\n' "$name_ok"
+    echo '```'
+    echo '<!-- volatile:begin -->'
     echo '```'
     for d in /etc/letsencrypt/live/*/; do
         [ -f "${d}cert.pem" ] || continue
@@ -105,6 +118,7 @@ inventory() {
             "$(openssl x509 -enddate -noout -in "${d}cert.pem" 2>/dev/null | cut -d= -f2)"
     done | sort
     echo '```'
+    echo '<!-- volatile:end -->'
     echo "certbot authenticator:"
     echo '```'
     grep -hE '^(authenticator|manual_auth_hook)' /etc/letsencrypt/renewal/*.conf 2>/dev/null | sort -u
@@ -148,20 +162,31 @@ inventory() {
     echo '```'
 
     sec "Fleet code refs"
-    echo "All hosts must report the same ref. A divergence here IS the drift that"
-    echo "breaks a training the night after a partial deploy."
+    echo "The invariant is that every host reports the SAME ref — not any particular"
+    echo "ref, which changes on every legitimate promotion. The verdict below is what"
+    echo "--check compares; the refs themselves are marked volatile and excluded, so a"
+    echo "normal deploy does not register as drift and train everyone to ignore it."
     echo '```'
     # `sudo -u ops`, not bare `sudo`: the checkout is owned by ops, and git run
     # as root refuses it with "detected dubious ownership" — which reads as an
     # unreachable host rather than the permissions problem it is.
-    printf '%-42s %s\n' "master ($(hostname))" \
-        "$(sudo -u ops git -C "$OPS_CHECKOUT" rev-parse --short HEAD 2>/dev/null || echo 'no checkout')"
-    local w ref
+    local w ref master_ref all_same=yes
+    master_ref="$(sudo -u ops git -C "$OPS_CHECKOUT" rev-parse --short HEAD 2>/dev/null || echo 'no-checkout')"
+    local -a rows=("$(printf '%-42s %s' "master ($(hostname))" "$master_ref")")
     for w in $WORKERS; do
         ref="$(as_ssh "$w" "sudo -n -u ops git -C $OPS_CHECKOUT rev-parse --short HEAD")"
-        printf '%-42s %s\n' "$w" "${ref:-unreachable}"
+        ref="${ref:-unreachable}"
+        [ "$ref" = "$master_ref" ] || all_same=no
+        rows+=("$(printf '%-42s %s' "$w" "$ref")")
     done
+    printf 'all hosts on the same ref: %s\n' "$all_same"
+    printf 'hosts reporting:           %s\n' "$(( ${#rows[@]} ))"
     echo '```'
+    echo '<!-- volatile:begin -->'
+    echo '```'
+    printf '%s\n' "${rows[@]}"
+    echo '```'
+    echo '<!-- volatile:end -->'
 
     sec "OneAgent"
     echo "Prod workers must be **infra-only**: host and container metrics plus"
@@ -189,18 +214,28 @@ inventory() {
     printf '%-24s %s\n' "drill timer"  "$(systemctl is-enabled orbital-restore-drill.timer 2>/dev/null || echo absent)"
     printf '%-24s %s\n' "offsite S3" \
         "$(grep -oP '^ORBITAL_BACKUP_S3_URI=\K.*' /etc/default/orbital-backup 2>/dev/null || echo 'NOT CONFIGURED — local only')"
-    printf '%-24s %s\n' "local snapshots" \
-        "$(sudo find /var/backups/orbital -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' 2>/dev/null | wc -l)"
+    # A snapshot exists from the last 48h. The COUNT churns daily with pruning,
+    # so assert freshness instead — an empty or stale backup dir is the failure
+    # worth waking up for, not "6 snapshots instead of 7".
+    printf '%-24s %s\n' "snapshot <48h old" \
+        "$(find /var/backups/orbital -mindepth 1 -maxdepth 1 -type d \
+              -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z' -mtime -2 2>/dev/null \
+           | grep -q . && echo yes || echo NO)"
     echo '```'
 }
+
+# Strip the host preamble and every volatile:begin/end region, so the diff sees
+# only what is supposed to be stable. Without this the check fires after every
+# promotion and every cert renewal — and a drift detector that is normally red
+# is one nobody reads.
+comparable() { sed '1,6d' "$1" | sed '/<!-- volatile:begin -->/,/<!-- volatile:end -->/d'; }
 
 if [ "${1:-}" = "--check" ]; then
     BASELINE="${2:?usage: --check <baseline.md>}"
     [ -f "$BASELINE" ] || { echo "baseline not found: $BASELINE" >&2; exit 2; }
     TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
     inventory > "$TMP"
-    # Ignore the generated-host preamble; compare the substance.
-    if diff -u <(sed '1,6d' "$BASELINE") <(sed '1,6d' "$TMP"); then
+    if diff -u <(comparable "$BASELINE") <(comparable "$TMP"); then
         echo "inventory: no drift from $(basename "$BASELINE")"
         exit 0
     fi
