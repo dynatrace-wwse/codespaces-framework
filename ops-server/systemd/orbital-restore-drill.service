@@ -1,0 +1,14 @@
+[Unit]
+Description=Orbital restore drill (verifies the latest DR snapshot is restorable)
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/home/ops/enablement-framework/codespaces-framework/ops-server/tools/backup/orbital-restore-drill.sh
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orbital-restore-drill
+
+[Install]
+WantedBy=multi-user.target

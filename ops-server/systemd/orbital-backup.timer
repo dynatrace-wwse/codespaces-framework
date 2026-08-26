@@ -1,0 +1,13 @@
+[Unit]
+Description=Orbital DR snapshot timer
+Requires=orbital-backup.service
+
+[Timer]
+# 03:17 UTC — clear of the 02:00 nightly training-test window, and off the
+# hour so it does not pile onto every other cron on the box.
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
