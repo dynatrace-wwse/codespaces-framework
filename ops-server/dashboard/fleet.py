@@ -18,6 +18,7 @@ import base64
 import json
 
 from dashboard import fleet_policy
+from shared import environment
 
 AWS_CLI = "/usr/local/bin/aws"
 # Home region: where the master, Redis and the golden AMI live. Every call
@@ -86,6 +87,12 @@ WORKER_ROLE_TAG = "worker"           # value of the orbital-role tag
 # it entirely would widen the role's blast radius to the whole account.
 FLEET_TAG_KEY = "ManagedBy"
 FLEET_TAG_VALUE = "orbital-autoscaler"
+
+# The environment boundary. Staging and production share this AWS account, and
+# every mutating grant is additionally conditioned on this tag matching the
+# caller's own environment — so a staging control loop asking to terminate a
+# production worker is refused by IAM, not merely by the code below.
+ENV_TAG_KEY = environment.ENV_TAG_KEY
 WORKER_NAME_PREFIX = "autonomous-enablements-worker"
 
 # Hard safety limit: never launch more than this many instances per call.
@@ -365,6 +372,10 @@ def _parse_instances(reservations: list) -> list[dict]:
                 # Untagged (the two long-lived pet workers) reads as daily,
                 # matching how every other consumer treats a missing pool.
                 "pool": tags.get("orbital-pool", "") or "",
+                # Untagged reads as prod — see shared/environment. Surfaced so
+                # the fleet table and anything reading these records can tell
+                # a staging machine from a production one.
+                "env": environment.instance_env(tags),
             })
     return out
 
@@ -372,10 +383,18 @@ def _parse_instances(reservations: list) -> list[dict]:
 def _is_spot_worker(instance: dict) -> bool:
     """True if a raw EC2 instance dict is one of OUR disposable spot workers.
 
-    Terminate is allowed only for instances tagged orbital-role=worker or
-    named orbital-worker-spot — never for the master or pet workers.
+    "Ours" is two conditions, not one: the instance must be a spot worker
+    (tagged orbital-role=worker or named orbital-worker-spot — never the master
+    or a pet worker) AND it must belong to the calling environment.
+
+    The environment half is what stops a staging control loop from terminating
+    a production worker if a discovery filter is ever added without its scope.
+    IAM refuses it too; this is the layer that refuses it before the call is
+    made, and the layer that a unit test can hold still.
     """
     tags = _tags_of(instance)
+    if not environment.owns(tags, environment.current().name):
+        return False
     return (
         tags.get("orbital-role") == WORKER_ROLE_TAG
         or tags.get("Name") == SPOT_WORKER_NAME
@@ -398,8 +417,16 @@ def _verify_terminatable(descriptions: list) -> tuple[list[str], list[str]]:
 def _start_stop_allowed(instance: dict) -> bool:
     """True if start/stop is permitted: any autonomous-enablements-worker*
     instance (e.g. the pre-provisioned stopped worker-3) or one of our
-    tagged spot workers."""
-    name = _tags_of(instance).get("Name", "") or ""
+    tagged spot workers — and in both cases only within this environment.
+
+    Stopping another environment's machine is less destructive than
+    terminating it and just as wrong: it takes capacity away from a fleet that
+    is not ours, silently, and looks like a spot interruption to whoever owns it.
+    """
+    tags = _tags_of(instance)
+    if not environment.owns(tags, environment.current().name):
+        return False
+    name = tags.get("Name", "") or ""
     return name.startswith(WORKER_NAME_PREFIX) or _is_spot_worker(instance)
 
 
@@ -513,12 +540,21 @@ async def _describe_by_ids(instance_ids: list[str]) -> list[dict]:
 # ── Public API (all async) ───────────────────────────────────────────────────
 
 async def list_fleet() -> list[dict]:
-    """List all fleet EC2 instances (tag project=autonomous-enablements OR
-    Name prefix autonomous-enablements), merged and de-duplicated.
+    """List this environment's fleet EC2 instances (tag
+    project=autonomous-enablements OR Name prefix autonomous-enablements),
+    merged, de-duplicated, and scoped to the calling environment.
 
     Returns [{instance_id, name, type, state, private_ip, lifecycle,
-    launch_time}].
+    launch_time, pool, env}].
+
+    The environment scope is applied CLIENT-side rather than as a
+    ``Name=tag:env`` filter. EC2 filters cannot express "tag absent", and the
+    four long-lived machines carry no ``env`` tag — a server-side filter would
+    make production discover nothing at all the moment this shipped, before the
+    backfill ran. ``environment.owns`` reads untagged as prod, so the migration
+    is invisible to production and staging still cannot see a legacy machine.
     """
+    env = environment.current()
     by_tag, by_name = await asyncio.gather(
         _aws("ec2", "describe-instances", "--filters",
              f"Name=tag:project,Values={PROJECT_TAG}"),
@@ -528,7 +564,7 @@ async def list_fleet() -> list[dict]:
     merged: dict[str, dict] = {}
     for data in (by_tag, by_name):
         for rec in _parse_instances((data or {}).get("Reservations", [])):
-            if rec["instance_id"]:
+            if rec["instance_id"] and rec.get("env") == env.name:
                 merged[rec["instance_id"]] = rec
     return sorted(merged.values(), key=lambda r: (r["name"], r["instance_id"]))
 
@@ -596,6 +632,10 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         # call fails UnauthorizedOperation. It is also the blast-radius guarantee
         # that the role can never touch an instance it did not create.
         f"{{Key={FLEET_TAG_KEY},Value={FLEET_TAG_VALUE}}},"
+        # MANDATORY, same reasoning as ManagedBy above: the IAM role may only
+        # act on instances whose env matches its own, so an untagged launch is
+        # a machine this environment can create but never afterwards terminate.
+        f"{{Key={ENV_TAG_KEY},Value={environment.current().ec2_tag}}},"
         f"{{Key=orbital-role,Value={WORKER_ROLE_TAG}}},"
         # Pool is tagged as well as written into .env so it survives a stop/start
         # (user-data only runs on first boot) and so the reaper can find every

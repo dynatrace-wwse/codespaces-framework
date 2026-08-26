@@ -1093,3 +1093,93 @@ def test_the_loop_uses_the_tested_predicates():
     import inspect
     src = inspect.getsource(wf.tick)
     assert "should_prewarm(" in src and "should_teardown(" in src
+
+
+# ── Reaper discovery is environment-scoped ───────────────────────────────────
+#
+# _instances_tagged feeds TERMINATION. Pool names are not unique across
+# environments — "daily" is the same string in staging as in production — so
+# without an environment scope a staging reaper handing back its own daily pool
+# would hand back production's with it. There was no test here at all.
+
+import asyncio
+import os
+
+import pytest
+
+
+def _reservations(*instances):
+    return {"Reservations": [{"Instances": list(instances)}]}
+
+
+def _ec2(iid, env=None, pool="daily"):
+    tags = [{"Key": "orbital-pool", "Value": pool}]
+    if env is not None:
+        tags.append({"Key": "env", "Value": env})
+    return {"InstanceId": iid, "Tags": tags}
+
+
+@pytest.fixture
+def _fake_ec2(monkeypatch):
+    """Make fleet._aws return a fixed describe-instances payload."""
+    from dashboard import fleet
+
+    def _install(payload):
+        async def fake_aws(*_a, **_kw):
+            return payload
+        monkeypatch.setattr(fleet, "_aws", fake_aws)
+    return _install
+
+
+@pytest.fixture
+def _as_env(monkeypatch):
+    def _set(name):
+        monkeypatch.setenv("ORBITAL_ENV", name)
+    return _set
+
+
+def test_reaper_sees_only_its_own_environments_instances(_fake_ec2, _as_env):
+    _fake_ec2(_reservations(
+        _ec2("i-prod", env="prod"),
+        _ec2("i-staging", env="staging"),
+    ))
+
+    _as_env("staging")
+    assert asyncio.run(wf._instances_tagged("daily")) == ["i-staging"]
+
+    _as_env("prod")
+    assert asyncio.run(wf._instances_tagged("daily")) == ["i-prod"]
+
+
+def test_reaper_in_staging_never_returns_an_untagged_machine(_fake_ec2, _as_env):
+    # The long-lived production machines carry no env tag. A staging reaper
+    # must not hand them back.
+    _fake_ec2(_reservations(_ec2("i-legacy")))
+    _as_env("staging")
+    assert asyncio.run(wf._instances_tagged("daily")) == []
+
+
+def test_reaper_in_prod_still_returns_untagged_machines(_fake_ec2, _as_env):
+    # ...and production must still reap them, or the scope change breaks
+    # teardown for every machine that predates the tag.
+    _fake_ec2(_reservations(_ec2("i-legacy")))
+    _as_env("prod")
+    assert asyncio.run(wf._instances_tagged("daily")) == ["i-legacy"]
+
+
+def test_reaper_still_reaps_nothing_on_a_failed_describe(monkeypatch, _as_env):
+    # Fail-safe, preserved from before the env scope: a failed AWS call must
+    # reap NOTHING. An exception that read as "no instances" would make every
+    # live workshop look abandoned.
+    from dashboard import fleet
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("AWS unreachable")
+    monkeypatch.setattr(fleet, "_aws", boom)
+    _as_env("prod")
+    assert asyncio.run(wf._instances_tagged("daily")) == []
+
+
+def test_reaper_returns_nothing_for_a_blank_pool(_as_env):
+    _as_env("prod")
+    assert asyncio.run(wf._instances_tagged("")) == []

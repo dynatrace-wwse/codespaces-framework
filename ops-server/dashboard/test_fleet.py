@@ -214,6 +214,14 @@ def test_fleet_tag_constants_match_iam_policy():
     conditions on. If they drift, every launch fails UnauthorizedOperation."""
     assert fleet.FLEET_TAG_KEY == "ManagedBy"
     assert fleet.FLEET_TAG_VALUE == "orbital-autoscaler"
+    # The environment tag is conditioned on the same way — see
+    # docs/iam/environment-isolation.md. Renaming it here without updating both
+    # role policies makes every launch fail, and every terminate succeed
+    # against the wrong environment.
+    assert fleet.ENV_TAG_KEY == "env"
+    from shared import environment
+    assert environment.ENV_TAG_KEY == fleet.ENV_TAG_KEY
+    assert set(environment.KNOWN_ENVS) == {"prod", "staging"}
 
 
 # ── Root volume override ─────────────────────────────────────────────────────
@@ -340,7 +348,7 @@ def test_parse_instances_shape_and_lifecycle():
     assert spot["private_ip"] == "172.31.40.1"
     assert master["type"] == "c5.4xlarge"
     assert set(spot) == {"instance_id", "name", "type", "state",
-                         "private_ip", "lifecycle", "launch_time", "pool"}
+                         "private_ip", "lifecycle", "launch_time", "pool", "env"}
     # The lane must survive the flattening. Dropping every tag here is what left
     # the UI unable to tell a workshop machine from a self-service one, and it
     # is the same blind spot that let a scale-down click cordon a workshop box.
@@ -348,6 +356,130 @@ def test_parse_instances_shape_and_lifecycle():
     # An untagged instance (the long-lived pet workers) reports no lane rather
     # than a guessed one; consumers read empty as daily, as they do everywhere.
     assert master["pool"] == ""
+
+
+# ── Environment isolation ────────────────────────────────────────────────────
+#
+# Staging and production share one AWS account. These are the tests that fail
+# if the environment scope is ever dropped from a guard — which is the single
+# most likely way this design gets broken, because dropping it makes nothing
+# fail visibly until the day one environment reaps the other's fleet.
+
+import os
+from contextlib import contextmanager
+
+from shared import environment
+
+
+@contextmanager
+def _as_env(name):
+    prev = os.environ.get("ORBITAL_ENV")
+    os.environ["ORBITAL_ENV"] = name
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("ORBITAL_ENV", None)
+        else:
+            os.environ["ORBITAL_ENV"] = prev
+
+
+def test_launched_instance_carries_its_environment_tag():
+    """Every launch is tagged with the launching environment.
+
+    An untagged launch is a machine this environment can create but can never
+    afterwards terminate, because the IAM condition will not match it — it
+    would run to its in-instance shutdown backstop with nothing able to reap it.
+
+    Asserted on the source of scale_up, matching how the pool tag is pinned:
+    the tag string is built inline and the alternative is mocking the AWS CLI.
+    """
+    import inspect
+    src = inspect.getsource(fleet.scale_up)
+    assert f"Key={{ENV_TAG_KEY}},Value=" in src or "Key={ENV_TAG_KEY},Value=" in src
+    assert fleet.ENV_TAG_KEY == "env"
+
+
+def test_prod_refuses_to_terminate_a_staging_worker():
+    staging_worker = _inst("i-staging", orbital_role="worker", env="staging")
+    with _as_env("prod"):
+        ok, refused = fleet._verify_terminatable([staging_worker])
+    assert ok == []
+    assert refused == ["i-staging"]
+
+
+def test_staging_refuses_to_terminate_a_prod_worker():
+    prod_worker = _inst("i-prod", orbital_role="worker", env="prod")
+    with _as_env("staging"):
+        ok, refused = fleet._verify_terminatable([prod_worker])
+    assert ok == []
+    assert refused == ["i-prod"]
+
+
+def test_staging_refuses_to_terminate_an_UNTAGGED_worker():
+    # The four long-lived production machines carry no env tag. Staging must
+    # treat them as production's, not as unclaimed.
+    legacy = _inst("i-legacy", orbital_role="worker")
+    with _as_env("staging"):
+        ok, refused = fleet._verify_terminatable([legacy])
+    assert ok == []
+    assert refused == ["i-legacy"]
+
+
+def test_each_environment_still_terminates_its_OWN_worker():
+    # The isolation must not be so broad that it breaks the actual job. If this
+    # ever fails, autoscaling is dead in that environment.
+    with _as_env("prod"):
+        ok, refused = fleet._verify_terminatable(
+            [_inst("i-p", orbital_role="worker", env="prod")])
+        assert (ok, refused) == (["i-p"], [])
+        # ...including the untagged legacy machines, pre-backfill.
+        ok, refused = fleet._verify_terminatable(
+            [_inst("i-old", orbital_role="worker")])
+        assert (ok, refused) == (["i-old"], [])
+    with _as_env("staging"):
+        ok, refused = fleet._verify_terminatable(
+            [_inst("i-s", orbital_role="worker", env="staging")])
+        assert (ok, refused) == (["i-s"], [])
+
+
+def test_terminate_isolation_holds_in_both_directions_for_every_pair():
+    # Stated as a property rather than two examples: for every (caller, owner)
+    # pair, terminate is permitted if and only if they are the same
+    # environment. Deleting the env check from _is_spot_worker makes the
+    # off-diagonal cases fail here.
+    for caller in environment.KNOWN_ENVS:
+        for owner in environment.KNOWN_ENVS:
+            inst = _inst("i-x", orbital_role="worker", env=owner)
+            with _as_env(caller):
+                ok, _ = fleet._verify_terminatable([inst])
+            assert bool(ok) == (caller == owner), \
+                f"caller={caller} owner={owner} -> ok={ok}"
+
+
+def test_start_stop_isolation_holds_in_both_directions():
+    # Stopping another environment's machine is quieter than terminating it and
+    # just as wrong: it removes capacity from a fleet that is not ours and
+    # looks like a spot interruption to whoever owns it.
+    for caller in environment.KNOWN_ENVS:
+        for owner in environment.KNOWN_ENVS:
+            pet = _inst("i-pet", Name="autonomous-enablements-worker-3", env=owner)
+            with _as_env(caller):
+                allowed = fleet._start_stop_allowed(pet)
+            assert allowed == (caller == owner), \
+                f"caller={caller} owner={owner} -> {allowed}"
+
+
+def test_parsed_records_report_their_environment():
+    recs = fleet._parse_instances([{"Instances": [
+        {"InstanceId": "i-s", "Tags": [{"Key": "env", "Value": "staging"}]},
+        {"InstanceId": "i-legacy", "Tags": []},
+    ]}])
+    by_id = {r["instance_id"]: r for r in recs}
+    assert by_id["i-s"]["env"] == "staging"
+    # Untagged surfaces as prod, not as blank — a blank would render in the
+    # fleet table as an unowned machine that anyone may scale down.
+    assert by_id["i-legacy"]["env"] == "prod"
 
 
 if __name__ == "__main__":

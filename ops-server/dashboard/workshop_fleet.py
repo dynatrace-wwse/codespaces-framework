@@ -1047,15 +1047,26 @@ async def _busy_pool_workers(redis, pool_name: str) -> list[str]:
 
 
 async def _instances_tagged(pool_name: str) -> list[str]:
-    """Live EC2 instance ids carrying this pool's tag.
+    """Live EC2 instance ids carrying this pool's tag, in THIS environment.
 
     Deliberately queries AWS rather than Redis: when a workshop's machines need
     giving back, the question is "what is actually still running", and Redis is
     the component most likely to be the reason the record is wrong.
+
+    The environment scope is not optional here. This list feeds termination,
+    and pool names are not unique across environments — ``daily`` is the same
+    string in staging as in production. Without it, a staging reaper handing
+    back its own daily pool would hand back production's as well.
+
+    Scoped client-side for the same reason as ``fleet.list_fleet``: EC2 filters
+    cannot express "tag absent", and an untagged legacy machine must read as
+    production rather than vanish from it.
     """
     if not pool_name:
         return []
     from dashboard import fleet
+    from shared import environment
+    env_name = environment.current().name
     try:
         data = await fleet._aws(
             "ec2", "describe-instances",
@@ -1064,8 +1075,16 @@ async def _instances_tagged(pool_name: str) -> list[str]:
     except Exception as exc:
         log.warning("could not list instances for pool %s: %s", pool_name, exc)
         return []
-    return [i.get("InstanceId") for r in (data or {}).get("Reservations", [])
-            for i in r.get("Instances", []) if i.get("InstanceId")]
+    out = []
+    for r in (data or {}).get("Reservations", []):
+        for i in r.get("Instances", []):
+            iid = i.get("InstanceId")
+            if not iid:
+                continue
+            tags = {t.get("Key"): t.get("Value") for t in i.get("Tags", []) or []}
+            if environment.owns(tags, env_name):
+                out.append(iid)
+    return out
 
 
 async def _pool_worker_ids(redis, pool_name: str) -> list[str]:
