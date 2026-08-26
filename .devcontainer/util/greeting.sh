@@ -237,8 +237,21 @@ printOrbitalGreeting(){
 # learner is inside an app tab, so the GitHub URLs, the app URL, the slot
 # hostname, the VS Code port advice and deleteCodespace are all either wrong or
 # already on screen. Every other instantiation type keeps the full greeting.
+#
+# "orbital_codespaces" is deliberately NOT routed here, even though the name
+# looks like it belongs. It is a real GitHub Codespace that Orbital merely
+# launched, so every reason above is false for it:
+#   - there IS a VS Code, so the port-visibility advice applies;
+#   - GitHub, not Orbital, owns the lifecycle, so deleteCodespace is correct;
+#   - the hostname is the learner's own Codespace, not an internal slot name;
+#   - the app is served by GitHub port forwarding, not by an Orbital wildcard
+#     subdomain — which is exactly what getAppURL and printRunningApplications
+#     both already conclude (see the "codespaces" arm above).
+# Routing it here stripped the app URL out of every Orbital-launched Codespace,
+# and out of every hand-opened one that kept the type via the variables.sh
+# fail-safe (ops server unreachable / no curl).
 case "${INSTANTIATION_TYPE:-}" in
-  orbital|orbital_codespaces)
+  orbital)
     printOrbitalGreeting
     ;;
   *)

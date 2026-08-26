@@ -1573,3 +1573,181 @@ def test_env_name_blank_without_an_env_id_and_never_mints_a_token():
         dep._oauth_bearer = saved
     assert out[0] == ""
     assert called == [], "minted an account bearer with nothing to look up"
+
+
+# ── content sync credential: the ladder nothing used to execute ───────────────
+# `CONTENT_SYNC_SCOPES` / `content_sync_token()` had no test of any kind. Every
+# case in test_content_sync.py injects a ready-made credential
+# (`kw.setdefault("credential", CRED)`), so the mint was never once exercised in
+# CI — the same blind spot that let the self-update deploy scopes rot. These
+# tests drive the real mint against a fake SSO that enforces the one rule that
+# matters: a client is granted a scope set only if it holds every scope in it.
+
+def _sso_holding(catalog):
+    """A fake SSO for a client whose catalog is exactly `catalog`.
+
+    Mirrors the real all-or-nothing grant: ask for one scope the client lacks and
+    the WHOLE request is refused with 400 invalid_request and an empty
+    error_description — indistinguishable from a wrong id or secret.
+    Returns (client_class, attempts) where attempts records each scope asked for.
+    """
+    import httpx  # noqa: F401  (imported for symmetry with the other stubs)
+    held, attempts = set(catalog), []
+
+    class _Resp:
+        def __init__(self, status, payload=None):
+            self.status_code, self._payload = status, payload or {}
+            self.text = json.dumps(self._payload)
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+        async def post(self, url, data=None, headers=None):
+            asked = set((data or {}).get("scope", "").split())
+            attempts.append(sorted(asked))
+            if asked - held:
+                return _Resp(400, {"error": "invalid_request", "error_description": ""})
+            return _Resp(200, {"access_token": "tok-" + str(len(attempts)),
+                               "scope": " ".join(sorted(asked))})
+
+    return _Client, attempts
+
+
+def _with_sso(client_cls, coro):
+    import httpx
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = client_cls
+    try:
+        return asyncio.run(coro)
+    finally:
+        httpx.AsyncClient = orig
+
+
+# The scopes a tenant admin is actually told to grant, straight from the module the
+# Register gate and the checker page both read. Importing it (rather than repeating
+# a literal) is the point: if the registerable set ever changes, these tests move
+# with it instead of silently pinning a stale copy.
+from dashboard.tenant_credentials import REGISTER_SCOPES  # noqa: E402
+
+_REGISTERABLE = {s for entry in REGISTER_SCOPES for s in entry}
+
+
+def test_content_sync_token_mints_for_a_client_that_holds_every_rung_scope():
+    """The happy path, which nothing exercised before.
+
+    A client holding everything the richest rung asks for gets rung 1 and one
+    attempt — no needless degrading.
+    """
+    cls, attempts = _sso_holding(_REGISTERABLE | {"state:app-states:read"})
+    saved = (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE)
+    dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE = "cid", "csec", "urn:dtaccount:x"
+    try:
+        token, label = _with_sso(cls, dep.content_sync_token(dep.COE_TENANT_URL))
+    finally:
+        (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE) = saved
+    assert token and label == "COE"
+    assert len(attempts) == 1, f"should take the richest rung, took {len(attempts)} attempts"
+    assert "document:documents:write" in attempts[0], "the rung that can write documents"
+
+
+def test_content_sync_ladder_degrades_instead_of_giving_up():
+    """A client without the document scopes still gets the mint path.
+
+    The rungs shed document access first, deliberately: the mint path (documents
+    owned by the service principal) is worth more than the caller-context
+    fallback, so it is the last thing dropped.
+    """
+    cls, attempts = _sso_holding({"app-engine:apps:run", "state:app-states:read",
+                                  "app-settings:objects:read"})
+    saved = (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE)
+    dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE = "cid", "csec", "urn:dtaccount:x"
+    try:
+        token, _ = _with_sso(cls, dep.content_sync_token(dep.COE_TENANT_URL))
+    finally:
+        (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE) = saved
+    assert token, "should have fallen through to a rung it can hold"
+    assert len(attempts) > 1, "the richest rung must have been refused first"
+
+
+def test_content_sync_scopes_divergence_from_the_registerable_set_is_the_known_one():
+    """Guard: what content sync ASKS FOR vs what a tenant can actually GRANT.
+
+    A tenant admin is told to create a client with exactly REGISTER_SCOPES (the
+    15). Because the grant is all-or-nothing, any scope in CONTENT_SYNC_SCOPES
+    that is NOT registerable fails the entire mint for every correctly-built
+    client — the tenant is never even contacted.
+
+    Today there is exactly one such scope, `state:app-states:read`, and it is a
+    leftover: CONTENT_SYNC_SCOPES was written 2026-08-05 (a562790) when app state
+    was the only place the mint client lived, and `loadMintClient()` moved to
+    reading the app-settings `mint-client` object first on 2026-08-10 (8db0f45,
+    app #73), keeping app state only as a fallback for its own comment's "legacy
+    app-state copy".
+
+    This assertion is deliberately an equality, not a subset check. It stays green
+    while the known divergence stands, and turns red BOTH ways: if someone adds
+    another unregisterable scope, and if someone removes this one — because
+    removing it is a behaviour change (content sync starts writing documents on
+    every tenant, every 6h) that should be a decision, not a drive-by edit.
+    """
+    asked = {s for rung in dep.CONTENT_SYNC_SCOPES for s in rung.split()}
+    assert asked - _REGISTERABLE == {"state:app-states:read"}, (
+        "CONTENT_SYNC_SCOPES asks for scopes outside REGISTER_SCOPES: "
+        f"{sorted(asked - _REGISTERABLE)}. Every one of these fails the whole "
+        "grant for a correctly-registered tenant."
+    )
+
+
+def test_a_correctly_registered_client_cannot_mint_content_sync_today():
+    """The production symptom, pinned.
+
+    A client holding exactly the 15 registerable scopes — which is what COE, SRO
+    and sprint now carry, and what every tenant admin is instructed to create —
+    is refused on EVERY rung, because all three ask for `state:app-states:read`.
+    `content_sync_token()` returns "" and `sync_tenant` reports `no-credential`.
+
+    Observed live 2026-08-26 11:00 on all three tenants. When the divergence above
+    is resolved this test must be inverted, not deleted: it is the difference
+    between "the sync is off" and "the sync is on and writing".
+    """
+    cls, attempts = _sso_holding(_REGISTERABLE)
+    saved = (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE)
+    dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE = "cid", "csec", "urn:dtaccount:x"
+    try:
+        token, label = _with_sso(cls, dep.content_sync_token(dep.COE_TENANT_URL))
+    finally:
+        (dep.COE_CLIENT_ID, dep.COE_CLIENT_SECRET, dep.COE_RESOURCE) = saved
+    assert token == "" and label == "COE"
+    assert len(attempts) == len(dep.CONTENT_SYNC_SCOPES), "every rung must have been tried"
+
+
+def test_every_content_sync_rung_can_still_invoke_the_app_function():
+    """`app-engine:apps:run` is the floor, exactly as install/run is for deploys.
+
+    Without it the bearer cannot call the import function at all, so no rung may
+    shed it however far the ladder degrades.
+    """
+    for rung in dep.CONTENT_SYNC_SCOPES:
+        assert "app-engine:apps:run" in rung.split(), f"rung lost apps:run: {rung}"
+
+
+def test_content_sync_rungs_are_strictly_descending_and_free_of_duplicates():
+    """Each rung must be a strict subset of the one above, and internally unique.
+
+    `_mint_account_token` returns the first rung that is granted and records its
+    scope as an exact statement of what the bearer can do. That reasoning only
+    holds if the rungs descend — an out-of-order rung would hand back a weaker
+    token than the client could have had. A repeated scope inside one rung is
+    harmless to SSO but means the list has been hand-edited into drift.
+    """
+    rungs = [rung.split() for rung in dep.CONTENT_SYNC_SCOPES]
+    for rung in rungs:
+        assert len(rung) == len(set(rung)), f"duplicate scope within a rung: {rung}"
+    for richer, poorer in zip(rungs, rungs[1:]):
+        assert set(poorer) < set(richer), (
+            f"rungs must strictly descend; {poorer} is not a proper subset of {richer}")

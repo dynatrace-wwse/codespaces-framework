@@ -3,15 +3,25 @@ on:
   push:
     branches: [main]
     paths:
-      - 'functions.sh'
-      - 'my_functions.sh'
+      # These must match where the framework actually keeps its shell sources.
+      # They previously read 'functions.sh' / 'my_functions.sh', which exist at
+      # no path in this repo (they live under .devcontainer/util/), so the only
+      # trigger that ever fired was the nightly cron — a greeting.sh regression
+      # merged green in #156 and went unnoticed for a day.
+      - '.devcontainer/util/**'
       - '.devcontainer/test/unit/**'
+      - '.github/workflows/framework-tests.yaml'
   pull_request:
     branches: [main]
     paths:
-      - 'functions.sh'
-      - 'my_functions.sh'
+      # These must match where the framework actually keeps its shell sources.
+      # They previously read 'functions.sh' / 'my_functions.sh', which exist at
+      # no path in this repo (they live under .devcontainer/util/), so the only
+      # trigger that ever fired was the nightly cron — a greeting.sh regression
+      # merged green in #156 and went unnoticed for a day.
+      - '.devcontainer/util/**'
       - '.devcontainer/test/unit/**'
+      - '.github/workflows/framework-tests.yaml'
   workflow_dispatch:
   schedule:
     - cron: '0 3 * * *'

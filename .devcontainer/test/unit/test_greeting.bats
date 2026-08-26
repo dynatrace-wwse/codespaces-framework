@@ -51,11 +51,38 @@ run_greeting() {
   run bash "$FAKE_REPO/.devcontainer/util/greeting.sh"
 }
 
-@test "greeting: orbital prints wildcard subdomain URL" {
+@test "greeting: orbital announces the app but withholds its URL" {
+  # Since 1.10.0 an Orbital Sysbox slot gets printOrbitalGreeting instead of the
+  # full Codespaces greeting: the learner is already inside an app tab, so the
+  # app URL, the GitHub links, the slot hostname, the VS Code port advice and
+  # deleteCodespace are all either wrong or already on screen. The app is still
+  # announced by name so the learner knows it came up.
   export ORBITAL_ENVIRONMENT=true INSTANTIATION_TYPE=orbital
   unset CODESPACE_NAME CODESPACES
   run_greeting
-  [[ "$output" == *"https://todoapp--34ea2d-k8s-101.autonomous-enablements.whydevslovedynatrace.com"* ]]
+  [[ "$output" == *"todoapp"*"has been registered in your workspace"* ]]
+  # No URL of any shape — the app tab is the only entry point.
+  [[ "$output" != *"autonomous-enablements"* ]]
+  [[ "$output" != *"app.github.dev"* ]]
+  [[ "$output" != *"sslip.io"* ]]
+  # Codespaces-only advice must never reach a Sysbox slot.
+  [[ "$output" != *"deleteCodespace"* ]]
+  [[ "$output" != *"GitHub Pages"* ]]
+}
+
+@test "greeting: orbital_codespaces keeps the FULL greeting, not the Orbital one" {
+  # Regression guard for the dispatch. orbital_codespaces is a real GitHub
+  # Codespace that Orbital merely launched — there IS a VS Code, GitHub owns the
+  # lifecycle, and the app is served by port forwarding. Routing it to
+  # printOrbitalGreeting stripped the app URL, the port-visibility advice and
+  # deleteCodespace out of every Orbital-launched Codespace.
+  unset K3D_CLUSTER_NAME
+  export ORBITAL_ENVIRONMENT=true CODESPACES=true CODESPACE_NAME="myspace"
+  export INSTANTIATION_TYPE=orbital_codespaces
+  run_greeting
+  [[ "$output" == *"deleteCodespace"* ]]
+  [[ "$output" == *"GitHub Pages"* ]]
+  [[ "$output" != *"has been registered in your workspace"* ]]
 }
 
 @test "greeting: orbital detected via K3D_CLUSTER_NAME=master-* prefix" {
