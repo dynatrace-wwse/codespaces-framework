@@ -63,13 +63,86 @@ Seeing production is expected and unavoidable — `ec2:DescribeInstances` takes
 no resource ARN and cannot be tag-conditioned in IAM. That is precisely why
 `shared/environment.py` filters client-side; see `docs/iam/environment-isolation.md`.
 
+## Installed (2026-08-26)
+
+Built with `ops-server/setup.sh`, run as
+`sudo ORBITAL_ENV=staging FRAMEWORK_BRANCH=main bash setup.sh`.
+
+| Component | State |
+|---|---|
+| Redis | own instance, own 256-bit password, `bind 127.0.0.1 172.31.38.222`, **AOF on from birth** |
+| nginx | active on 80/443, `server_name staging.…`, **no `http2`** |
+| ops-dashboard | active, connected to staging Redis, control loop **DRY RUN** |
+| ops-webhook | active |
+| oauth2-proxy | **inactive — blocked**, see below |
+| Stack | docker, k3d, kubectl, helm, node, gh, dtctl, python venv |
+
+### `/home/ops/.env` — 26 keys, `0600 ops:ops`
+
+Production credentials are **deliberately absent**, and this is verified rather
+than assumed: no `COE_*`, no `SRO_*`, no `DT_PLATFORM_TOKEN`, no
+`REMOTE_GRAIL_COE_TOKEN_ENC`, no `CODESPACES_TRACKER_TOKEN`. A staging mistake
+cannot write to a production tenant or to production telemetry.
+
+Inherited from production: the **sprint** tenant credentials (sprint is the
+staging tenant, decision D2) and a GitHub token for repository operations.
+Generated fresh on the box: `ORBITAL_TOKEN`, `WEBHOOK_SECRET`,
+`OAUTH2_COOKIE_SECRET`, and the Redis password.
+
+`CONTROL_LOOP_APPLY=0`. The control loop launches and terminates EC2; staging
+must be observed making correct decisions before it is allowed to act on them.
+The startup log confirms it: *"Control loop is in DRY RUN — it will log what it
+would do and launch NOTHING."*
+
+### Isolation, verified from the running stack
+
+`GET /api/fleet` on staging returns **exactly one instance — itself**, while
+production's returns its four. Staging's Redis password returns `WRONGPASS`
+against production's Redis. The two control planes share an AWS account and see
+each other's instances through `DescribeInstances`, and neither can act on nor
+read the other's state.
+
+## Two things setup.sh got wrong, now fixed
+
+Running the installer surfaced defects that would have made staging **worse**
+than production, all corrected in the same change:
+
+- It cloned `--branch rfe/ops-server`, a branch that no longer exists.
+- It set Redis `bind 0.0.0.0`, exposing the control plane's entire state on the
+  public interface with a shared secret as the only protection. Now binds
+  loopback plus the host's private address, as production does.
+- The generated password was 128-bit and the file inherited the caller's umask,
+  landing **world-readable** — the same `0644` `.env.generated` found on
+  production earlier in this epic. Now 256-bit, and the file is created `0600`
+  and owned by `ops` *before* anything is written to it.
+- It left `appendonly no`; staging now has AOF from birth.
+
+## nginx: a gotcha specific to a longer hostname
+
+`staging.autonomous-enablements.…` is eight characters longer than production's
+name and overflows nginx's default `server_names_hash_bucket_size 64`, so nginx
+refuses to start with `could not build server_names_hash`. Raised to 128.
+Production never hit this because its name is shorter — any environment with a
+longer prefix will. `/var/cache/nginx/content-packs` must also be created by
+hand; the `proxy_cache_path` directive does not create it.
+
 ## Not done yet
 
-- No Orbital services installed. AWS CLI v2 is installed; nothing else.
-- No `ORBITAL_ENV=staging` env file, no staging Redis, no nginx, no certificate.
+- **oauth2-proxy is blocked on a new GitHub OAuth app.** It needs
+  `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` for an app whose callback is the
+  staging host; `OAUTH2_COOKIE_SECRET` and `OAUTH2_GITHUB_ORG` are already set.
+  Until it runs, requests through nginx to gated paths return **500**, not 401:
+  the `auth_request` subrequest gets connection-refused (502), and a 502 is not
+  caught by the config's `error_page 401` fallback. The app itself is healthy —
+  `http://127.0.0.1:8080` answers 200 — so this is purely the SSO front door.
+  After adding the two values, re-run `setup.sh` to render the config.
+- **TLS is a self-signed placeholder** at `/etc/ssl/orbital-staging/`, valid 90
+  days, so nginx could start before DNS exists. Replace with the real
+  certificate once the A record is live.
 - DNS for `staging.autonomous-enablements.whydevslovedynatrace.com` does not
   exist — point it at `35.176.95.18` in GCP Cloud DNS, then issue the cert with
-  the existing `/etc/letsencrypt/hooks/gcp-dns-auth.sh` DNS-01 hooks.
+  the existing `/etc/letsencrypt/hooks/gcp-dns-auth.sh` DNS-01 hooks and repoint
+  `ssl_certificate` / `ssl_certificate_key` at `/etc/letsencrypt/live/<host>/`.
 - `environment.py`'s staging entry still has `template_instance_id = ""` — set
   it once a staging WORKER exists, so staging workers never inherit production
   worker-1's networking.
