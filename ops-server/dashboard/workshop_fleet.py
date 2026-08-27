@@ -63,7 +63,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from dashboard import fleet_policy, live_sessions, pools, repo_profiles
+from dashboard import fleet_policy, live_sessions, pools, repo_profiles, worker_seed
 from shared import capacity_units
 from shared.log_safety import scrub_for_log
 
@@ -1318,6 +1318,20 @@ async def tick(redis) -> dict:
             if state == WARMING:
                 pool_name = rec.get("pool", "")
                 ready = await _pool_workers_ready(redis, pool_name)
+                if not ready and CONTROL_LOOP_APPLY:
+                    # A pool with nothing ready is usually just still booting —
+                    # but it is ALSO exactly what a worker that cannot
+                    # authenticate to the master's Redis looks like from here,
+                    # and those two are indistinguishable from the master until
+                    # the degraded timeout fires. The golden AMI bakes the Redis
+                    # password that was current the day it was made, so every
+                    # autoscaled worker launched after a rotation crash-loops on
+                    # AuthenticationError and never registers (live incident
+                    # 2026-08-27). Repair it here, where we already know the
+                    # pool is not answering: seeding is a no-op against a worker
+                    # whose credential is already right, so a merely-slow boot
+                    # pays one ssh round-trip and is left otherwise untouched.
+                    await worker_seed.reconcile(redis, rec.get("instances") or [])
                 if ready:
                     rec["state"] = READY
                     rec["ready_at"] = now.isoformat()
