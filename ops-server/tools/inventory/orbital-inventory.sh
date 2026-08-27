@@ -25,7 +25,18 @@
 #
 set -uo pipefail
 
-WORKERS="${ORBITAL_INVENTORY_WORKERS:-autonomous-enablements-worker autonomous-enablements-worker-2}"
+# Which workers to reach for the per-host sections. The default is derived from
+# ORBITAL_ENV, NOT hard-coded: with a fixed production default, running this on
+# the staging box would ssh straight into production's workers and report their
+# state as staging's. Staging has no long-lived workers yet, so its default is
+# empty; set ORBITAL_INVENTORY_WORKERS explicitly to override either way.
+ORBITAL_ENV="${ORBITAL_ENV:-prod}"
+case "$ORBITAL_ENV" in
+    prod)    _default_workers="autonomous-enablements-worker autonomous-enablements-worker-2" ;;
+    staging) _default_workers="" ;;
+    *)       echo "orbital-inventory: unknown ORBITAL_ENV=${ORBITAL_ENV}" >&2; exit 2 ;;
+esac
+WORKERS="${ORBITAL_INVENTORY_WORKERS-$_default_workers}"
 OPS_ENV="${ORBITAL_OPS_ENV_FILE:-/home/ops/.env}"
 OPS_CHECKOUT="${ORBITAL_CHECKOUT:-/home/ops/enablement-framework/codespaces-framework}"
 SSH_AS="${ORBITAL_INVENTORY_SSH_USER:-ubuntu}"
