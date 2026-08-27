@@ -14,6 +14,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from shared import paths
+
 import redis.asyncio as redis
 
 from webhook.config import (
@@ -2502,7 +2504,7 @@ class WorkerManager:
     async def _run_sync(self, job: dict, command: str) -> dict:
         """Run a sync CLI command."""
         repo = job["repo"]
-        sync_dir = Path.home() / "enablement-framework" / "codespaces-framework"
+        sync_dir = paths.framework_dir()
 
         cmd = ["python3", "-m", "sync.cli", command]
         if repo != "unknown":
@@ -2533,7 +2535,7 @@ class WorkerManager:
         """
         job_id = job["job_id"]
         args = job.get("args") or []
-        sync_dir = Path.home() / "enablement-framework" / "codespaces-framework"
+        sync_dir = paths.framework_dir()
         log_file = LOGS_DIR / f"{job_id}.log"
         livelog_key = f"job:livelog:{job_id}"
         await self.pool.set(livelog_key, "", ex=3600)

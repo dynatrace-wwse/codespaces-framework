@@ -304,6 +304,37 @@ def test_launch_actually_passes_the_metadata_options():
     assert "_metadata_options()" in src
 
 
+# ── The checkout path a worker syncs is configuration, not a literal ─────────
+
+def test_user_data_checkout_defaults_to_todays_path(monkeypatch):
+    """Unset means nothing moves. The repo split flips one variable."""
+    monkeypatch.delenv("ORBITAL_CHECKOUT", raising=False)
+    assert "CHECKOUT=/home/ops/enablement-framework/codespaces-framework" in \
+        fleet._build_user_data()
+
+
+def test_user_data_checkout_follows_orbital_checkout(monkeypatch):
+    """After the split Orbital is its own repo at its own path.
+
+    The sync in this script is best-effort by design — a worker whose `git -C
+    $CHECKOUT` fails still boots and still takes jobs, running whatever code the
+    AMI was baked with, and says so only in a log file. So a stale literal here
+    does not announce itself: it produces a worker that looks healthy and serves
+    learners old code. See feedback_fleet_code_sync_invariant.
+    """
+    monkeypatch.setenv("ORBITAL_CHECKOUT", "/home/ops/orbital")
+    script = fleet._build_user_data()
+    assert "CHECKOUT=/home/ops/orbital" in script
+    assert "enablement-framework" not in script
+
+
+def test_user_data_checkout_is_not_resolved_against_the_callers_home(monkeypatch, tmp_path):
+    """This script runs as root on a worker, not as whoever generated it."""
+    monkeypatch.delenv("ORBITAL_CHECKOUT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert str(tmp_path) not in fleet._build_user_data()
+
+
 def test_user_data_encodes_to_base64_roundtrip():
     script = fleet._build_user_data()
     encoded = fleet._encode_user_data(script)

@@ -18,7 +18,7 @@ import base64
 import json
 
 from dashboard import fleet_policy
-from shared import environment
+from shared import environment, paths
 
 AWS_CLI = "/usr/local/bin/aws"
 # Home region: where the master, Redis and the golden AMI live. Every call
@@ -251,10 +251,14 @@ else
   echo "WORKER_SLOT_LIMITS=1" >> "$ENV_FILE"
 fi
 """
+    # Where Orbital's code lives ON THE WORKER — an absolute path, because this
+    # script runs as root on a machine that is not this one. shared.paths keeps
+    # it from being resolved against whoever generated the script.
+    orbital_checkout = paths.fleet_host_orbital_checkout()
     return f"""#!/bin/bash
 set -uo pipefail
 ENV_FILE=/home/ops/.env
-CHECKOUT=/home/ops/enablement-framework/codespaces-framework
+CHECKOUT={orbital_checkout}
 LOG=/var/log/orbital-worker-init.log
 
 # Stop BEFORE rewriting identity: the golden AMI boots as the worker it was

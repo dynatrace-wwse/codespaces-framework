@@ -16,6 +16,8 @@ import pytest
 from dashboard import app_deploy as dep
 from dashboard import tenant_preflight as pf
 from dashboard.tenant_credentials import REGISTER_SCOPES, missing_from_catalog
+# Aliased: `test_both_shared_routes_exist` binds a local named `paths`.
+from shared import paths as orbital_paths
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "tools" / "tenant-check-page" / "check-tenant-setup.sh"
@@ -131,9 +133,22 @@ def test_the_report_serialises_without_the_credential():
 def test_the_apps_deploy_scope_still_covers_every_blocking_capability():
     """`mintCredentials.function.ts` asserts this in a comment; nothing enforced it.
     An install-only bearer once made "Update now" a silent no-op on every tenant."""
-    app_fn = ROOT.parent.parent / "dynatrace-app-enablements" / "api" / "mintCredentials.function.ts"
-    if not app_fn.is_file():
-        pytest.skip("the app repo is not checked out next to this one")
+    # Resolved through shared.paths, NOT `ROOT.parent.parent`. That walk only
+    # reaches the app repo while Orbital is a subdirectory of the framework;
+    # from a standalone /home/ops/orbital it lands on /home, finds nothing, and
+    # this test goes quiet — re-opening the exact bug it was written for, with
+    # a green suite. Set APP_REPO_DIR to point it at the checkout.
+    app_repo = orbital_paths.app_repo_dir()
+    if app_repo is None:
+        pytest.skip(
+            "dynatrace-app-enablements is not available here — set APP_REPO_DIR "
+            "to the checkout to run this parity check"
+        )
+    app_fn = app_repo / "api" / "mintCredentials.function.ts"
+    assert app_fn.is_file(), (
+        f"{app_repo} is not a dynatrace-app-enablements checkout — "
+        "APP_REPO_DIR points somewhere wrong"
+    )
     m = re.search(r"export const DEPLOY_SCOPE\s*=\s*((?:\s*\"[^\"]*\")+)", app_fn.read_text())
     assert m, "DEPLOY_SCOPE is no longer a literal — this check cannot see it"
     granted = set(" ".join(re.findall(r'"([^"]*)"', m.group(1))).split())
