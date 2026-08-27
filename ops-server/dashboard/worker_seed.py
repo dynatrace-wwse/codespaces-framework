@@ -41,7 +41,10 @@ only one launched after.
 import asyncio
 import logging
 import os
+import shlex
 from urllib.parse import urlsplit, unquote
+
+from shared.log_safety import scrub_for_log
 
 from shared import environment
 
@@ -139,11 +142,27 @@ read -r PW || true
 if [ -z "${{PW:-}}" ]; then echo "SEED_NO_PASSWORD"; exit 0; fi
 
 ENV_FILE={env_file}
-if [ ! -f "$ENV_FILE" ]; then echo "SEED_NO_ENV_FILE"; exit 0; fi
+# `sudo -n`, not a bare test: /home/ops is drwxr-x--- and this script runs as
+# `ubuntu`, so an unprivileged existence check reports "missing" on every worker
+# even though the file is there. Every other access here is already privileged;
+# this one was not, and it made the script a guaranteed no-op.
+if ! sudo -n test -f "$ENV_FILE"; then echo "SEED_NO_ENV_FILE"; exit 0; fi
 
 CURRENT=$(sudo -n grep -m1 '^MASTER_REDIS_PASSWORD=' "$ENV_FILE" 2>/dev/null \\
   | cut -d= -f2- || true)
-if [ "$CURRENT" = "$PW" ]; then echo "SEED_ALREADY_CURRENT"; exit 0; fi
+if [ "$CURRENT" = "$PW" ]; then
+    # The file is right -- but the agent may still be running with the OLD value
+    # in memory (a rewrite whose restart failed, or a restart that crash-looped).
+    # Only act when the unit is actually broken: a merely-booting worker is
+    # `active`/`activating`, and bouncing it would restart the Sysbox warm-up
+    # from zero and it would never reach ready.
+    if sudo -n systemctl is-failed --quiet {unit}; then
+        if sudo -n systemctl restart {unit}; then
+            echo "SEED_RESTARTED_STALE_AGENT"; exit 0
+        fi
+    fi
+    echo "SEED_ALREADY_CURRENT"; exit 0
+fi
 
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
@@ -156,8 +175,16 @@ printf 'MASTER_REDIS_PASSWORD=%s\\n' "$PW" >> "$TMP"
 if ! grep -q '^WORKER_ID=' "$TMP"; then echo "SEED_REFUSED_TRUNCATED"; exit 1; fi
 
 sudo -n install -m 600 -o ops -g ops "$TMP" "$ENV_FILE"
-sudo -n systemctl restart {unit}
-echo "SEED_UPDATED"
+# `set -e` would abort here on a failed restart -- BEFORE the token is printed.
+# The caller would see "unknown" while the file was in fact rewritten, and the
+# next tick would find the credential already correct and never restart the
+# agent, leaving the worker permanently unrepairable. Report the two outcomes
+# apart instead of dying between them.
+if sudo -n systemctl restart {unit}; then
+    echo "SEED_UPDATED"
+else
+    echo "SEED_UPDATED_NO_RESTART"
+fi
 """
 
 
@@ -169,6 +196,8 @@ def classify_seed_output(stdout: str) -> str:
     """
     text = stdout or ""
     for token, status in (
+        ("SEED_UPDATED_NO_RESTART", "updated-no-restart"),
+        ("SEED_RESTARTED_STALE_AGENT", "restarted-stale-agent"),
         ("SEED_UPDATED", "updated"),
         ("SEED_ALREADY_CURRENT", "already-current"),
         ("SEED_REFUSED_TRUNCATED", "refused"),
@@ -197,6 +226,22 @@ def unregistered_instances(instance_ips: dict[str, str],
     return out
 
 
+def _redact(text: str, secret: str) -> str:
+    """Remove ``secret`` from text that is about to be logged.
+
+    The remote shell echoes a failed command back on stderr, so a bug that puts
+    the password where a command belongs puts the password in the log -- which
+    is exactly what happened on 2026-08-27: the credential reached
+    /var/log/syslog and, through the host OneAgent, production Grail. Logging
+    raw remote stderr is therefore never safe, no matter how confident the
+    caller is about what that stderr can contain.
+    """
+    out = (text or "").strip()
+    if secret:
+        out = out.replace(secret, "<redacted>")
+    return scrub_for_log(out)
+
+
 # ── Side-effecting ──────────────────────────────────────────────────────────
 
 async def seed_worker(host: str, password: str = "",
@@ -214,9 +259,16 @@ async def seed_worker(host: str, password: str = "",
     if not host:
         return "no-host"
 
+    # `bash -s` reads its SCRIPT from stdin -- and stdin is where the password
+    # goes. Using it meant the remote bash executed the password as a command
+    # ("<secret>: command not found", rc=127) and the script was never sent at
+    # all. The script therefore travels in argv (it is not secret) and stdin is
+    # reserved for the password (which is). shlex.quote because ssh joins its
+    # remaining arguments with spaces and the REMOTE shell re-parses the result.
+    remote = f"bash -c {shlex.quote(build_seed_script())}"
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ssh", *SSH_OPTS, f"{SSH_USER}@{host}", "bash", "-s",
+            "ssh", *SSH_OPTS, f"{SSH_USER}@{host}", remote,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -243,7 +295,7 @@ async def seed_worker(host: str, password: str = "",
     if status == "unknown":
         # stderr, never stdout: the script prints only its own tokens, so
         # anything else came from ssh or sudo and is diagnostic, not secret.
-        detail = (err.decode(errors="replace") or "").strip()[:200]
+        detail = _redact(err.decode(errors="replace"), password)[:200]
         if proc.returncode != 0:
             log.warning("worker seed: %s failed (rc=%s): %s",
                         host, proc.returncode, detail)
@@ -252,6 +304,12 @@ async def seed_worker(host: str, password: str = "",
     elif status == "updated":
         log.info("worker seed: %s had a stale master Redis credential — "
                  "rewritten and %s restarted", host, WORKER_AGENT_UNIT)
+    elif status == "updated-no-restart":
+        log.error("worker seed: %s credential rewritten but %s FAILED to "
+                  "restart - it is still running the old value", host, WORKER_AGENT_UNIT)
+    elif status == "restarted-stale-agent":
+        log.warning("worker seed: %s already had the right credential but its "
+                    "agent had failed - restarted", host)
     elif status == "refused":
         log.error("worker seed: %s refused the rewrite (env file looked "
                   "truncated) — left untouched", host)

@@ -92,14 +92,23 @@ def test_script_reads_the_password_from_stdin_not_argv():
     assert "sed -i" not in script
 
 
-def test_script_is_a_no_op_when_the_credential_already_matches():
+def test_a_healthy_worker_with_the_right_credential_is_never_bounced():
+    """A merely-warming worker must not be restarted.
+
+    Bouncing it restarts the Sysbox pool warm-up from zero and it never reaches
+    ready. Asserted as a property of the branch rather than as a text offset:
+    the already-current path DOES contain a restart now (for an agent that has
+    actually failed), so comparing string positions no longer says anything
+    about behaviour -- what matters is that the restart is GUARDED.
+    """
     script = worker_seed.build_seed_script()
-    idx_check = script.index("SEED_ALREADY_CURRENT")
-    idx_restart = script.index("systemctl restart")
-    # The early exit must come BEFORE the restart, or every tick would bounce
-    # the agent of a worker that is merely still warming its Sysbox pool and it
-    # would never finish.
-    assert idx_check < idx_restart
+    head, _, tail = script.partition("SEED_ALREADY_CURRENT")
+    branch = head[head.index('if [ "$CURRENT" = "$PW" ]'):]
+    assert "systemctl is-failed" in branch, (
+        "the restart on the already-current path is unguarded -- a warming "
+        "worker would be bounced on every tick")
+    # ...and the guard has to gate the restart, not merely appear nearby.
+    assert branch.index("systemctl is-failed") < branch.index("systemctl restart")
 
 
 def test_script_refuses_to_install_a_truncated_env_file():
@@ -111,8 +120,13 @@ def test_script_refuses_to_install_a_truncated_env_file():
 def test_script_restarts_the_agent_after_a_rewrite():
     # The unit reads the env file at start, so a rewrite alone deploys nothing.
     script = worker_seed.build_seed_script()
-    assert f"systemctl restart {worker_seed.WORKER_AGENT_UNIT}" in script
-    assert script.index("install -m 600") < script.index("systemctl restart")
+    unit = worker_seed.WORKER_AGENT_UNIT
+    assert f"systemctl restart {unit}" in script
+    # Look only at what follows the install, so the stale-agent restart earlier
+    # in the script cannot satisfy this by accident.
+    after_install = script[script.index("install -m 600"):]
+    assert f"systemctl restart {unit}" in after_install, \
+        "the rewrite path does not restart the agent; the new value is never read"
 
 
 def test_script_rejects_an_empty_password():
@@ -317,6 +331,102 @@ def test_guard_is_not_vacuous():
     assert seen_ok and not seen_no, (
         "guard is vacuous: identical input differing only in env tag gave "
         f"{seen_ok!r} and {seen_no!r}")
+
+
+# ── The invocation itself ────────────────────────────────────────────────────
+# These exist because 1113 tests passed while seed_worker could not work at all:
+# everything stubbed the subprocess or tested only the pure helpers, so nothing
+# checked that the script is delivered or that the password stays out of argv.
+
+def _captured_exec():
+    """Run seed_worker against a stubbed exec and return (argv, stdin_bytes)."""
+    import asyncio as _a
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        async def communicate(self, input=None):
+            captured["stdin"] = input
+            return b"SEED_ALREADY_CURRENT", b""
+
+    async def fake_exec(*argv, **kw):
+        captured["argv"] = argv
+        return _Proc()
+
+    real = _a.create_subprocess_exec
+    _a.create_subprocess_exec = fake_exec
+    try:
+        _run(worker_seed.seed_worker("10.0.0.5", password=SENTINEL_ANY))
+    finally:
+        _a.create_subprocess_exec = real
+    return captured.get("argv", ()), captured.get("stdin", b"")
+
+
+def test_the_remote_command_actually_carries_the_script():
+    # `bash -s` reads the script from STDIN, which is where the password goes --
+    # so the script was never delivered and the password was executed as a
+    # command. Pin that the script travels in argv.
+    argv, _ = _captured_exec()
+    joined = " ".join(argv)
+    assert "bash -c" in joined, f"remote command is not `bash -c`: {joined[-120:]!r}"
+    for token in ("MASTER_REDIS_PASSWORD", "SEED_ALREADY_CURRENT", "read -r PW"):
+        assert token in joined, f"script fragment {token!r} missing from argv"
+
+
+def test_bare_dash_s_is_never_used_again():
+    argv, _ = _captured_exec()
+    assert list(argv[-2:]) != ["bash", "-s"], "regressed to `bash -s`: stdin cannot carry both script and password"
+
+
+def test_the_password_is_on_stdin_and_never_in_argv():
+    argv, stdin = _captured_exec()
+    assert SENTINEL_ANY.encode() in (stdin or b""), "password did not reach stdin"
+    assert SENTINEL_ANY not in " ".join(argv), "password leaked into argv (/proc is world-readable)"
+
+
+def test_remote_stderr_is_redacted_before_logging():
+    # The remote shell echoes a failed command back on stderr. If that is logged
+    # raw, a bug that misplaces the password puts it in syslog -- and, via the
+    # host OneAgent, in production Grail. This is what happened 2026-08-27.
+    secret = "NOT-A-REAL-SECRET-fixture-value-only"
+    leaked = f"bash: line 1: {secret}: command not found"
+    out = worker_seed._redact(leaked, secret)
+    assert secret not in out, f"credential survived redaction: {out!r}"
+    assert "<redacted>" in out
+    assert "command not found" in out, "redaction destroyed the diagnostic"
+
+
+def test_redact_is_safe_with_no_secret():
+    assert "boom" in worker_seed._redact("boom", "")
+    assert worker_seed._redact("", "x") == ""
+
+
+def test_updated_no_restart_is_not_misread_as_updated():
+    # SEED_UPDATED is a SUBSTRING of SEED_UPDATED_NO_RESTART, so classification
+    # order decides the answer. Getting it wrong reports a rewrite-without-
+    # restart as a full success -- the one case an operator must not miss.
+    assert worker_seed.classify_seed_output("SEED_UPDATED_NO_RESTART") == "updated-no-restart"
+    assert worker_seed.classify_seed_output("SEED_UPDATED") == "updated"
+
+
+def test_restarted_stale_agent_classifies():
+    assert worker_seed.classify_seed_output("SEED_RESTARTED_STALE_AGENT") == "restarted-stale-agent"
+
+
+def test_script_never_dies_between_rewrite_and_its_token():
+    # `set -e` plus a failing restart aborted before the token printed: the file
+    # was rewritten, the caller saw "unknown", and the next tick found the
+    # credential correct and never restarted -- permanently stuck.
+    s = worker_seed.build_seed_script()
+    assert "if sudo -n systemctl restart" in s, "restart is not guarded; set -e can abort before the token"
+    assert "SEED_UPDATED_NO_RESTART" in s
+
+
+def test_env_file_existence_check_is_privileged():
+    # /home/ops is drwxr-x--- and the script runs as `ubuntu`, so a bare
+    # `[ -f ]` reports "missing" on every worker and the script no-ops forever.
+    s = worker_seed.build_seed_script()
+    assert "sudo -n test -f" in s, "env-file check is unprivileged; it will always say missing"
 
 if __name__ == "__main__":
     failed = 0
