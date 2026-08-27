@@ -43,15 +43,21 @@ import logging
 import os
 from urllib.parse import urlsplit, unquote
 
+from shared import environment
+
 log = logging.getLogger(__name__)
 
 # Where the agent's env lives on a worker, and the unit that reads it.
 WORKER_ENV_FILE = "/home/ops/.env"
 WORKER_AGENT_UNIT = "ops-worker-agent"
 
-# ssh as the master's `ops` user — the same identity and authorized_keys path
-# the PTY bridge uses. BatchMode so a missing key fails fast instead of hanging
-# on a password prompt inside the control loop.
+# The control loop runs as `ops` on the master and connects as `ubuntu` on the
+# worker — VERIFIED, not assumed: `ops` -> `ubuntu@worker` succeeds with a
+# working `sudo -n`, while `ops` -> `ops@worker` is "Permission denied
+# (publickey)". Do not "correct" this to `ops`; the remote half needs sudo and
+# `ops` has none (it is also what made a password rotation fail once already).
+# BatchMode so a missing key fails fast instead of hanging on a password prompt
+# inside the control loop.
 SSH_OPTS = (
     "-o", "BatchMode=yes",
     "-o", "StrictHostKeyChecking=no",
@@ -289,11 +295,24 @@ async def reconcile(redis, instance_ids: list[str]) -> dict[str, str]:
         log.warning("worker seed: cannot describe instances: %s", exc)
         return {}
 
-    ips = {
-        inst.get("InstanceId", ""): inst.get("PrivateIpAddress", "")
-        for inst in described
-        if (inst.get("State") or {}).get("Name") == "running"
-    }
+    # Environment guard. Seeding is a MUTATING remote action -- it rewrites
+    # /home/ops/.env and restarts the agent -- so it belongs with the other
+    # cross-environment guards (`_is_spot_worker`, `_start_stop_allowed`), not
+    # only behind the discovery filter. The instance ids arrive from a fleet
+    # record in this environment's own Redis, so this should never fire; that
+    # is the point. A guard that only holds while every caller is correct is
+    # not a guard. Untagged reads as prod, so production still repairs the
+    # long-lived machines that predate the `env` tag.
+    env_name = environment.current().name
+    ips = {}
+    for inst in described:
+        if (inst.get("State") or {}).get("Name") != "running":
+            continue
+        if not environment.owns(fleet._tags_of(inst), env_name):
+            log.warning("worker seed: refusing %s -- it belongs to a different "
+                        "environment", inst.get("InstanceId", "?"))
+            continue
+        ips[inst.get("InstanceId", "")] = inst.get("PrivateIpAddress", "")
 
     results: dict[str, str] = {}
     for instance_id, ip in unregistered_instances(ips, registered):

@@ -224,6 +224,100 @@ def test_seed_worker_without_a_password_reports_no_password():
         os.environ.update(old)
 
 
+
+# ── Environment guard ────────────────────────────────────────────────────────
+# Seeding rewrites a remote /home/ops/.env and restarts the agent, so it is a
+# mutating cross-host action and must not reach another environment's machines.
+
+def _inst(iid, env_value=None, state="running", ip="10.0.0.9"):
+    tags = [{"Key": "Name", "Value": "autonomous-enablements-worker"}]
+    if env_value is not None:
+        tags.append({"Key": "env", "Value": env_value})
+    return {"InstanceId": iid, "PrivateIpAddress": ip,
+            "State": {"Name": state}, "Tags": tags}
+
+
+class _FakeRedisWithKeys:
+    """Distinct from the module's other fake: this one is seeded with the exact
+    worker:* keys the scan should return."""
+    def __init__(self, keys): self._keys = list(keys)
+    async def scan_iter(self, match=None, count=None):
+        for k in self._keys:
+            yield k
+
+
+def _reconcile_with(described, env_name, monkey_env="prod"):
+    """Run reconcile against a stubbed fleet/describe, return {iid: status}."""
+    import os
+    from dashboard import fleet
+    seen = []
+
+    async def fake_describe(ids):
+        return described
+    async def fake_seed(host, password="", timeout=None):
+        seen.append(host)
+        return "updated"
+
+    old_desc = fleet._describe_by_ids
+    old_seed = worker_seed.seed_worker
+    old_env = os.environ.get("ORBITAL_ENV")
+    old_pw = os.environ.get("REDIS_PASSWORD")
+    try:
+        fleet._describe_by_ids = fake_describe
+        worker_seed.seed_worker = fake_seed
+        os.environ["ORBITAL_ENV"] = env_name
+        os.environ["REDIS_PASSWORD"] = SENTINEL_ANY
+        os.environ.pop("REDIS_URL", None)
+        res = _run(worker_seed.reconcile(_FakeRedisWithKeys([]), [d["InstanceId"] for d in described]))
+        return res, seen
+    finally:
+        fleet._describe_by_ids = old_desc
+        worker_seed.seed_worker = old_seed
+        if old_env is None: os.environ.pop("ORBITAL_ENV", None)
+        else: os.environ["ORBITAL_ENV"] = old_env
+        if old_pw is None: os.environ.pop("REDIS_PASSWORD", None)
+        else: os.environ["REDIS_PASSWORD"] = old_pw
+
+
+def test_seeds_an_instance_it_owns():
+    res, seen = _reconcile_with([_inst("i-aaaaaaaaaaaaaaaa1", "prod")], "prod")
+    assert seen == ["10.0.0.9"], f"own-environment instance was not seeded: {seen}"
+    assert res.get("i-aaaaaaaaaaaaaaaa1") == "updated"
+
+
+def test_refuses_an_instance_owned_by_another_environment():
+    # The guard that matters: staging must never restart a production agent.
+    res, seen = _reconcile_with([_inst("i-bbbbbbbbbbbbbbbb2", "prod")], "staging")
+    assert seen == [], f"staging seeded a prod instance: {seen}"
+    assert res == {}
+
+
+def test_prod_refuses_a_staging_instance():
+    res, seen = _reconcile_with([_inst("i-cccccccccccccccc3", "staging")], "prod")
+    assert seen == [], f"prod seeded a staging instance: {seen}"
+
+
+def test_untagged_instance_is_repaired_by_production():
+    # The long-lived machines predate the env tag; prod must still repair them,
+    # or this guard would strand exactly the workers it is meant to protect.
+    res, seen = _reconcile_with([_inst("i-dddddddddddddddd4", None)], "prod")
+    assert seen == ["10.0.0.9"], "prod refused an untagged (legacy) instance"
+
+
+def test_untagged_instance_is_never_touched_by_staging():
+    res, seen = _reconcile_with([_inst("i-eeeeeeeeeeeeeeee5", None)], "staging")
+    assert seen == [], "staging claimed a legacy instance"
+
+
+def test_guard_is_not_vacuous():
+    # Mutation check: the ownership test must be what rejects, not the state
+    # filter or an empty describe. Same instance, only the env differs.
+    _, seen_ok = _reconcile_with([_inst("i-ffffffffffffffff6", "staging")], "staging")
+    _, seen_no = _reconcile_with([_inst("i-ffffffffffffffff6", "prod")], "staging")
+    assert seen_ok and not seen_no, (
+        "guard is vacuous: identical input differing only in env tag gave "
+        f"{seen_ok!r} and {seen_no!r}")
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
