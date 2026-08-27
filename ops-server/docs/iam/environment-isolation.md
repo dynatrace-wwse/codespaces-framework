@@ -1,5 +1,10 @@
 # IAM: the environment boundary
 
+> **STATUS: APPLIED 2026-08-26.** Tags backfilled onto all four long-lived
+> instances, `env` conditions live on `OrbitalFleetAutoscalerPolicy`, and
+> `OrbitalFleetAutoscalerStaging` created with its own instance profile.
+> Verification results are at the bottom of this file.
+
 Staging and production share AWS account `112258687663`. The tag filters in
 `dashboard/fleet.py` and `dashboard/workshop_fleet.py` are defence in depth —
 **IAM is the actual boundary.** A cross-environment terminate must come back
@@ -91,3 +96,55 @@ tags. Every environment can therefore *see* every instance in the account.
 That is unavoidable, and it is the reason `list_fleet` and `_instances_tagged`
 filter in Python rather than relying on the API to hand back only what they
 own — see the module docstring in `shared/environment.py`.
+
+
+---
+
+## Applied state (2026-08-26)
+
+**Roles**
+
+| Role | Instance profile | Scope |
+|---|---|---|
+| `OrbitalFleetAutoscaler` | (existing, on the prod master) | `env=prod` |
+| `OrbitalFleetAutoscalerStaging` | `OrbitalFleetAutoscalerStaging` | `env=staging` |
+
+Both carry the same six statements. The staging copy renames the master deny to
+`HardDenyTouchingTheProductionMaster` and keeps it: staging must not be able to
+stop the production master even if the environment condition were ever relaxed.
+
+**Backfill.** All four long-lived instances now carry `env=prod`
+(master, worker-1, worker-2, and the stopped worker-3). Note that only worker-1
+and worker-2 carry `ManagedBy=orbital-autoscaler`; the master and worker-3 do
+not, so the lifecycle statement never granted on them in the first place — the
+master additionally has an explicit `Deny`.
+
+**Verified with `aws iam simulate-principal-policy`,** which evaluates the real
+policy without assuming the role or touching an instance:
+
+| Principal | Action | Target | Result |
+|---|---|---|---|
+| prod | Terminate | prod worker | `allowed` |
+| **staging** | **Terminate** | **prod worker** | **`implicitDeny`** |
+| staging | Terminate | staging worker | `allowed` |
+| **prod** | **Terminate** | **staging worker** | **`implicitDeny`** |
+| **staging** | **Stop** | **prod worker** | **`implicitDeny`** |
+| prod | Stop | prod worker | `allowed` |
+| prod | RunInstances | `env=prod` tag | `allowed` |
+| **prod** | **RunInstances** | **no env tag** | **`implicitDeny`** |
+| **prod** | **RunInstances** | **`env=staging` tag** | **`implicitDeny`** |
+| staging | RunInstances | `env=staging` tag | `allowed` |
+| **staging** | **RunInstances** | **`env=prod` tag** | **`implicitDeny`** |
+
+The untagged-launch denial matters as much as the cross-environment ones: a
+machine launched without an `env` tag is one this role could create but never
+afterwards terminate, so it would run to its in-instance `shutdown -h +N`
+backstop with nothing able to reap it.
+
+**Production after the change:** all 4 instances still visible, control loop
+reporting zero `UnauthorizedOperation`, API 200.
+
+**Rollback.** The pre-change policy document was kept at
+`/tmp/fleet-policy-ROLLBACK.json` during the session; to reconstruct it, remove
+the two `env` keys from `LaunchOnlyTaggedFleetInstances` and
+`LifecycleOnlyOnFleetTaggedInstances`. Nothing else was modified.
