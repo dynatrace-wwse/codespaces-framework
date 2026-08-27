@@ -146,3 +146,93 @@ hand; the `proxy_cache_path` directive does not create it.
 - `environment.py`'s staging entry still has `template_instance_id = ""` — set
   it once a staging WORKER exists, so staging workers never inherit production
   worker-1's networking.
+
+---
+
+## DNS and TLS (done 2026-08-27)
+
+### The name already resolved -- to production
+
+Before any record was added, `staging.autonomous-enablements...` **already
+answered `18.134.158.252`**, because the zone carries a wildcard
+`*.autonomous-enablements` A record pointing at the production box. Anything
+aimed at the staging hostname -- an OAuth callback, a health check, a test
+harness -- would have hit production instead, with no error to notice. Check
+for a shadowing wildcard before assuming an unresolved name is unreachable.
+
+The wildcard is load-bearing (it serves the per-slot app tabs via
+`subdomain_url`) and was left alone.
+
+### Delegated child zone -- why not just an A record in the parent
+
+`whydevslovedynatrace.com` holds **production's** A record. A certbot
+credential with write access to that zone could repoint production DNS, so a
+per-zone grant on the parent is not isolation -- it is a staging box holding a
+key to production's name.
+
+Staging therefore gets its own delegated zone:
+
+| Zone | Holds |
+|---|---|
+| `whydevslovedynatrace-com` (parent) | prod A, wildcard A, **NS delegation** for the staging name |
+| `staging-autonomous-enablements` (child) | staging A + its `_acme-challenge` TXT |
+
+Cloud DNS refuses `NS` and `A` at the same name, so the parent's A record must
+be **deleted before** the NS delegation is added. Create the A record in the
+child first and the name never stops resolving.
+
+### Credential -- two grants, deliberately split
+
+`orbital-staging-certbot@sales-engineering-emea.iam.gserviceaccount.com`
+
+| Scope | Role | Why |
+|---|---|---|
+| child zone only | `roles/dns.admin` | write the ACME TXT |
+| project | custom `orbitalStagingCertbotZoneLookup` (`dns.managedZones.list`) | `certbot-dns-google` resolves a zone id by listing zones; without it every issuance 403s. Lists zone **names** only -- no record read, no write. |
+
+`roles/dns.reader` at project level would also have fixed the 403 and was not
+used: it would let staging read every record in every zone for no benefit.
+
+**Verified in both directions, not assumed** -- as the service account:
+write to the child zone succeeded; write to the parent zone returned
+`HTTPError 403: Forbidden`.
+
+### Issuance
+
+`certbot-dns-google` (`python3-certbot-dns-google`), not the manual hooks
+production uses. Production's hooks exist to accumulate two challenge values
+under one `_acme-challenge` name (apex + wildcard share it) -- staging has a
+single name and no such problem, and the plugin reads the service-account JSON
+directly, so staging needs no `gcloud` install.
+
+```bash
+certbot certonly --dns-google   --dns-google-credentials /etc/letsencrypt/gcp-staging-certbot.json   --dns-google-propagation-seconds 60 --key-type ecdsa   -d staging.autonomous-enablements.whydevslovedynatrace.com
+```
+
+Key at `/etc/letsencrypt/gcp-staging-certbot.json`, `600 root:root`. The copy
+used to transfer it was shredded on both ends.
+
+### Renewal -- the part that actually matters
+
+This domain lost ~90 days to a renewal that failed **silently**
+(`authenticator = manual` with no auth hook). Two things close that here:
+
+1. `certbot renew --dry-run` was run and reported
+   *"Congratulations, all simulated renewals succeeded"*. `certbot.timer` is
+   `enabled`.
+2. **Deploy hook** `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` --
+   renewal writes new files but nginx serves the in-memory certificate until
+   reloaded. Without the hook the renewal succeeds and the box still serves the
+   expiring cert.
+
+`orbital-inventory.sh`'s *"all certs valid for >30 days"* invariant currently
+covers production hosts only. **Staging is not yet in the drift check.**
+
+### Gotcha: staging inherited prod's wildcard server blocks
+
+`/etc/nginx/sites-available/ops-server` on staging still contains
+`server_name ~^(?<app_subdomain>[^.]+)\.autonomous-enablements\...$` -- the
+**production** wildcard. Those blocks are dead on staging: that name resolves
+to prod and never reaches this box. Staging cannot serve per-slot app tabs
+until it has its own `*.staging.autonomous-enablements` record and the regex is
+re-anchored.
