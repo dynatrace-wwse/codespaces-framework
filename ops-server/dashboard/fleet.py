@@ -71,6 +71,22 @@ WORKER_ROOT_DEVICE = "/dev/sda1"
 WORKER_ROOT_SIZE_GB = 300
 WORKER_ROOT_THROUGHPUT_MBPS = fleet_policy.FLEET_VOLUME_THROUGHPUT_MBPS
 WORKER_ROOT_IOPS = fleet_policy.FLEET_VOLUME_IOPS
+# IMDS is reachable from inside a learner's container unless the hop limit is 1.
+# Measured on a live slot (sb-slot-arm518-0, 2026-08-27): the metadata service
+# answered `401 Unauthorized` to an IMDSv1 GET — a 401 means the packet arrived
+# and only the token was missing, so the endpoint was one PUT away from handing
+# out whatever the instance carries. The slot routes to it via the docker bridge
+# (`169.254.169.254 via 172.20.0.1 dev eth0`), which costs exactly one hop, so a
+# limit of 1 drops it while leaving the host itself unaffected.
+#
+# That matters because learners run arbitrary code: on a host with an instance
+# profile they could mint its role credentials, and anything ever written into
+# user-data is readable by the very people the isolation exists to contain.
+# Every IMDS caller we own runs on the host (`workers/manager.py`, and the
+# user-data script below), all at hop 1 — nothing in a container needs it.
+# provisioning/sso.py already refuses to probe this address for the same reason;
+# this is the same defence one layer down.
+WORKER_IMDS_HOP_LIMIT = 1
 # worker-1 — template instance whose subnet / security groups / key-name are
 # resolved dynamically at scale-up time so networking never drifts from prod.
 TEMPLATE_INSTANCE_ID = "i-02b773319c758fe40"
@@ -342,6 +358,19 @@ def _root_block_device() -> str:
             "DeleteOnTermination": True,
         },
     }])
+
+
+def _metadata_options() -> str:
+    """IMDS options for RunInstances — see WORKER_IMDS_HOP_LIMIT.
+
+    `HttpTokens=required` is IMDSv2-only, which the fleet already runs with;
+    it is pinned here so a future launch can never silently be born on v1.
+    """
+    return (
+        f"HttpTokens=required,"
+        f"HttpPutResponseHopLimit={WORKER_IMDS_HOP_LIMIT},"
+        f"HttpEndpoint=enabled"
+    )
 
 
 def _tags_of(instance: dict) -> dict:
@@ -653,6 +682,10 @@ async def scale_up(count: int, instance_type: str = DEFAULT_INSTANCE_TYPE,
         "--security-group-ids", *sg_ids,
         "--tag-specifications", tag_spec,
         "--block-device-mappings", _root_block_device(),
+        # MANDATORY. Without this the instance inherits the account default of
+        # hop limit 2, which is one hop more than the host needs and exactly one
+        # hop more than a learner's container needs to read IMDS.
+        "--metadata-options", _metadata_options(),
         "--user-data", _encode_user_data(_build_user_data(
             lifetime_minutes=lifetime_minutes, pool=pool, capacity=capacity,
             code_branch=code_branch, slot_memory_mb=slot_memory_mb)),
