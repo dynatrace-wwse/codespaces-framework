@@ -270,6 +270,40 @@ def test_root_block_device_deletes_on_termination():
     assert ebs["VolumeSize"] == fleet.WORKER_ROOT_SIZE_GB
 
 
+# ── IMDS reachability from a learner's container ─────────────────────────────
+
+def test_launch_pins_the_imds_hop_limit_to_one():
+    """A learner's container reaches IMDS at hop 2, and cannot at hop 1.
+
+    Measured on a live slot rather than reasoned about: IMDSv1 GET from inside
+    sb-slot-arm518-0 returned `401 Unauthorized`, i.e. the packet arrived and
+    only the token was missing. The route out is via the docker bridge, one hop.
+    At 2 the learner is one PUT away from the host's instance-profile
+    credentials and from anything user-data carries; at 1 the request dies
+    before it leaves the box while the host, being hop 0, is unaffected.
+    """
+    opts = fleet._metadata_options()
+    assert f"HttpPutResponseHopLimit={fleet.WORKER_IMDS_HOP_LIMIT}" in opts
+    assert fleet.WORKER_IMDS_HOP_LIMIT == 1
+    # IMDSv2-only. A launch born on v1 needs no token at all, which puts the
+    # hop limit back to being the only thing standing in the way.
+    assert "HttpTokens=required" in opts
+    assert "HttpEndpoint=enabled" in opts
+
+
+def test_launch_actually_passes_the_metadata_options():
+    """The constant is worthless if RunInstances never sees it.
+
+    Omitting the flag does not fail the launch — it inherits the account default
+    of hop limit 2 and the worker comes up looking perfectly healthy, which is
+    precisely why this needs a test rather than a code review.
+    """
+    import inspect
+    src = inspect.getsource(fleet.scale_up)
+    assert "--metadata-options" in src
+    assert "_metadata_options()" in src
+
+
 def test_user_data_encodes_to_base64_roundtrip():
     script = fleet._build_user_data()
     encoded = fleet._encode_user_data(script)
