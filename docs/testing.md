@@ -264,7 +264,7 @@ sudo journalctl -u ops-nightly --since "24 hours ago" --no-pager | tail -20
 
 ```bash
 # On the ops server
-cd /home/ops/enablement-framework/codespaces-framework/ops-server/nightly
+cd /home/ops/orbital/nightly
 sudo -u ops python3 scheduler.py --include-framework
 
 # Dry run (shows what would be queued, no actual jobs)

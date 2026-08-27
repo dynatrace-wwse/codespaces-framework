@@ -1,6 +1,6 @@
 # Enablement Framework — Phases & Tasks
 
-Full phased roadmap. Start each session by reading `CLAUDE.md` + memory files. End each session by updating `ops-server/PROJECT-STATUS.md` and the relevant memory file.
+Full phased roadmap. Start each session by reading `CLAUDE.md` + memory files. End each session by updating `PROJECT-STATUS.md` in the private `dynatrace-wwse/orbital` repo and the relevant memory file.
 
 ---
 
