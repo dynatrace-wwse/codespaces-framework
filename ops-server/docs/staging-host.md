@@ -228,11 +228,69 @@ This domain lost ~90 days to a renewal that failed **silently**
 `orbital-inventory.sh`'s *"all certs valid for >30 days"* invariant currently
 covers production hosts only. **Staging is not yet in the drift check.**
 
-### Gotcha: staging inherited prod's wildcard server blocks
+### App-tab wildcard (done 2026-08-27)
 
-`/etc/nginx/sites-available/ops-server` on staging still contains
-`server_name ~^(?<app_subdomain>[^.]+)\.autonomous-enablements\...$` -- the
-**production** wildcard. Those blocks are dead on staging: that name resolves
-to prod and never reaches this box. Staging cannot serve per-slot app tabs
-until it has its own `*.staging.autonomous-enablements` record and the regex is
-re-anchored.
+Staging inherited nginx server blocks whose `server_name` regex matched
+**production's** wildcard, so they were dead here: those names resolve to prod
+and never arrive. Note the earlier domain substitution *did* fix the CSP
+`frame-ancestors` line, because that is a plain string -- only the two regexes,
+with their escaped dots, were missed. Renaming a domain in this file is not one
+find-and-replace.
+
+| Piece | State |
+|---|---|
+| `*.staging.autonomous-enablements...` A record | child zone -> 35.176.95.18 |
+| certificate | expanded to cover apex **and** wildcard |
+| `server_name` regexes (~666, ~704) | re-anchored onto `.staging.` |
+
+The certificate expansion is the case the earlier outage was about: apex and
+wildcard both validate under the **same** `_acme-challenge.staging...` name, so
+two TXT values must be live at once. `certbot-dns-google` handles that
+correctly -- precisely why the plugin is used here rather than hand-rolling the
+accumulation logic production's manual hooks need.
+
+Verified: `slot42.staging...` reaches the staging box with a chain that
+validates without `-k`, and answers `400 {"detail":"missing or invalid
+X-App-Subdomain header"}` -- byte-identical to production's answer for a
+nonexistent slot, which is what shows the block is wired rather than merely
+present.
+
+The deploy hook now captures `nginx -t` and re-emits it only on failure;
+otherwise nginx's success banner goes to stderr and certbot labels every
+healthy renewal *"deploy-hook ran with error output"*.
+
+### Drift detection (done 2026-08-27)
+
+Staging has its own baseline at `/var/lib/orbital-inventory/baseline.md` and
+its own copy of the script -- not a section inside production's, because the
+inventory reads the host it runs on.
+
+`orbital-inventory.sh` had to be fixed first: its worker list defaulted to
+**production's** two workers, so running it on staging would have ssh'd into
+production and reported prod's systemd state, OneAgent mode and git refs as
+staging's. The default now derives from `ORBITAL_ENV`.
+
+Drift detection here is mutation-tested, not assumed: flipping a service state
+in the baseline is reported as a diff, and the restored baseline is clean.
+
+**`snapshot <48h old` reads NO on staging and that is correct** -- there are no
+staging backups and nothing yet worth backing up. The check diffs against the
+baseline, so a stable NO is not drift; it alarms only if it changes.
+
+### Disarmed: `ops-nightly.timer`
+
+Found `enabled` but `inactive`, with `OnCalendar=*-*-* 02:00:00`,
+`Persistent=true`, **no stamp file**, and a live GitHub token in
+`/home/ops/.env`. That combination means the next reboot of this box would
+activate the timer and fire it *immediately*, running
+`nightly.scheduler --include-framework` against the real repositories --
+concurrently with production's own 02:00 nightly, which is `active`.
+
+Disabled (`systemctl disable --now`). D9 does move nightly here, but as a
+coordinated change: disable on production, provision a dedicated `pool=test`
+worker, then enable. Inheriting it by accident on a reboot is not that.
+
+Other inherited timers audited at the same time: `ops-sync-daemon`,
+`ops-gen2scan`, `orbital-backup` and `orbital-restore-drill` are
+disabled/inactive; `ops-docker-cleanup` and `certbot` are enabled and active,
+which is correct.
