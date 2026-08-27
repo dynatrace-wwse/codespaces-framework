@@ -39,6 +39,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from shared import paths
 from typing import Any
 
 try:
@@ -52,8 +54,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent            # codespaces-framework/ops-server
-FRAMEWORK_ROOT = REPO_ROOT.parent        # codespaces-framework/
+REPO_ROOT = SCRIPT_DIR.parent            # ops-server/
+# NOT REPO_ROOT.parent: that walk only reaches the framework while Orbital
+# is a subdirectory of it. See shared/paths.py.
+FRAMEWORK_ROOT = paths.framework_dir()
 ENV_QA = FRAMEWORK_ROOT / ".env-qa"
 
 ORBITAL_API = "https://autonomous-enablements.whydevslovedynatrace.com"

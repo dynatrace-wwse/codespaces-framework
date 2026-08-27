@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+from shared import paths
+
 load_dotenv(Path.home() / ".env")
 
 # GitHub webhook secret for signature verification
@@ -17,7 +19,9 @@ OPS_HOME = Path.home()
 REPOS_DIR = OPS_HOME / "repos"
 LOGS_DIR = OPS_HOME / "logs"
 WORKDIR = OPS_HOME / "workdir"
-FRAMEWORK_DIR = OPS_HOME / "enablement-framework" / "codespaces-framework"
+# Resolved through shared.paths so the repo split is a config change; the
+# default is unchanged. See shared/paths.py.
+FRAMEWORK_DIR = paths.framework_dir()
 
 # Concurrency
 MAX_PARALLEL_WORKERS = int(os.environ.get("MAX_PARALLEL_WORKERS", "6"))
