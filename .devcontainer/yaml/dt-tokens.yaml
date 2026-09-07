@@ -9,6 +9,30 @@
 # Token naming: enbl-{repo}-{user}-{name_suffix}  (auto-prefixed, max 100 chars)
 # Token expiry: matches training session TTL (default 4h)
 
+# Where the DEFAULT token pair sits in the classic -> platform migration.
+#
+#   migrated             every token is minted as a gen3 dt0s16, so the training runs
+#                        on a tenant that has retired classic API-token creation.
+#   pending              not declared, or declared as in progress. Runs today via the
+#                        classic -> platform translation, which works but has not been
+#                        proven on a classic-retired tenant.
+#   legacy-classic-only  needs a capability with no platform equivalent; WILL fail
+#                        where classic minting is gone. The only value that refuses a
+#                        workshop at create time.
+#
+# ⚠️ BLAST RADIUS. This file is the FALLBACK for every repo that has no
+# .devcontainer/yaml/dt-tokens.yaml of its own — today that is all 27 training repos.
+# Anything changed here changes all of them at once. `pending` is written explicitly
+# because it is already the parser's default for an absent field, so stating it moves
+# nothing; it is here to be read, not to take effect.
+#
+# `kind:` is deliberately still absent below, which means "classic" by dataclass
+# default. Pinning it to `platform` here would switch all 27 repos off the classic
+# path in one edit — and classic tokens are self-contained, while a platform token's
+# effective permissions are its scopes ∩ the IAM policy of its OWNER, unchecked at
+# creation. Migrating a training is a per-repo override, never an edit to this line.
+migrationStatus: pending
+
 tokens:
   - name_suffix: operator
     env_var: DT_OPERATOR_TOKEN
