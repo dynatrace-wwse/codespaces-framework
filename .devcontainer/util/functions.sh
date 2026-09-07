@@ -1685,6 +1685,45 @@ _parseDynakubeYaml() {
   done < "$file"
 }
 
+loadTokenConfig() {
+  # Loads token migration configuration: framework defaults first, repo overrides on top.
+  # Defaults:  .devcontainer/yaml/dt-tokens.yaml  (fetched from framework cache)
+  # Overrides: .devcontainer/yaml/dt-tokens.yaml  (repo-specific, never synced to framework)
+  # Top-level scalar fields are exported as TK_* variables. Repo overrides win.
+  local defaults_file="${FRAMEWORK_CACHE:-${REPO_PATH}}/.devcontainer/yaml/dt-tokens.yaml"
+  local config_file="$REPO_PATH/.devcontainer/yaml/dt-tokens.yaml"
+
+  # Step 1: Load framework defaults
+  if [[ -f "$defaults_file" ]]; then
+    _parseTokenScalars "$defaults_file"
+  else
+    printWarn "Token defaults not found at $defaults_file"
+  fi
+
+  # Step 2: Overlay repo-specific overrides (only top-level scalars are overwritten)
+  if [[ "$config_file" != "$defaults_file" && -f "$config_file" ]]; then
+    printInfo "Applying repo-specific token overrides from: $config_file"
+    _parseTokenScalars "$config_file"
+  else
+    printInfo "No repo-specific token config — using framework defaults"
+  fi
+}
+
+_parseTokenScalars() {
+  # Parses top-level scalar fields from dt-tokens.yaml into TK_* exported variables.
+  # Stops at `tokens:` to avoid ingesting nested token definitions.
+  # camelCase keys are converted to UPPER_SNAKE_CASE: migrationStatus -> TK_MIGRATION_STATUS.
+  local file="$1"
+  while IFS=': ' read -r key value; do
+    [[ "$key" == "tokens" ]] && break
+    [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+    value=$(echo "$value" | sed 's/^["'\'']*//;s/["'\'']*$//' | xargs)
+    [[ -z "$value" ]] && continue
+    local var_name="TK_$(echo "$key" | sed 's/\([A-Z]\)/_\1/g' | tr '[:lower:]' '[:upper:]')"
+    eval "export $var_name=\"$value\""
+  done < "$file"
+}
+
 getDtSessionId() {
   # Per-user session identity: "<user>-<yyyymmdd>". Makes the DynaKube name and
   # hostGroup unique per user+day, so many students can run the SAME training
