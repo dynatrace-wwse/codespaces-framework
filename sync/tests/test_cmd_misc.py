@@ -150,13 +150,105 @@ class TestProtectMain:
         from sync.commands.protect_main import run
         repo = make_repo_entry(name="lab1")
         mock_load.return_value = [repo]
-        mock_subp.return_value = MagicMock(returncode=1, stdout="")
+        # First call = _get_default_branch (returns "main"), second = _get_protection (fails → unprotected)
+        mock_subp.side_effect = [
+            MagicMock(returncode=0, stdout="main\n"),  # _get_default_branch
+            MagicMock(returncode=1, stdout="", stderr=""),  # _get_protection
+        ]
 
-        args = SimpleNamespace(repo=None, dry_run=True)
+        args = SimpleNamespace(repo=None, branch=None, check=None, dry_run=True)
         run(args)
         out = capsys.readouterr().out
         assert "DRY RUN" in out
         assert "would apply" in out
+
+    @patch("sync.commands.protect_main.subprocess.run")
+    @patch("sync.commands.protect_main.load_repos")
+    def test_default_branch_resolved_not_hardcoded(self, mock_load, mock_subp, make_repo_entry, capsys):
+        """Default branch is fetched from GitHub, not assumed to be 'main'."""
+        from sync.commands.protect_main import run, DEFAULT_CONTEXTS
+        repo = make_repo_entry(name="lab1")
+        mock_load.return_value = [repo]
+        mock_subp.side_effect = [
+            MagicMock(returncode=0, stdout="master\n"),   # _get_default_branch → "master"
+            MagicMock(returncode=1, stdout="", stderr=""),  # _get_protection → unprotected
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # _protect → success
+        ]
+
+        args = SimpleNamespace(repo=None, branch=None, check=None, dry_run=False)
+        run(args)
+
+        # The PUT call must hit "master", not "main"
+        put_call = mock_subp.call_args_list[2]
+        url_part = next(s for s in put_call.args[0] if "branches" in s)
+        assert "/master/" in url_part
+        # Default contexts unchanged
+        payload = json.loads(put_call.kwargs["input"])
+        assert payload["required_status_checks"]["contexts"] == DEFAULT_CONTEXTS
+
+    @patch("sync.commands.protect_main.subprocess.run")
+    @patch("sync.commands.protect_main.load_repos")
+    def test_custom_contexts_passed_through(self, mock_load, mock_subp, make_repo_entry, capsys):
+        """--check contexts replace the default; payload reflects them exactly."""
+        from sync.commands.protect_main import run
+        repo = make_repo_entry(name="lab1")
+        mock_load.return_value = [repo]
+        mock_subp.side_effect = [
+            MagicMock(returncode=0, stdout="main\n"),    # _get_default_branch
+            MagicMock(returncode=1, stdout="", stderr=""),  # _get_protection → unprotected
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # _protect
+        ]
+
+        args = SimpleNamespace(repo=None, branch=None, check=["unit-tests"], dry_run=False)
+        run(args)
+
+        put_call = mock_subp.call_args_list[2]
+        payload = json.loads(put_call.kwargs["input"])
+        assert payload["required_status_checks"]["contexts"] == ["unit-tests"]
+
+    @patch("sync.commands.protect_main.subprocess.run")
+    @patch("sync.commands.protect_main.load_repos")
+    def test_training_repo_path_unchanged(self, mock_load, mock_subp, make_repo_entry, capsys):
+        """Training repos still use default branch + default context when no overrides given."""
+        from sync.commands.protect_main import run, DEFAULT_CONTEXTS
+        repo = make_repo_entry(name="k8s-lab", repo="dynatrace-wwse/k8s-lab")
+        mock_load.return_value = [repo]
+        mock_subp.side_effect = [
+            MagicMock(returncode=0, stdout="main\n"),      # _get_default_branch
+            MagicMock(returncode=1, stdout="", stderr=""),  # _get_protection → unprotected
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # _protect
+        ]
+
+        args = SimpleNamespace(repo=None, branch=None, check=None, dry_run=False)
+        run(args)
+
+        put_call = mock_subp.call_args_list[2]
+        url_part = next(s for s in put_call.args[0] if "branches" in s)
+        assert "/main/" in url_part
+        payload = json.loads(put_call.kwargs["input"])
+        assert payload["required_status_checks"]["contexts"] == DEFAULT_CONTEXTS
+        assert payload["enforce_admins"] is True
+        assert payload["allow_deletions"] is False
+
+    @patch("sync.commands.protect_main.subprocess.run")
+    @patch("sync.commands.protect_main.load_repos")
+    def test_out_of_yaml_repo_accepted(self, mock_load, mock_subp, make_repo_entry, capsys):
+        """owner/name not in repos.yaml is accepted as a synthetic entry."""
+        from sync.commands.protect_main import run
+        mock_load.return_value = []  # nothing in yaml
+        mock_subp.side_effect = [
+            MagicMock(returncode=0, stdout="main\n"),      # _get_default_branch
+            MagicMock(returncode=1, stdout="", stderr=""),  # _get_protection → unprotected
+            MagicMock(returncode=0, stdout="{}", stderr=""),  # _protect
+        ]
+
+        args = SimpleNamespace(repo="dynatrace-wwse/dynatrace-app-enablements",
+                               branch=None, check=["unit-tests"], dry_run=False)
+        run(args)
+
+        put_call = mock_subp.call_args_list[2]
+        url_part = next(s for s in put_call.args[0] if "branches" in s)
+        assert "dynatrace-wwse/dynatrace-app-enablements" in url_part
 
 
 # ---------------------------------------------------------------------------

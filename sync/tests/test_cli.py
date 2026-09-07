@@ -159,6 +159,22 @@ class TestCLI:
             main()
         mock_run.assert_called_once()
 
+    @patch("sync.commands.protect_main.run")
+    def test_protect_main_with_check_flag(self, mock_run):
+        with patch("sys.argv", ["sync", "protect-main", "--check", "unit-tests",
+                                 "--repo", "org/my-app"]):
+            main()
+        args = mock_run.call_args[0][0]
+        assert args.check == ["unit-tests"]
+        assert args.repo == "org/my-app"
+
+    @patch("sync.commands.protect_main.run")
+    def test_protect_main_with_branch_flag(self, mock_run):
+        with patch("sys.argv", ["sync", "protect-main", "--branch", "develop"]):
+            main()
+        args = mock_run.call_args[0][0]
+        assert args.branch == "develop"
+
     @patch("sync.commands.bump_repo_version.run")
     def test_bump_repo_version_requires_repo(self, mock_run):
         with patch("sys.argv", ["sync", "bump-repo-version"]):
