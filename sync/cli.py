@@ -147,9 +147,12 @@ def main():
     # protect-main
     pm = subparsers.add_parser(
         "protect-main",
-        help="Enable branch protection on main (require CI, enforce admins)",
+        help="Enable branch protection on the default branch (require CI, enforce admins)",
     )
-    pm.add_argument("--repo", help="Target a specific repo (default: all sync-managed)")
+    pm.add_argument("--repo", help="Target a specific repo (owner/name or name; accepts repos outside repos.yaml)")
+    pm.add_argument("--branch", help="Override branch name (default: resolve from GitHub API)")
+    pm.add_argument("--check", action="append", metavar="CONTEXT",
+                    help="Required status-check context (repeatable; default: codespaces-integration-test-with-dynatrace-deployment)")
     pm.add_argument("--dry-run", action="store_true", help="Preview without applying")
 
     # cleanup-branches
