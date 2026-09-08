@@ -1444,6 +1444,31 @@ latestPublicActiveGateImage() {
   echo "${repo}:${tag}"
 }
 
+_pickLatestCodeModulesTag() {
+  # Read a newline-delimited tag list on stdin; echo the newest clean version tag
+  # (form N.N.N.N-N).
+  #
+  # Deliberately its own picker rather than _pickLatestActiveGateTag: the
+  # codemodules repository ALSO publishes single-language variants
+  # (-java, -python, -nodejs, -php) alongside each multi-arch tag. They sort
+  # adjacent to it, and selecting one would instrument only that runtime while
+  # looking completely healthy. The anchored pattern is what excludes them.
+  grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' | sort -V | tail -1
+}
+
+latestPublicCodeModulesImage() {
+  # Echo the newest pullable image ref on public.ecr.aws/dynatrace/dynatrace-codemodules,
+  # or return non-zero if it can't be resolved (offline / API change).
+  local repo="public.ecr.aws/dynatrace/dynatrace-codemodules" token tag
+  token="$(curl -fsS https://public.ecr.aws/token/ 2>/dev/null | jq -r '.token // empty')" || return 1
+  [ -n "$token" ] || return 1
+  tag="$(curl -fsS -H "Authorization: Bearer $token" \
+        "https://public.ecr.aws/v2/dynatrace/dynatrace-codemodules/tags/list" 2>/dev/null \
+        | jq -r '.tags[]?' | _pickLatestCodeModulesTag)"
+  [ -n "$tag" ] || return 1
+  echo "${repo}:${tag}"
+}
+
 fixSprintActiveGateImage() {
   # Post-apply fallback. generateDynakube already pins the public AG image on sprint,
   # so this is a safety net for DynaKubes applied from outside the generator.
@@ -1462,6 +1487,50 @@ fixSprintActiveGateImage() {
   printInfo "Pinning ActiveGate image to $img"
   kubectl -n dynatrace patch dynakube "$dk" --type=merge \
     -p "{\"spec\":{\"activeGate\":{\"image\":\"$img\"}}}" >/dev/null 2>&1
+}
+
+fixSprintCodeModulesImage() {
+  # Post-apply fallback, mirroring fixSprintActiveGateImage. generateDynakube already
+  # pins the public codemodules image on sprint, so this is a safety net for DynaKubes
+  # applied from outside the generator.
+  #
+  # WHY: on sprint the DynaKube resolves its codemodules image from the tenant's PRIVATE
+  # registry. No paasToken is issued for these sessions and no <dynakube>-pull-secret is
+  # created, so the CSI provisioner's pull is anonymous and answers
+  #   401 Unauthorized: Not Authorized
+  # Nothing is extracted -- /data/codemodules stays completely empty -- and because
+  # installAgentFromImage() swallows the pull failure and returns nil, the only error
+  # ever raised is the downstream
+  #   open /data/codemodules/<version>/agent/bin: no such file or directory
+  # Every oneagent-bin mount is refused from then on and the learner's pod sits in Init
+  # forever. Best-effort throughout — never fails the deploy.
+  isSprintTenant || return 0
+  local dk current img
+  dk="$(kubectl get dynakube -n dynatrace --no-headers 2>/dev/null | awk '{print $1}' | head -1)"
+  [ -n "$dk" ] || return 0
+  # Already pinned by generateDynakube? Say so rather than patching a second time.
+  current="$(kubectl -n dynatrace get dynakube "$dk" \
+    -o jsonpath='{.spec.oneAgent.applicationMonitoring.codeModulesImage}{.spec.oneAgent.cloudNativeFullStack.codeModulesImage}' 2>/dev/null)"
+  case "$current" in
+    public.ecr.aws/*) printInfo "codeModulesImage already pinned to $current"; return 0 ;;
+  esac
+  if ! img="$(latestPublicCodeModulesImage)"; then
+    printWarn "Could not resolve a public codemodules image — leaving the default."
+    return 0
+  fi
+  printWarn "Sprint codemodules images are not pullable (401 from the tenant's private registry) — pinning the latest public build."
+  printInfo "Pinning codeModulesImage to $img"
+  # Patch whichever mode this DynaKube uses; the absent one is simply not present.
+  if kubectl -n dynatrace get dynakube "$dk" -o jsonpath='{.spec.oneAgent.applicationMonitoring}' 2>/dev/null | grep -q .; then
+    kubectl -n dynatrace patch dynakube "$dk" --type=merge \
+      -p "{\"spec\":{\"oneAgent\":{\"applicationMonitoring\":{\"codeModulesImage\":\"$img\"}}}}" >/dev/null 2>&1 \
+      || printWarn "Could not patch the DynaKube (continuing)"
+  elif kubectl -n dynatrace get dynakube "$dk" -o jsonpath='{.spec.oneAgent.cloudNativeFullStack}' 2>/dev/null | grep -q .; then
+    kubectl -n dynatrace patch dynakube "$dk" --type=merge \
+      -p "{\"spec\":{\"oneAgent\":{\"cloudNativeFullStack\":{\"codeModulesImage\":\"$img\"}}}}" >/dev/null 2>&1 \
+      || printWarn "Could not patch the DynaKube (continuing)"
+  fi
+  return 0
 }
 
 deployCloudNative() {
@@ -1531,6 +1600,10 @@ deployDynatrace() {
   # Sprint tenants ship an unpullable private-ECR ActiveGate image — swap it for the
   # latest public build so the AG can actually start (no-op on prod/gen2 tenants).
   fixSprintActiveGateImage
+
+  # Same story one image over: the codemodules image is also a private-ECR build on
+  # sprint, and an unpullable one leaves every injected pod stuck in Init.
+  fixSprintCodeModulesImage
 
   # Wait for ActiveGate to be ready (the critical component for cluster monitoring)
   waitForPod dynatrace activegate
@@ -1886,6 +1959,25 @@ generateDynakube() {
     fi
   fi
 
+  # Same story one image over. On sprint the codemodules image also resolves to a
+  # private-ECR build, and no pull secret is issued for these sessions, so the CSI
+  # provisioner's pull answers 401 and NOTHING is extracted. The only error raised is
+  # the downstream "open /data/codemodules/<version>/agent/bin: no such file or
+  # directory", every oneagent-bin mount is refused, and injected pods sit in Init
+  # forever. Pin at GENERATION time so the manifest is pullable the moment it is
+  # applied — including the documented `kubectl apply -f .../gen/dynakube.yaml` path,
+  # where the post-apply fixSprintCodeModulesImage never runs. No-op on prod/gen2.
+  local cm_image_line=""
+  if isSprintTenant "${DT_ENVIRONMENT:-$DT_TENANT}"; then
+    local sprint_cm_img
+    if sprint_cm_img="$(latestPublicCodeModulesImage)"; then
+      cm_image_line="codeModulesImage: \"${sprint_cm_img}\""
+      printWarn "Sprint tenant — default codemodules image is not pullable, pinning to ${sprint_cm_img}"
+    else
+      printWarn "Sprint tenant but no public codemodules image resolved — injected pods may hang in Init."
+    fi
+  fi
+
   # --- Build the Dynakube YAML ---
 
   cat > "$gen_file" <<DKEOF
@@ -1942,6 +2034,7 @@ DKEOF
     hostGroup: ${cluster_name}
     cloudNativeFullStack:
 ${oa_image_line:+      ${oa_image_line}}
+${cm_image_line:+      ${cm_image_line}}
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/master
@@ -1954,10 +2047,20 @@ ${oa_image_line:+      ${oa_image_line}}
           value: "true"
 CNFSEOF
   elif [[ "$mode" == "apponly" ]]; then
-    cat >> "$gen_file" <<AOEOF
+    # `{}` when there is nothing to pin: an empty mapping and a mapping with one key
+    # are different YAML, so this cannot be collapsed into one heredoc.
+    if [[ -n "$cm_image_line" ]]; then
+      cat >> "$gen_file" <<AOEOF
+  oneAgent:
+    applicationMonitoring:
+      ${cm_image_line}
+AOEOF
+    else
+      cat >> "$gen_file" <<AOEOF
   oneAgent:
     applicationMonitoring: {}
 AOEOF
+    fi
   fi
   # k8s-only mode: no oneAgent section
 
