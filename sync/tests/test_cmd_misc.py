@@ -95,6 +95,199 @@ class TestCleanupBranches:
         out = capsys.readouterr().out
         assert "not found" in out
 
+    # ── Enumeration failure must never read as "clean" ──
+    #
+    # Regression guard for the false all-clear: the command reported 23 consumer
+    # repos as clean while 278 stale sync/framework-* branches sat on their
+    # remotes, because _get_merged_remote returned [] on failure exactly as it
+    # did on genuine emptiness.
+
+    @patch("sync.commands.cleanup_branches._resolve_default_branch", return_value="main")
+    @patch("sync.commands.cleanup_branches._git")
+    @patch("sync.commands.cleanup_branches._resolve_repo_path")
+    @patch("sync.commands.cleanup_branches.load_repos")
+    def test_remote_enumeration_failure_is_loud_not_clean(
+        self, mock_load, mock_resolve, mock_git, mock_branch,
+        make_repo_entry, capsys, tmp_path,
+    ):
+        from sync.commands.cleanup_branches import run
+        mock_load.return_value = [make_repo_entry(name="lab1")]
+        repo_dir = tmp_path / "lab1"
+        repo_dir.mkdir()
+        mock_resolve.return_value = repo_dir
+        mock_git.return_value = MagicMock(returncode=0, stdout="")
+
+        with patch("sync.commands.cleanup_branches._get_merged_local", return_value=[]):
+            with patch("sync.commands.cleanup_branches._get_merged_remote", return_value=None):
+                args = SimpleNamespace(repo=None, dry_run=True)
+                with pytest.raises(SystemExit) as exc:
+                    run(args)
+                assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "could not enumerate REMOTE" in out
+        assert "NOT proven clean" in out
+        assert "✅ clean" not in out
+
+    @patch("sync.commands.cleanup_branches._resolve_default_branch", return_value="main")
+    @patch("sync.commands.cleanup_branches._git")
+    @patch("sync.commands.cleanup_branches._resolve_repo_path")
+    @patch("sync.commands.cleanup_branches.load_repos")
+    def test_local_enumeration_failure_is_loud_not_clean(
+        self, mock_load, mock_resolve, mock_git, mock_branch,
+        make_repo_entry, capsys, tmp_path,
+    ):
+        from sync.commands.cleanup_branches import run
+        mock_load.return_value = [make_repo_entry(name="lab1")]
+        repo_dir = tmp_path / "lab1"
+        repo_dir.mkdir()
+        mock_resolve.return_value = repo_dir
+        mock_git.return_value = MagicMock(returncode=0, stdout="")
+
+        with patch("sync.commands.cleanup_branches._get_merged_local", return_value=None):
+            with patch("sync.commands.cleanup_branches._get_merged_remote", return_value=[]):
+                args = SimpleNamespace(repo=None, dry_run=True)
+                with pytest.raises(SystemExit) as exc:
+                    run(args)
+                assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "could not enumerate LOCAL" in out
+        assert "✅ clean" not in out
+
+    @patch("sync.commands.cleanup_branches._resolve_default_branch", return_value="main")
+    @patch("sync.commands.cleanup_branches._git")
+    @patch("sync.commands.cleanup_branches._resolve_repo_path")
+    @patch("sync.commands.cleanup_branches.load_repos")
+    def test_clean_only_when_enumeration_succeeded(
+        self, mock_load, mock_resolve, mock_git, mock_branch,
+        make_repo_entry, capsys, tmp_path,
+    ):
+        from sync.commands.cleanup_branches import run
+        mock_load.return_value = [make_repo_entry(name="lab1")]
+        repo_dir = tmp_path / "lab1"
+        repo_dir.mkdir()
+        mock_resolve.return_value = repo_dir
+        mock_git.return_value = MagicMock(returncode=0, stdout="")
+
+        with patch("sync.commands.cleanup_branches._get_merged_local", return_value=[]):
+            with patch("sync.commands.cleanup_branches._get_merged_remote", return_value=[]):
+                args = SimpleNamespace(repo=None, dry_run=True)
+                run(args)  # must NOT exit non-zero
+        out = capsys.readouterr().out
+        assert "✅ clean" in out
+        assert "could not enumerate" not in out
+
+    @patch("sync.commands.cleanup_branches._resolve_default_branch", return_value=None)
+    @patch("sync.commands.cleanup_branches._resolve_repo_path")
+    @patch("sync.commands.cleanup_branches.load_repos")
+    def test_undeterminable_default_branch_is_loud(
+        self, mock_load, mock_resolve, mock_branch, make_repo_entry, capsys, tmp_path,
+    ):
+        from sync.commands.cleanup_branches import run
+        mock_load.return_value = [make_repo_entry(name="lab1")]
+        repo_dir = tmp_path / "lab1"
+        repo_dir.mkdir()
+        mock_resolve.return_value = repo_dir
+
+        args = SimpleNamespace(repo=None, dry_run=True)
+        with pytest.raises(SystemExit) as exc:
+            run(args)
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "could not determine the default branch" in out
+        assert "✅ clean" not in out
+
+    # ── The fetch must not trust the clone's configured refspec ──
+
+    @patch("sync.commands.cleanup_branches._git")
+    def test_fetch_passes_full_refspec_explicitly(self, mock_git, tmp_path):
+        from sync.commands.cleanup_branches import _fetch_all_heads, ALL_HEADS_REFSPEC
+        mock_git.return_value = MagicMock(returncode=0, stdout="")
+
+        assert _fetch_all_heads(tmp_path) is True
+        args = mock_git.call_args[0][1]
+        assert args[0] == "fetch"
+        assert ALL_HEADS_REFSPEC in args, (
+            "must pass +refs/heads/*:refs/remotes/origin/* on the command line — "
+            "a single-branch clone configures a narrow remote.origin.fetch"
+        )
+
+    @patch("sync.commands.cleanup_branches._fetch_all_heads", return_value=False)
+    def test_get_merged_remote_none_when_fetch_fails(self, mock_fetch, tmp_path):
+        from sync.commands.cleanup_branches import _get_merged_remote
+        assert _get_merged_remote(tmp_path, "main") is None
+
+    @patch("sync.commands.cleanup_branches._fetch_all_heads", return_value=True)
+    @patch("sync.commands.cleanup_branches._git")
+    def test_get_merged_remote_none_when_branch_cmd_fails(self, mock_git, mock_fetch, tmp_path):
+        from sync.commands.cleanup_branches import _get_merged_remote
+        # rev-parse of origin/main succeeds, `branch -r --merged` fails
+        mock_git.side_effect = [
+            MagicMock(returncode=0, stdout="sha"),
+            MagicMock(returncode=128, stdout=""),
+        ]
+        assert _get_merged_remote(tmp_path, "main") is None
+
+    @patch("sync.commands.cleanup_branches._fetch_all_heads", return_value=True)
+    @patch("sync.commands.cleanup_branches._git")
+    def test_get_merged_remote_none_when_ref_missing(self, mock_git, mock_fetch, tmp_path):
+        from sync.commands.cleanup_branches import _get_merged_remote
+        mock_git.return_value = MagicMock(returncode=128, stdout="")
+        assert _get_merged_remote(tmp_path, "main") is None
+
+    @patch("sync.commands.cleanup_branches._fetch_all_heads", return_value=True)
+    @patch("sync.commands.cleanup_branches._git")
+    def test_get_merged_remote_strips_and_filters(self, mock_git, mock_fetch, tmp_path):
+        from sync.commands.cleanup_branches import _get_merged_remote
+        mock_git.side_effect = [
+            MagicMock(returncode=0, stdout="sha"),
+            MagicMock(returncode=0, stdout=(
+                "  origin/HEAD -> origin/main\n"
+                "  origin/main\n"
+                "  origin/gh-pages\n"
+                "  origin/sync/framework-1.9.5\n"
+                "  origin/sync/framework-1.10.1\n"
+            )),
+        ]
+        assert _get_merged_remote(tmp_path, "main") == [
+            "sync/framework-1.9.5", "sync/framework-1.10.1",
+        ]
+
+    @patch("sync.commands.cleanup_branches._git")
+    def test_get_merged_local_none_on_git_failure(self, mock_git, tmp_path):
+        from sync.commands.cleanup_branches import _get_merged_local
+        mock_git.return_value = MagicMock(returncode=128, stdout="")
+        assert _get_merged_local(tmp_path, "main") is None
+
+    @patch("sync.commands.cleanup_branches._git")
+    def test_get_merged_local_empty_is_a_real_answer(self, mock_git, tmp_path):
+        from sync.commands.cleanup_branches import _get_merged_local
+        mock_git.return_value = MagicMock(returncode=0, stdout="* main\n")
+        assert _get_merged_local(tmp_path, "main") == []
+
+    # ── Default branch is resolved, not assumed to be "main" ──
+
+    @patch("sync.commands.cleanup_branches._git")
+    def test_default_branch_from_symbolic_ref(self, mock_git, tmp_path):
+        from sync.commands.cleanup_branches import _resolve_default_branch
+        mock_git.return_value = MagicMock(returncode=0, stdout="refs/remotes/origin/master\n")
+        assert _resolve_default_branch(tmp_path) == "master"
+
+    @patch("sync.commands.cleanup_branches._git")
+    def test_default_branch_falls_back_to_master(self, mock_git, tmp_path):
+        from sync.commands.cleanup_branches import _resolve_default_branch
+        mock_git.side_effect = [
+            MagicMock(returncode=128, stdout=""),   # symbolic-ref fails
+            MagicMock(returncode=128, stdout=""),   # origin/main missing
+            MagicMock(returncode=0, stdout="sha"),  # origin/master exists
+        ]
+        assert _resolve_default_branch(tmp_path) == "master"
+
+    @patch("sync.commands.cleanup_branches._git")
+    def test_default_branch_none_when_undeterminable(self, mock_git, tmp_path):
+        from sync.commands.cleanup_branches import _resolve_default_branch
+        mock_git.return_value = MagicMock(returncode=128, stdout="")
+        assert _resolve_default_branch(tmp_path) is None
+
 
 # ---------------------------------------------------------------------------
 # revert
