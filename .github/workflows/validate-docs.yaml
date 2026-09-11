@@ -1,0 +1,70 @@
+name: Validate docs
+# Validates the documentation build WITHOUT publishing it.
+#
+# This is the half the repo was missing. deploy-ghpages.yaml used to trigger on
+# push to 'docs/*' and 'rfe/*', so a working branch published the public site
+# with no review; the github-pages environment allowlist rejected it, but only
+# after the run had been queued into the 'pages' concurrency group. Publication
+# now happens only from main, after merge, and the branches that used to publish
+# land here instead.
+#
+# Note the permissions below: contents:read only. No 'pages: write', no
+# 'id-token: write', no environment. This workflow cannot deploy.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yaml'
+      - 'mkdocs-base.yaml'
+      - '.github/scripts/**'
+      - '.github/workflows/validate-docs.yaml'
+      - '.github/workflows/deploy-ghpages*.yaml'
+  push:
+    branches:
+      - 'docs/**'
+      - 'rfe/**'
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yaml'
+      - 'mkdocs-base.yaml'
+      - '.github/scripts/**'
+      - '.github/workflows/validate-docs.yaml'
+      - '.github/workflows/deploy-ghpages*.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deliberately NOT the 'pages' group: a validation run must never cancel a
+# release in flight.
+concurrency:
+  group: validate-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Build and check (no publish)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install requirements
+        run: pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
+
+      # --strict turns MkDocs warnings into errors. Measured on mkdocs-material
+      # 9.5.42: this aborts on a broken internal link and on a nav entry naming a
+      # file that does not exist. It does NOT catch a broken #anchor - MkDocs
+      # logs those at INFO.
+      - name: Build documentation (strict)
+        run: mkdocs build --strict --site-dir site
+
+      - name: Check referenced assets exist
+        run: python .github/scripts/check_referenced_assets.py site
+
+      - name: Check publication triggers
+        run: python .github/scripts/check_publish_triggers.py

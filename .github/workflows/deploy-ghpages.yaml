@@ -1,29 +1,41 @@
 name: Deploy GitHub Pages
 run-name: ${{ github.event.head_commit.message }} - deploy github pages
+# Publication happens ONLY from main, after a PR is merged.
+#
+# This used to also trigger on 'docs/*' and 'rfe/*', so any push to a working
+# branch attempted to publish the public site with no review. It also shares the
+# 'pages' concurrency group below with cancel-in-progress, so such a push could
+# cancel an in-flight main deploy before being rejected.
+#
+# The github-pages environment has a deployment branch allowlist (main, gh-pages)
+# which rejected those runs - that control is real and stays. But it only fires
+# once the job is already queued: run 34607139129 on branch docs/mermaid-pinned
+# was rejected with steps_run=0, after entering the concurrency group. Settings
+# are the backstop; this trigger list is the fix.
+#
+# Pull requests are validated, without publishing, by validate-docs.yaml.
 on:
   push:
     branches:
       - main
-      - docs/*
-      - rfe/*
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Branch to deploy
-        default: main
-        required: false
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# Only main reaches this workflow now, so cancel-in-progress means "the newest
+# main wins" rather than "any working branch can cancel a release".
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
   deploy-github-pages:
+    # Defence in depth: a manual dispatch from any other branch stops here,
+    # without depending on repository settings staying as they are.
+    if: github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -31,8 +43,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
