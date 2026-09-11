@@ -1,13 +1,17 @@
 """Tests for sync.commands.migrate — Category A/B file classification, templates, devcontainer validation."""
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from sync.commands.migrate import (
     CATEGORY_A_FILES,
+    DEPLOY_GHPAGES_TEMPLATE,
+    GITIGNORE_TEMPLATE,
     CATEGORY_A_DIRS,
     CATEGORY_B_FILES,
     REPO_CUSTOM_FILES,
@@ -85,6 +89,54 @@ class TestTemplates:
     def test_thin_makefile_reads_version(self):
         """Makefile extracts version from source_framework.sh."""
         assert "source_framework.sh" in THIN_MAKEFILE
+
+
+# ---------------------------------------------------------------------------
+# Vendored mermaid: pin + distribution
+# ---------------------------------------------------------------------------
+
+MERMAID_VERSION = "11.17.2"
+MERMAID_SHA256 = "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8"
+MERMAID_PATH = "docs/javascripts/mermaid.min.js"
+
+FRAMEWORK_ROOT = Path(__file__).resolve().parents[2]
+
+
+class TestMermaidAsset:
+    """The vendored mermaid is only useful if every consuming repo gets it."""
+
+    def test_ghpages_template_is_valid_yaml(self):
+        yaml.safe_load(DEPLOY_GHPAGES_TEMPLATE)
+
+    def test_ghpages_template_fetches_all_three_assets(self):
+        for asset in ("mkdocs-base.yaml", "docs/stylesheets/extra.css", MERMAID_PATH):
+            assert asset in DEPLOY_GHPAGES_TEMPLATE, f"workflow does not fetch {asset}"
+
+    def test_ghpages_template_tolerates_tags_without_mermaid(self):
+        """Repos pinned to a pre-1.12.0 tag must keep deploying."""
+        assert "|| exit 1" not in DEPLOY_GHPAGES_TEMPLATE.split(MERMAID_PATH)[1].split("\n")[0]
+        assert "does not reference mermaid" in DEPLOY_GHPAGES_TEMPLATE
+
+    def test_ghpages_template_fails_loudly_on_inconsistent_state(self):
+        """Config referencing the asset + asset unfetchable must not degrade silently."""
+        assert "::error::" in DEPLOY_GHPAGES_TEMPLATE
+        assert "exit 1" in DEPLOY_GHPAGES_TEMPLATE
+
+    def test_gitignore_template_excludes_fetched_mermaid(self):
+        assert MERMAID_PATH in GITIGNORE_TEMPLATE
+
+    def test_mkdocs_base_declares_mermaid_fence_and_script(self):
+        base = (FRAMEWORK_ROOT / "mkdocs-base.yaml").read_text()
+        assert "custom_fences" in base
+        assert "name: mermaid" in base
+        assert "javascripts/mermaid.min.js" in base
+
+    def test_vendored_file_matches_the_documented_pin(self):
+        """The pin is a claim about bytes. Check the bytes."""
+        f = FRAMEWORK_ROOT / MERMAID_PATH
+        assert f.exists(), f"{MERMAID_PATH} is not vendored"
+        assert hashlib.sha256(f.read_bytes()).hexdigest() == MERMAID_SHA256
+        assert MERMAID_VERSION in (FRAMEWORK_ROOT / "mkdocs-base.yaml").read_text()
 
 
 # ---------------------------------------------------------------------------
