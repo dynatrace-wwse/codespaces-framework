@@ -35,10 +35,10 @@ Files in `.devcontainer/` are classified into categories that determine how the 
 
 | File | Purpose |
 |------|---------|
-| `util/functions.sh` | Core framework functions (1800+ lines) |
+| `util/functions.sh` | Core framework functions (the main library) |
 | `util/variables.sh` | Global variables, colors, port ranges |
 | `util/greeting.sh` | Terminal welcome message |
-| `util/test_functions.sh` | Test assertion functions |
+| `test/test_functions.sh` | Test assertion functions ([reference](testing.md#test-function-reference)) |
 | `makefile.sh` | Docker build/run logic for local development |
 | `runlocal/helper.sh` | ENV file loader, repo name resolver |
 | `Dockerfile` | Base image build (consumers pull pre-built image) |
@@ -113,14 +113,31 @@ Defines the development container for VS Code and Codespaces.
 ## 🟩 Documentation Workflow (`docs/`)
 
 - **docs/**: Contains all documentation and site configuration.
-- **mkdocs.yaml**: Per-repo config using `INHERIT: mkdocs-base.yaml` to inherit the framework's base theme, extensions, and plugins. Only repo-specific fields (site_name, nav, RUM snippet) are defined here.
-- **mkdocs-base.yaml**: Framework-owned base configuration (Material theme, deep-purple palette, markdown extensions). Fetched at runtime by CI workflows at the repo's `FRAMEWORK_VERSION` tag.
-- **.github/workflows/deploy-ghpages.yaml**: GitHub Actions workflow to deploy documentation to GitHub Pages when a PR is merged into main.
+- **mkdocs.yaml**: Per-repo config using `INHERIT: mkdocs-base.yaml` to inherit the framework's base theme, extensions, and plugins. Only repo-specific fields are defined here — `site_name`, `repo_name`, `repo_url`, `nav`, and `extra.rum_snippet`. A consuming repo defines no `theme:` and no `extra_css:` of its own; everything visual comes from the base.
+- **mkdocs-base.yaml**: Framework-owned base configuration — Material theme, a dark-first custom Dynatrace palette, the markdown extensions, and `extra_css: stylesheets/extra.css`. Together with `docs/stylesheets/extra.css` it is **fetched at build time** at the repo's pinned `FRAMEWORK_VERSION`, which is why neither file is committed in a consuming repo.
+- **.github/workflows/deploy-ghpages.yaml**: GitHub Actions workflow that builds the site and publishes it to GitHub Pages. It triggers on **push**, not on merge: `main` and `docs/*` in consuming repos. A push to one of those branches publishes.
 
-### Live Documentation
+### Live documentation, locally
 
-- **installMkdocs**: Installs all requirements for MkDocs (including Python dependencies from `docs/requirements/requirements-mkdocs.txt`) and exposes the documentation locally.
-- **exposeMkdocs**: Launches the MkDocs development server on port 8000 inside your dev container.
+Inside the dev container:
+
+- **installMkdocs**: installs the pinned MkDocs requirements from `docs/requirements/requirements-mkdocs.txt`, then calls `fetchMkdocsBase` and `exposeMkdocs`.
+- **fetchMkdocsBase**: if `mkdocs.yaml` starts with `INHERIT:` and `mkdocs-base.yaml` is missing, it downloads that file from the framework at the pinned `FRAMEWORK_VERSION`. **This is the step that makes a fresh clone previewable** — without it `mkdocs serve` fails on the missing inherit target.
+- **exposeMkdocs**: starts `mkdocs serve` on port 8000 in the background and exposes it appropriately for the instantiation type (forwarded port in Codespaces, ingress where one exists, `localhost:8000` otherwise).
+
+!!! note "Local preview renders unstyled if the stylesheet is missing"
+    `fetchMkdocsBase` retrieves `mkdocs-base.yaml` only. `docs/stylesheets/extra.css` — the file that
+    carries the Dynatrace visual language — is fetched by the docs CI workflow, not by the local
+    preview, so a local build of a consuming repo shows correct content with default Material styling.
+    To preview with the real theme, fetch it the same way CI does:
+    ```bash
+    FRAMEWORK_VERSION=$(grep -oP ':-\K[^}"]+' .devcontainer/util/source_framework.sh | head -1)
+    mkdir -p docs/stylesheets
+    curl -fsSL "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/docs/stylesheets/extra.css" \
+      -o docs/stylesheets/extra.css
+    ```
+    This repository is the exception: it *owns* both files, so they are committed here and
+    `mkdocs serve` works straight out of a clone.
 
 ### Deploying to GitHub Pages
 
@@ -139,7 +156,7 @@ Apps are published through **nginx ingress-nginx** on port 80. Each `registerApp
 
 | Rule | Matches | Example URL | Environment |
 |------|---------|-------------|-------------|
-| `<app>.<public-ip>.sslip.io` | sslip.io magic-DNS host | `http://todoapp.18.134.158.252.sslip.io` | VS Code / local container / remote VM |
+| `<app>.<public-ip>.sslip.io` | sslip.io magic-DNS host | `http://todoapp.203.0.113.10.sslip.io` | VS Code / local container / remote VM |
 | `<app>.<hostname>` | machine hostname | `http://todoapp.codespace-abc123` | VS Code / Host-header curl in CI |
 | *(catch-all, no host)* | any other Host header | `https://{name}-80.app.github.dev` | **GitHub Codespaces** |
 
@@ -152,8 +169,8 @@ Apps are published through **nginx ingress-nginx** on port 80. Each `registerApp
     Port 80 on the host maps directly to the nginx ingress LoadBalancer. The app is reachable via its sslip.io URL:
 
     ```
-    Browser → http://todoapp.18.134.158.252.sslip.io
-                  DNS: sslip.io resolves to 18.134.158.252
+    Browser → http://todoapp.203.0.113.10.sslip.io
+                  DNS: sslip.io resolves to 203.0.113.10
                   nginx ingress matches Host header → todoapp service:80
     ```
 
@@ -181,7 +198,7 @@ Apps are published through **nginx ingress-nginx** on port 80. Each `registerApp
     ```bash
     # assertRunningApp sends:
     curl --fail --max-time 5 \
-      -H "Host: todoapp.172.16.0.10.sslip.io" \
+      -H "Host: todoapp.203.0.113.10.sslip.io" \
       http://localhost:30080
     ```
 
@@ -249,7 +266,7 @@ The Makefile generates a `cached_makefile.sh` wrapper during bootstrap that corr
 
 Automation for CI/CD and integration testing:
 
-- **.github/workflows/integration-tests.yaml**: Runs integration tests on every PR. The `main` branch is protected — tests must pass before merging.
+- **.github/workflows/integration-tests.yaml**: Runs integration tests on every PR. The `main` branch is protected — the integration-test check must pass before merging.
 - **test/integration.sh**: Repo-specific test runner. Loads the framework, then runs assertions.
 
 ### Integration Test Function
@@ -265,13 +282,18 @@ printInfoSection "Running integration Tests for $RepositoryName"
 
 assertRunningPod dynatrace operator
 assertRunningPod dynatrace activegate
-assertRunningPod dynatrace oneagent
+# assertRunningPod dynatrace oneagent
+#   ^ intentionally not asserted on K3d: cluster nodes are containers, so the
+#     OneAgent DaemonSet cannot reach the host kernel and stays CrashLoopBackOff.
+#     See the K3d limitation note in the Testing section.
 
 # App is reachable via nginx ingress + sslip.io magic DNS
 assertRunningApp todoapp
 ```
 
-These assertions check that required pods are running and the application is accessible. If any assertion fails, the PR is blocked from merging.
+These assertions check that required pods are running and the application is accessible. If any
+assertion fails, the PR is blocked from merging. The full list of assertions, including three that
+are **placeholders and can never fail**, is in [Testing](testing.md#test-function-reference).
 
 ---
 
@@ -408,7 +430,7 @@ This enables Kind and other Docker-based tools to work inside the dev environmen
 
 Reusable shell functions loaded into every shell session:
 
-- **functions.sh**: Main library (1800+ lines). Includes logging, Kubernetes helpers, deployment functions, environment management, and tracking.
+- **functions.sh**: Main library. Includes logging, Kubernetes helpers, deployment functions, environment management, and tracking. It also sources `test/test_functions.sh`, which is why the [test assertions](testing.md#test-function-reference) are available in every shell.
 - **source_framework.sh**: Version-aware loader. Handles DEV MODE (local files) and CACHE MODE (two-tier cache with git clone fallback).
 - **greeting.sh**: Welcome message with environment info. Call `printGreeting` or open a new terminal.
 - **variables.sh**: Central variables (image versions, port ranges, ENV_FILE path).

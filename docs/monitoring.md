@@ -57,10 +57,25 @@ All codespace instantiations are monitored by sending a signal to the Codespaces
 
 ### 📊 GitHub Pages
 
-GitHub Pages are monitored using Dynatrace Agentless Real User Monitoring (RUM):
+GitHub Pages are monitored using Dynatrace Agentless Real User Monitoring (RUM). Both mechanisms live
+in **one file** — `docs/overrides/main.html`, the Jinja template that extends the Material theme's
+`base.html`. No markdown page carries tracking code of its own:
 
-- An agentless RUM snippet is injected into the `main.html` template located in the `overrides` folder. This ensures every page load is tracked for user interactions and performance metrics.
-- Additionally, each markdown page includes a JavaScript snippet at the top that sends a BizEvent with the name of the page to Dynatrace. This allows for detailed tracking of user navigation and engagement across the documentation.
+- The agentless RUM snippet is injected into the template's `libs` block, so every page load is
+  tracked for user interactions and performance.
+- The same template's `scripts` block sends a `page_load` BizEvent carrying the page title, which is
+  what allows navigation and engagement to be analysed per page.
+
+Both blocks are guarded on `config.extra.rum_snippet`. That key is the **only** monitoring
+configuration a consuming repo provides — it lives in the repo's own `mkdocs.yaml` under `extra:`. If
+it is absent, the template renders nothing and the site is simply unmonitored, which is why
+`sync validate` checks for it.
+
+!!! note "`main.html` is committed per repo"
+    Unlike `mkdocs-base.yaml` and `extra.css`, which the docs workflow fetches from the framework at
+    build time, `docs/overrides/main.html` is a committed copy in each repository. A change to the
+    tracking mechanism therefore has to be rolled out with `sync push-update`, not picked up
+    automatically on the next build.
 
 ---
 

@@ -32,7 +32,7 @@ graph LR
 Make your changes to the framework, commit them, then release:
 
 ```bash
-# Bump patch (1.2.5 → 1.2.6), tag, push, create GitHub Release
+# Bump the patch component, tag, push, create a GitHub Release
 sync release --part patch
 ```
 
@@ -48,17 +48,20 @@ sync release
 
 ```bash
 # Preview what would change
-sync push-update --framework-version 1.2.6 --dry-run
+sync push-update --framework-version <version> --dry-run
 
 # Execute: pull main → branch → full migrate → commit → push → PR
-sync push-update --framework-version 1.2.6
+sync push-update --framework-version <version>
+
+# --framework-version is optional: omitted, it targets the latest git tag
+sync push-update --dry-run
 ```
 
 Per repo, `push-update`:
 
 1. 📥 Clones if not present locally
 2. 🔄 Checks out main and pulls latest
-3. 🌿 Creates branch `sync/framework-1.2.6`
+3. 🌿 Creates branch `sync/framework-<version>`
 4. 🔧 Runs full migration (Category A cleanup, templates, mkdocs, .env, README badges, devcontainer.json fixes)
 5. 📝 Commits all changes
 6. 🚀 Pushes branch and creates PR
@@ -68,7 +71,7 @@ On failure at any step, the branch is left in place for manual intervention.
 To re-push changes at the same version (e.g. after fixing badges or templates):
 
 ```bash
-sync push-update --framework-version 1.2.6 --force
+sync push-update --framework-version <version> --force
 ```
 
 ### Step 3: Monitor CI and merge
@@ -78,13 +81,13 @@ sync push-update --framework-version 1.2.6 --force
 sync list-pr
 
 # Filter to sync PRs for a specific version
-sync list-pr --framework-version 1.2.6
+sync list-pr --framework-version <version>
 
 # Merge passing PRs
 sync list-pr --merge
 
 # Close old PRs that are superseded
-sync list-pr --framework-version 1.2.5 --close -c "Superseded by 1.2.6"
+sync list-pr --framework-version <previous-version> --close -c "Superseded by <version>"
 ```
 
 ### Step 4: Tag consumer repos and create releases
@@ -93,13 +96,13 @@ After all PRs are merged:
 
 ```bash
 # Preview
-sync tag --framework-version 1.2.6 --bump patch --release --dry-run
+sync tag --framework-version <version> --bump patch --release --dry-run
 
 # Create combined version tags + GitHub Releases
-sync tag --framework-version 1.2.6 --bump patch --release
+sync tag --framework-version <version> --bump patch --release
 ```
 
-Each repo gets a tag like `v1.2.6_1.0.1` (framework version + repo version) and a GitHub Release with categorized changelog.
+Each repo gets a tag of the form `v<framework-version>_<repo-version>` and a GitHub Release with categorized changelog.
 
 ### Step 5: Cleanup
 
@@ -135,29 +138,36 @@ When `push-update` or `migrate` runs on a repo, it executes these phases:
 
 ## All Commands
 
+Run `sync <command> --help` for the authoritative flags — the table below lists what each command is
+for, not every option it takes.
+
 ### Migration & Updates
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `push-update` | Full workflow: pull → branch → migrate → push → PR | `sync push-update --framework-version 1.2.6` |
-| `migrate` | Local migration preview (no git operations) | `sync migrate --dry-run` |
+| `push-update` | Full workflow: pull → branch → migrate → push → PR | `sync push-update --framework-version <version>` |
+| `diff` | Preview what `push-update` would change, without touching git | `sync diff` |
+| `migrate` | Migrate repos to the versioned pull model | `sync migrate --dry-run` |
+| `migrate-mkdocs` | Convert a single repo's `mkdocs.yaml` to the `INHERIT` pattern | `sync migrate-mkdocs --repo <owner/name>` |
 | `revert` | Undo uncommitted changes | `sync revert --repo template` |
-| `validate` | Check schema, GitHub, templates, badges | `sync validate` |
+| `validate` | Check `repos.yaml` schema and local repo state, including docs structure | `sync validate` |
 
 ### Versioning & Releases
 
 | Command | Description | Example |
 |---------|-------------|---------|
 | `release` | Tag framework, create GitHub Release | `sync release --part patch` |
-| `tag` | Tag consumer repos with combined version | `sync tag --framework-version 1.2.6 --bump patch --release` |
+| `tag` | Tag consumer repos with the combined version | `sync tag --framework-version <version> --bump patch --release` |
+| `bump-repo-version` | Bump only a repo's own version component | `sync bump-repo-version --repo <owner/name> --part minor` |
 
 ### Repository Management
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `clone` | Clone repos from repos.yaml | `sync clone --all` |
-| `protect-main` | Apply branch protection rules | `sync protect-main` |
-| `cleanup-branches` | Delete merged branches | `sync cleanup-branches --dry-run` |
+| `clone` | Clone repos from `repos.yaml` | `sync clone --all` |
+| `checkout` | Check out `main` across repos and show status | `sync checkout --pull` |
+| `protect-main` | Enable branch protection on the default branch | `sync protect-main --dry-run` |
+| `cleanup-branches` | Delete merged branches (local + remote) | `sync cleanup-branches --dry-run` |
 
 ### Monitoring
 
@@ -165,8 +175,22 @@ When `push-update` or `migrate` runs on a repo, it executes these phases:
 |---------|-------------|---------|
 | `list-pr` | List PRs, approve, merge, or close | `sync list-pr --merge` |
 | `list-issues` | List open issues | `sync list-issues --label bug` |
+| `ci-status` | Latest CI run status across repos | `sync ci-status` |
 | `status` | Show version drift | `sync status` |
 | `list` | List registered repos | `sync list --sync-managed --json` |
+
+### Registry generation
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `generate-registry` | Build the registry consumed by The Hub | `sync generate-registry` |
+| `generate-json` | Emit `repos.json` for the published catalog | `sync generate-json` |
+
+!!! tip "`protect-main` resolves the branch and the required check"
+    It reads the default branch from the GitHub API rather than assuming `main`, accepts repos that
+    are not in `repos.yaml` via `--repo`, and takes `--check` (repeatable) to set which status-check
+    contexts are required. The default context is the integration-test job name — see
+    [Testing](testing.md#branch-protection).
 
 ---
 
@@ -183,11 +207,11 @@ sync migrate --dry-run        # Preview migration
 ### Deploy a framework update
 
 ```bash
-sync release --part patch                          # 1.2.5 → 1.2.6
-sync push-update --framework-version 1.2.6         # Create PRs
-sync list-pr --framework-version 1.2.6             # Monitor CI
+sync release --part patch                          # bump + tag + GitHub Release
+sync push-update --framework-version <version>         # Create PRs
+sync list-pr --framework-version <version>             # Monitor CI
 sync list-pr --merge                               # Merge passing
-sync tag --framework-version 1.2.6 --bump patch --release  # Tag + release
+sync tag --framework-version <version> --bump patch --release  # Tag + release
 sync cleanup-branches                              # Clean up
 ```
 
@@ -195,13 +219,13 @@ sync cleanup-branches                              # Clean up
 
 ```bash
 # Edit the framework, commit
-sync push-update --framework-version 1.2.6 --force
+sync push-update --framework-version <version> --force
 ```
 
 ### Close old PRs
 
 ```bash
-sync list-pr --framework-version 1.2.5 --close -c "Superseded by 1.2.6"
+sync list-pr --framework-version <previous-version> --close -c "Superseded by <version>"
 ```
 
 ### Housekeeping
@@ -229,6 +253,15 @@ sync list-issues               # Check for open issues
 | `sync/commands/tag.py` | Consumer repo tagging + releases |
 | `sync/commands/list_pr.py` | PR listing, approve, merge, close |
 | `repos.yaml` | Registry of all repos |
+| `sync/tests/` | The CLI's own pytest suite — see [Testing](testing.md#sync-cli-unit-tests-pytest) |
+
+!!! warning "Run the tests before changing `sync/` or `repos.yaml`"
+    The suite covers `repos.yaml` parsing, version maths and every subcommand, and it needs no
+    network — but **no GitHub Actions workflow runs it**, so a regression only shows up if you run it:
+    ```bash
+    pip install -r requirements-dev.txt
+    pytest sync/tests
+    ```
 
 ---
 

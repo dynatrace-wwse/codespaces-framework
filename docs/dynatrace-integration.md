@@ -29,14 +29,17 @@ Before you begin working with the MCP-enabled agent, you'll need to tell the age
 
 
 !!! info "Playground as default environment"
-    By default if no environment is set, the DT_ENVIRONMENT variable will point to the playground [https://wkf10640.apps.dynatrace.com](https://wkf10640.apps.dynatrace.com)
+    If no environment is set, `DT_ENVIRONMENT` falls back to a shared playground tenant. The
+    environment menu in the framework (`dynatraceEvalReadSaveCredentials` in
+    `.devcontainer/util/functions.sh`) offers it as option 1 and holds the current URL — read it
+    there rather than from this page, so it cannot go stale.
 
 ### Step 1:Connecting the MCP Server 
 
 !!! info "Steps to establish an MCP Server Connection"
     1. On the IDE go to the left pane > `Extensions > MCP Servers Installed  > dynatrace-mcp-server`
     - Open dynatrace-mcp-server click on the configuration wheel > Start server
-    - The server should start, it'll read the environment file located in .devcontainer/runlocal/.env and will read the variable DT_ENVIRONMENT
+    - The server should start, it will read the environment file located at `.devcontainer/.env` and will read the variable DT_ENVIRONMENT
     - In the Server output (click on Show Output in the configuration wheel )
     - A link for the SSO authentication should open automatically (if not then click on it).
     - "✅ Successfully retrieved token from SSO!" is what you should see if you have access to the environment. Now let the agents communicate with the environment.
