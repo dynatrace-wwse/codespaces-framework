@@ -34,10 +34,20 @@ Both components follow [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.
 Each repo pins its framework version in `.devcontainer/util/source_framework.sh`:
 
 ```bash
-FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-1.2.5}"
+FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-<framework-version>}"
 ```
 
-The Sync CLI manages this pin across all repos via `push-update`.
+That one line is the single selector: it decides which framework files the container pulls from the
+cache **and** which `mkdocs-base.yaml` the docs workflow fetches. The Sync CLI manages the pin across
+all repos via `push-update`.
+
+!!! tip "Read the version from the repo, never from a document"
+    Any version written into a page is stale the next release. To see what a repo actually pins:
+    ```bash
+    grep -oP ':-\K[^}"]+' .devcontainer/util/source_framework.sh | head -1
+    ```
+    Across the whole fleet, `sync status` shows the drift; the framework's own current version is its
+    latest git tag.
 
 ### Vendored Front-End Assets
 
@@ -88,10 +98,10 @@ After syncing all repos to a framework version and merging PRs:
 
 ```bash
 # Create combined tags on all repos
-sync tag --framework-version 1.2.5
+sync tag --framework-version <framework-version>
 
 # Bump repo version and create GitHub Releases
-sync tag --framework-version 1.2.5 --bump patch --release
+sync tag --framework-version <framework-version> --bump patch --release
 ```
 
 ### Benefits
@@ -103,5 +113,5 @@ sync tag --framework-version 1.2.5 --bump patch --release
 
 
 <div class="grid cards" markdown>
-- [Continue to Resources →](resources.md)
+- [Continue to Cleanup →](cleanup.md)
 </div>

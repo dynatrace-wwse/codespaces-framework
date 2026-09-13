@@ -26,16 +26,25 @@ Dynatrace OneAgent FullStack and Kubernetes CloudNativeFullstack deployments are
 
 ## Tooling
 
-!!! tip "🛠️ Included tooling "
-    The image comes with a comprehensive set of tools required for modern DevOps and cloud-native development, including:
+!!! tip "🛠️ Baked into the image"
+    Installed at image build time, present the moment the container starts:
 
-    - [Helm](https://helm.sh)
     - [Kubectl](https://kubernetes.io/docs/reference/kubectl/)
+    - [Helm](https://helm.sh)
     - [Kind](https://kind.sigs.k8s.io/)
-    - [Docker](https://www.docker.com/)
+    - [Docker CLI](https://www.docker.com/) — the client only; it talks to the host daemon through the mounted socket (see below)
     - [NodeJs](https://nodejs.org/)
-    - [K9s](https://k9scli.io/)
-    - [Python](https://www.python.org/)
+    - [Python](https://www.python.org/) (`python3-pip`)
+    - [GitHub CLI](https://cli.github.com/) (`gh`)
+
+!!! tip "🧰 Installed on demand by the framework"
+    Kept out of the image so their versions can move without an image rebuild. A repo's
+    `post-create.sh` calls the installer it needs:
+
+    - [K3d](https://k3d.io) — `installK3d`; the **default** cluster engine
+    - [K9s](https://k9scli.io/) — `installK9s`
+    - [MkDocs](https://www.mkdocs.org/) — `installMkdocs`, for previewing the repo's own docs
+    - [bats](https://bats-core.readthedocs.io/) — added by `make test-in-container` when the image does not carry it
 
 
 

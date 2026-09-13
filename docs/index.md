@@ -35,7 +35,8 @@ The Dynatrace Enablement Framework simplifies the delivery of demos and hands-on
   Modular design allows repo-specific logic without impacting the core framework.
 
 - **Automated Testing**  
-  GitHub Actions enable end-to-end integration tests for all trainings.
+  Every training repo runs its devcontainer integration test on each Pull Request, and the framework
+  carries its own shell and CLI unit suites. See [Testing](testing.md).
 
 - **Monitoring & Analytics**  
   Usage and adoption are tracked with Dynatrace for continuous improvement.

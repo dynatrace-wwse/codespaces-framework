@@ -9,5 +9,5 @@ Another way to do this is by going to [https://github.com/codespaces](https://gi
 You may also want to deactivate or delete the API token needed for this lab.
 
 <div class="grid cards" markdown>
-- [Ressources:octicons-arrow-right-24:](resources.md)
+- [Continue to Resources →](resources.md)
 </div>

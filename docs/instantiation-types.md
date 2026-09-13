@@ -41,13 +41,13 @@ The following steps apply to both scenarios:
 3. **Clone the repository**
 
 4. **Set up secrets and environment variables**
-	- Define all required secrets as environment variables. For both VS Code Dev Containers and local containers, create a `.env` file under `.devcontainer/runlocal/.env`.
+	- Define all required secrets as environment variables. For both VS Code Dev Containers and local containers, create a `.env` file under `.devcontainer/.env`.
 	- The secrets required are defined in the `secrets` section of `.devcontainer.json`. If no secrets are needed, create an empty `.env` file.
 
 	??? info "Sample `.env` file"
-		You can copy and paste the following sample into `.devcontainer/runlocal/.env`. Ensure all required secrets for the training are included.
+		You can copy and paste the following sample into `.devcontainer/.env`. Ensure all required secrets for the training are included.
 
-		```properties title=".devcontainer/runlocal/.env" linenums="1"
+		```properties title=".devcontainer/.env" linenums="1"
 		# Environment variables as defined as secrets in the devcontainer.json file
 		# Dynatrace Tenant
 		DT_ENVIRONMENT=https://abc123.apps.dynatrace.com
@@ -77,11 +77,11 @@ The following steps apply to both scenarios:
 
 #### 2. a. 📦 🖥️ Running as dev container with VS Code 
 
-1. Let's tell VS Code to read the secrets as environment variables from an `.env`file. Modify the `runArgs` in `.devcontainer/devcontainer.json` and add `"--env-file", ".devcontainer/runlocal/.env"`like the following:
+1. Let's tell VS Code to read the secrets as environment variables from an `.env`file. Modify the `runArgs` in `.devcontainer/devcontainer.json` and add `"--env-file", ".devcontainer/.env"`like the following:
 	```json
-	"runArgs": ["--init", "--privileged", "--network=host", "--env-file", ".devcontainer/runlocal/.env"]
+	"runArgs": ["--init", "--privileged", "--network=host", "--env-file", ".devcontainer/.env"]
 	```
-- This ensures all variables in `.devcontainer/runlocal/.env` are available inside the container.
+- This ensures all variables in `.devcontainer/.env` are available inside the container.
 - ![run codespace](img/vscode_container.png){ align=right ; width="400"}Open the folder in VS Code and use the Dev Containers extension to "Reopen in Container". VS Code will use the `.devcontainer/devcontainer.json` definition to build and start the environment for you.
 - You can rebuild the container at any time by typing ```[CTRL] + Shift P > Dev Containers: Rebuild and reopen in container```
 
@@ -95,7 +95,7 @@ The following steps apply to both scenarios:
 	!!! info "Protip: create a new Terminal"
 		For attaching a new Terminal to the container, just type `make start`.
 
-- Secrets and environment variables are loaded from `.devcontainer/runlocal/.env`. 
+- Secrets and environment variables are loaded from `.devcontainer/.env`. 
 - The `makefile.sh` script passes the variables to Docker at runtime such as arguments, volume mounts and port-forwarding. The devcontainer.json file is not used with this set-up.
 
 
@@ -274,12 +274,17 @@ is *who pressed start* (the app, via the user's GitHub identity) and *who relays
     Full design: `dynatrace-app-enablements/docs/CODESPACES_DIRECT_LAUNCH_ANALYSIS.md`.
 
 !!! info "DNS & TLS requirements"
-    The wildcard subdomain requires:
+    Serving one app per job under a wildcard subdomain requires three things of the host, whatever
+    its address:
 
-    - DNS: `*.autonomous-enablements.whydevslovedynatrace.com A 18.134.158.252` (Google Cloud DNS)
-    - TLS: a Let's Encrypt wildcard cert for `*.autonomous-enablements.whydevslovedynatrace.com`
-      issued via DNS-01 challenge (manual renewal every 90 days)
-    - nginx: `server_names_hash_bucket_size 128` in `/etc/nginx/nginx.conf`
+    - **DNS:** a wildcard `A` record for the delivery domain, pointing at the host that terminates
+      the requests
+    - **TLS:** a wildcard certificate for the same domain, issued via the DNS-01 challenge (HTTP-01
+      cannot issue wildcards), and renewed before expiry
+    - **nginx:** a raised `server_names_hash_bucket_size`, since per-job server names are long
+
+    The concrete record, certificate and host configuration belong to
+    [Orbital](ops-platform.md) and are documented in that (private) repository.
 
 
 ## ⚡ Quick Comparison
@@ -299,8 +304,8 @@ Secrets and environment variables are handled differently depending on the insta
 | Instantiation Type         | How Secrets Are Provided                                                                 | Where to Configure/Set                        | Notes                                                                                 |
 |---------------------------|----------------------------------------------------------------------------------------|-----------------------------------------------|---------------------------------------------------------------------------------------|
 | ☁️ Codespaces             | Auto-injected as environment variables from GitHub Codespaces secrets                   | GitHub repository > Codespaces secrets         | No manual setup; secrets available at container start                                 |
-| 🖥️ VS Code Dev Containers | Passed as environment variables via `runArgs` and `.env` file                          | `.devcontainer/devcontainer.json`, `.devcontainer/runlocal/.env`      | Edit/add `.devcontainer/runlocal/.env` for local secrets; `runArgs` must include `--env-file`                    |
-| 🐳 Local Container        | Loaded from `.devcontainer/runlocal/.env` file and passed to Docker at runtime by `makefile.sh`                | `.devcontainer/runlocal/.env`, `makefile.sh`   | Run `make start` in `.devcontainer`; secrets loaded at container start                |
+| 🖥️ VS Code Dev Containers | Passed as environment variables via `runArgs` and `.env` file                          | `.devcontainer/devcontainer.json`, `.devcontainer/.env`      | Edit/add `.devcontainer/.env` for local secrets; `runArgs` must include `--env-file`                    |
+| 🐳 Local Container        | Loaded from `.devcontainer/.env` file and passed to Docker at runtime by `makefile.sh`                | `.devcontainer/.env`, `makefile.sh`   | Run `make start` in `.devcontainer`; secrets loaded at container start                |
 | 🛰️ Orbital                | Written just-in-time per job as `.devcontainer/.env` by the worker (`executor.py`); minted, tenant-scoped, fail-closed for foreign tenants | Orbital ops-server (no learner action)         | See [Orbital](ops-platform.md); CoE creds never leak cross-tenant                     |
 | 🧑‍🚀 App-launched Codespace | The learner's **user-scope** GitHub Codespaces secrets (set once, or via per-user OAuth) — repo/org secrets break per-tenant isolation | `https://github.com/settings/codespaces` or app OAuth | See [Enablement App](enablement-app.md); create API takes no env, so secrets are pre-set |
 

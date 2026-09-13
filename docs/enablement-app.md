@@ -38,7 +38,7 @@ and consumes* a training, in-product.
    ┌──────────────────────────────────────────────┐
    │  CODESPACES FRAMEWORK                          │
    │   .devcontainer/ · functions.sh · variables.sh │
-   │   sync/ keeps all 27 repos on one version      │
+   │   sync/ keeps every repo on one version        │
    └──────────────────────────────────────────────┘
 ```
 
@@ -125,7 +125,7 @@ architecture, sequence diagrams, relay mechanics, and production-grade code:
 | **Orbital — Ops Platform** | [ops-platform.md](ops-platform.md) |
 | **Instantiation types** | [instantiation-types.md](instantiation-types.md) |
 | **Lab Registry (The Hub)** | https://dynatrace-wwse.github.io/ |
-| **COE Tenant** | https://geu80787.apps.dynatrace.com |
+| **Testing** | [testing.md](testing.md) |
 
 <div class="grid cards" markdown>
 - [← Orbital — Ops Platform](ops-platform.md)
