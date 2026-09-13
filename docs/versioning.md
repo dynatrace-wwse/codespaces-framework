@@ -39,6 +39,49 @@ FRAMEWORK_VERSION="${FRAMEWORK_VERSION:-1.2.5}"
 
 The Sync CLI manages this pin across all repos via `push-update`.
 
+### Vendored Front-End Assets
+
+Mermaid is **vendored**, not pulled from a CDN at page load. Material for MkDocs would
+otherwise fetch `https://unpkg.com/mermaid@11/dist/mermaid.min.js` on every page view — a
+floating major that can change under the sites without a commit anywhere.
+
+| | |
+|---|---|
+| File | `docs/javascripts/mermaid.min.js` |
+| Pinned version | `11.17.2` |
+| Source | `https://unpkg.com/mermaid@11.17.2/dist/mermaid.min.js` |
+| sha256 | `581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8` |
+| Size | 3.5 MB raw (0.9 MB gzipped over the wire) |
+
+Consuming repos do not commit the file. Their `deploy-ghpages.yaml` fetches it from this repo
+at their pinned `FRAMEWORK_VERSION`, alongside `mkdocs-base.yaml` and `docs/stylesheets/extra.css`.
+The pin therefore travels with the framework version — every repo on the same tag renders with
+the same mermaid.
+
+!!! warning "The pin does not update itself"
+    There are no automatic security or bug fixes. A diagram written against mermaid syntax newer
+    than the pin renders as an error box in the page; it does **not** fail the build.
+
+#### Bumping the pin
+
+1. Check what changed upstream: [mermaid releases](https://github.com/mermaid-js/mermaid/releases).
+2. Download and record the new hash:
+   ```bash
+   curl -fsSL "https://unpkg.com/mermaid@<NEW>/dist/mermaid.min.js" -o docs/javascripts/mermaid.min.js
+   sha256sum docs/javascripts/mermaid.min.js
+   ```
+3. Update the version, source URL and sha256 in the `extra_javascript` comment block of
+   `mkdocs-base.yaml`, and the table above.
+4. Build and confirm a diagram still renders — `mkdocs build` succeeding is **not** proof. Check
+   that the page emits `<pre class="mermaid">` and that a diagram appears in the browser. Material
+   puts the rendered SVG in a *closed* shadow root, so `document.querySelector(".mermaid svg")`
+   finds nothing even when the diagram is fine.
+5. Release a framework version and `sync push-update`, so every repo moves to the same mermaid.
+   Repos left on older tags keep the mermaid of the tag they are pinned to.
+
+Staying inside mermaid `11.x` is deliberate: Material 9.5.x asks for `mermaid@11`, so the pin
+matches what it expects. A major bump needs a Material upgrade checked alongside it.
+
 ### Tagging Workflow
 
 After syncing all repos to a framework version and merging PRs:

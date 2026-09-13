@@ -1,0 +1,67 @@
+name: Validate docs
+# A strict documentation build, run alongside publication - never in place of it.
+#
+# Publishing from branches that start with 'docs' (and from 'rfe/*') is by
+# design: a docs-only change carries no test risk, so deploy-ghpages.yaml puts it
+# straight on the site. This workflow does not gate, block or delay that. It runs
+# on the same branches and on pull requests, and tells you whether the build is
+# strict-clean, whether the nav resolves, and whether the assets the config
+# references actually exist.
+#
+# `mkdocs build` as run by deploy-ghpages.yaml is not strict, and is silent about
+# a missing extra_javascript file. This is where that shows up.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yaml'
+      - 'mkdocs-base.yaml'
+      - '.github/scripts/**'
+      - '.github/workflows/validate-docs.yaml'
+  push:
+    branches:
+      - 'docs/**'
+      - 'rfe/**'
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yaml'
+      - 'mkdocs-base.yaml'
+      - '.github/scripts/**'
+      - '.github/workflows/validate-docs.yaml'
+  workflow_dispatch:
+
+# A validator needs nothing else.
+permissions:
+  contents: read
+
+# Deliberately NOT the 'pages' group used by deploy-ghpages.yaml: that group is
+# cancel-in-progress, and this job runs on the same pushes. Sharing it would mean
+# validation cancelling the publish it is meant to accompany.
+concurrency:
+  group: validate-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Build and check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install requirements
+        run: pip install --break-system-packages -r docs/requirements/requirements-mkdocs.txt
+
+      # --strict turns MkDocs warnings into errors. Measured on mkdocs-material
+      # 9.5.42: this aborts on a broken internal link and on a nav entry naming a
+      # file that does not exist. It does NOT catch a broken #anchor - MkDocs
+      # logs those at INFO.
+      - name: Build documentation (strict)
+        run: mkdocs build --strict --site-dir site
+
+      - name: Check referenced assets exist
+        run: python .github/scripts/check_referenced_assets.py site
