@@ -167,6 +167,16 @@ repos:
     icon_key: dql
     duration: "1.5h"
 
+  - name: enablement-bindplane-logs
+    repo: dynatrace-wwse/enablement-bindplane-logs
+    status: active
+    maintainer: "@ericm-dt, @shinojosa"
+    description: "Build a log pipeline with Bindplane and Dynatrace. Install the Bindplane agent, shape logs in flight (add fields, mask sensitive data, route), deliver to Dynatrace, and parse with OpenPipeline. Extract metrics from logs and monitor Bindplane health with SFM."
+    tags: [logs, bindplane, openpipeline]
+    title: "Log Pipelines with Bindplane"
+    primary_tag: logs
+    duration: "2h"
+
   # ── Workshops ──
   - name: workshop-dynatrace-log-analytics
     repo: dynatrace-wwse/workshop-dynatrace-log-analytics

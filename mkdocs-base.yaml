@@ -53,7 +53,12 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - admonition
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        # ```mermaid blocks render as diagrams instead of a grey code box.
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.snippets:
       base_path: ["docs"]
   - pymdownx.tabbed:
@@ -71,6 +76,16 @@ markdown_extensions:
 
 extra_css:
   - stylesheets/extra.css
+
+# Mermaid is vendored, not fetched from a CDN at page load.
+# Pinned: mermaid 11.17.2
+#   source: https://unpkg.com/mermaid@11.17.2/dist/mermaid.min.js
+#   sha256: 581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8
+# Material's own loader is guarded on `typeof mermaid == "undefined"`, so loading
+# our copy here stops it fetching https://unpkg.com/mermaid@11/dist/mermaid.min.js.
+# Bumping the pin is a deliberate, documented step -- see docs/versioning.md.
+extra_javascript:
+  - javascripts/mermaid.min.js
 
 plugins:
   - search
