@@ -1,15 +1,15 @@
 name: Validate docs
-# A strict documentation build, run alongside publication - never in place of it.
+# Validates the documentation build WITHOUT publishing it.
 #
-# Publishing from branches that start with 'docs' (and from 'rfe/*') is by
-# design: a docs-only change carries no test risk, so deploy-ghpages.yaml puts it
-# straight on the site. This workflow does not gate, block or delay that. It runs
-# on the same branches and on pull requests, and tells you whether the build is
-# strict-clean, whether the nav resolves, and whether the assets the config
-# references actually exist.
+# This is the half the repo was missing. deploy-ghpages.yaml used to trigger on
+# push to 'docs/*' and 'rfe/*', so a working branch published the public site
+# with no review; the github-pages environment allowlist rejected it, but only
+# after the run had been queued into the 'pages' concurrency group. Publication
+# now happens only from main, after merge, and the branches that used to publish
+# land here instead.
 #
-# `mkdocs build` as run by deploy-ghpages.yaml is not strict, and is silent about
-# a missing extra_javascript file. This is where that shows up.
+# Note the permissions below: contents:read only. No 'pages: write', no
+# 'id-token: write', no environment. This workflow cannot deploy.
 on:
   pull_request:
     branches:
@@ -20,6 +20,7 @@ on:
       - 'mkdocs-base.yaml'
       - '.github/scripts/**'
       - '.github/workflows/validate-docs.yaml'
+      - '.github/workflows/deploy-ghpages*.yaml'
   push:
     branches:
       - 'docs/**'
@@ -30,22 +31,21 @@ on:
       - 'mkdocs-base.yaml'
       - '.github/scripts/**'
       - '.github/workflows/validate-docs.yaml'
+      - '.github/workflows/deploy-ghpages*.yaml'
   workflow_dispatch:
 
-# A validator needs nothing else.
 permissions:
   contents: read
 
-# Deliberately NOT the 'pages' group used by deploy-ghpages.yaml: that group is
-# cancel-in-progress, and this job runs on the same pushes. Sharing it would mean
-# validation cancelling the publish it is meant to accompany.
+# Deliberately NOT the 'pages' group: a validation run must never cancel a
+# release in flight.
 concurrency:
   group: validate-docs-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
-    name: Build and check
+    name: Build and check (no publish)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -65,3 +65,6 @@ jobs:
 
       - name: Check referenced assets exist
         run: python .github/scripts/check_referenced_assets.py site
+
+      - name: Check publication triggers
+        run: python .github/scripts/check_publish_triggers.py

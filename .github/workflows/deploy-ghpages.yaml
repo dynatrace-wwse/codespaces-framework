@@ -1,29 +1,67 @@
 name: Deploy GitHub Pages
 run-name: ${{ github.event.head_commit.message }} - deploy github pages
+# Publication happens ONLY from main, after a PR is merged.
+#
+# This used to also trigger on 'docs/*' and 'rfe/*', so any push to a working
+# branch attempted to publish the public site with no review. It also shares the
+# 'pages' concurrency group below with cancel-in-progress, so such a push could
+# cancel an in-flight main deploy before being rejected.
+#
+# The github-pages environment has a deployment branch allowlist (main, gh-pages)
+# which rejected those runs - that control is real and stays. But it only fires
+# once the job is already queued: run 34607139129 on branch docs/mermaid-pinned
+# was rejected with steps_run=0, after entering the concurrency group. Settings
+# are the backstop; this trigger list is the fix.
+#
+# Pull requests are validated, without publishing, by validate-docs.yaml.
 on:
   push:
     branches:
       - main
-      - docs/*
-      - rfe/*
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Branch to deploy
-        default: main
-        required: false
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# cancel-in-progress stays true. It is now correct, and it was not before.
+#
+# 'pages' is this file's group and no other workflow in the repo joins it
+# (`grep -rn 'group: pages' .github/` matches here only), so the only runs that
+# can cancel each other are two runs of THIS workflow.
+#
+# What it cost on 2026-09-13, all four facts from the Actions API:
+#   14:10:08  run 34761875717  push main bba40f9          -> cancelled 14:10:15
+#   14:10:13  run 34761879341  push docs/framework-refresh -> failure  14:10:17,
+#                              zero steps executed - the github-pages environment
+#                              allowlist rejected it after it had already joined
+#                              this group and cancelled main.
+# The docs/* run could never publish anything; it only cancelled the run that
+# could. bba40f9 carried the mermaid rendering, and nothing republished it until
+# an unrelated merge (7baa4cc) deployed five minutes later. So a build carrying
+# content nothing else would republish was cancelled by a build that could not
+# publish at all - caused by the trigger list above, not by cancel-in-progress.
+#
+# (The `Sync registry to GitHub Pages` run that started in the same second,
+# 34761875700, was not the canceller: sync-registry.yaml declares no concurrency
+# key at all, and it pushes to the dynatrace-wwse.github.io repository, not to
+# this site. It succeeded at 14:10:22.)
+#
+# With publication restricted to main, a collision can only be two main deploys.
+# main is linear and mkdocs rebuilds the whole site from the checkout every time,
+# so the newer commit's build is a superset of the older one's - the superseded
+# run carries nothing the surviving run does not also publish. That is the
+# reasonable case, so cancelling stays.
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
   deploy-github-pages:
+    # Defence in depth: a manual dispatch from any other branch stops here,
+    # without depending on repository settings staying as they are.
+    if: github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -31,8 +69,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
