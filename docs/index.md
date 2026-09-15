@@ -44,6 +44,11 @@ The Dynatrace Enablement Framework simplifies the delivery of demos and hands-on
 - **Rapid Training Creation**  
   Templates and automation help trainers launch new enablement content quickly.
 
+- **One of Three Systems**  
+  The framework is the shared substrate; a separate ops platform runs environments at scale
+  and a Dynatrace App delivers them to learners. See [The wider ecosystem](ecosystem.md) for
+  the map and which way the dependencies run.
+
 - **Centralized Maintenance**  
   The Codespaces Synchronizer tool keeps all repositories up to date with the latest framework changes.
 
