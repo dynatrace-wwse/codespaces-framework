@@ -1,3 +1,15 @@
+# Framework Phase 2 brief — 2026-05-05
+
+> **Frozen working note.** The original, unedited request for a structured Phase 2
+> plan. Kept for the reasoning it records; it is not a specification and it is not
+> maintained.
+>
+> The structured roadmap it asked for became
+> [2026-08-27-phases-and-tasks.md](2026-08-27-phases-and-tasks.md). For the
+> framework as it actually is today, see the published documentation:
+> <https://dynatrace-wwse.github.io/codespaces-framework/>
+
+---
 
 ** Plan for Phase 2 of the Enablement Framework migration/refactor**
 Please create a structured implementation plan for the points below, we want to test and make sure all repos work with the implemented changes. I'm applying for an IA prize within the company so help me use all best practices with what we have installed claude-code, gstack and dtctl for creating a great project that can be used worldwide for intern and external usage. We will be executing this one by one testing withtin the codespaces-framework hence extracting the core functionality and making the synch easier was the first step, now we modify the core functions and sync to the enablements easier. 
