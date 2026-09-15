@@ -1,5 +1,15 @@
 # Documentation & Screenshot Validation Plan
 
+> **Frozen working note — 2026-04-14.** The plan for the Gen2/Gen3 documentation
+> audit, as written before it ran. Kept as the record of the method; not
+> maintained, and not a description of any process that runs today.
+>
+> Phase 1 of this plan is implemented by `audit/phase1-scan.py`. Per-repo
+> validation output lands in `validation-reports/`, written by tooling that lives
+> outside this repository.
+
+---
+
 Systematic validation of all enablement repo documentation against the live Dynatrace platform. Prioritizes identifying Gen2 (classic) vs Gen3 (native app) drift as Dynatrace migrates features.
 
 ## Phase 1: Static Analysis (no tenant needed)

@@ -1,5 +1,17 @@
 # Enablement Framework — Phases & Tasks
 
+> **Frozen working note — 2026-08-27.** A snapshot of the phased roadmap and the
+> session conventions in use on that date. **Its checklists are stale** — for
+> example §2-8 still lists `framework.md`, `instantiation-types.md` and
+> `ops-platform.md` as pending, and the first two were rewritten in #171 and #173.
+> It also names paths and a private repository that exist only on the maintainer's
+> workstation.
+>
+> Treat it as a record of what was planned, not as a list of open work. For the
+> framework as it is today, see the published documentation: <https://dynatrace-wwse.github.io/codespaces-framework/>
+
+---
+
 Full phased roadmap. Start each session by reading `CLAUDE.md` + memory files. End each session by updating `PROJECT-STATUS.md` in the private `dynatrace-wwse/orbital` repo and the relevant memory file.
 
 ---
