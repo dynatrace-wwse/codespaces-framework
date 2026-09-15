@@ -293,6 +293,51 @@ assertAstroshopContent() {
   fi
 }
 
+_assertEnvVar_display() {
+  # Returns a display-safe form of a value for use in error messages.
+  #
+  # Redacts when EITHER condition holds:
+  #   (1) variable name contains TOKEN, SECRET, PASSWORD, KEY, or CREDENTIAL
+  #   (2) value begins with a Dynatrace token prefix (dt0X00. pattern)
+  #
+  # Redacted form: "[REDACTED len=NN]" or "[REDACTED dt0s16.… len=NN]" for DT tokens,
+  # so the token class (public information) is visible without revealing the secret.
+  #
+  # What this rule cannot catch: a secret stored in a generically-named variable
+  # (e.g. FOO=dt0s16…) where the name does not match AND the value is not a DT-shaped
+  # token. Callers responsible for those variables should pass a pattern so a mismatch
+  # is diagnosed without echoing; the value-shape check is a safety net, not a guarantee.
+  local var_name="$1"
+  local var_value="$2"
+  local upper_name
+  upper_name="$(printf '%s' "$var_name" | tr '[:lower:]' '[:upper:]')"
+
+  local name_sensitive=0
+  case "$upper_name" in
+    *TOKEN*|*SECRET*|*PASSWORD*|*KEY*|*CREDENTIAL*) name_sensitive=1 ;;
+  esac
+
+  local value_sensitive=0
+  if printf '%s' "$var_value" | grep -qE '^dt0[a-z][0-9]{2}\.'; then
+    value_sensitive=1
+  fi
+
+  if [ "$name_sensitive" -eq 1 ] || [ "$value_sensitive" -eq 1 ]; then
+    local len="${#var_value}"
+    local prefix=""
+    if [ "$value_sensitive" -eq 1 ]; then
+      prefix="$(printf '%s' "$var_value" | grep -oE '^dt0[a-z][0-9]{2}\.')"
+    fi
+    if [ -n "$prefix" ]; then
+      printf '[REDACTED %s… len=%d]' "$prefix" "$len"
+    else
+      printf '[REDACTED len=%d]' "$len"
+    fi
+  else
+    printf '%s' "$var_value"
+  fi
+}
+
 assertEnvVariable(){
   # Assert an environment variable is set and optionally matches a pattern
   # Usage: assertEnvVariable <var-name> [pattern]
@@ -312,7 +357,9 @@ assertEnvVariable(){
     if echo "$var_value" | grep -qE "$pattern"; then
       printInfo "✅ $var_name matches pattern '$pattern'"
     else
-      printError "❌ $var_name='$var_value' does not match pattern '$pattern'"
+      local _display
+      _display="$(_assertEnvVar_display "$var_name" "$var_value")"
+      printError "❌ $var_name='$_display' does not match pattern '$pattern'"
       exit 1
     fi
   else
