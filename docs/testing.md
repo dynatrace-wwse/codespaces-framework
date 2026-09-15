@@ -257,7 +257,7 @@ on the [Orbital](ops-platform.md) ops platform, in a Codespace, or on a local ma
 | `integration_k3d_aitraveladvisor.sh` | AI Travel Advisor stack (Ollama, Weaviate, app) on K3d | AMD64 only (Ollama has no ARM64 image) | `DT_LLM_TOKEN` — skips gracefully when absent |
 | `integration_appmon_k3d_todoapp.sh` | Dynatrace **ApplicationMonitoring** end to end on K3d | AMD64 **and** ARM64, run independently | `DT_ENVIRONMENT`, `DT_OPERATOR_TOKEN`, `DT_INGEST_TOKEN` |
 | `integration_cnfs_k3d_todoapp.sh` | Dynatrace **CloudNativeFullStack** on K3d | AMD64 **and** ARM64 | same three |
-| `integration_dtwiz_k3d.sh` | The `dtwiz` CLI path: install, `status`, `analyze`, `install kubernetes` | any | `DT_ENVIRONMENT` + **`DT_PLATFORM_TOKEN`** (`dt0s16`), not the classic tokens |
+| `integration_dtwiz_k3d.sh` | The `dtwiz` CLI path: install, `status`, `analyze`, `install kubernetes` | any | `DT_ENVIRONMENT` + **`DT_PLATFORM_TOKEN`** (`dt0s16`), not the classic tokens — **or** the tenant's own OAuth client, from which the suite mints one for the run (see below) |
 | `integration_kind_astroshop.sh` | Astroshop on Kind: ingress, HTML content, static assets | AMD64 only; skipped on Sysbox | No |
 
 Credentials are never baked in: each suite reads them from `.devcontainer/.env` locally, or from
@@ -276,6 +276,37 @@ each — a single-arch run cannot show that.
 bash .devcontainer/test/integration_appmon_k3d_todoapp.sh
 bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh
 ```
+
+### Platform tokens: supplied, or minted for the run
+
+`integration_dtwiz_k3d.sh` needs a gen3 platform token (`dt0s16`), and takes it one of two ways.
+The order is the point:
+
+1. **`DT_PLATFORM_TOKEN` is set** — a provisioned training environment already holds one, minted by
+   the enablement app with the tenant's own OAuth client before the container started. The suite
+   uses it as given and mints nothing. This is the learner's path and the one the suite exists to
+   exercise.
+2. **It is not set** — then `DT_OAUTH_CLIENT_ID`, `DT_OAUTH_CLIENT_SECRET` and `DT_OAUTH_RESOURCE`
+   (the tenant's own OAuth client and its account URN) let the suite mint a short-lived token for
+   this run, through the same Account Management API the app uses, and revoke it at teardown.
+
+```bash
+# On a machine that is not a provisioned training environment:
+export DT_ENVIRONMENT=https://<tenant>
+export DT_OAUTH_CLIENT_ID=... DT_OAUTH_CLIENT_SECRET=... DT_OAUTH_RESOURCE=urn:dtaccount:...
+bash .devcontainer/test/integration_dtwiz_k3d.sh   # mints, runs, revokes
+```
+
+The minted token carries the scopes **dtwiz itself documents** — no more. A harness token wider than
+the learner's would hide the scope failure the suite is meant to catch, so if a mint is refused for
+want of a scope, that is a finding about what the tenant grants that client, not a scope to add.
+
+!!! note "Why not just store a platform token?"
+    Because a stored one is long-lived, rotated by nobody, and says nothing about what the app
+    actually grants a learner. Minting per run keeps the credential short-lived and keeps the test
+    honest about the scopes under test. The helper lives in
+    `.devcontainer/test/mint_platform_token.sh` (+ `.py`) and is loaded by the suite, not by
+    `post-create.sh` — learners never run it.
 
 !!! warning "Known limitation — OneAgent DaemonSet on K3d"
     K3d nodes are Docker containers. OneAgent's host init module needs real kernel interfaces
@@ -299,10 +330,14 @@ What is worth knowing from this side of the boundary:
 
 - A nightly run exercises repositories that have had **no PR**, which is how regressions from
   upstream changes (a new operator release, a new K3d version, a rebuilt base image) surface.
-- A suite that requires a credential the scheduling environment deliberately does not hold can never
-  go green there. `integration_dtwiz_k3d.sh` needs `DT_PLATFORM_TOKEN`; if the environment has no
-  such token, scope the suite out rather than accepting a permanent red — a signal that is red every
-  night is not a signal.
+- A signal that is red every night is not a signal. But "this environment holds no such credential"
+  is rarely the end of the story, and reading it that way once cost this suite its coverage:
+  `integration_dtwiz_k3d.sh` was written off as unrunnable anywhere without a standing
+  `DT_PLATFORM_TOKEN`, and a standing platform token is precisely what a well-run environment does
+  not keep. Platform tokens are **minted**, per training, by the enablement app from the tenant's own
+  OAuth client — so the suite now mints its own the same way when no token is supplied, uses it, and
+  revokes it at teardown. Before scoping a suite out, check whether the credential it wants is one
+  the product creates on demand.
 
 ---
 
