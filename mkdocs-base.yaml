@@ -1,7 +1,10 @@
 # Framework-owned MkDocs base configuration
 # Per-repo mkdocs.yaml uses: INHERIT: mkdocs-base.yaml
 # This file is fetched by CI at the repo's FRAMEWORK_VERSION tag.
-# Local preview: run 'make docs' to auto-fetch this file.
+# Local preview: inside the dev container, `installMkdocs` calls `fetchMkdocsBase`,
+# which downloads this file when a repo inherits it and does not have it yet.
+# There is no `make docs` target -- this comment used to promise one that was
+# never written. See docs/framework.md, "Live documentation, locally".
 
 theme:
   name: material
