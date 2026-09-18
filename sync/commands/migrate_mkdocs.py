@@ -33,7 +33,13 @@ def run(args):
         print(f"Failed to parse mkdocs.yaml: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Extract repo-specific fields
+    # Extract repo-specific fields.
+    #
+    # `training_name` is Orbital's rung-1 display name (ENH-009). It is not an
+    # mkdocs key and mkdocs warns about it, but it must survive this rewrite:
+    # anything not listed here is DROPPED, so omitting it would silently erase
+    # a repo's declared training name the first time this command touched it.
+    training_name = config.get("training_name", "")
     site_name = config.get("site_name", "")
     repo_name = config.get("repo_name", "")
     repo_url = config.get("repo_url", "")
@@ -43,6 +49,10 @@ def run(args):
 
     # Build new mkdocs.yaml
     lines = ["INHERIT: mkdocs-base.yaml", ""]
+    # Rung 1 sits above site_name, at column 0 — Orbital's parser anchors on
+    # line start, so an indented copy would be invisible to it.
+    if training_name:
+        lines.append(f'training_name: "{training_name}"')
     if site_name:
         lines.append(f'site_name: "{site_name}"')
     if repo_name:
