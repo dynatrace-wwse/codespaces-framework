@@ -509,6 +509,30 @@ class TestMigrateMkdocs:
         assert "INHERIT: mkdocs-base.yaml" in out
 
     @patch("sync.commands.migrate_mkdocs.get_file_content")
+    def test_training_name_survives_the_rewrite(self, mock_content, capsys):
+        """Rung-1 display name (ENH-009) must not be dropped by the migration.
+
+        This command rebuilds mkdocs.yaml from a whitelist and discards
+        everything else, so a key it does not know about is deleted silently —
+        the file still parses, the build still passes, and the training quietly
+        falls back to its site_name. That is the failure this pins.
+        """
+        from sync.commands.migrate_mkdocs import run
+        mock_content.return_value = (
+            'training_name: "Kubernetes 101"\n'
+            'site_name: "Dynatrace Enablement Lab: Kubernetes 101"\n'
+            "nav:\n  - Home: index.md\n"
+        )
+
+        args = SimpleNamespace(repo="org/my-repo", dry_run=True)
+        run(args)
+        out = capsys.readouterr().out
+        assert 'training_name: "Kubernetes 101"' in out
+        # At column 0: Orbital anchors its match on line start, so an indented
+        # copy would parse as YAML and still be invisible to it.
+        assert '\ntraining_name: "Kubernetes 101"\n' in out
+
+    @patch("sync.commands.migrate_mkdocs.get_file_content")
     def test_api_error(self, mock_content, capsys):
         from sync.commands.migrate_mkdocs import run
         mock_content.side_effect = GHAPIError("contents", 404, "Not Found")
