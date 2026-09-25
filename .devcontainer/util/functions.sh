@@ -1569,8 +1569,12 @@ deployApplicationMonitoring() {
 deployDynatrace() {
   # Unified Dynatrace deployment function.
   # Usage: deployDynatrace [mode] [DT_ENVIRONMENT DT_OPERATOR_TOKEN DT_INGEST_TOKEN]
-  #   mode: cloudnative (default) | apponly | k8s-only
-  local mode="${1:-cloudnative}"
+  #   mode: apponly | cloudnative | k8s-only
+  #   No mode (or "") follows `mode:` from dynakube-defaults.yaml / the repo's
+  #   dynakube-config.yaml — apponly by default. CloudNativeFullStack is opt-in:
+  #   its OneAgent DaemonSet cannot start on k3d or under Sysbox (see deployCloudNative).
+  loadDynakubeConfig
+  local mode="${1:-${DK_MODE:-apponly}}"
   shift 2>/dev/null
 
   dynatraceEvalReadSaveCredentials "$@"
@@ -1824,7 +1828,7 @@ generateDynakube() {
   # Load config
   loadDynakubeConfig
 
-  local mode="${mode_override:-${DK_MODE:-cloudnative}}"
+  local mode="${mode_override:-${DK_MODE:-apponly}}"
   local api_version="${DK_DYNAKUBE_API_VERSION:-v1beta6}"
   # Kubernetes resource names must be lowercase RFC-1123. Repo names can be
   # mixed-case (e.g. Enablement-DTWiz-101), which the DynaKube validating webhook

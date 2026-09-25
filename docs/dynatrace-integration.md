@@ -132,7 +132,13 @@ If you want to give access to other AI Agents and premium models, click in the S
 All repositories using the Enablement Framework can automatically activate Dynatrace Full-Stack Observability or Application Monitoring, enabling seamless monitoring of the Kubernetes cluster and all deployed applications—no manual setup required.
 
 ### Prerequisites
-1. The following environment variables are set `DT_ENVIRONMENT` `DT_OPERATOR_TOKEN` `DT_INGEST_TOKEN`. These 3 variables are needed for monitoring the Kubernetes Cluster.
+The container needs three environment variables to monitor its Kubernetes cluster: `DT_ENVIRONMENT`, `DT_OPERATOR_TOKEN` and `DT_INGEST_TOKEN`. Where they come from depends on where the container runs:
+
+| Where it runs | Who provides the variables |
+|---|---|
+| **Dynatrace Enablement app (Orbital)** | Nobody by hand. The app **mints** the tokens in the learner's tenant from the repo's [`dt-tokens.yaml`](#tokens-dt-tokensyaml) and Orbital writes them into `.devcontainer/.env` before `post-create.sh` runs. |
+| **GitHub Codespaces** | Codespaces secrets (`devcontainer.json` → `secrets`). |
+| **VS Code Dev Containers / local `make`** | A `.devcontainer/.env` file (gitignored). See [Instantiation types](instantiation-types.md#secrets-environment). |
 
 ### Monitoring a Kubernetes Cluster automatically
 
@@ -146,22 +152,22 @@ source .devcontainer/util/source_framework.sh
 
 setUpTerminal
 
-startKindCluster
+startK3dCluster
 
 installK9s
 
 # Dynatrace Operator is deployed automatically
 dynatraceDeployOperator
 
-# You can deploy CNFS or AppOnly
-deployCloudNative
-#deployApplicationMonitoring
+# Deploys the DynaKube in the mode set by dynakube-defaults.yaml / dynakube-config.yaml
+# (AppOnly by default). deployApplicationMonitoring and deployCloudNative force a mode.
+deployDynatrace
 
 # The Astroshop will be deployed as a sample
 deployApp astroshop
 
 # This step is needed, do not remove it
-# it'll verify if there are error in the logs and will show them in the greeting as well a monitoring 
+# it'll verify if there are error in the logs and will show them in the greeting as well a monitoring
 finalizePostCreation
 
 printInfoSection "Your dev container finished creating"
@@ -170,20 +176,102 @@ printInfoSection "Your dev container finished creating"
 
 Now let's break it down.
 
-1. Line 1 - 6: This code is needed for loading the framework and setting up the terminal for the container.
-- Line 8 and 10: `startKindCluster` and `installK9s` creates the Kubernetes Cluster and installs k9s for easy management of your Kubernetes Cluster. For learning more go to [Kubernetes Cluster](framework.md#kubernetes-cluster) section of the Framework section.
-- Line 13: `dynatraceDeployOperator` checks for the needed credentials and deploys teh Dynatrace Operator with its´'s components (CSI Driver and Webhook)
-- Line 16: `deployCloudNative` deploys CloudNativeFullstack for Kubernetes. 
+- Line 1 - 6: This code is needed for loading the framework and setting up the terminal for the container.
+- Line 8 and 10: `startK3dCluster` and `installK9s` create the Kubernetes Cluster (K3d, the default engine) and install k9s for easy management of your Kubernetes Cluster. For learning more go to [Kubernetes Cluster](framework.md#kubernetes-cluster) section of the Framework section.
+- Line 13: `dynatraceDeployOperator` checks for the needed credentials and deploys the Dynatrace Operator with its components (CSI Driver and Webhook).
+- Line 17: `deployDynatrace` generates the DynaKube from the [DynaKube configuration](#dynakube-configuration-defaults-and-repo-override) and applies it. With no argument it uses the configured `mode:` — **AppOnly** by default.
 - Line 20: `deployApp astroshop` will call the deployApp repository and deploy Astroshop.
 
+| Function | Mode |
+|---|---|
+| `deployDynatrace` | the `mode:` from the DynaKube config (`apponly` unless the repo overrides it) |
+| `deployDynatrace <mode>` | `apponly`, `cloudnative` or `k8s-only`, explicitly |
+| `deployApplicationMonitoring` | always `apponly` |
+| `deployCloudNative` | always `cloudnative` — the OneAgent DaemonSet cannot start on K3d nodes or under Orbital's Sysbox, so use it only on Kind outside Orbital |
+
 !!! info "Race conditions safeguard"
-    The framework includes logic to manage resources efficiently and prevent race conditions. For example, deployCloudNative will not start while the Dynatrace Operator is being created. Once the Operator is ready, the CloudNative Full-Stack resources are deployed, followed by the application itself. This ensures that Dynatrace components are fully operational before any application deployment begins.
+    The framework includes logic to manage resources efficiently and prevent race conditions. For example, `deployDynatrace` will not apply the DynaKube while the Dynatrace Operator webhook is still starting. Once the Operator is ready, the DynaKube is applied and the ActiveGate is awaited, followed by the application itself. This ensures that Dynatrace components are fully operational before any application deployment begins.
 
+### Tokens: `dt-tokens.yaml`
 
+When a training runs in the **Dynatrace Enablement app**, nobody pastes a token. The app mints scoped, short-lived tokens in the learner's own tenant, and Orbital writes them into the container's `.devcontainer/.env` **before** `post-create.sh` runs. Which tokens, with which scopes, under which variable names, is declared in one file:
+
+- Framework default: [`.devcontainer/yaml/dt-tokens.yaml`](https://github.com/dynatrace-wwse/codespaces-framework/blob/main/.devcontainer/yaml/dt-tokens.yaml) — an operator token (`DT_OPERATOR_TOKEN`) and an ingest token (`DT_INGEST_TOKEN`).
+- Repo override: the training repo's own `.devcontainer/yaml/dt-tokens.yaml`. Real example: [enablement-kubernetes-101](https://github.com/dynatrace-wwse/enablement-kubernetes-101/blob/main/.devcontainer/yaml/dt-tokens.yaml).
+
+```yaml title=".devcontainer/yaml/dt-tokens.yaml (repo override)"
+migrationStatus: migrated        # migrated | pending (default) | legacy-classic-only
+
+tokens:
+  - name_suffix: operator        # token name: enbl-<training>-<user>-operator
+    env_var: DT_OPERATOR_TOKEN   # the variable the container receives
+    scopes:                      # classic scopes (dotted names)
+      - activeGateTokenManagement.create
+      - activeGateTokenManagement.write
+      - entities.read
+      - settings.read
+      - settings.write
+      - DataExport
+      - InstallerDownload
+    platform_scopes:             # used where the tenant mints platform (dt0s16) tokens
+      - fleet-management:activegate.connection-info:read
+      - fleet-management:activegate.tokens:create
+      - fleet-management:container-images:read
+      - fleet-management:oneagent.connection-info:read
+      - fleet-management:oneagents:download
+      - settings:objects:read
+      - settings:objects:write
+
+  - name_suffix: ingest
+    env_var: DT_INGEST_TOKEN
+    scopes: [metrics.ingest, logs.ingest, events.ingest, openTelemetryTrace.ingest]
+    platform_scopes:
+      - openpipeline:logs:ingest
+      - openpipeline:metrics:ingest
+      - openpipeline:traces:ingest
+      - storage:metrics:write
+
+  - name_suffix: api             # an extra token your own functions read
+    env_var: DT_API_TOKEN
+    aliases: [DT_BIZEVENTS_TOKEN]  # same value under a second variable name
+    scopes: [entities.read]
+```
+
+| Field | Meaning |
+|---|---|
+| `name_suffix` | Required. Last part of the token name, `enbl-<training>-<user>-<suffix>` (max 100 chars). |
+| `env_var` | Required. The variable name written into `.devcontainer/.env`. Your functions read it like any other variable. |
+| `scopes` | Classic scopes (`metrics.ingest`, …). Under `kind: platform` write platform scopes here instead. |
+| `kind` | `classic` (default) or `platform` (always minted as a `dt0s16` platform token). |
+| `platform_scopes` | Platform scopes (`storage:logs:read`, `openpipeline:logs:ingest`, …) used when the token is minted as a platform token. If absent, `scopes` is translated. |
+| `aliases` | Extra variable names that receive the same value. |
+| `migrationStatus` | Top level. `legacy-classic-only` means the training needs a classic-only capability; it is the only value that refuses a workshop at creation. |
+
+!!! warning "The repo file REPLACES the default — it is not merged"
+    Declaring one extra token means copying the operator and ingest tokens too, or the container starts without them. A repo file with an empty or missing `tokens:` list does **not** fall back to the framework file: it falls back to built-in defaults. Declare only the tokens the training needs — the app mints exactly those.
+
+Tokens expire after 4 hours (the session TTL). Outside the app (Codespaces, local) nothing is minted: provide the same variables as secrets or in `.devcontainer/.env`.
+
+### DynaKube configuration: defaults and repo override
+
+The DynaKube is not a committed manifest. `generateDynakube` builds it at run time into `.devcontainer/yaml/gen/dynakube.yaml` (gitignored) from two flat YAML files:
+
+1. [`.devcontainer/yaml/dynakube-defaults.yaml`](https://github.com/dynatrace-wwse/codespaces-framework/blob/main/.devcontainer/yaml/dynakube-defaults.yaml) — framework-owned, synced to every repo. Do not edit it in a training repo.
+2. `.devcontainer/yaml/dynakube-config.yaml` — **your** override, never synced. Only the keys you write change; everything else keeps the default.
+
+```yaml title=".devcontainer/yaml/dynakube-config.yaml"
+# flat key: value only — nested YAML is ignored
+mode: cloudnative        # apponly (default) | cloudnative | k8s-only
+kspm: true
+extensions: true
+ag_memory_limit: "2Gi"
+```
+
+The keys and their defaults are listed in the [Functions reference](functions.md#dynakube-configuration). The DynaKube name and `hostGroup` are `<repo without "enablement-">-<session id>`, cut to fit the operator's name limit; the session id is `DT_HOSTGROUP` (set by Orbital per learner) and always survives whole, which is what lets a DQL filter `endsWith(k8s.cluster.name, "<session id>")` isolate one learner.
 
 ### Undeploying Dynakube
 
-Now, let's say you want to undeploy the Dynakubes, there is a comfort function for you to do so, just type `undeployDynakube` and this will undeploy the Dynakubes. For changing the monitoring mode to `ApplicationMonitoring` just type `deployApplicationMonitoring` and this will deploy the Application Monitoring mode in the cluster.
+Now, let's say you want to undeploy the Dynakubes, there is a comfort function for you to do so, just type `undeployDynakubes` and this will undeploy the Dynakubes. For changing the monitoring mode to `ApplicationMonitoring` just type `deployApplicationMonitoring` and this will deploy the Application Monitoring mode in the cluster.
 
 
 <div class="grid cards" markdown>

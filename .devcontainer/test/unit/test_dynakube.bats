@@ -521,6 +521,61 @@ EOF
 }
 
 # ============================================================
+# deployDynatrace default mode — AppOnly unless the config says otherwise
+# ============================================================
+
+# Stubs everything deployDynatrace does after choosing the mode, and records
+# the mode it handed to generateDynakube.
+stub_deploy_pipeline() {
+  dynatraceEvalReadSaveCredentials() { :; }
+  generateDynakube() { echo "GEN=$1"; touch "$REPO_PATH/.devcontainer/yaml/gen/dynakube.yaml"; }
+  fixSprintActiveGateImage() { :; }
+  fixSprintCodeModulesImage() { :; }
+  waitForPod() { :; }
+  waitForAllReadyPods() { :; }
+  printInfo() { :; }
+  printInfoSection() { :; }
+  sleep() { :; }
+}
+
+@test "generateDynakube: no mode anywhere (defaults file lacks mode:) -> apponly" {
+  source_functions
+  sed -i '/^mode:/d' "$FAKE_REPO/.devcontainer/yaml/dynakube-defaults.yaml"
+
+  generateDynakube
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" == *"applicationMonitoring"* ]]
+  [[ "$output" != *"cloudNativeFullStack"* ]]
+}
+
+@test "deployDynatrace: no mode argument deploys apponly (the defaults file)" {
+  source_functions
+  stub_deploy_pipeline
+
+  result=$(deployDynatrace)
+  [[ "$result" == *"GEN=apponly"* ]]
+}
+
+@test "deployDynatrace: no mode argument follows the repo's dynakube-config.yaml" {
+  source_functions
+  stub_deploy_pipeline
+  echo 'mode: k8s-only' > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+
+  result=$(deployDynatrace)
+  [[ "$result" == *"GEN=k8s-only"* ]]
+}
+
+@test "deployDynatrace: an explicit mode wins over the config" {
+  source_functions
+  stub_deploy_pipeline
+  echo 'mode: cloudnative' > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+
+  result=$(deployDynatrace k8s-only)
+  [[ "$result" == *"GEN=k8s-only"* ]]
+}
+
+# ============================================================
 # Error payload tests
 # ============================================================
 
