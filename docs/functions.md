@@ -132,7 +132,7 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | Function | Signature | Description |
 |---|---|---|
 | `dynatraceDeployOperator` | `dynatraceDeployOperator [env token ingest]` | Deploys the DT Operator via Helm and creates the credentials secret |
-| `deployDynatrace` | `deployDynatrace [mode] [env token ingest]` | Unified deploy: validates credentials, generates Dynakube, waits for pods |
+| `deployDynatrace` | `deployDynatrace [mode] [env token ingest]` | Unified deploy: validates credentials, generates Dynakube, waits for pods. No mode = the configured `mode:` (`apponly` by default) |
 | `deployCloudNative` | `deployCloudNative [env token ingest]` | Shortcut for `deployDynatrace cloudnative` |
 | `deployApplicationMonitoring` | `deployApplicationMonitoring [env token ingest]` | Shortcut for `deployDynatrace apponly` |
 | `undeployDynakubes` | `undeployDynakubes` | Deletes all Dynakube CRDs and uninstalls the OneAgent if present |
@@ -141,13 +141,13 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `undeployOperatorViaHelm` | `undeployOperatorViaHelm` | Uninstalls the `dynatrace-operator` Helm release |
 
 ```bash
-# Deploy using credentials from env vars
-deployCloudNative
+# Deploy using credentials from env vars, in the configured mode (apponly by default)
+deployDynatrace
 
 # Deploy with explicit credentials
 deployDynatrace apponly "https://abc.apps.dynatrace.com" "$OP_TOKEN" "$INGEST_TOKEN"
 
-# Available modes: cloudnative (default), apponly, k8s-only
+# Available modes: apponly (default), cloudnative, k8s-only
 ```
 
 ### Dynakube Configuration
@@ -163,14 +163,22 @@ Config keys (set in `dynakube-config.yaml` or `dynakube-defaults.yaml`) map to `
 
 | Key | Variable | Default |
 |---|---|---|
-| `mode` | `DK_MODE` | `cloudnative` |
-| `operator_version` | `DK_OPERATOR_VERSION` | `1.9.0` |
-| `ag_replicas` | `DK_AG_REPLICAS` | `1` |
+| `mode` | `DK_MODE` | `apponly` (`cloudnative`, `k8s-only`) |
+| `operator_version` | `DK_OPERATOR_VERSION` | `1.10.2` |
+| `dynakube_api_version` | `DK_DYNAKUBE_API_VERSION` | `v1beta6` |
 | `log_monitoring` | `DK_LOG_MONITORING` | `true` |
+| `telemetry_ingest` | `DK_TELEMETRY_INGEST` | `true` |
+| `sensitive_data` | `DK_SENSITIVE_DATA` | `true` |
 | `kspm` | `DK_KSPM` | `false` |
-| `telemetry_ingest` | `DK_TELEMETRY_INGEST` | `false` |
 | `extensions` | `DK_EXTENSIONS` | `false` |
-| `sensitive_data` | `DK_SENSITIVE_DATA` | `false` |
+| `routing` | `DK_ROUTING` | `true` |
+| `debugging` | `DK_DEBUGGING` | `false` |
+| `dynatrace_api` | `DK_DYNATRACE_API` | `false` |
+| `ag_replicas` | `DK_AG_REPLICAS` | `1` |
+| `ag_cpu_request` / `ag_cpu_limit` | `DK_AG_CPU_*` | `100m` / `500m` |
+| `ag_memory_request` / `ag_memory_limit` | `DK_AG_MEMORY_*` | `512Mi` / `1Gi` |
+
+The authoritative values are [`dynakube-defaults.yaml`](https://github.com/dynatrace-wwse/codespaces-framework/blob/main/.devcontainer/yaml/dynakube-defaults.yaml) — this table mirrors it. How to override them per repo: [DynaKube configuration](dynatrace-integration.md#dynakube-configuration-defaults-and-repo-override).
 
 ---
 
