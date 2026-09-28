@@ -234,12 +234,28 @@ repos:
 
   - name: demo-astroshop-problems
     repo: dynatrace-wwse/demo-astroshop-problems
-    status: active
+    status: archived
+    sync_managed: false
+    listed: false
+    ci: false
     maintainer: "@shinojosa"
-    description: "Troubleshoot Astroshop problem scenarios with Dynatrace. Practice root-cause analysis on realistic failure modes across a distributed microservices stack."
-    tags: [kubernetes, live-debugger, sanbox]
+    description: "Archived 2026-09-28. Troubleshoot Astroshop problem scenarios with Dynatrace. Not offered in the Hub or the Enablement app."
+    tags: [kubernetes, live-debugger, sandbox]
     title: "Astroshop Problem Scenarios"
     primary_tag: kubernetes
+    duration: "1.5h"
+
+  - name: demo-agentic-ai-with-nvidia
+    repo: dynatrace-wwse/demo-agentic-ai-with-nvidia
+    status: archived
+    sync_managed: false
+    listed: false
+    ci: false
+    maintainer: "@shinojosa"
+    description: "Archived 2026-09-28. NVIDIA NeMo Agent Toolkit demo. Not offered in the Hub or the Enablement app."
+    tags: [sandbox, demo]
+    title: "NVIDIA NeMo Agent Toolkit"
+    primary_tag: gen-ai
     duration: "1.5h"
 
   # ── Other framework-managed ──
