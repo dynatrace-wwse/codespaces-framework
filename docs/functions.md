@@ -384,7 +384,7 @@ CERTMANAGER_EMAIL="myemail@example.com" certmanagerEnable
 | Function | Description |
 |---|---|
 | `installMkdocs` | Installs Runme + MkDocs from requirements file, fetches base config, starts server |
-| `fetchMkdocsBase` | Downloads `mkdocs-base.yaml` from the framework if it is missing locally |
+| `fetchMkdocsBase` | For an `INHERIT` repo, downloads `mkdocs-base.yaml` and `docs/stylesheets/extra.css` from the framework at `FRAMEWORK_VERSION` — each only if missing and not committed; a failed download warns and returns 0 |
 | `exposeMkdocs` | Starts `mkdocs serve` in the background and registers it via ingress (or prints URL) |
 | `registerMkdocs` | Creates a K8s Service + Endpoints + Ingress to proxy the host's mkdocs port 8000 |
 | `deployGhdocs` | Deploys the docs to GitHub Pages via `mkdocs gh-deploy` |
