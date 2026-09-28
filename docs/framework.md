@@ -124,21 +124,28 @@ Defines the development container for VS Code and Codespaces.
 Inside the dev container:
 
 - **installMkdocs**: installs the pinned MkDocs requirements from `docs/requirements/requirements-mkdocs.txt`, then calls `fetchMkdocsBase` and `exposeMkdocs`.
-- **fetchMkdocsBase**: if `mkdocs.yaml` starts with `INHERIT:` and `mkdocs-base.yaml` is missing, it downloads that file from the framework at the pinned `FRAMEWORK_VERSION`. **This is the step that makes a fresh clone previewable** — without it `mkdocs serve` fails on the missing inherit target.
+- **fetchMkdocsBase**: if `mkdocs.yaml` starts with `INHERIT:`, it downloads the same framework files the docs workflow (`deploy-ghpages.yaml`) fetches, from the same URL at the same pinned `FRAMEWORK_VERSION`: `mkdocs-base.yaml` and `docs/stylesheets/extra.css`. **This is the step that makes a fresh clone previewable** — without the base `mkdocs serve` fails on the missing inherit target, and without the stylesheet it renders correct content in default Material styling instead of the Dynatrace theme.
 - **exposeMkdocs**: starts `mkdocs serve` on port 8000 in the background and exposes it appropriately for the instantiation type (forwarded port in Codespaces, ingress where one exists, `localhost:8000` otherwise).
 
-!!! note "Local preview renders unstyled if the stylesheet is missing"
-    `fetchMkdocsBase` retrieves `mkdocs-base.yaml` only. `docs/stylesheets/extra.css` — the file that
-    carries the Dynatrace visual language — is fetched by the docs CI workflow, not by the local
-    preview, so a local build of a consuming repo shows correct content with default Material styling.
-    To preview with the real theme, fetch it the same way CI does:
-    ```bash
-    FRAMEWORK_VERSION=$(grep -oP ':-\K[^}"]+' .devcontainer/util/source_framework.sh | head -1)
-    mkdir -p docs/stylesheets
-    curl -fsSL "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/docs/stylesheets/extra.css" \
-      -o docs/stylesheets/extra.css
-    ```
-    This repository is the exception: it *owns* both files, so they are committed here and
+!!! note "What `fetchMkdocsBase` fetches, and what it leaves alone"
+    - **Only when absent.** Each file is downloaded only if it is not already on disk, exactly like
+      the base always was. A file that is present — a repo's own stylesheet, or one you are editing
+      to try a change — is never overwritten. The trade-off is the same for both files: after a
+      `FRAMEWORK_VERSION` bump in an existing workspace, delete `mkdocs-base.yaml` and
+      `docs/stylesheets/extra.css` and run `fetchMkdocsBase` again to preview the new version. CI is
+      unaffected; it always fetches both fresh.
+    - **Never over a committed file.** If `docs/stylesheets/extra.css` is tracked by git but missing
+      from the working tree, it prints a warning (`git restore docs/stylesheets/extra.css`) instead of
+      fetching the framework copy over it. No consuming repo commits one today — both files are in the
+      synced `.gitignore` — but this repository does.
+    - **Never fatal.** `functions.sh` is sourced into your shell, so a failed download (offline, a
+      tag that does not exist) prints a `WARN` and returns 0; nothing partial is left behind, and
+      `installMkdocs` still starts `mkdocs serve`. Run `fetchMkdocsBase` again once the network is back.
+    - **Not `mermaid.min.js`.** The workflow also fetches the vendored `docs/javascripts/mermaid.min.js`.
+      The local preview does not: when that file is missing, Material's own loader falls back to the
+      unpkg CDN, so diagrams still render locally.
+
+    This repository is the exception: it *owns* all three files, so they are committed here and
     `mkdocs serve` works straight out of a clone.
 
 ### Deploying to GitHub Pages

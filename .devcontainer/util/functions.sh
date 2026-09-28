@@ -2200,11 +2200,46 @@ installMkdocs(){
 }
 
 fetchMkdocsBase(){
-  # If mkdocs.yaml uses INHERIT and mkdocs-base.yaml is missing, fetch it from the framework
-  if grep -q '^INHERIT:' "${REPO_PATH}/mkdocs.yaml" 2>/dev/null && [ ! -f "${REPO_PATH}/mkdocs-base.yaml" ]; then
-    printInfo "Fetching mkdocs-base.yaml from framework v${FRAMEWORK_VERSION}..."
-    curl -fsSL "https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/mkdocs-base.yaml" -o "${REPO_PATH}/mkdocs-base.yaml"
+  # A repo whose mkdocs.yaml uses INHERIT gets, for a local preview, the same
+  # framework files the docs CI workflow (deploy-ghpages.yaml) fetches at
+  # FRAMEWORK_VERSION: mkdocs-base.yaml and docs/stylesheets/extra.css.
+  # Each is fetched only when absent, so a repo that ships its own copy, or a
+  # file being edited locally, is never overwritten. Failures warn and return
+  # 0 -- this file is sourced, and mkdocs still serves (unstyled) without CSS.
+  grep -q '^INHERIT:' "${REPO_PATH}/mkdocs.yaml" 2>/dev/null || return 0
+  if [ -z "$FRAMEWORK_VERSION" ]; then
+    printWarn "FRAMEWORK_VERSION is not set, cannot fetch mkdocs-base.yaml / extra.css for the docs preview"
+    return 0
   fi
+  _fetchFrameworkAsset "mkdocs-base.yaml"
+  _fetchFrameworkAsset "docs/stylesheets/extra.css"
+  return 0
+}
+
+_fetchFrameworkAsset(){
+  # Downloads <path> (relative to the repo root) from the framework at
+  # FRAMEWORK_VERSION into the same path under REPO_PATH, unless it already
+  # exists there or is tracked by git (committed, then deleted locally).
+  local rel="$1"
+  local dest="${REPO_PATH}/${rel}"
+  local url="https://raw.githubusercontent.com/dynatrace-wwse/codespaces-framework/${FRAMEWORK_VERSION}/${rel}"
+  [ -e "$dest" ] && return 0
+  if git -C "$REPO_PATH" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+    printWarn "${rel} is committed in this repo but missing locally, not fetching the framework copy (git restore ${rel})"
+    return 0
+  fi
+  printInfo "Fetching ${rel} from framework v${FRAMEWORK_VERSION}..."
+  mkdir -p "$(dirname "$dest")"
+  # Download beside the target and move it into place only on success, so a
+  # failed transfer never leaves a partial file that the next run would keep.
+  local tmp="${dest}.tmp.$$"
+  if curl -fsSL "$url" -o "$tmp"; then
+    mv -f "$tmp" "$dest"
+  else
+    rm -f "$tmp"
+    printWarn "Could not fetch ${rel} from ${url} -- the local docs preview will be incomplete"
+  fi
+  return 0
 }
 
 exposeMkdocs(){
