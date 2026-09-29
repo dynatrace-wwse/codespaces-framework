@@ -57,7 +57,19 @@ REPO_CUSTOM_FILES = [
     ".devcontainer/util/source_framework.sh",
     ".devcontainer/util/my_functions.sh",
     ".devcontainer/test/integration.sh",
+    # A repo's own token contract. It lives inside a Category A dir, so the
+    # dir cleanup below must skip it: functions.sh and Orbital both read it as
+    # the per-training override of the framework default. framework 1.11.2's
+    # sync deleted enablement-kubernetes-101's copy by wiping .devcontainer/yaml.
+    ".devcontainer/yaml/dt-tokens.yaml",
 ]
+
+
+def _removable_files(repo_path: Path, d: str) -> list[Path]:
+    """Files under Category A dir `d` that the cleanup may delete: all of
+    them except any REPO_CUSTOM_FILES entry that lives inside it."""
+    keep = {repo_path / f for f in REPO_CUSTOM_FILES}
+    return [p for p in (repo_path / d).rglob("*") if p.is_file() and p not in keep]
 
 
 def _get_category_a(image_tier: str) -> tuple[list[str], list[str]]:
@@ -828,9 +840,10 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     for d in cat_a_dirs:
         p = repo_path / d
         if p.is_dir():
-            count = sum(1 for _ in p.rglob("*") if _.is_file())
-            found_dirs.append((d, count))
-            print(f"    found  {d}/ ({count} files)")
+            count = len(_removable_files(repo_path, d))
+            if count:
+                found_dirs.append((d, count))
+                print(f"    found  {d}/ ({count} files)")
 
     for f in CATEGORY_B_FILES:
         p = repo_path / f
@@ -900,8 +913,20 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
             (repo_path / f).unlink()
             print(f"      deleted {f}")
         for d, count in found_dirs:
-            shutil.rmtree(repo_path / d)
-            print(f"      deleted {d}/ ({count} files)")
+            kept = [f for f in REPO_CUSTOM_FILES if (repo_path / f).is_relative_to(repo_path / d)
+                    and (repo_path / f).exists()]
+            if not kept:
+                shutil.rmtree(repo_path / d)
+                print(f"      deleted {d}/ ({count} files)")
+                continue
+            for p in _removable_files(repo_path, d):
+                p.unlink()
+            # Drop subdirs the unlinks emptied, deepest first.
+            for sub in sorted((x for x in (repo_path / d).rglob("*") if x.is_dir()),
+                              key=lambda x: len(x.parts), reverse=True):
+                if not any(sub.iterdir()):
+                    sub.rmdir()
+            print(f"      deleted {d}/ ({count} files, kept {', '.join(kept)})")
         for d in [".devcontainer/runlocal", ".devcontainer/test"]:
             p = repo_path / d
             if p.is_dir() and not any(p.iterdir()):
