@@ -25,6 +25,7 @@ from sync.commands.migrate import (
     _parse_devcontainer,
     _validate_devcontainer,
     _resolve_repo_path,
+    _migrate_repo,
 )
 
 
@@ -306,3 +307,65 @@ class TestResolveRepoPath:
         # Should be a sibling of codespaces-framework
         assert path.name == "my-repo"
         assert "enablement-framework" in str(path) or path.parent.exists()
+
+
+# ---------------------------------------------------------------------------
+# Repo-owned files inside a Category A directory survive the cleanup
+# ---------------------------------------------------------------------------
+
+REPO_TOKENS = ".devcontainer/yaml/dt-tokens.yaml"
+TOKENS_TEXT = "migrationStatus: migrated\ntokens: []\n"
+
+
+def _repo_with_yaml_dir(tmp_path, with_tokens=True):
+    """A repo whose .devcontainer/yaml holds framework-owned files and,
+    optionally, the repo's own dt-tokens.yaml."""
+    repo = tmp_path / "test-repo"
+    y = repo / ".devcontainer/yaml"
+    (y / "kind").mkdir(parents=True)
+    (y / "dynakube-defaults.yaml").write_text("kind: DynaKube\n")
+    (y / "clusterissuer.yaml").write_text("kind: ClusterIssuer\n")
+    (y / "kind/kind-cluster.yml").write_text("kind: Cluster\n")
+    if with_tokens:
+        (repo / REPO_TOKENS).write_text(TOKENS_TEXT)
+    return repo
+
+
+class TestRepoOwnedFilesInCategoryADirs:
+    """framework 1.11.2's sync deleted enablement-kubernetes-101's own
+    dt-tokens.yaml: `.devcontainer/yaml` is removed wholesale, and that file
+    is the repo's per-training token contract, not a framework copy
+    (functions.sh reads it as the override of the framework default)."""
+
+    def test_dt_tokens_is_repo_custom(self):
+        assert REPO_TOKENS in REPO_CUSTOM_FILES
+
+    def test_migrate_keeps_repo_dt_tokens(self, tmp_path, make_repo_entry):
+        repo = _repo_with_yaml_dir(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=False)
+        assert (repo / REPO_TOKENS).read_text() == TOKENS_TEXT
+
+    def test_migrate_still_removes_framework_yaml(self, tmp_path, make_repo_entry):
+        # Control: the guard must not turn into "keep the whole directory".
+        repo = _repo_with_yaml_dir(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=False)
+        y = repo / ".devcontainer/yaml"
+        assert not (y / "dynakube-defaults.yaml").exists()
+        assert not (y / "clusterissuer.yaml").exists()
+        assert not (y / "kind").exists()
+        assert sorted(p.name for p in y.iterdir()) == ["dt-tokens.yaml"]
+
+    def test_migrate_without_repo_tokens_removes_dir(self, tmp_path, make_repo_entry):
+        # The 26 repos with no own copy keep the old behaviour: dir gone.
+        repo = _repo_with_yaml_dir(tmp_path, with_tokens=False)
+        _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=False)
+        assert not (repo / ".devcontainer/yaml").exists()
+
+    def test_kept_file_alone_is_not_pending_work(self, tmp_path, make_repo_entry):
+        # A dir holding only a repo-owned file must not read as "to remove"
+        # forever, or every later dry run reports needs-migration.
+        repo = _repo_with_yaml_dir(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=False)
+        status = _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=True)
+        assert status == "up-to-date"
+        assert (repo / REPO_TOKENS).read_text() == TOKENS_TEXT
