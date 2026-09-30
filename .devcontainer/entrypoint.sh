@@ -51,6 +51,12 @@ entrypoint(){
     # Mapping docker groups of Host and Container
     if [ $DOCKER_SOCK_GID = $DOCKER_GROUP_ID ]; then
         printInfo "DOCKER_SOCK_GID[$DOCKER_SOCK_GID] matches DOCKER_GROUP_ID[$DOCKER_GROUP_ID]. No changes needed."
+        # A restarted container keeps the groupmod from its first start, so it always
+        # lands here. Without this exec the command never runs and the container exits 0
+        # (`docker restart` left a stopped container behind).
+        if [ $# -gt 0 ]; then
+            exec "$@"
+        fi
     else
         printInfo "DOCKER_SOCK_GID[$DOCKER_SOCK_GID] do NOT match DOCKER_GROUP_ID[$DOCKER_GROUP_ID]. Updating..."
         sudo groupmod -g $DOCKER_SOCK_GID docker && printInfo "Updated correctly..."
@@ -79,4 +85,4 @@ entrypoint(){
 }
 
 printInfo "Entering entrypoint with args: $@"
-entrypoint $@
+entrypoint "$@"
