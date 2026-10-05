@@ -3641,6 +3641,180 @@ freeUpSpace(){
   printInfo "✅ Disk space cleanup complete"
 }
 
+# ======================================================================
+#   Lab step checks and solution helpers
+# ----------------------------------------------------------------------
+#   A lesson's shell-verification block calls a check:
+#
+#     command: "source .devcontainer/util/source_framework.sh >/dev/null 2>&1 && checkNodeReady"
+#     expect:
+#       operator: exit-zero
+#
+#   A learner's click probes ONCE and answers at once (return 0 = pass,
+#   return 1 = fail with a hint) — never a spinner while the check retries.
+#
+#   Automation (the training test, resume, "Run solution", the editor's
+#   Test step) exports LAB_WAIT=1 first: the check then waits for the
+#   expected state before probing, so verifying a step right after its
+#   solution does not race the rollout.
+#
+#   The waits run in a subshell: waitForPod / waitForAllReadyPods `exit 1`
+#   on timeout, which must end the wait, never the learner's shell. The
+#   probe after the wait decides pass or fail.
+#
+#   A repo's my_functions.sh is sourced after this file, so a repo that
+#   still defines one of these functions keeps its own copy until it
+#   removes it.
+#
+#   The waitFor* names are LAB_WAIT wrappers kept for lab content written
+#   against them (enablement-kubernetes-101).
+# ======================================================================
+
+# Cluster node is Ready.
+checkNodeReady() {
+  if [ -n "${LAB_WAIT:-}" ]; then
+    local i=0
+    while [ "$i" -lt 18 ]; do
+      [ "$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready')" -gt 0 ] && break
+      i=$((i + 1)); printInfo "node not Ready yet ($i/18), waiting 5s"; sleep 5
+    done
+  fi
+  if [ "$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready')" -gt 0 ]; then
+    printInfo "Cluster node is Ready"; return 0
+  fi
+  printError "Cluster node is not Ready yet"; return 1
+}
+waitForNodeReady() { LAB_WAIT=1 checkNodeReady; }
+
+# TODO app pods are Running in the todoapp namespace.
+checkTodoAppRunning() {
+  [ -n "${LAB_WAIT:-}" ] && ( waitForAllReadyPods todoapp )
+  if [ "$(kubectl get pods -n todoapp --no-headers 2>/dev/null | grep -c Running)" -gt 0 ]; then
+    printInfo "todoapp pods are Running"; return 0
+  fi
+  printError "todoapp pods are not Running yet — the environment may still be starting"; return 1
+}
+waitForTodoAppRunning() { LAB_WAIT=1 checkTodoAppRunning; }
+
+# Dynatrace Operator pod is Running.
+checkOperatorReady() {
+  [ -n "${LAB_WAIT:-}" ] && ( waitForPod dynatrace operator )
+  if kubectl get pods -n dynatrace --no-headers 2>/dev/null | grep -E 'operator' | grep -q Running; then
+    printInfo "Dynatrace Operator pod is Running"; return 0
+  fi
+  printError "Dynatrace Operator is not running — install the operator, then check again"; return 1
+}
+waitForOperatorReady() { LAB_WAIT=1 checkOperatorReady; }
+
+# A DynaKube custom resource exists in the dynatrace namespace.
+checkDynakube() {
+  if [ -n "${LAB_WAIT:-}" ]; then
+    local i=0
+    while [ "$i" -lt 30 ]; do
+      kubectl get dynakube -n dynatrace --no-headers 2>/dev/null | grep -q . && break
+      i=$((i + 1)); printInfo "no DynaKube yet ($i/30), waiting 5s"; sleep 5
+    done
+  fi
+  if kubectl get dynakube -n dynatrace --no-headers 2>/dev/null | grep -q .; then
+    printInfo "DynaKube custom resource is present"; return 0
+  fi
+  printError "No DynaKube found in the dynatrace namespace — apply the DynaKube, then check again"; return 1
+}
+waitForDynakube() { LAB_WAIT=1 checkDynakube; }
+
+# ActiveGate pod is Running in the dynatrace namespace.
+checkActiveGateReady() {
+  [ -n "${LAB_WAIT:-}" ] && ( waitForPod dynatrace activegate )
+  if kubectl get pods -n dynatrace --no-headers 2>/dev/null | grep -i activegate | grep -q Running; then
+    printInfo "ActiveGate pod is Running"; return 0
+  fi
+  printError "ActiveGate pod is not Running yet — it can take a minute or two after the DynaKube is applied; check again shortly"; return 1
+}
+waitForActiveGateReady() { LAB_WAIT=1 checkActiveGateReady; }
+
+# OneAgent injection annotation is present on the pods of a namespace
+# (default todoapp) — true only for pods (re)started after the DynaKube.
+# Usage: checkOneAgentInjected [namespace]
+checkOneAgentInjected() {
+  local ns="${1:-todoapp}"
+  local jp='{.items[*].metadata.annotations.oneagent\.dynatrace\.com/injected}'
+  if [ -n "${LAB_WAIT:-}" ]; then
+    local i=0
+    while [ "$i" -lt 24 ]; do
+      kubectl get pods -n "$ns" -o jsonpath="$jp" 2>/dev/null | tr ' ' '\n' | grep -q true && break
+      i=$((i + 1)); printInfo "not injected yet ($i/24), waiting 10s"; sleep 10
+    done
+  fi
+  if kubectl get pods -n "$ns" -o jsonpath="$jp" 2>/dev/null | tr ' ' '\n' | grep -q true; then
+    printInfo "OneAgent is injected into the $ns pods"; return 0
+  fi
+  printError "OneAgent is not injected into the $ns pods — restart the deployment, wait for the rollout, then check again"; return 1
+}
+waitForOneAgentInjected() { LAB_WAIT=1 checkOneAgentInjected "$@"; }
+
+# Dynatrace log module pod is Running. Container logs are captured by the
+# log monitoring DaemonSet (pods named <dynakube>-logmonitoring), which the
+# operator rolls out from the DynaKube's `logMonitoring` section. It tails
+# container stdout — no pod restart and no code injection are involved.
+checkLogModuleReady() {
+  [ -n "${LAB_WAIT:-}" ] && ( waitForPod dynatrace logmonitoring )
+  if kubectl get pods -n dynatrace --no-headers 2>/dev/null | grep -i logmonitoring | grep -q Running; then
+    printInfo "Dynatrace log module is Running — your cluster's container logs are being captured"; return 0
+  fi
+  printError "Log module pod is not Running yet — it starts shortly after the DynaKube is applied; check again in a moment"; return 1
+}
+waitForLogModuleReady() { LAB_WAIT=1 checkLogModuleReady; }
+
+# Solution helper: restart the todoapp so the Dynatrace webhook injects
+# OneAgent into the new pods, and wait for the rollout.
+restartTodoApp() {
+  printInfoSection "Restarting todoapp so OneAgent gets injected"
+  kubectl rollout restart deployment -n todoapp || return 1
+  kubectl rollout status deployment -n todoapp --timeout=180s
+}
+
+# Solution helper: create a TODO through the app's HTTP API so fresh todoapp
+# log lines and a POST /todos trace reach Grail. The learner may do this by
+# hand in the app UI; this is the automation equivalent for LAB_SOLUTION
+# commands and the training test, which cannot click a web page.
+#
+# The app logs "Adding a new todo: TodoRecord{title='...'}"; match that text in
+# a DQL check, not the title. Usage: generateTodoTraffic [title]
+#
+# It always waits for the endpoint first (TODO_TRAFFIC_WAIT seconds, default
+# 60; 150 with LAB_WAIT=1): a finished `kubectl rollout status` only means the
+# container started, and the app answers HTTP some seconds later. Without the
+# wait, `restartTodoApp && generateTodoTraffic` raced the rollout.
+generateTodoTraffic() {
+  local title="${1:-Dynatrace enablement}"
+  local url="http://localhost:${K3D_LB_HTTP_PORT:-80}"
+  local host="todoapp.$(detectHostname)"
+  local wait_s="${TODO_TRAFFIC_WAIT:-60}"
+  [ -n "${LAB_WAIT:-}" ] && [ -z "${TODO_TRAFFIC_WAIT:-}" ] && wait_s=150
+  local step=5 waited=0
+  printInfoSection "Creating a TODO so logs and traces reach Grail"
+  printInfo "title: $title  | endpoint: $url (Host: $host)"
+
+  until curl -sf -o /dev/null --max-time 5 -H "Host: $host" "$url/todos"; do
+    if [ "$waited" -ge "$wait_s" ]; then
+      printError "todoapp HTTP endpoint did not answer within ${wait_s}s — make sure the app is running (checkTodoAppRunning), then try again"
+      return 1
+    fi
+    printInfo "app endpoint not answering yet (${waited}s/${wait_s}s), waiting ${step}s"
+    sleep "$step"; waited=$((waited + step))
+  done
+
+  local resp
+  resp=$(curl -s --max-time 10 -H "Host: $host" -X POST "$url/todos" -H "Content-Type: application/json" \
+    -d "{\"title\":\"$title\",\"completed\":false}")
+  if echo "$resp" | grep -q '"status":"ok"'; then
+    printInfo "Created TODO \"$title\" — its log and its POST /todos trace should appear in Grail within ~2 min"
+    return 0
+  fi
+  printError "Failed to create the TODO. Response: $resp"
+  return 1
+}
+
 # Custom functions for each repo can be added in my_functions.sh
 # Guarded: repos without one (or a shell opened outside the repo) must not error.
 if [ -f "$REPO_PATH/.devcontainer/util/my_functions.sh" ]; then

@@ -348,6 +348,36 @@ All deploy functions expose apps exclusively via nginx ingress (`registerApp`). 
 
 ---
 
+## Lab Step Checks & Solution Helpers
+
+Checks for a lesson's `shell-verification` blocks and helpers for its `LAB_SOLUTION` commands. They used to live in each repo's `my_functions.sh` (enablement-kubernetes-101, enablement-app-training-template); since 1.12.0 every repo gets them from the framework.
+
+```yaml
+command: "source .devcontainer/util/source_framework.sh >/dev/null 2>&1 && checkNodeReady"
+expect:
+  operator: exit-zero
+```
+
+| Function | Signature | Passes when |
+|---|---|---|
+| `checkNodeReady` | `checkNodeReady` | a cluster node is `Ready` |
+| `checkTodoAppRunning` | `checkTodoAppRunning` | a pod in `todoapp` is `Running` |
+| `checkOperatorReady` | `checkOperatorReady` | the Dynatrace Operator pod is `Running` |
+| `checkDynakube` | `checkDynakube` | a DynaKube exists in `dynatrace` |
+| `checkActiveGateReady` | `checkActiveGateReady` | the ActiveGate pod is `Running` |
+| `checkLogModuleReady` | `checkLogModuleReady` | the log monitoring pod is `Running` |
+| `checkOneAgentInjected` | `checkOneAgentInjected [namespace]` | a pod in the namespace (default `todoapp`) carries `oneagent.dynatrace.com/injected: "true"` |
+| `restartTodoApp` | `restartTodoApp` | restarts the todoapp deployment and waits for the rollout (max 180 s) |
+| `generateTodoTraffic` | `generateTodoTraffic [title]` | creates a TODO through the app's HTTP API, so logs and a `POST /todos` trace reach Grail |
+
+**Click vs. automation.** A learner's click probes once and answers at once: `0` passes, `1` fails with a hint. Automation (the training test, resume, Run solution, the editor's Test step) exports `LAB_WAIT=1`, and the check then waits for the expected state before probing. A wait that times out ends the wait, never the shell: the probe after it gives the verdict. Each check also has a `waitFor…` wrapper (`waitForNodeReady`, `waitForOneAgentInjected`, …) that is the check with `LAB_WAIT=1`.
+
+**`generateTodoTraffic` waits for the endpoint.** A finished `kubectl rollout status` only means the container started; the app answers HTTP some seconds later. The helper therefore retries the endpoint before it posts: up to 60 s, 150 s with `LAB_WAIT=1`, or `TODO_TRAFFIC_WAIT` seconds when set. It fails with a clear message if the endpoint never answers. `restartTodoApp && generateTodoTraffic` is safe in one solution command. Match the app's log line `Adding a new todo` in a DQL check, not the title.
+
+A repo's `my_functions.sh` is sourced after `functions.sh`, so a repo that still defines one of these functions keeps its own copy until it deletes it.
+
+---
+
 ## Cert-Manager
 
 | Function | Description |
