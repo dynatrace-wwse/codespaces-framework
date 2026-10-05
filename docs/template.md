@@ -118,7 +118,8 @@ The template exposes every interactive block type as a live, runnable example:
 | `STEP_SETUP` | Runs framework functions before a page renders (credential loading, DynaKube generation) |
 | `multiple-choice` | Inline knowledge check (no separate file needed) |
 | `boundScenarioId` | Links a full scored assessment from `.assessment/*.json` |
-| Custom functions | `.devcontainer/util/my_functions.sh` — fault injection, scenario setup, validation helpers |
+| Step checks | Framework `checkNodeReady`, `checkOperatorReady`, `checkDynakube`, `checkOneAgentInjected [ns]`, … — see [Functions › Lab Step Checks](functions.md#lab-step-checks-solution-helpers) |
+| Custom functions | `.devcontainer/util/my_functions.sh` — fault injection, scenario setup, repo-specific validation helpers |
 | `hs-video` | Embedded video from the Orbital server |
 | `dt-app` deep links | In-lesson buttons that open Dynatrace apps (Kubernetes, Services, Notebooks, etc.) |
 
