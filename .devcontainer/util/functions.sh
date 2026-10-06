@@ -166,6 +166,28 @@ waitForPod() {
 }
 
 # shellcheck disable=SC2120
+# Print the state of a deployment that is not coming up: pods, their events and
+# container states, the nodes' pressure and allocation, and the host's disk and
+# memory. Read-only; never fails the caller.
+printPodsDiagnostics() {
+  local ns_filter="${1:---all-namespaces}"
+  printInfoSection "Pod diagnostics (${ns_filter})"
+  printInfo "Host: disk and memory"
+  df -h / 2>/dev/null | tail -1 || true
+  free -h 2>/dev/null || true
+  printInfo "Nodes: conditions (MemoryPressure / DiskPressure / PIDPressure) and allocated resources"
+  kubectl describe nodes 2>/dev/null | grep -E "^Name:|Pressure|Allocated resources|^  (cpu|memory|ephemeral-storage) " || true
+  kubectl top nodes 2>/dev/null || true
+  printInfo "Pods not Running/Completed"
+  kubectl get pods $ns_filter -o wide 2>/dev/null | grep -v -E '(Running|Completed)' || true
+  printInfo "Why: reason, last termination and recent events per pod"
+  kubectl get pods $ns_filter --no-headers \
+    -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,REASON:.status.reason,WAITING:.status.containerStatuses[*].state.waiting.reason,LAST:.status.containerStatuses[*].lastState.terminated.reason,EXIT:.status.containerStatuses[*].lastState.terminated.exitCode' 2>/dev/null \
+    | grep -v -E ' Running +<none> +<none> +<none>| Succeeded ' || true
+  printInfo "Warning events (newest last)"
+  kubectl get events $ns_filter --field-selector type=Warning --sort-by=.lastTimestamp 2>/dev/null | tail -40 || true
+}
+
 waitForAllPods() {
   # Function to filter by Namespace, default is ALL
   if [[ $# -eq 1 ]]; then
@@ -186,12 +208,17 @@ waitForAllPods() {
     fi
     RETRY=$(($RETRY + 1))
     printWarn "Retry: ${RETRY}/${RETRY_MAX} - Wait 10s for $pods_not_ok PoDs to finish or be in state Running ..."
+    # Every 2 minutes, show what is holding the pods, so a slow start is visible before it fails.
+    if (( RETRY % 12 == 0 )); then
+      printPodsDiagnostics "$namespace_filter"
+    fi
     sleep 10
   done
 
   if [[ $RETRY == $RETRY_MAX ]]; then
     printError "Following pods are not still not running. Please check their events. Exiting installation..."
     kubectl get pods --field-selector=status.phase!=Running -A
+    printPodsDiagnostics "--all-namespaces"
     exit 1
   fi
 }
