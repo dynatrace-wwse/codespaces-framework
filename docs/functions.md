@@ -260,7 +260,8 @@ deleteKindCluster   # destructive, removes the cluster
 | Function | Signature | Description |
 |---|---|---|
 | `waitForPod` | `waitForPod [namespace] <pod-name-pattern>` | Waits until at least one matching pod is scheduled (max 10 min) |
-| `waitForAllPods` | `waitForAllPods [namespace]` | Waits until all pods are `Running` or `Completed` |
+| `waitForAllPods` | `waitForAllPods [namespace]` | Waits until all pods are `Running` or `Completed`; every 2 minutes, and before it fails, prints `printPodsDiagnostics` |
+| `printPodsDiagnostics` | `printPodsDiagnostics [-n namespace]` | Why pods are not running: host disk and memory, node pressure and allocation, each stuck pod's reason and exit code, Warning events. Read-only |
 | `waitForAllReadyPods` | `waitForAllReadyPods [namespace]` | Waits until all pods are fully `Ready` (all containers up) |
 | `waitAppCanHandleRequests` | `waitAppCanHandleRequests [port] [retries]` | Polls `http://localhost:<port>` until it returns HTTP 200 |
 
