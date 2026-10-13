@@ -35,9 +35,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install bats
+        # zsh: the learner's shell. Without it the zsh test in
+        # test_dtctl_monaco.bats skips, and zsh's no-word-splitting is unguarded.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bats
+          sudo apt-get install -y bats zsh
 
       - name: Run framework unit tests
         run: bats .devcontainer/test/unit/ --tap
