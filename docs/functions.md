@@ -123,6 +123,117 @@ selectEnvironment && enableMCP  # switch environments and re-enable
 
 MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-server` via `npx` and reads credentials from `.devcontainer/.env`.
 
+### dtctl & Monaco (opt-in)
+
+| Function | Signature | Description |
+|---|---|---|
+| `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Read-only unless `--readwrite` |
+| `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
+| `installMonaco` | `installMonaco` | Installs the latest [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) (checksum-verified) |
+| `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project |
+| `undeployMonaco` | `undeployMonaco [tenant\|env]` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
+| `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
+
+Nothing calls these by default — a repo opts in from its `post-create.sh`:
+
+```bash
+deployMonaco tenant      # early: tenant-only config (dashboards, notebooks, settings)
+startCluster
+deployTodoApp
+deployMonaco env         # after the app answers
+enableDtctl              # optional: learners inspect what was deployed
+```
+
+**Verified installs.** Both installers resolve the latest GitHub release, or the version pinned
+in `DTCTL_VERSION` / `MONACO_VERSION`. dtctl's archive is checked against the release's
+`checksums.txt`, Monaco's binary against its `.sha256`. A mismatch, or an asset missing from the
+checksum file, refuses the install. The checksum file comes from the same release, so this
+proves the download is intact, not who published it; pin a reviewed version for a delivery.
+A pin that is not `x.y.z` is refused before any download: nothing is written to `/usr/local/bin` (override with
+`DTCTL_INSTALL_DIR` / `MONACO_INSTALL_DIR`). Architectures: `amd64` and `arm64`.
+
+**dtctl context.** `enableDtctl` runs non-interactively:
+
+| Setting | Value |
+|---|---|
+| context | `enablement` (`DTCTL_CONTEXT`) |
+| environment | `$DT_ENVIRONMENT` |
+| token | the literal reference `${DT_DTCTL_TOKEN}` (or `${NAME}` with `--token-var NAME`). dtctl expands it on every command; the value is never written to the config |
+| safety level | `readonly`; `--readwrite` sets `readwrite-mine`. Safety levels are a **client-side** guard — they do not narrow what the token itself may do |
+| storage | `DTCTL_TOKEN_STORAGE=file` (a container has no keyring) |
+
+!!! warning "Two dtctl commands expose the token"
+    `dtctl config view` prints the **resolved** token, and `dtctl config use-context` rewrites
+    the config with every `${VAR}` expanded — the token value lands in the file (dtctl 0.42.0).
+    `enableDtctl` writes the credential last and refuses a config that holds the value. To
+    switch or repair the context, re-run `enableDtctl` rather than `dtctl config use-context`.
+
+**Credentials.** Both tools read a token by variable **name**, never a pasted value: dtctl
+`DT_DTCTL_TOKEN`, Monaco `DT_MONACO_TOKEN` (override with `MONACO_TOKEN_VAR`). Under Orbital
+these arrive per learner from the repo's `.devcontainer/yaml/dt-tokens.yaml`. Monaco needs a
+**platform** token (`dt0s16`) — documents are platform-only — with
+`document:documents:read/write/delete`, `settings:objects:read/write` and `settings:schemas:read`.
+
+#### The `monaco/` folder
+
+```
+monaco/
+  tenant/          # deployed by `deployMonaco tenant` — tenant-only config, no app URL needed
+    <any>/config.yaml + templates
+  env/             # deployed by `deployMonaco env` — config that needs the running app
+    <any>/config.yaml + templates
+```
+
+Each phase folder is one Monaco project (Monaco reads every `*.yaml` below it). The repo
+ships **no manifest**: `deployMonaco` writes one at run time, so every learner deploys a
+project of their own.
+
+| What | Value | Why |
+|---|---|---|
+| project name | `<repo>-<DT_SESSION_ID>` | Monaco derives settings and document ids from the project name. Two learners with the same project overwrite each other in a shared tenant |
+| `LEARNER_PREFIX` | `<DT_SESSION_ID>` | Exported to Monaco. Use it in every `name:` so learners can find their own objects |
+| environment | `learner`, URL from `DT_ENVIRONMENT`, `platformToken` from `DT_MONACO_TOKEN` | |
+
+```yaml
+# monaco/tenant/dashboards/config.yaml
+configs:
+- id: my-dashboard
+  config:
+    name:
+      type: environment
+      name: LEARNER_PREFIX     # e.g. "alice-20261013"
+    template: dashboard.json
+  type:
+    document:
+      kind: dashboard
+```
+
+`deployMonaco` refuses — non-zero, nothing deployed — when there is no `DT_SESSION_ID`
+(`DT_HOSTGROUP` under Orbital, `GITHUB_USER` in a Codespace): without it every learner would
+share one project.
+
+**Supported types (v1): `document` (dashboards, notebooks) and `settings`.** Any other config
+type — a classic API such as `synthetic-monitor` or `application-web`, `automation`, `bucket` —
+is reported by file and refused with "not supported yet"; nothing is deployed. Those need a
+classic token or IAM bindings that are not settled yet.
+
+**Undo.** Before deploying, `deployMonaco` snapshots the phase folder into
+`.devcontainer/.monaco/<phase>/` (git-ignored; override with `MONACO_RUN_DIR`) together with
+the manifest and a delete file from `monaco generate deletefile`. If the delete file cannot be
+generated, it does not deploy. A redeploy keeps the previous delete entries, so a config
+removed from `monaco/` since the last deploy is still deleted (Monaco skips objects that are
+already gone). `undeployMonaco` runs `monaco delete` with that file and removes the snapshot;
+if the delete fails, the delete file is kept so it can be retried.
+
+A `configs` file the check cannot read — a flow list (`configs: [...]`) or no top-level
+`configs:` — is refused like an unsupported type: the check fails closed. Deploy and
+undeploy output lands in the provisioning log through `printInfoSection`.
+
+!!! warning "Nothing deletes tenant config when a container dies"
+    `undeployMonaco` runs inside the container. A container that is removed without running
+    it leaves its dashboards and settings in the tenant. Removing a learner's config at the end
+    of a session is not part of these functions.
+
 ---
 
 ## Dynatrace Operator & Dynakube
@@ -407,6 +518,8 @@ CERTMANAGER_EMAIL="myemail@example.com" certmanagerEnable
 | `installKubernetesDashboard` | Installs the Kubernetes Dashboard via Helm and port-forwards on 8001 |
 | `installK9s` | Installs the k9s CLI |
 | `installRunme` | Installs the Runme CLI (architecture-aware: AMD/ARM) |
+| `installMonaco` | Installs Monaco, checksum-verified — see [dtctl & Monaco](#dtctl-monaco-opt-in) |
+| `enableDtctl` | Installs and configures dtctl, checksum-verified — see [dtctl & Monaco](#dtctl-monaco-opt-in) |
 
 ---
 

@@ -688,6 +688,522 @@ setupMCPServer(){
   enableMCP
 }
 
+# ======================================================================
+#          ------- dtctl & Monaco (opt-in) -------                     #
+#  enableDtctl / disableDtctl, installMonaco, deployMonaco /           #
+#  undeployMonaco. Nothing calls these by default: a repo opts in      #
+#  from its post-create.sh, so existing repos change nothing.          #
+#                                                                      #
+#  Every binary is checksum-verified before it is installed; a         #
+#  mismatch refuses the install. No function prints a token value:     #
+#  dtctl stores a ${VAR} reference, Monaco reads the variable by name. #
+#                                                                      #
+#  Written for bash AND zsh (the learner's shell): no word splitting   #
+#  of unquoted variables, no globs, no `status`/`path` locals.         #
+# ======================================================================
+
+# Prints the sha256 of a file.
+_sha256Of() {
+  sha256sum "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+verifySha256() {
+  # verifySha256 <file> <expected-sha256> — returns 0 only when the file's
+  # sha256 equals the expected one. A missing file, a malformed expected value
+  # or a mismatch all refuse (return 1) — there is no "could not check" pass.
+  local file="$1" expected actual
+  expected=$(echo "$2" | tr '[:upper:]' '[:lower:]')
+  if [ ! -f "$file" ]; then
+    printError "verifySha256: $file does not exist"
+    return 1
+  fi
+  if ! echo "$expected" | grep -qE '^[0-9a-f]{64}$'; then
+    printError "verifySha256: no valid expected checksum for $(basename "$file") — refusing"
+    return 1
+  fi
+  actual=$(_sha256Of "$file")
+  if [ "$actual" != "$expected" ]; then
+    printError "Checksum MISMATCH for $(basename "$file") — expected $expected, got ${actual:-<none>}. Refusing to install."
+    return 1
+  fi
+  printInfo "Checksum OK for $(basename "$file") ($actual)"
+  return 0
+}
+
+_isVarName() {
+  # A shell variable name, matched as a whole string (no grep: a line-anchored
+  # regex lets "X<newline>junk" through).
+  case "$1" in
+    ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 1 ;;
+  esac
+}
+
+_isVersion() {
+  case "${1#v}" in
+    ''|*[!0-9.]*|.*|*.|*..*) return 1 ;;
+  esac
+  echo "${1#v}" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+'
+}
+
+_varIsSet() {
+  # _varIsSet <NAME> — true when NAME is a valid variable name holding a
+  # non-empty value. Never prints the value.
+  _isVarName "$1" || return 1
+  eval "[ -n \"\${$1:-}\" ]"
+}
+
+_releaseArch() {
+  # Maps the machine architecture to the release asset suffix (amd64 | arm64).
+  case "${ARCH:-$(uname -m)}" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64|armv8*) echo "arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+_githubLatestTag() {
+  # _githubLatestTag <owner/repo> — prints the latest release tag (e.g. v0.42.0).
+  # GitHub API first; the releases/latest redirect as a fallback, because the
+  # API is rate-limited for anonymous callers behind a shared egress IP.
+  local repo="$1" tag
+  tag=$(curl -fsSL --max-time 20 "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+  if [ -z "$tag" ]; then
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 20 \
+      "https://github.com/$repo/releases/latest" 2>/dev/null | sed -E 's#.*/tag/##')
+  fi
+  _isVersion "$tag" || return 1
+  echo "$tag"
+}
+
+_installBinary() {
+  # _installBinary <src> <dir> <name> — installs 0755, with sudo only when the
+  # target directory is not writable.
+  local src="$1" dir="$2" name="$3"
+  mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir" || return 1
+  if [ -w "$dir" ]; then
+    install -m 0755 "$src" "$dir/$name"
+  else
+    sudo install -m 0755 "$src" "$dir/$name"
+  fi
+}
+
+_removeBinary() {
+  local file="$1"
+  [ -e "$file" ] || return 0
+  if [ -w "$(dirname "$file")" ]; then
+    rm -f "$file"
+  else
+    sudo rm -f "$file"
+  fi
+}
+
+_dtctlConfigFile() {
+  echo "${DTCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/dtctl/config}"
+}
+
+_dtctlDropLeakedConfig() {
+  # _dtctlDropLeakedConfig <config> <VAR> — when the config holds the VALUE of
+  # $VAR, deletes the config and returns 0. Never prints the value.
+  local cfg="$1" var="$2"
+  [ -f "$cfg" ] && _varIsSet "$var" || return 1
+  printenv "$var" | grep -qFf - "$cfg" || return 1
+  rm -f "$cfg"
+  return 0
+}
+
+enableDtctl() {
+  # enableDtctl [--readwrite] [--token-var NAME]
+  # Installs the latest dtctl (pin with DTCTL_VERSION), verified against the
+  # release's checksums.txt, and configures a non-interactive context:
+  #   environment  = $DT_ENVIRONMENT
+  #   token        = a literal ${NAME} reference (default DT_DTCTL_TOKEN), which
+  #                  dtctl resolves at run time — the value is never written
+  #   safety level = readonly; --readwrite opts into readwrite-mine
+  # DTCTL_TOKEN_STORAGE=file: a container has no keyring.
+  local level="readonly" token_var="${DTCTL_TOKEN_VAR:-DT_DTCTL_TOKEN}"
+  local ctx="${DTCTL_CONTEXT:-enablement}" dir="${DTCTL_INSTALL_DIR:-/usr/local/bin}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --readwrite) level="readwrite-mine" ;;
+      --token-var) shift; token_var="$1" ;;
+      *) printError "enableDtctl: unknown argument '$1'. Usage: enableDtctl [--readwrite] [--token-var NAME]"; return 2 ;;
+    esac
+    shift
+  done
+
+  printInfoSection "Enabling dtctl ($level) for ${DT_ENVIRONMENT:-<no environment>}"
+
+  if [ -z "$DT_ENVIRONMENT" ]; then
+    printError "DT_ENVIRONMENT is not set — dtctl not enabled. Run selectEnvironment first."
+    return 1
+  fi
+  if ! _isVarName "$token_var"; then
+    printError "enableDtctl: '$token_var' is not a valid variable name"
+    return 1
+  fi
+
+  local arch version tag
+  if ! arch=$(_releaseArch); then
+    printError "dtctl: unsupported architecture '${ARCH:-$(uname -m)}' (amd64 and arm64 only)"
+    return 1
+  fi
+  if [ -n "$DTCTL_VERSION" ]; then
+    if ! _isVersion "$DTCTL_VERSION"; then
+      printError "dtctl: DTCTL_VERSION '$DTCTL_VERSION' is not a version (x.y.z)"
+      return 1
+    fi
+    version="${DTCTL_VERSION#v}"
+  else
+    if ! tag=$(_githubLatestTag "dynatrace-oss/dtctl"); then
+      printError "dtctl: could not resolve the latest release — set DTCTL_VERSION to pin one"
+      return 1
+    fi
+    version="${tag#v}"
+  fi
+
+  local asset="dtctl_${version}_linux_${arch}.tar.gz"
+  local base="https://github.com/dynatrace-oss/dtctl/releases/download/v${version}"
+  local tmp expected
+  tmp=$(mktemp -d)
+  printInfo "Downloading $asset and checksums.txt (dtctl v$version)"
+  if ! curl -fsSL --max-time 120 -o "$tmp/$asset" "$base/$asset" \
+     || ! curl -fsSL --max-time 30 -o "$tmp/checksums.txt" "$base/checksums.txt"; then
+    printError "dtctl: download of v$version failed"
+    rm -rf "$tmp"
+    return 1
+  fi
+  expected=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1; exit}' "$tmp/checksums.txt")
+  if ! verifySha256 "$tmp/$asset" "$expected"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -xzf "$tmp/$asset" -C "$tmp" dtctl 2>/dev/null || [ ! -f "$tmp/dtctl" ]; then
+    printError "dtctl: archive $asset holds no dtctl binary"
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! _installBinary "$tmp/dtctl" "$dir" dtctl; then
+    printError "dtctl: could not install into $dir"
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  printInfo "dtctl v$version installed at $dir/dtctl"
+
+  # The literal ${NAME} is stored in the config; dtctl expands it per command.
+  # set-credentials MUST be the last write: dtctl (0.42) rewrites the config
+  # with every ${VAR} EXPANDED on `config use-context`, which would put the
+  # token value — or an empty string — into the file.
+  local token_ref='${'"$token_var"'}' cfg
+  cfg=$(_dtctlConfigFile)
+  export DTCTL_TOKEN_STORAGE=file
+  if ! "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
+         --token-ref "$ctx" --safety-level "$level" \
+     || ! "$dir/dtctl" config use-context "$ctx" \
+     || ! "$dir/dtctl" config set-credentials "$ctx" --token "$token_ref"; then
+    # use-context may already have expanded a ${VAR} into the file.
+    _dtctlDropLeakedConfig "$cfg" "$token_var"
+    printError "dtctl: configuring context '$ctx' failed"
+    return 1
+  fi
+
+  # Prove the config says what we asked. The value check runs FIRST so that
+  # no failure path leaves a token value on disk.
+  if _dtctlDropLeakedConfig "$cfg" "$token_var"; then
+    printError "dtctl: $cfg held the token VALUE — removed dtctl's config"
+    return 1
+  fi
+  if ! grep -qF "safety-level: $level" "$cfg" 2>/dev/null \
+     || ! grep -qF "token: $token_ref" "$cfg" 2>/dev/null; then
+    printError "dtctl: $cfg does not show safety-level $level with token reference $token_ref"
+    return 1
+  fi
+
+  if ! _varIsSet "$token_var"; then
+    printWarn "$token_var is not set — dtctl is configured, but commands fail until it is"
+  fi
+  printInfo "dtctl context '$ctx' → $DT_ENVIRONMENT, safety level $level, token from \$$token_var"
+  printInfo "Try: dtctl get dashboards   ·   disable with: disableDtctl"
+  printInfo "Note: 'dtctl config view' prints the resolved token, and 'dtctl config use-context' writes it into the config — re-run enableDtctl instead"
+}
+
+disableDtctl() {
+  # Removes the dtctl binary installed by enableDtctl and dtctl's config and
+  # file-stored tokens.
+  local dir="${DTCTL_INSTALL_DIR:-/usr/local/bin}" cfg
+  cfg=$(_dtctlConfigFile)
+  _removeBinary "$dir/dtctl"
+  rm -f "$cfg"
+  rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/dtctl" "${XDG_DATA_HOME:-$HOME/.local/share}/dtctl"
+  if [ -e "$dir/dtctl" ] || [ -e "$cfg" ]; then
+    printError "disableDtctl: $dir/dtctl or $cfg is still present"
+    return 1
+  fi
+  printInfo "dtctl disabled — removed $dir/dtctl and its config"
+}
+
+installMonaco() {
+  # Installs the latest Monaco (pin with MONACO_VERSION), verified against the
+  # release's per-asset .sha256 file.
+  local dir="${MONACO_INSTALL_DIR:-/usr/local/bin}" arch version tag
+  if ! arch=$(_releaseArch); then
+    printError "monaco: unsupported architecture '${ARCH:-$(uname -m)}' (amd64 and arm64 only)"
+    return 1
+  fi
+  if [ -n "$MONACO_VERSION" ]; then
+    if ! _isVersion "$MONACO_VERSION"; then
+      printError "monaco: MONACO_VERSION '$MONACO_VERSION' is not a version (x.y.z)"
+      return 1
+    fi
+    version="${MONACO_VERSION#v}"
+  else
+    if ! tag=$(_githubLatestTag "Dynatrace/dynatrace-configuration-as-code"); then
+      printError "monaco: could not resolve the latest release — set MONACO_VERSION to pin one"
+      return 1
+    fi
+    version="${tag#v}"
+  fi
+  printInfoSection "Installing Monaco v$version ($arch)"
+
+  local asset="monaco-linux-${arch}"
+  local base="https://github.com/Dynatrace/dynatrace-configuration-as-code/releases/download/v${version}"
+  local tmp expected
+  tmp=$(mktemp -d)
+  if ! curl -fsSL --max-time 120 -o "$tmp/$asset" "$base/$asset" \
+     || ! curl -fsSL --max-time 30 -o "$tmp/$asset.sha256" "$base/$asset.sha256"; then
+    printError "monaco: download of v$version failed"
+    rm -rf "$tmp"
+    return 1
+  fi
+  expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
+  if ! verifySha256 "$tmp/$asset" "$expected"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! _installBinary "$tmp/$asset" "$dir" monaco; then
+    printError "monaco: could not install into $dir"
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  printInfo "Monaco v$version installed at $dir/monaco"
+}
+
+_monacoUnsupportedTypes() {
+  # _monacoUnsupportedTypes <dir> — prints "<file>: <type>" for every config
+  # whose type is not settings or document. v1 deploys only those two; a
+  # scalar type (`type: synthetic-monitor`) is a classic API and needs a
+  # classic token. Only the `type:` key of a config item is read, never a
+  # parameter's `type: environment`. A file the parser cannot read (no
+  # top-level block `configs:` list) is reported too: it fails closed.
+  find "$1" -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | sort | while IFS= read -r f; do
+    awk -v F="$f" '
+      function ind(s) { match(s, /^ */); return RLENGTH }
+      function check(v) {
+        sub(/^[ \t]+/, "", v); sub(/[ \t]+(#.*)?$/, "", v)
+        if (v == "") { pending = 1; return }
+        if (v ~ /^\{/) { v = substr(v, 2); sub(/^[ \t]+/, "", v); sub(/[ \t:].*$/, "", v) }
+        if (v != "settings" && v != "document") print F ": " v
+      }
+      {
+        line = $0; sub(/\r$/, "", line)
+        if (line ~ /^[ \t]*(#.*)?$/) next
+        i = ind(line)
+        if (pending) {
+          pending = 0
+          if (i > col) { k = line; sub(/^ *(- *)?/, "", k); sub(/:.*$/, "", k)
+                         if (k != "settings" && k != "document") print F ": " k; next }
+          print F ": (empty type)"
+        }
+        if (line ~ /^configs:/) {
+          v = line; sub(/^configs:[ \t]*/, "", v); sub(/[ \t]*#.*$/, "", v)
+          # A flow list cannot be checked line by line: fail closed.
+          if (v != "") { print F ": (configs: not a block list — cannot check its types)"; exit }
+          inconf = 1; sawconf = 1; dash = -1; next
+        }
+        if (i == 0 && line !~ /^-/) { inconf = 0; next }
+        if (!inconf) next
+        rest = line
+        if (line ~ /^ *- /) {
+          if (dash < 0) dash = i
+          if (i == dash) { col = i + 2; rest = substr(line, i + 3); sub(/^ +/, "", rest)
+                           if (rest ~ /^type:/) check(substr(rest, 6)); next }
+        }
+        if (i == col && line ~ /^ *type:/) { v = line; sub(/^ *type:/, "", v); check(v) }
+      }
+      END {
+        if (pending) print F ": (empty type)"
+        if (!sawconf) print F ": (no top-level configs: list — cannot check its types)"
+      }
+    ' "$f"
+  done
+}
+
+_monacoMergeDeleteFiles() {
+  # _monacoMergeDeleteFiles <new> <old> — appends to <new> every entry of <old>
+  # it does not already hold. Entries are the "- ..." items under `delete:`.
+  local merged
+  merged=$(mktemp)
+  awk '
+    /^delete:/ { next }
+    /^- / { if (cur != "") keep(); cur = $0; next }
+    { cur = cur "\n" $0 }
+    END { if (cur != "") keep(); if (n == 0) { print "delete: []"; exit }
+          print "delete:"; for (i = 1; i <= n; i++) print out[i] }
+    function keep() { if (!(cur in seen)) { seen[cur] = 1; out[++n] = cur }; cur = "" }
+  ' "$1" "$2" > "$merged" && mv "$merged" "$1"
+}
+
+_monacoRunDir() {
+  echo "${MONACO_RUN_DIR:-$REPO_PATH/.devcontainer/.monaco}/$1"
+}
+
+_monacoProjectName() {
+  local repo session
+  repo=$(echo "${RepositoryName:-$(basename "$REPO_PATH")}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g')
+  session="${DT_SESSION_ID:-$(getDtSessionId)}"
+  [ -n "$session" ] || return 1
+  # Written into the generated manifest: lowercase, digits and dashes only.
+  echo "${repo}-${session}" | grep -qxE '[a-z0-9][a-z0-9-]*' || return 1
+  echo "${repo}-${session}"
+}
+
+deployMonaco() {
+  # deployMonaco <tenant|env> — deploys monaco/<phase>/ from the repo as ONE
+  # project per learner, named <repo>-<DT_SESSION_ID>. That name is Monaco's
+  # isolation key for settings and documents; LEARNER_PREFIX=<DT_SESSION_ID>
+  # is exported for config names. The delete file is generated BEFORE the
+  # deploy, so even a partial deploy can be undone with undeployMonaco.
+  # v1 deploys settings and documents with the platform token in
+  # $DT_MONACO_TOKEN (override the name with MONACO_TOKEN_VAR).
+  local phase="$1" token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
+  case "$phase" in
+    tenant|env) ;;
+    *) printError "Usage: deployMonaco <tenant|env>"; return 2 ;;
+  esac
+
+  local src="${MONACO_DIR:-$REPO_PATH/monaco}/$phase"
+  if [ ! -d "$src" ]; then
+    printInfo "No monaco/$phase folder in this repo — nothing to deploy"
+    return 0
+  fi
+  printInfoSection "Deploying Monaco configuration: monaco/$phase"
+
+  if ! _isVarName "$token_var"; then
+    printError "deployMonaco: '$token_var' is not a valid variable name"
+    return 1
+  fi
+  local unsupported
+  unsupported=$(_monacoUnsupportedTypes "$src")
+  if [ -n "$unsupported" ]; then
+    printError "monaco/$phase holds config types that are not supported yet (v1: settings and document only; synthetic/RUM-app need a classic token):"
+    echo "$unsupported" | while IFS= read -r u; do printError "  $u"; done
+    printError "Nothing was deployed."
+    return 1
+  fi
+  if [ -z "$DT_ENVIRONMENT" ]; then
+    printError "DT_ENVIRONMENT is not set — nothing was deployed"
+    return 1
+  fi
+  if ! _varIsSet "$token_var"; then
+    printError "$token_var is not set — Monaco needs a platform token. Nothing was deployed."
+    return 1
+  fi
+  local project session
+  session="${DT_SESSION_ID:-$(getDtSessionId)}"
+  if ! project=$(_monacoProjectName); then
+    printError "No usable DT_SESSION_ID (DT_HOSTGROUP or GITHUB_USER; lowercase, digits, dashes) — refusing: without it every learner would share one Monaco project. Nothing was deployed."
+    return 1
+  fi
+  command -v monaco >/dev/null 2>&1 || installMonaco || return 1
+
+  # The manifest's project path must sit below the manifest (Monaco reads the
+  # project relative to it), so the run dir holds a snapshot of the configs.
+  # It also makes undeployMonaco independent of later edits to monaco/.
+  local run previous=""
+  run=$(_monacoRunDir "$phase")
+  mkdir -p "$(dirname "$run")"
+  echo '*' > "$(dirname "$run")/.gitignore"
+  # Keep what an earlier deploy created: a config removed from monaco/ since
+  # then must still be deletable. monaco delete skips objects already gone.
+  if [ -f "$run/delete.yaml" ]; then
+    previous=$(mktemp)
+    cp "$run/delete.yaml" "$previous"
+  fi
+  rm -rf "$run"
+  mkdir -p "$run"
+  cp -R "$src" "$run/project"
+  cat > "$run/manifest.yaml" <<MANIFESTEOF
+manifestVersion: "1.0"
+projects:
+  - name: $project
+    path: project
+environmentGroups:
+  - name: default
+    environments:
+      - name: learner
+        url:
+          type: environment
+          value: DT_ENVIRONMENT
+        auth:
+          platformToken:
+            type: environment
+            name: $token_var
+MANIFESTEOF
+  printInfo "Monaco project '$project' (LEARNER_PREFIX=$session) → $DT_ENVIRONMENT"
+
+  if ! (cd "$run" && LEARNER_PREFIX="$session" monaco generate deletefile manifest.yaml -o "$run" --file delete.yaml) \
+     || [ ! -f "$run/delete.yaml" ]; then
+    [ -n "$previous" ] && mv "$previous" "$run/delete.yaml"
+    printError "monaco: could not generate $run/delete.yaml — refusing to deploy what could not be undone"
+    return 1
+  fi
+  if [ -n "$previous" ]; then
+    _monacoMergeDeleteFiles "$run/delete.yaml" "$previous"
+    rm -f "$previous"
+  fi
+  if ! (cd "$run" && LEARNER_PREFIX="$session" monaco deploy manifest.yaml -e learner); then
+    printError "monaco deploy of monaco/$phase failed — undo what landed with: undeployMonaco $phase"
+    return 1
+  fi
+  printInfo "monaco/$phase deployed. Undo with: undeployMonaco (delete file: $run/delete.yaml)"
+}
+
+undeployMonaco() {
+  # undeployMonaco [tenant|env] — deletes what deployMonaco created, using the
+  # delete file persisted at deploy time. No argument: both phases, env first.
+  local phases rc=0 phase run token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
+  case "$1" in
+    "") phases="env tenant" ;;
+    tenant|env) phases="$1" ;;
+    *) printError "Usage: undeployMonaco [tenant|env]"; return 2 ;;
+  esac
+  printInfoSection "Removing Monaco configuration ($phases)"
+  # read lines, not `for p in $phases`: zsh does not word-split.
+  while IFS= read -r phase; do
+    run=$(_monacoRunDir "$phase")
+    if [ ! -f "$run/delete.yaml" ]; then
+      printInfo "monaco/$phase: nothing deployed (no $run/delete.yaml)"
+      continue
+    fi
+    if ! _varIsSet "$token_var"; then
+      printError "monaco/$phase: $token_var is not set — cannot delete. Delete file kept at $run/delete.yaml"
+      rc=1
+      continue
+    fi
+    command -v monaco >/dev/null 2>&1 || installMonaco || { rc=1; continue; }
+    if (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner); then
+      rm -rf "$run"
+      printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+    else
+      printError "monaco/$phase: monaco delete failed — delete file kept at $run/delete.yaml"
+      rc=1
+    fi
+  done < <(echo "$phases" | tr ' ' '\n')
+  return $rc
+}
+
 selectEnvironment(){
   # Check if DT_ENVIRONMENT is already set
   if [ -n "$DT_ENVIRONMENT" ]; then
