@@ -186,7 +186,7 @@ the union of the two lists: `document:documents:read/write/delete`, `settings:ob
 So `DT_DTCTL_TOKEN` is **not** read-only: it can write and delete any document and change any
 setting the minting client's owner can reach on the tenant; dtctl's `readonly` safety level is
 the only thing that keeps `dtctl` from doing so. A seat can be built without the token (the
-per-owner platform-token cap, a tenant with no registered OAuth client, a Codespace) — the app
+per-owner platform-token cap, a tenant with no registered OAuth client) — the app
 says so on screen, and `installDevTools` then installs dtctl with no context. Outside Orbital,
 set the variables yourself; Monaco needs a platform token — documents are platform-only.
 
