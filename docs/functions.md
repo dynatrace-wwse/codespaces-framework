@@ -129,7 +129,7 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 |---|---|---|
 | `installDevTools` | `installDevTools` | Run by `finalizePostCreation` in **every** repo: installs dtctl and Monaco at the framework's pinned versions, plus a read-only dtctl context when `DT_DTCTL_TOKEN` is set. Off with `FRAMEWORK_DEVTOOLS=off`. Never fatal — see [dtctl & Monaco](dtctl-monaco.md) |
 | `installDtctl` | `installDtctl [dir]` | Installs dtctl only (no context), checksum-verified |
-| `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Read-only unless `--readwrite` |
+| `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
 | `installMonaco` | `installMonaco` | Installs the latest [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) (checksum-verified) |
 | `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project |
@@ -178,9 +178,17 @@ A pin that is not `x.y.z` is refused before any download: nothing is written to 
 
 **Credentials.** Both tools read a token by variable **name**, never a pasted value: dtctl
 `DT_DTCTL_TOKEN`, Monaco `DT_MONACO_TOKEN` (override with `MONACO_TOKEN_VAR`). Under Orbital
-these arrive per learner from the repo's `.devcontainer/yaml/dt-tokens.yaml`. Monaco needs a
-**platform** token (`dt0s16`) — documents are platform-only — with
-`document:documents:read/write/delete`, `settings:objects:read/write` and `settings:schemas:read`.
+the Enablement app supplies them to every learner seat it builds — not the repo's
+`.devcontainer/yaml/dt-tokens.yaml`: a spec there under either name is dropped. It is **one**
+platform token (`dt0s16`) per seat, delivered under **both** names with the same value, carrying
+the union of the two lists: `document:documents:read/write/delete`, `settings:objects:read/write`,
+`settings:schemas:read` and `storage:logs/spans/events/bizevents/metrics/entities/buckets:read`.
+So `DT_DTCTL_TOKEN` is **not** read-only: it can write and delete any document and change any
+setting the minting client's owner can reach on the tenant; dtctl's `readonly` safety level is
+the only thing that keeps `dtctl` from doing so. A seat can be built without the token (the
+per-owner platform-token cap, a tenant with no registered OAuth client) — the app
+says so on screen, and `installDevTools` then installs dtctl with no context. Outside Orbital,
+set the variables yourself; Monaco needs a platform token — documents are platform-only.
 
 #### The `monaco/` folder
 

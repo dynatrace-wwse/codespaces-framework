@@ -136,7 +136,7 @@ The container needs three environment variables to monitor its Kubernetes cluste
 
 | Where it runs | Who provides the variables |
 |---|---|
-| **Dynatrace Enablement app (Orbital)** | Nobody by hand. The app **mints** the tokens in the learner's tenant from the repo's [`dt-tokens.yaml`](#tokens-dt-tokensyaml) and Orbital writes them into `.devcontainer/.env` before `post-create.sh` runs. |
+| **Dynatrace Enablement app (Orbital)** | Nobody by hand. The app **mints** the tokens in the learner's tenant from the repo's [`dt-tokens.yaml`](#tokens-dt-tokensyaml), plus `DT_MONACO_TOKEN` / `DT_DTCTL_TOKEN` on every learner seat (not from that file — see below), and Orbital writes them into `.devcontainer/.env` before `post-create.sh` runs — or, for a Codespace Orbital launches, sets them as the learner's Codespaces secrets for that repo. |
 | **GitHub Codespaces** | Codespaces secrets (`devcontainer.json` → `secrets`). |
 | **VS Code Dev Containers / local `make`** | A `.devcontainer/.env` file (gitignored). See [Instantiation types](instantiation-types.md#secrets-environment). |
 
@@ -198,6 +198,12 @@ When a training runs in the **Dynatrace Enablement app**, nobody pastes a token.
 
 - Framework default: [`.devcontainer/yaml/dt-tokens.yaml`](https://github.com/dynatrace-wwse/codespaces-framework/blob/main/.devcontainer/yaml/dt-tokens.yaml) — an operator token (`DT_OPERATOR_TOKEN`) and an ingest token (`DT_INGEST_TOKEN`).
 - Repo override: the training repo's own `.devcontainer/yaml/dt-tokens.yaml`. Real example: [enablement-kubernetes-101](https://github.com/dynatrace-wwse/enablement-kubernetes-101/blob/main/.devcontainer/yaml/dt-tokens.yaml).
+
+`DT_MONACO_TOKEN` and `DT_DTCTL_TOKEN` are **not** declared here: the app adds them to every
+learner seat itself — one platform token under both names, which can write and delete
+documents and settings — and drops a spec in this file under either name. A seat can be
+built without them (the per-owner platform-token cap); the app then says so on screen. See
+[dtctl & Monaco](functions.md#dtctl-monaco).
 
 ```yaml title=".devcontainer/yaml/dt-tokens.yaml (repo override)"
 migrationStatus: migrated        # migrated | pending (default) | legacy-classic-only
