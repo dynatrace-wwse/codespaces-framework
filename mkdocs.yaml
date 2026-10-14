@@ -14,6 +14,7 @@ nav:
   - "9. Testing": testing.md
   - "10. Monitoring": monitoring.md
   - "11. Functions Reference": functions.md
+  - "11a. dtctl & Monaco": dtctl-monaco.md
   - "12. Versioning Policy": versioning.md
   - "13. Cleanup": cleanup.md
   - "14. Resources": resources.md

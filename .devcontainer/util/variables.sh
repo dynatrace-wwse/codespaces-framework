@@ -23,6 +23,30 @@ CERTMANAGER_VERSION=1.15.3
 # RUNME Version
 RUNME_CLI_VERSION=3.13.2
 
+# dtctl + Monaco, installed in every environment by installDevTools (one pinned,
+# checksum-verified version per framework release; FRAMEWORK_DEVTOOLS=off skips).
+# The sha256 values were REVIEWED for this release and committed here: an install
+# of the pinned version is verified against them first, and against the release's
+# own checksum file second. Bumping a version means bumping its hashes too.
+#   *_PIN_SHA256_<ARCH>      the downloaded asset (dtctl: the .tar.gz)
+#   *_PIN_BIN_SHA256_<ARCH>  the installed binary (lets a present binary be trusted)
+# https://github.com/dynatrace-oss/dtctl/releases
+DTCTL_PIN_VERSION=0.43.0
+DTCTL_PIN_SHA256_AMD64=23c1e133da5d585b1399f59cfca78cfe89d9f9f4659e2a9e64a31c4e6b0074f3
+DTCTL_PIN_SHA256_ARM64=e9c0984523ee3a651ababda8bb492df5181a410979dbb76fcd6a1ed74f9bce39
+DTCTL_PIN_BIN_SHA256_AMD64=7cb79a5db80720dde5bf90af4d1586c06eb7656d30908949d66b7c766d7a9089
+DTCTL_PIN_BIN_SHA256_ARM64=4ee4f1f808553c6cc7eaafc72d0f2fa2bc3ffb21bd204f12a3e4e01015df0185
+DTCTL_VERSION="${DTCTL_VERSION:-$DTCTL_PIN_VERSION}"
+export DTCTL_VERSION
+# https://github.com/Dynatrace/dynatrace-configuration-as-code/releases
+MONACO_PIN_VERSION=2.30.1
+MONACO_PIN_SHA256_AMD64=1ded55f7f78a64a338bcb41795cd2710076750944ae369d58ca97b61a52aeaf6
+MONACO_PIN_SHA256_ARM64=0c4f4b359ca17851a813e8331af7fe02f02f7900cb5b9c0a79e6e75e4e6e64c5
+MONACO_PIN_BIN_SHA256_AMD64=$MONACO_PIN_SHA256_AMD64
+MONACO_PIN_BIN_SHA256_ARM64=$MONACO_PIN_SHA256_ARM64
+MONACO_VERSION="${MONACO_VERSION:-$MONACO_PIN_VERSION}"
+export MONACO_VERSION
+
 # Ingress configuration — apps are exposed exclusively via nginx ingress.
 # App registry file — tracks deployed apps for ingress routing
 export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"

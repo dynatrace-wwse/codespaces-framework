@@ -26,7 +26,8 @@ setup() {
   export REPO_PATH="$FAKE_REPO"
   export RepositoryName="test-enablement"
   export FRAMEWORK_CACHE=""
-  export ARCH="x86_64"
+  # The machine is whatever the uname stub says (_releaseArch reads uname -m only).
+  export FAKE_UNAME_M="x86_64"
 
   cat > "$FAKE_REPO/.devcontainer/util/variables.sh" <<'VARSEOF'
 LOGNAME="test"
@@ -48,6 +49,7 @@ VARSEOF
   export PATH="$INSTALL_DIR:$BIN:/usr/bin:/bin"
 
   make_curl_stub
+  make_uname_stub
   make_fixtures
 
   export DT_ENVIRONMENT="https://abc12345.apps.dynatrace.com"
@@ -63,17 +65,19 @@ teardown() {
 make_curl_stub() {
   cat > "$BIN/curl" <<'EOF'
 #!/bin/bash
+ARGS="$*"
 out="" url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) shift; out="$1" ;;
-    -w|--max-time) shift ;;
+    -w|--max-time|--connect-timeout) shift ;;
     -*) ;;
     *) url="$1" ;;
   esac
   shift
 done
 echo "$url" >> "$CURL_LOG"
+[ -n "${CURL_ARGS_LOG:-}" ] && echo "$ARGS" >> "$CURL_ARGS_LOG"
 case "$url" in
   https://api.github.com/repos/*/releases/latest) echo '{"url": "x", "tag_name": "v9.9.9", "name": "v9.9.9"}'; exit 0 ;;
 esac
@@ -82,6 +86,21 @@ f="$FIXTURES/$(basename "$url")"
 if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi
 EOF
   chmod +x "$BIN/curl"
+}
+
+make_uname_stub() {
+  cat > "$BIN/uname" <<'EOF'
+#!/bin/bash
+[ "$1" = "-m" ] && { echo "$FAKE_UNAME_M"; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+  chmod +x "$BIN/uname"
+}
+
+# stub_set NAME=value — a control for the dtctl stub (see make_fixtures).
+stub_set() {
+  echo "$1" >> "$TEST_DIR/stub.env"
+  export "$1"
 }
 
 make_fixtures() {
@@ -93,7 +112,20 @@ make_fixtures() {
 echo "dtctl $*" >> "$DTCTL_LOG"
 cfg="${DTCTL_CONFIG:-$XDG_CONFIG_HOME/dtctl/config}"
 mkdir -p "$(dirname "$cfg")"
+[ -n "${DTCTL_STUB_FAIL:-}" ] && [ "$1 $2" = "config set-context" ] && exit 1
+# A dtctl that writes the token from its ENVIRONMENT into the config on every
+# config write (what env -u in enableDtctl must make impossible).
+if [ -n "${DTCTL_STUB_WRITE_ENV:-}" ] && [ "$1" = "config" ] && [ -n "${DT_DTCTL_TOKEN:-}" ]; then
+  [ ! -f "$cfg" ] || [ -w "$cfg" ] && echo "# from env: $DT_DTCTL_TOKEN" >> "$cfg"
+fi
+# Real dtctl 0.43 opens the config for writing on every `config` write and
+# fails on a read-only file ("failed to write config file: permission denied").
+if [ "$1" = "config" ] && [ "$2" != "current-context" ] && [ -f "$cfg" ] && [ ! -w "$cfg" ]; then
+  echo "Error: failed to write config file: open $cfg: permission denied" >&2; exit 1
+fi
 if [ "$1 $2" = "config set-context" ]; then
+  # Like real dtctl, setting an existing context updates it, not a second copy.
+  grep -qxF "    - name: $3" "$cfg" 2>/dev/null && : > "$cfg"
   echo "    - name: $3" >> "$cfg"; shift 3
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -110,10 +142,18 @@ elif [ "$1 $2" = "config use-context" ]; then
 fi
 exit 0
 EOF
+  # enableDtctl runs dtctl config writes with `env -i` (an allowlist), so the
+  # stub cannot read its controls from the environment: it sources a file at a
+  # fixed path instead. stub_set writes it; it never holds a token value.
+  sed -i "2i . \"$TEST_DIR/stub.env\" 2>/dev/null" "$stage/dtctl"
+  printf 'DTCTL_LOG=%q\nTEST_DIR=%q\n' "$DTCTL_LOG" "$TEST_DIR" > "$TEST_DIR/stub.env"
   chmod +x "$stage/dtctl"
   local a
   for a in amd64 arm64; do
-    tar -czf "$FIXTURES/dtctl_9.9.9_linux_${a}.tar.gz" -C "$stage" dtctl
+    # A different mtime per arch: the two archives must not share a sha256,
+    # or a test could not tell which arch's pin was checked.
+    tar --mtime="@$([ "$a" = amd64 ] && echo 1000000000 || echo 1100000000)" \
+      -czf "$FIXTURES/dtctl_9.9.9_linux_${a}.tar.gz" -C "$stage" dtctl
   done
   (cd "$FIXTURES" && sha256sum dtctl_9.9.9_linux_amd64.tar.gz dtctl_9.9.9_linux_arm64.tar.gz > checksums.txt)
 
@@ -131,7 +171,8 @@ if [ "$1 $2" = "generate deletefile" ]; then
 fi
 exit "${MONACO_STUB_RC:-0}"
 EOF
-  cp "$FIXTURES/monaco-linux-amd64" "$FIXTURES/monaco-linux-arm64"
+  { cat "$FIXTURES/monaco-linux-amd64"; echo "# arm64 build"; } > "$FIXTURES/monaco-linux-arm64"
+  chmod +x "$FIXTURES/monaco-linux-arm64"
   for a in amd64 arm64; do
     (cd "$FIXTURES" && sha256sum "monaco-linux-$a" > "monaco-linux-$a.sha256")
   done
@@ -185,10 +226,32 @@ refute() {
 no_sentinel_anywhere() {
   # Fails if either token value appears in the captured output or in any file
   # the functions wrote (config, run dir, stub logs).
+  # Only paths that exist are scanned, and grep's status is read exactly:
+  # grep exits 2 on a missing path EVEN WHEN it also found a match, and the
+  # old `if grep -rls ... missing.log` read that 2 as "clean" — the check was
+  # blind in every test that never ran Monaco.
   if echo "$output" | grep -q "SENTINEL"; then echo "token value in output"; return 1; fi
-  if grep -rls "SENTINEL" "$HOME" "$FAKE_REPO" "$CURL_LOG" "$DTCTL_LOG" "$MONACO_LOG"; then
-    echo "token value written to the files above"; return 1
-  fi
+  local p paths=() rc
+  for p in "$HOME" "$FAKE_REPO" "$CURL_LOG" "$DTCTL_LOG" "$MONACO_LOG"; do
+    [ -e "$p" ] && paths+=("$p")
+  done
+  rc=0
+  grep -rl "SENTINEL" "${paths[@]}" || rc=$?
+  case "$rc" in
+    0) echo "token value written to the files above"; return 1 ;;
+    1) return 0 ;;
+    *) echo "could not scan for the token value (grep exit $rc)"; return 1 ;;
+  esac
+}
+
+@test "no_sentinel_anywhere: catches a value on disk even when a log file is missing" {
+  # Negative control for the helper every token test relies on.
+  rm -f "$MONACO_LOG" "$CURL_LOG"
+  mkdir -p "$HOME/x"; echo "leaked $DTCTL_SENTINEL" > "$HOME/x/file"
+  output=""
+  run no_sentinel_anywhere
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "token value written"
 }
 
 # ── verifySha256 ──────────────────────────────────────────────────────────────
@@ -264,8 +327,11 @@ no_sentinel_anywhere() {
 
 @test "enableDtctl: a config holding the token VALUE is refused and removed" {
   source_functions
-  # A dtctl that bakes the value in, whatever the order.
-  sed -i 's|echo "      token: \$5"|{ echo "      token: \$5"; echo "      leaked: $DT_DTCTL_TOKEN"; }|' "$TEST_DIR/stage/dtctl"
+  # A dtctl that bakes the value in, whatever the order. enableDtctl strips the
+  # token from dtctl's environment, so this one gets it some other way (a
+  # keyring, another variable): the on-disk check is the backstop for that.
+  printenv DT_DTCTL_TOKEN > "$TEST_DIR/side-channel"
+  sed -i 's|echo "      token: \$5"|{ echo "      token: \$5"; echo "      leaked: $(cat "$TEST_DIR/side-channel")"; }|' "$TEST_DIR/stage/dtctl"
   tar -czf "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz" -C "$TEST_DIR/stage" dtctl
   (cd "$FIXTURES" && sha256sum dtctl_9.9.9_linux_amd64.tar.gz > checksums.txt)
   run enableDtctl
@@ -277,8 +343,9 @@ no_sentinel_anywhere() {
 
 @test "enableDtctl: a value WITHOUT the reference line is still found and removed" {
   source_functions
-  # A dtctl that writes the expanded value instead of the reference.
-  sed -i 's|echo "      token: \$5"|echo "      token: $DT_DTCTL_TOKEN"|' "$TEST_DIR/stage/dtctl"
+  # A dtctl that writes the value (from a side channel, see above) instead of the reference.
+  printenv DT_DTCTL_TOKEN > "$TEST_DIR/side-channel"
+  sed -i 's|echo "      token: \$5"|echo "      token: $(cat "$TEST_DIR/side-channel")"|' "$TEST_DIR/stage/dtctl"
   tar -czf "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz" -C "$TEST_DIR/stage" dtctl
   (cd "$FIXTURES" && sha256sum dtctl_9.9.9_linux_amd64.tar.gz > checksums.txt)
   run enableDtctl
@@ -328,10 +395,10 @@ no_sentinel_anywhere() {
 
 @test "enableDtctl: arm64 machine downloads the arm64 asset; unknown arch refused" {
   source_functions
-  ARCH=aarch64 run enableDtctl
+  FAKE_UNAME_M=aarch64 run enableDtctl
   [ "$status" -eq 0 ]
   grep -q "dtctl_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
-  ARCH=s390x run enableDtctl
+  FAKE_UNAME_M=s390x run enableDtctl
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "unsupported architecture"
 }
@@ -596,4 +663,469 @@ EOF
     && deployMonaco tenant && deployMonaco env && undeployMonaco'
   [ "$status" -eq 0 ]
   [ "$(grep -c '^monaco delete' "$MONACO_LOG")" -eq 2 ]
+}
+
+# ── installDevTools (every environment, from finalizePostCreation) ────────────
+
+pin_devtools() {
+  # The framework pin is 9.9.9, with reviewed hashes taken from the fixtures.
+  export DTCTL_VERSION=9.9.9 MONACO_VERSION=9.9.9
+  export DTCTL_PIN_VERSION=9.9.9 MONACO_PIN_VERSION=9.9.9
+  local a A
+  for a in amd64 arm64; do
+    A=$(echo "$a" | tr '[:lower:]' '[:upper:]')
+    export "DTCTL_PIN_SHA256_$A=$(sha256sum "$FIXTURES/dtctl_9.9.9_linux_$a.tar.gz" | cut -d' ' -f1)"
+    export "DTCTL_PIN_BIN_SHA256_$A=$(sha256sum "$TEST_DIR/stage/dtctl" | cut -d' ' -f1)"
+    export "MONACO_PIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
+    export "MONACO_PIN_BIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
+  done
+}
+
+# fake_present <tool> <version> — a present binary that reports <version>;
+# prints its sha256.
+fake_present() {
+  printf '#!/bin/bash\necho "%s version %s"\n' "$1" "$2" > "$INSTALL_DIR/$1"
+  chmod +x "$INSTALL_DIR/$1"
+  sha256sum "$INSTALL_DIR/$1" | cut -d' ' -f1
+}
+
+@test "installDevTools: default installs dtctl and Monaco at the pinned versions, verified" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  grep -q "dtctl/releases/download/v9.9.9/checksums.txt" "$CURL_LOG"
+  grep -q "configuration-as-code/releases/download/v9.9.9/monaco-linux-amd64.sha256" "$CURL_LOG"
+  refute grep -q "releases/latest" "$CURL_LOG"
+  echo "$output" | grep -q "Checksum OK"
+}
+
+@test "installDevTools: no DT_DTCTL_TOKEN → binary only, no dtctl context" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  run installDevTools
+  [ "$status" -eq 0 ]
+  refute grep -q "config set-context" "$DTCTL_LOG"
+  [ ! -f "$XDG_CONFIG_HOME/dtctl/config" ]
+}
+
+@test "installDevTools: DT_DTCTL_TOKEN set → readonly context with a REFERENCE, value never written" {
+  source_functions
+  pin_devtools
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -q "safety-level: readonly" "$XDG_CONFIG_HOME/dtctl/config"
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  no_sentinel_anywhere
+}
+
+@test "installDevTools: token set but no DT_ENVIRONMENT → installed, warned, no context" {
+  source_functions
+  pin_devtools
+  unset DT_ENVIRONMENT
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  echo "$output" | grep -q "DT_ENVIRONMENT is not"
+  refute grep -q "config set-context" "$DTCTL_LOG"
+}
+
+@test "installDevTools: FRAMEWORK_DEVTOOLS=off (any case) skips everything — no download" {
+  source_functions
+  pin_devtools
+  local v
+  for v in off OFF false 0 no; do
+    FRAMEWORK_DEVTOOLS="$v" run installDevTools
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "skipped"
+  done
+  [ ! -s "$CURL_LOG" ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+}
+
+@test "installDevTools: FRAMEWORK_DEVTOOLS=off from .devcontainer/.env is honoured" {
+  echo "FRAMEWORK_DEVTOOLS=off" > "$FAKE_REPO/.devcontainer/.env"
+  echo '[ -e "$ENV_FILE" ] && source "$ENV_FILE"' >> "$FAKE_REPO/.devcontainer/util/variables.sh"
+  source_functions
+  pin_devtools
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "installDevTools: corrupt dtctl archive is refused, NOT fatal, Monaco still installs" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  echo "$output" | grep -q "MISMATCH"
+  echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
+}
+
+@test "installDevTools: corrupt Monaco binary is refused, NOT fatal" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
+}
+
+@test "installDevTools: a failure is not counted as a container-creation error" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/monaco-*
+  run installDevTools
+  [ "$status" -eq 0 ]
+  # Its real output holds tagged "failed" lines...
+  echo "$output" | grep -i -E 'error|failed' | grep -qF 'devtools (non-fatal)'
+  # ...and verifyContainerCreation's own filter drops every one of them.
+  local left
+  left=$(printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter || true)
+  [ -z "$left" ]
+}
+
+@test "_creationNoiseFilter: drops a tagged devtools line, keeps an untagged real failure" {
+  source_functions
+  local tagged="devtools (non-fatal): [x| ERROR |t| dtctl: download of v9.9.9 failed  |"
+  [ -z "$(printf '%s\n' "$tagged" | _creationNoiseFilter || true)" ]
+  # Negative control: the same line without the tag is a real error and stays.
+  [ -n "$(printf '%s\n' "[x| ERROR |t| dtctl: download of v9.9.9 failed  |" | _creationNoiseFilter || true)" ]
+}
+
+@test "verifyContainerCreation uses _creationNoiseFilter (the filter the tests exercise)" {
+  grep -qF '"$raw_errors" | _creationNoiseFilter' "$BATS_TEST_DIRNAME/../../util/functions.sh"
+}
+
+@test "installDevTools: binaries matching the pinned sha256 + version are kept, not downloaded" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export DTCTL_PIN_BIN_SHA256_AMD64="$(fake_present dtctl 9.9.9)"
+  export MONACO_PIN_BIN_SHA256_AMD64="$(fake_present monaco 9.9.9)"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -s "$CURL_LOG" ]
+  echo "$output" | grep -q "dtctl v9.9.9 already present"
+  echo "$output" | grep -q "Monaco v9.9.9 already present"
+}
+
+@test "installDevTools: a present binary reporting the RIGHT version but other bytes is replaced" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  fake_present dtctl 9.9.9 >/dev/null     # says 9.9.9, but its sha256 is NOT the pin
+  fake_present monaco 9.9.9 >/dev/null
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -q "dtctl_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  grep -q "monaco-linux-amd64" "$CURL_LOG"
+  refute grep -q 'echo "dtctl version 9.9.9"' "$INSTALL_DIR/dtctl"
+}
+
+@test "installDevTools: a binary at a DIFFERENT version is replaced by the verified pin" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export DTCTL_PIN_BIN_SHA256_AMD64="$(fake_present dtctl 9.9.10)"   # bytes match, version does not
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -q "dtctl_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  refute grep -q 'echo "dtctl version 9.9.10"' "$INSTALL_DIR/dtctl"
+}
+
+@test "installDevTools: asset whose sha256 differs from the REVIEWED pin is refused (release file agrees)" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  # The release checksum files still match the assets: only the committed pin catches this.
+  export DTCTL_PIN_SHA256_AMD64="$(printf '%064d' 1)" MONACO_PIN_SHA256_AMD64="$(printf '%064d' 2)"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  [ "$(echo "$output" | grep -c "MISMATCH")" -eq 2 ]
+}
+
+@test "installDtctl: a version the repo overrode (not the pin) falls back to the release file, with a warning" {
+  source_functions
+  pin_devtools
+  export DTCTL_VERSION=9.9.8
+  cp "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz" "$FIXTURES/dtctl_9.9.8_linux_amd64.tar.gz"
+  (cd "$FIXTURES" && sha256sum dtctl_9.9.8_linux_amd64.tar.gz >> checksums.txt)
+  run installDtctl
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  echo "$output" | grep -q "not the framework's pinned version"
+}
+
+@test "installDevTools: the framework's pinned version with NO pin for this arch is refused, no fallback" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  # The release checksum files are fine; only the committed per-arch pin is missing.
+  export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64=""
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  [ "$(echo "$output" | grep -c "no reviewed sha256 is pinned for amd64 — refusing")" -eq 2 ]
+  refute grep -q "Checksum OK" <<< "$output"
+}
+
+@test "variables.sh: committed pins are 64-hex for both tools and both arches" {
+  local real="$BATS_TEST_DIRNAME/../../util/variables.sh" v
+  for v in DTCTL_PIN_SHA256_AMD64 DTCTL_PIN_SHA256_ARM64 DTCTL_PIN_BIN_SHA256_AMD64 DTCTL_PIN_BIN_SHA256_ARM64 \
+           MONACO_PIN_SHA256_AMD64 MONACO_PIN_SHA256_ARM64; do
+    grep -qE "^$v=[0-9a-f]{64}$" "$real"
+  done
+}
+
+@test "installDevTools: arm64 machine installs the arm64 assets against the arm64 pins" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export FAKE_UNAME_M=aarch64
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -q "dtctl_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
+  grep -q "monaco-linux-arm64" "$CURL_LOG"
+  refute grep -q "amd64" "$CURL_LOG"
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+}
+
+@test "_releaseArch: \$ARCH cannot override the machine (uname -m only)" {
+  source_functions
+  export FAKE_UNAME_M=aarch64
+  ARCH=x86_64 run _releaseArch
+  [ "$output" = "arm64" ]
+  export FAKE_UNAME_M=x86_64
+  ARCH=aarch64 run _releaseArch
+  [ "$output" = "amd64" ]
+}
+
+@test "installDevTools: no passwordless sudo → sudo -n fails fast, non-fatal" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere: the sudo path is never taken"
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export SUDO_LOG="$TEST_DIR/sudo.log" SUBDIR="$INSTALL_DIR/locked"
+  # A sudo that needs a password: -n fails at once, anything else would hang.
+  printf '#!/bin/bash\necho "sudo $*" >> "$SUDO_LOG"\nif [ "$1" = "-n" ]; then echo "sudo: a password is required" >&2; exit 1; fi\nsleep 30; exit 1\n' > "$BIN/sudo"
+  chmod +x "$BIN/sudo"
+  mkdir -p "$SUBDIR"; chmod 0555 "$SUBDIR"
+  DTCTL_INSTALL_DIR="$SUBDIR" MONACO_INSTALL_DIR="$SUBDIR" run timeout 20 bash -c \
+    'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh; installDevTools'
+  chmod 0755 "$SUBDIR"
+  [ "$status" -eq 0 ]
+  [ -s "$SUDO_LOG" ]
+  refute grep -qv '^sudo -n ' "$SUDO_LOG"
+  echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
+  echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
+}
+
+@test "_removeBinary uses sudo -n for a non-writable directory" {
+  [ "$(id -u)" -ne 0 ] || skip "root can write anywhere: the sudo path is never taken"
+  source_functions
+  export SUDO_LOG="$TEST_DIR/sudo.log" SUBDIR="$INSTALL_DIR/locked"
+  printf '#!/bin/bash\necho "sudo $*" >> "$SUDO_LOG"; [ "$1" = "-n" ] || sleep 30; exit 1\n' > "$BIN/sudo"
+  chmod +x "$BIN/sudo"
+  mkdir -p "$SUBDIR"; touch "$SUBDIR/dtctl"; chmod 0555 "$SUBDIR"
+  run timeout 10 bash -c 'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh; _removeBinary "$SUBDIR/dtctl"'
+  chmod 0755 "$SUBDIR"
+  [ "$status" -ne 124 ]
+  grep -q '^sudo -n rm -f ' "$SUDO_LOG"
+}
+
+@test "installDevTools: every download has --connect-timeout 10 and fits one time budget" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export CURL_ARGS_LOG="$TEST_DIR/curl-args.log" DEVTOOLS_TIME_BUDGET=60
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CURL_ARGS_LOG")" -eq 4 ]
+  refute grep -v -- "--connect-timeout 10 " "$CURL_ARGS_LOG"
+  local mt
+  for mt in $(grep -o -- "--max-time [0-9]*" "$CURL_ARGS_LOG" | awk '{print $2}'); do
+    [ "$mt" -le 60 ]
+  done
+}
+
+@test "installDevTools: a non-numeric DEVTOOLS_TIME_BUDGET falls back to 180 s" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export CURL_ARGS_LOG="$TEST_DIR/curl-args.log"
+  local b
+  for b in abc "1+1" "-5" "60s"; do
+    : > "$CURL_ARGS_LOG"; rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+    DEVTOOLS_TIME_BUDGET="$b" run installDevTools
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "DEVTOOLS_TIME_BUDGET '$b' is not a number of seconds — using 180"
+    [ -x "$INSTALL_DIR/dtctl" ]
+    [ -x "$INSTALL_DIR/monaco" ]
+    # max-time is the per-file cap (120/30), never more than the 180 s default.
+    refute grep -E -- "--max-time (1[89][0-9]|[2-9][0-9][0-9])" "$CURL_ARGS_LOG"
+  done
+}
+
+@test "installDevTools: DEVTOOLS_TIME_BUDGET is base 10 and capped at 900 s" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export CURL_ARGS_LOG="$TEST_DIR/curl-args.log"
+  # 08 / 09 are invalid octal: base-10 parsing must take them as 8 / 9 s.
+  : > "$CURL_ARGS_LOG"
+  DEVTOOLS_TIME_BUDGET=08 run installDevTools
+  [ "$status" -eq 0 ]
+  refute grep -q "value too great for base\|not a number" <<< "$output"
+  grep -q -- "--max-time [0-8] " "$CURL_ARGS_LOG"
+  refute grep -E -- "--max-time (9|[1-9][0-9]+) " "$CURL_ARGS_LOG"
+  # 20 digits overflow 64-bit arithmetic: 2^64 wraps to 0, which would leave
+  # a budget of 0 and download nothing. Capped to 900 BEFORE any math.
+  local b
+  for b in 18446744073709551616 99999999999999999999 1000; do
+    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+    DEVTOOLS_TIME_BUDGET="$b" run installDevTools
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "DEVTOOLS_TIME_BUDGET '$b' is above the 900 s cap — using 900"
+    [ -x "$INSTALL_DIR/dtctl" ]
+    [ -x "$INSTALL_DIR/monaco" ]
+  done
+}
+
+@test "installDevTools: exhausted time budget downloads nothing, non-fatal" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  DEVTOOLS_TIME_BUDGET=0 run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -s "$CURL_LOG" ]
+  echo "$output" | grep -q "time budget exhausted"
+  echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
+  echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
+}
+
+@test "installDtctl / installMonaco: a failing mktemp refuses, no download" {
+  source_functions
+  pin_devtools
+  printf '#!/bin/bash\nexit 1\n' > "$BIN/mktemp"; chmod +x "$BIN/mktemp"
+  run installDtctl
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "could not create a temporary directory"
+  run installMonaco
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "could not create a temporary directory"
+  refute grep -q "releases/download" "$CURL_LOG"
+}
+
+# A fake dtctl that echoes both token values from its environment.
+fake_echoing_dtctl() {
+  printf '#!/bin/bash\necho "debug: token=$DT_DTCTL_TOKEN monaco=$DT_MONACO_TOKEN"\nexit "${1:-0}"\n' > "$INSTALL_DIR/dtctl"
+  chmod +x "$INSTALL_DIR/dtctl"
+}
+
+@test "_devToolStep: a child echoing the token has the value masked in the replay" {
+  source_functions
+  fake_echoing_dtctl
+  run _devToolStep dtctl "$INSTALL_DIR/dtctl" 0
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF "debug: token=<redacted> monaco=<redacted>"
+  no_sentinel_anywhere
+}
+
+@test "_devToolStep: the token is masked on the FAILURE replay too" {
+  source_functions
+  fake_echoing_dtctl
+  run _devToolStep dtctl "$INSTALL_DIR/dtctl" 1
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF "devtools (non-fatal): debug: token=<redacted> monaco=<redacted>"
+  no_sentinel_anywhere
+}
+
+@test "enableDtctl: config left read-only, a later dtctl config write fails without leaking; re-run works" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores file modes"
+  source_functions
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  local cfg="$XDG_CONFIG_HOME/dtctl/config"
+  [ ! -w "$cfg" ]
+  run "$INSTALL_DIR/dtctl" config use-context enablement
+  [ "$status" -ne 0 ]
+  refute grep -q "SENTINEL" "$cfg"
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  [ ! -w "$cfg" ]
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$cfg"
+}
+
+@test "enableDtctl: every dtctl config write runs WITHOUT the token in its environment" {
+  source_functions
+  stub_set DTCTL_STUB_WRITE_ENV=1
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  no_sentinel_anywhere
+}
+
+@test "enableDtctl: another context's \${OTHER} reference is blanked, its VALUE never reaches disk" {
+  source_functions
+  export OTHER_TOKEN="dt0s16.SENTINELOTHER.secretpart"
+  mkdir -p "$XDG_CONFIG_HOME/dtctl"
+  printf '    - name: mine\n      token: ${OTHER_TOKEN}\n' > "$XDG_CONFIG_HOME/dtctl/config"
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  refute grep -qF 'token: ${OTHER_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  no_sentinel_anywhere
+}
+
+@test "enableDtctl never points the learner at 'dtctl config view' (prints the resolved token)" {
+  source_functions
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  refute grep -q "config view" <<< "$output"
+  echo "$output" | grep -q "re-run enableDtctl"
+}
+
+@test "_maskTokens works under zsh (the learner's shell)" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  run zsh -c 'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh >/dev/null; _maskTokens "a $DT_DTCTL_TOKEN b $DT_MONACO_TOKEN c"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "a <redacted> b <redacted> c" ]
+}
+
+@test "finalizePostCreation runs installDevTools (every repo gets it with no edits)" {
+  source_functions
+  installDevTools() { echo "INSTALL_DEVTOOLS_RAN"; }
+  verifyContainerCreation() { :; }
+  postCodespaceTracker() { :; }
+  CODESPACE_NAME="learner" run finalizePostCreation
+  echo "$output" | grep -q "INSTALL_DEVTOOLS_RAN"
+}
+
+@test "variables.sh pins DTCTL_VERSION and MONACO_VERSION to x.y.z (never 'latest')" {
+  source_functions
+  local real="$BATS_TEST_DIRNAME/../../util/variables.sh" d m
+  d=$(sed -n 's/^DTCTL_PIN_VERSION=//p' "$real")
+  m=$(sed -n 's/^MONACO_PIN_VERSION=//p' "$real")
+  grep -qxF 'DTCTL_VERSION="${DTCTL_VERSION:-$DTCTL_PIN_VERSION}"' "$real"
+  grep -qxF 'MONACO_VERSION="${MONACO_VERSION:-$MONACO_PIN_VERSION}"' "$real"
+  _isVersion "$d"
+  _isVersion "$m"
 }
