@@ -149,7 +149,9 @@ enableDtctl              # optional: learners inspect what was deployed
 
 **Verified installs.** Both installers use the version in `DTCTL_VERSION` / `MONACO_VERSION` —
 pinned by the framework in `variables.sh` — or, when that is empty, the latest GitHub release.
-A binary that already reports the wanted version is kept, not downloaded again. dtctl's archive is checked against the release's
+For the pinned version the download must match the reviewed sha256 committed in `variables.sh`
+**and** the release's checksum file; see [dtctl & Monaco](dtctl-monaco.md#supply-chain). A
+binary is kept only when its sha256 matches the pin and it reports the wanted version. dtctl's archive is checked against the release's
 `checksums.txt`, Monaco's binary against its `.sha256`. A mismatch, or an asset missing from the
 checksum file, refuses the install. The checksum file comes from the same release, so this
 proves the download is intact, not who published it; pin a reviewed version for a delivery.
@@ -166,11 +168,13 @@ A pin that is not `x.y.z` is refused before any download: nothing is written to 
 | safety level | `readonly`; `--readwrite` sets `readwrite-mine`. Safety levels are a **client-side** guard — they do not narrow what the token itself may do |
 | storage | `DTCTL_TOKEN_STORAGE=file` (a container has no keyring) |
 
-!!! warning "Two dtctl commands expose the token"
-    `dtctl config view` prints the **resolved** token, and `dtctl config use-context` rewrites
-    the config with every `${VAR}` expanded — the token value lands in the file (dtctl 0.42.0).
-    `enableDtctl` writes the credential last and refuses a config that holds the value. To
-    switch or repair the context, re-run `enableDtctl` rather than `dtctl config use-context`.
+!!! warning "dtctl commands that expose the token"
+    `dtctl config view` prints the **resolved** token, and **any** `dtctl config` write —
+    `use-context`, or `set-credentials` for another context — rewrites the config with every
+    `${VAR}` expanded, so the token value lands in the file (dtctl 0.42–0.43). `enableDtctl`
+    writes the credential last, refuses a config that holds the value, and leaves the config
+    **read-only** (`0400`) so a later config write fails instead of leaking. To switch or repair
+    the context, re-run `enableDtctl` — it restores the mode itself.
 
 **Credentials.** Both tools read a token by variable **name**, never a pasted value: dtctl
 `DT_DTCTL_TOKEN`, Monaco `DT_MONACO_TOKEN` (override with `MONACO_TOKEN_VAR`). Under Orbital

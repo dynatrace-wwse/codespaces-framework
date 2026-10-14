@@ -754,7 +754,9 @@ _varIsSet() {
 
 _releaseArch() {
   # Maps the machine architecture to the release asset suffix (amd64 | arm64).
-  case "${ARCH:-$(uname -m)}" in
+  # Always the kernel's answer: $ARCH is a plain variable a repo or .env can
+  # set, and a wrong one would install a binary that cannot run.
+  case "$(uname -m)" in
     x86_64|amd64) echo "amd64" ;;
     aarch64|arm64|armv8*) echo "arm64" ;;
     *) return 1 ;;
@@ -766,10 +768,10 @@ _githubLatestTag() {
   # GitHub API first; the releases/latest redirect as a fallback, because the
   # API is rate-limited for anonymous callers behind a shared egress IP.
   local repo="$1" tag
-  tag=$(curl -fsSL --max-time 20 "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+  tag=$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
     | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
   if [ -z "$tag" ]; then
-    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 20 \
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 --max-time 20 \
       "https://github.com/$repo/releases/latest" 2>/dev/null | sed -E 's#.*/tag/##')
   fi
   _isVersion "$tag" || return 1
@@ -778,13 +780,14 @@ _githubLatestTag() {
 
 _installBinary() {
   # _installBinary <src> <dir> <name> — installs 0755, with sudo only when the
-  # target directory is not writable.
+  # target directory is not writable. sudo -n: without passwordless sudo it
+  # fails at once instead of waiting on a password prompt nobody can answer.
   local src="$1" dir="$2" name="$3"
-  mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir" || return 1
+  mkdir -p "$dir" 2>/dev/null || sudo -n mkdir -p "$dir" || return 1
   if [ -w "$dir" ]; then
     install -m 0755 "$src" "$dir/$name"
   else
-    sudo install -m 0755 "$src" "$dir/$name"
+    sudo -n install -m 0755 "$src" "$dir/$name"
   fi
 }
 
@@ -794,8 +797,37 @@ _removeBinary() {
   if [ -w "$(dirname "$file")" ]; then
     rm -f "$file"
   else
-    sudo rm -f "$file"
+    sudo -n rm -f "$file"
   fi
+}
+
+_fetch() {
+  # _fetch <url> <out> <max-seconds> — one download. --connect-timeout so a
+  # dead route fails in seconds; --max-time capped by DEVTOOLS_DEADLINE (epoch
+  # seconds, set by installDevTools) so both tools share one time budget.
+  local url="$1" out="$2" mt="$3" left
+  if [ -n "${DEVTOOLS_DEADLINE:-}" ]; then
+    left=$(( DEVTOOLS_DEADLINE - $(date +%s) ))
+    if [ "$left" -le 0 ]; then
+      printError "download time budget exhausted — $(basename "$url") not fetched"
+      return 1
+    fi
+    [ "$left" -lt "$mt" ] && mt="$left"
+  fi
+  curl -fsSL --connect-timeout 10 --max-time "$mt" -o "$out" "$url"
+}
+
+_pinnedSha() {
+  # _pinnedSha <DTCTL|MONACO> <version> <amd64|arm64> [BIN_] — prints the
+  # reviewed sha256 committed in variables.sh, only when <version> is that
+  # tool's pinned version. Prints nothing for any other version.
+  local pin arch_up
+  case "$1" in DTCTL|MONACO) ;; *) return 1 ;; esac
+  case "$3" in amd64) arch_up=AMD64 ;; arm64) arch_up=ARM64 ;; *) return 1 ;; esac
+  case "${4:-}" in ''|BIN_) ;; *) return 1 ;; esac
+  eval "pin=\${${1}_PIN_VERSION:-}"
+  [ -n "$pin" ] && [ "${2#v}" = "${pin#v}" ] || return 0
+  eval "echo \"\${${1}_PIN_${4:-}SHA256_${arch_up}:-}\""
 }
 
 _dtctlConfigFile() {
@@ -813,14 +845,30 @@ _dtctlDropLeakedConfig() {
 }
 
 _devToolReports() {
-  # _devToolReports <binary> <version> — 0 when <binary> runs and its
-  # `version` output names <version>. Lets an image that bakes the binary in
-  # skip the download; anything else falls through to a verified install.
-  local bin="$1" want="${2#v}"
-  [ -x "$bin" ] && [ -n "$want" ] || return 1
+  # _devToolReports <binary> <version> <pinned-binary-sha256> — 0 only when
+  # <binary>'s sha256 equals the reviewed pin AND its `version` output names
+  # <version>. Lets an image that bakes the binary in skip the download;
+  # anything else (no pin, other bytes, other version) gets a verified install.
+  local bin="$1" want="${2#v}" pin="$3"
+  [ -x "$bin" ] && [ -n "$want" ] && [ -n "$pin" ] || return 1
+  [ "$(_sha256Of "$bin")" = "$(echo "$pin" | tr '[:upper:]' '[:lower:]')" ] || return 1
   "$bin" version 2>/dev/null | awk -v v="$want" '
     NR == 1 { for (i = 1; i <= NF; i++) { f = $i; sub(/^v/, "", f); if (f == v) ok = 1 } }
     END { exit !ok }'
+}
+
+_verifyAsset() {
+  # _verifyAsset <tool> <file> <pinned-sha256> <release-sha256> — the reviewed
+  # pin first, the release's own checksum file second. Both must match. With
+  # no pin (a version other than the framework's) only the release file is
+  # checked, and that is said out loud.
+  local tool="$1" file="$2" pinned="$3" release="$4"
+  if [ -n "$pinned" ]; then
+    verifySha256 "$file" "$pinned" || return 1
+  else
+    printWarn "$tool: no reviewed sha256 pinned for this version/arch — verified against the release checksum file only"
+  fi
+  verifySha256 "$file" "$release"
 }
 
 installDtctl() {
@@ -829,7 +877,7 @@ installDtctl() {
   local dir="${1:-${DTCTL_INSTALL_DIR:-/usr/local/bin}}"
   local arch version tag
   if ! arch=$(_releaseArch); then
-    printError "dtctl: unsupported architecture '${ARCH:-$(uname -m)}' (amd64 and arm64 only)"
+    printError "dtctl: unsupported architecture '$(uname -m)' (amd64 and arm64 only)"
     return 1
   fi
   if [ -n "$DTCTL_VERSION" ]; then
@@ -846,24 +894,27 @@ installDtctl() {
     version="${tag#v}"
   fi
 
-  if _devToolReports "$dir/dtctl" "$version"; then
-    printInfo "dtctl v$version already present at $dir/dtctl"
+  if _devToolReports "$dir/dtctl" "$version" "$(_pinnedSha DTCTL "$version" "$arch" BIN_)"; then
+    printInfo "dtctl v$version already present at $dir/dtctl (sha256 matches the pin)"
     return 0
   fi
 
   local asset="dtctl_${version}_linux_${arch}.tar.gz"
   local base="https://github.com/dynatrace-oss/dtctl/releases/download/v${version}"
   local tmp expected
-  tmp=$(mktemp -d)
+  if ! tmp=$(mktemp -d); then
+    printError "dtctl: could not create a temporary directory"
+    return 1
+  fi
   printInfo "Downloading $asset and checksums.txt (dtctl v$version)"
-  if ! curl -fsSL --max-time 120 -o "$tmp/$asset" "$base/$asset" \
-     || ! curl -fsSL --max-time 30 -o "$tmp/checksums.txt" "$base/checksums.txt"; then
+  if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
+     || ! _fetch "$base/checksums.txt" "$tmp/checksums.txt" 30; then
     printError "dtctl: download of v$version failed"
     rm -rf "$tmp"
     return 1
   fi
   expected=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1; exit}' "$tmp/checksums.txt")
-  if ! verifySha256 "$tmp/$asset" "$expected"; then
+  if ! _verifyAsset dtctl "$tmp/$asset" "$(_pinnedSha DTCTL "$version" "$arch")" "$expected"; then
     rm -rf "$tmp"
     return 1
   fi
@@ -921,6 +972,8 @@ enableDtctl() {
   local token_ref='${'"$token_var"'}' cfg
   cfg=$(_dtctlConfigFile)
   export DTCTL_TOKEN_STORAGE=file
+  # A previous enableDtctl left the config read-only (see below).
+  [ -f "$cfg" ] && chmod u+w "$cfg" 2>/dev/null
   if ! "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
          --token-ref "$ctx" --safety-level "$level" \
      || ! "$dir/dtctl" config use-context "$ctx" \
@@ -943,12 +996,20 @@ enableDtctl() {
     return 1
   fi
 
+  # Read-only from here: dtctl (0.43) rewrites the WHOLE config, every ${VAR}
+  # expanded, on any later config write — `use-context`, or `set-credentials`
+  # for another context — which would put the token value on disk. Read
+  # commands only read the file; a config write now fails instead of leaking.
+  if ! chmod 0400 "$cfg" 2>/dev/null; then
+    printWarn "dtctl: could not make $cfg read-only — a later 'dtctl config' write would store the token value"
+  fi
+
   if ! _varIsSet "$token_var"; then
     printWarn "$token_var is not set — dtctl is configured, but commands fail until it is"
   fi
   printInfo "dtctl context '$ctx' → $DT_ENVIRONMENT, safety level $level, token from \$$token_var"
   printInfo "Try: dtctl get dashboards   ·   disable with: disableDtctl"
-  printInfo "Note: 'dtctl config view' prints the resolved token, and 'dtctl config use-context' writes it into the config — re-run enableDtctl instead"
+  printInfo "Note: the config is read-only; 'dtctl config view' prints the resolved token and any 'dtctl config' write would store it — re-run enableDtctl instead"
 }
 
 disableDtctl() {
@@ -971,7 +1032,7 @@ installMonaco() {
   # release's per-asset .sha256 file.
   local dir="${MONACO_INSTALL_DIR:-/usr/local/bin}" arch version tag
   if ! arch=$(_releaseArch); then
-    printError "monaco: unsupported architecture '${ARCH:-$(uname -m)}' (amd64 and arm64 only)"
+    printError "monaco: unsupported architecture '$(uname -m)' (amd64 and arm64 only)"
     return 1
   fi
   if [ -n "$MONACO_VERSION" ]; then
@@ -987,8 +1048,8 @@ installMonaco() {
     fi
     version="${tag#v}"
   fi
-  if _devToolReports "$dir/monaco" "$version"; then
-    printInfo "Monaco v$version already present at $dir/monaco"
+  if _devToolReports "$dir/monaco" "$version" "$(_pinnedSha MONACO "$version" "$arch" BIN_)"; then
+    printInfo "Monaco v$version already present at $dir/monaco (sha256 matches the pin)"
     return 0
   fi
   printInfoSection "Installing Monaco v$version ($arch)"
@@ -996,15 +1057,18 @@ installMonaco() {
   local asset="monaco-linux-${arch}"
   local base="https://github.com/Dynatrace/dynatrace-configuration-as-code/releases/download/v${version}"
   local tmp expected
-  tmp=$(mktemp -d)
-  if ! curl -fsSL --max-time 120 -o "$tmp/$asset" "$base/$asset" \
-     || ! curl -fsSL --max-time 30 -o "$tmp/$asset.sha256" "$base/$asset.sha256"; then
+  if ! tmp=$(mktemp -d); then
+    printError "monaco: could not create a temporary directory"
+    return 1
+  fi
+  if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
+     || ! _fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 30; then
     printError "monaco: download of v$version failed"
     rm -rf "$tmp"
     return 1
   fi
   expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
-  if ! verifySha256 "$tmp/$asset" "$expected"; then
+  if ! _verifyAsset monaco "$tmp/$asset" "$(_pinnedSha MONACO "$version" "$arch")" "$expected"; then
     rm -rf "$tmp"
     return 1
   fi
@@ -1030,6 +1094,9 @@ installDevTools() {
       return 0 ;;
   esac
   printInfoSection "Installing dev tools: dtctl ${DTCTL_VERSION:-latest}, Monaco ${MONACO_VERSION:-latest}"
+  # One download budget for both tools (seconds), read by _fetch.
+  local DEVTOOLS_DEADLINE
+  DEVTOOLS_DEADLINE=$(( $(date +%s) + ${DEVTOOLS_TIME_BUDGET:-180} ))
   if _varIsSet DT_DTCTL_TOKEN && [ -n "$DT_ENVIRONMENT" ]; then
     _devToolStep "dtctl" enableDtctl
   else
@@ -1040,17 +1107,30 @@ installDevTools() {
   return 0
 }
 
+_maskTokens() {
+  # _maskTokens <text> — prints <text> with the VALUES of the dev-tool token
+  # variables replaced (fixed string, not a pattern) by <redacted>.
+  local text="$1" var val
+  for var in DT_DTCTL_TOKEN DT_MONACO_TOKEN "${DTCTL_TOKEN_VAR:-}" "${MONACO_TOKEN_VAR:-}"; do
+    _varIsSet "$var" || continue
+    eval "val=\${$var}"
+    text="${text//"$val"/<redacted>}"
+  done
+  printf '%s\n' "$text"
+}
+
 _devToolStep() {
-  # _devToolStep <name> <command...> — runs one install step. On failure its
-  # output is replayed tagged "devtools (non-fatal)", which
-  # verifyContainerCreation filters out: a missing dev tool must not mark the
-  # whole container as failed.
+  # _devToolStep <name> <command...> — runs one install step. Its output is
+  # replayed with token values masked (a child tool may echo one). On failure
+  # each line is tagged "devtools (non-fatal)", which _creationNoiseFilter
+  # drops: a missing dev tool must not mark the whole container as failed.
   local name="$1" out
   shift
   if out=$("$@" 2>&1); then
-    printf '%s\n' "$out"
+    _maskTokens "$out"
     return 0
   fi
+  out=$(_maskTokens "$out")
   printf '%s\n' "$out" | sed 's/^/devtools (non-fatal): /'
   printWarn "devtools (non-fatal): $name not installed — post-create continues without it"
   return 1
@@ -3867,6 +3947,43 @@ verifyCodespaceCreation(){
   verifyContainerCreation "$@"
 }
 
+_creationNoiseFilter() {
+  # Reads log lines on stdin, prints only those that are real errors: the
+  # grep for 'error|failed' in verifyContainerCreation is intentionally broad,
+  # so known noise is dropped here. Patterns are EXTENDED regexes — escape ( ).
+  grep -v -i -E \
+      -e 'no errors detected' \
+      -e 'errors detected in the creation' \
+      -e 'There has been.*error' \
+      -e 'configmap.*dtcredentials' \
+      -e 'Verify Codespace creation' \
+      -e 'error_count' \
+      -e 'ERROR_COUNT' \
+      -e 'npm warn' \
+      -e 'npm WARN' \
+      -e 'WARN.*not set' \
+      -e 'warning:' \
+      -e 'ErrorPolicy' \
+      -e 'error-page' \
+      -e 'error\.html' \
+      -e 'error_reporting' \
+      -e 'errorHandler' \
+      -e 'error-handling' \
+      -e 'stderr' \
+      -e 'printError' \
+      -e 'on-error' \
+      -e 'if-error' \
+      -e 'onerror' \
+      -e 'error\.log' \
+      -e 'errors=' \
+      -e 'error_' \
+      -e 'IfNotPresent.*failed' \
+      -e 'failedScheduling' \
+      -e 'Failed to check' \
+      -e 'FAILED_PRECONDITION' \
+      -e 'devtools \(non-fatal\)'
+}
+
 verifyContainerCreation(){
   printInfoSection "Verify container creation"
   calculateTime
@@ -3902,38 +4019,7 @@ verifyContainerCreation(){
   # and compound words. We filter those out here.
   CODESPACE_ERRORS=""
   if [ -n "$raw_errors" ]; then
-    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | grep -v -i -E \
-      -e 'no errors detected' \
-      -e 'errors detected in the creation' \
-      -e 'There has been.*error' \
-      -e 'configmap.*dtcredentials' \
-      -e 'Verify Codespace creation' \
-      -e 'error_count' \
-      -e 'ERROR_COUNT' \
-      -e 'npm warn' \
-      -e 'npm WARN' \
-      -e 'WARN.*not set' \
-      -e 'warning:' \
-      -e 'ErrorPolicy' \
-      -e 'error-page' \
-      -e 'error\.html' \
-      -e 'error_reporting' \
-      -e 'errorHandler' \
-      -e 'error-handling' \
-      -e 'stderr' \
-      -e 'printError' \
-      -e 'on-error' \
-      -e 'if-error' \
-      -e 'onerror' \
-      -e 'error\.log' \
-      -e 'errors=' \
-      -e 'error_' \
-      -e 'IfNotPresent.*failed' \
-      -e 'failedScheduling' \
-      -e 'Failed to check' \
-      -e 'FAILED_PRECONDITION' \
-      -e 'devtools (non-fatal)' \
-    || true)
+    CODESPACE_ERRORS=$(printf "%s" "$raw_errors" | _creationNoiseFilter || true)
   fi
 
   if [ -n "$CODESPACE_ERRORS" ]; then
