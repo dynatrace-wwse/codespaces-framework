@@ -830,6 +830,16 @@ _pinnedSha() {
   eval "echo \"\${${1}_PIN_${4:-}SHA256_${arch_up}:-}\""
 }
 
+_dtctlConfigWrite() {
+  # _dtctlConfigWrite <dtctl> <args...> — runs one `dtctl config` write in an
+  # ALLOWLIST environment. dtctl (0.42-0.43) rewrites the whole config with
+  # every ${VAR} expanded on any config write, so ANY token variable in its
+  # environment would land on disk — ours, or one another context references.
+  # With only the path variables present, every expansion yields "".
+  env -i PATH="$PATH" HOME="$HOME" XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}" \
+    DTCTL_CONFIG="${DTCTL_CONFIG:-}" DTCTL_TOKEN_STORAGE=file "$@"
+}
+
 _dtctlConfigFile() {
   echo "${DTCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/dtctl/config}"
 }
@@ -974,19 +984,21 @@ enableDtctl() {
 
   # The literal ${NAME} is stored in the config; dtctl expands it per command.
   # dtctl (0.42-0.43) rewrites the whole config with every ${VAR} EXPANDED on
-  # any config write. So every write here runs with $token_var UNSET (env -u):
-  # an expansion can only ever produce "", never the value, not even for a
-  # moment. set-credentials MUST be the last write — it puts back the
-  # reference that use-context blanked.
+  # any config write. So every write here runs in an allowlist environment
+  # (_dtctlConfigWrite): no token variable is present, an expansion can only
+  # ever produce "", never a value, not even for a moment. Other contexts'
+  # ${VAR} references are blanked too — the framework owns only its own.
+  # set-credentials MUST be the last write — it puts back the reference that
+  # use-context blanked.
   local token_ref='${'"$token_var"'}' cfg
   cfg=$(_dtctlConfigFile)
   export DTCTL_TOKEN_STORAGE=file
   # A previous enableDtctl left the config read-only (see below).
   [ -f "$cfg" ] && chmod u+w "$cfg" 2>/dev/null
-  if ! env -u "$token_var" "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
+  if ! _dtctlConfigWrite "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
          --token-ref "$ctx" --safety-level "$level" \
-     || ! env -u "$token_var" "$dir/dtctl" config use-context "$ctx" \
-     || ! env -u "$token_var" "$dir/dtctl" config set-credentials "$ctx" --token "$token_ref"; then
+     || ! _dtctlConfigWrite "$dir/dtctl" config use-context "$ctx" \
+     || ! _dtctlConfigWrite "$dir/dtctl" config set-credentials "$ctx" --token "$token_ref"; then
     # use-context may already have expanded a ${VAR} into the file.
     _dtctlDropLeakedConfig "$cfg" "$token_var"
     printError "dtctl: configuring context '$ctx' failed"
@@ -1021,7 +1033,7 @@ enableDtctl() {
   fi
   printInfo "dtctl context '$ctx' → $DT_ENVIRONMENT, safety level $level, token from \$$token_var"
   printInfo "Try: dtctl get dashboards   ·   disable with: disableDtctl"
-  printInfo "Note: the config is read-only; 'dtctl config view' prints the resolved token and any 'dtctl config' write would store it — re-run enableDtctl instead"
+  printInfo "Note: the config is read-only; to change the context re-run enableDtctl, not 'dtctl config'"
 }
 
 disableDtctl() {
@@ -1108,13 +1120,20 @@ installDevTools() {
   printInfoSection "Installing dev tools: dtctl ${DTCTL_VERSION:-latest}, Monaco ${MONACO_VERSION:-latest}"
   # One download budget for both tools (seconds), read by _fetch. Anything but
   # a plain non-negative integer falls back to 180: $(( )) would otherwise
-  # evaluate the value as an expression.
+  # evaluate the value as an expression. Digits are read as base 10 (a
+  # leading 0 is not octal) and capped at 900; a value too long to be a sane
+  # number of seconds is capped BEFORE arithmetic, which would overflow it.
   local DEVTOOLS_DEADLINE budget="${DEVTOOLS_TIME_BUDGET:-180}"
   case "$budget" in
     ''|*[!0-9]*)
       printWarn "DEVTOOLS_TIME_BUDGET '$budget' is not a number of seconds — using 180"
       budget=180 ;;
   esac
+  if [ "${#budget}" -gt 6 ] || [ $(( 10#$budget )) -gt 900 ]; then
+    printWarn "DEVTOOLS_TIME_BUDGET '$budget' is above the 900 s cap — using 900"
+    budget=900
+  fi
+  budget=$(( 10#$budget ))
   DEVTOOLS_DEADLINE=$(( $(date +%s) + budget ))
   if _varIsSet DT_DTCTL_TOKEN && [ -n "$DT_ENVIRONMENT" ]; then
     _devToolStep "dtctl" enableDtctl

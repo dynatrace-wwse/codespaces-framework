@@ -97,6 +97,12 @@ EOF
   chmod +x "$BIN/uname"
 }
 
+# stub_set NAME=value — a control for the dtctl stub (see make_fixtures).
+stub_set() {
+  echo "$1" >> "$TEST_DIR/stub.env"
+  export "$1"
+}
+
 make_fixtures() {
   local stage="$TEST_DIR/stage"
   mkdir -p "$stage"
@@ -136,6 +142,11 @@ elif [ "$1 $2" = "config use-context" ]; then
 fi
 exit 0
 EOF
+  # enableDtctl runs dtctl config writes with `env -i` (an allowlist), so the
+  # stub cannot read its controls from the environment: it sources a file at a
+  # fixed path instead. stub_set writes it; it never holds a token value.
+  sed -i "2i . \"$TEST_DIR/stub.env\" 2>/dev/null" "$stage/dtctl"
+  printf 'DTCTL_LOG=%q\nTEST_DIR=%q\n' "$DTCTL_LOG" "$TEST_DIR" > "$TEST_DIR/stub.env"
   chmod +x "$stage/dtctl"
   local a
   for a in amd64 arm64; do
@@ -215,10 +226,32 @@ refute() {
 no_sentinel_anywhere() {
   # Fails if either token value appears in the captured output or in any file
   # the functions wrote (config, run dir, stub logs).
+  # Only paths that exist are scanned, and grep's status is read exactly:
+  # grep exits 2 on a missing path EVEN WHEN it also found a match, and the
+  # old `if grep -rls ... missing.log` read that 2 as "clean" — the check was
+  # blind in every test that never ran Monaco.
   if echo "$output" | grep -q "SENTINEL"; then echo "token value in output"; return 1; fi
-  if grep -rls "SENTINEL" "$HOME" "$FAKE_REPO" "$CURL_LOG" "$DTCTL_LOG" "$MONACO_LOG"; then
-    echo "token value written to the files above"; return 1
-  fi
+  local p paths=() rc
+  for p in "$HOME" "$FAKE_REPO" "$CURL_LOG" "$DTCTL_LOG" "$MONACO_LOG"; do
+    [ -e "$p" ] && paths+=("$p")
+  done
+  rc=0
+  grep -rl "SENTINEL" "${paths[@]}" || rc=$?
+  case "$rc" in
+    0) echo "token value written to the files above"; return 1 ;;
+    1) return 0 ;;
+    *) echo "could not scan for the token value (grep exit $rc)"; return 1 ;;
+  esac
+}
+
+@test "no_sentinel_anywhere: catches a value on disk even when a log file is missing" {
+  # Negative control for the helper every token test relies on.
+  rm -f "$MONACO_LOG" "$CURL_LOG"
+  mkdir -p "$HOME/x"; echo "leaked $DTCTL_SENTINEL" > "$HOME/x/file"
+  output=""
+  run no_sentinel_anywhere
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "token value written"
 }
 
 # ── verifySha256 ──────────────────────────────────────────────────────────────
@@ -951,6 +984,31 @@ fake_present() {
   done
 }
 
+@test "installDevTools: DEVTOOLS_TIME_BUDGET is base 10 and capped at 900 s" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export CURL_ARGS_LOG="$TEST_DIR/curl-args.log"
+  # 08 / 09 are invalid octal: base-10 parsing must take them as 8 / 9 s.
+  : > "$CURL_ARGS_LOG"
+  DEVTOOLS_TIME_BUDGET=08 run installDevTools
+  [ "$status" -eq 0 ]
+  refute grep -q "value too great for base\|not a number" <<< "$output"
+  grep -q -- "--max-time [0-8] " "$CURL_ARGS_LOG"
+  refute grep -E -- "--max-time (9|[1-9][0-9]+) " "$CURL_ARGS_LOG"
+  # 20 digits overflow 64-bit arithmetic: 2^64 wraps to 0, which would leave
+  # a budget of 0 and download nothing. Capped to 900 BEFORE any math.
+  local b
+  for b in 18446744073709551616 99999999999999999999 1000; do
+    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+    DEVTOOLS_TIME_BUDGET="$b" run installDevTools
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "DEVTOOLS_TIME_BUDGET '$b' is above the 900 s cap — using 900"
+    [ -x "$INSTALL_DIR/dtctl" ]
+    [ -x "$INSTALL_DIR/monaco" ]
+  done
+}
+
 @test "installDevTools: exhausted time budget downloads nothing, non-fatal" {
   source_functions
   pin_devtools
@@ -1018,11 +1076,31 @@ fake_echoing_dtctl() {
 
 @test "enableDtctl: every dtctl config write runs WITHOUT the token in its environment" {
   source_functions
-  export DTCTL_STUB_WRITE_ENV=1
+  stub_set DTCTL_STUB_WRITE_ENV=1
   run enableDtctl
   [ "$status" -eq 0 ]
   grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
   no_sentinel_anywhere
+}
+
+@test "enableDtctl: another context's \${OTHER} reference is blanked, its VALUE never reaches disk" {
+  source_functions
+  export OTHER_TOKEN="dt0s16.SENTINELOTHER.secretpart"
+  mkdir -p "$XDG_CONFIG_HOME/dtctl"
+  printf '    - name: mine\n      token: ${OTHER_TOKEN}\n' > "$XDG_CONFIG_HOME/dtctl/config"
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  refute grep -qF 'token: ${OTHER_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  no_sentinel_anywhere
+}
+
+@test "enableDtctl never points the learner at 'dtctl config view' (prints the resolved token)" {
+  source_functions
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  refute grep -q "config view" <<< "$output"
+  echo "$output" | grep -q "re-run enableDtctl"
 }
 
 @test "_maskTokens works under zsh (the learner's shell)" {

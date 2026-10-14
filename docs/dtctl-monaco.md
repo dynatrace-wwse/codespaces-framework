@@ -85,9 +85,10 @@ under `~/.local/share/dtctl`, and read commands do not write.
 
 `enableDtctl` defends twice:
 
-- it runs every one of its own `dtctl config` writes with the token variable **removed from
-  dtctl's environment** (`env -u DT_DTCTL_TOKEN`), so an expansion can only ever produce `""`,
-  never the value — not even for a moment. The last write puts the reference back;
+- it runs every one of its own `dtctl config` writes in an **allowlist environment** (`env -i`
+  with only `PATH`, `HOME`, `XDG_CONFIG_HOME`, `DTCTL_CONFIG`, `DTCTL_TOKEN_STORAGE`), so no token
+  variable is present and an expansion can only ever produce `""`, never a value — not even for
+  a moment. The last write puts the reference back;
 - it leaves the config `0400`. Read commands work, and a later `dtctl config` write fails with
   `permission denied` instead of storing the token. dtctl 0.43.0 writes the config **in place**
   (`open(O_WRONLY|O_TRUNC)` on the file; no temporary file, no rename — checked with `strace`),
@@ -95,6 +96,17 @@ under `~/.local/share/dtctl`, and read commands do not write.
   bypass a file mode: re-check this on every version bump.
 
 Re-run `enableDtctl` to change the context — it restores the mode itself.
+
+**Do not run `dtctl config view`.** It prints the **resolved** token — the value, not the
+reference.
+
+!!! note "The framework owns only its own context"
+    `enableDtctl` manages the `enablement` context. Its config writes run with **no** token
+    variable in dtctl's environment, and dtctl rewrites the whole file on each write, so **every
+    other context's `${VAR}` token reference — `${DT_DTCTL_TOKEN}` or any other — is rewritten
+    as an empty token** (`token: ""`). Only `enablement` gets its reference back. A value never
+    lands on disk; a context you added by hand must be set up again after `enableDtctl`, or kept
+    in a separate config file (`dtctl --config <file>`).
 
 ## Turning it off
 

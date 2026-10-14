@@ -169,12 +169,12 @@ A pin that is not `x.y.z` is refused before any download: nothing is written to 
 | storage | `DTCTL_TOKEN_STORAGE=file` (a container has no keyring) |
 
 !!! warning "dtctl commands that expose the token"
-    `dtctl config view` prints the **resolved** token, and **any** `dtctl config` write —
-    `use-context`, or `set-credentials` for another context — rewrites the config with every
-    `${VAR}` expanded, so the token value lands in the file (dtctl 0.42–0.43). `enableDtctl`
-    writes the credential last, refuses a config that holds the value, and leaves the config
-    **read-only** (`0400`) so a later config write fails instead of leaking. To switch or repair
-    the context, re-run `enableDtctl` — it restores the mode itself.
+    **Do not run `dtctl config view`** — it prints the **resolved** token. And **any**
+    `dtctl config` write — `use-context`, or `set-credentials` for another context — rewrites
+    the config with every `${VAR}` expanded, so the token value lands in the file (dtctl
+    0.42–0.43). `enableDtctl` writes the credential last, refuses a config that holds the value,
+    and leaves the config **read-only** (`0400`) so a later config write fails instead of
+    leaking. To switch or repair the context, re-run `enableDtctl` — it restores the mode itself.
 
 **Credentials.** Both tools read a token by variable **name**, never a pasted value: dtctl
 `DT_DTCTL_TOKEN`, Monaco `DT_MONACO_TOKEN` (override with `MONACO_TOKEN_VAR`). Under Orbital
