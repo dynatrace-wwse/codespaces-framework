@@ -42,4 +42,19 @@ jobs:
           sudo apt-get install -y bats zsh
 
       - name: Run framework unit tests
-        run: bats .devcontainer/test/unit/ --tap
+        # Non-root on purpose: the sudo -n and read-only-config tests in
+        # test_dtctl_monaco.bats skip as root (root writes anywhere), and a
+        # skipped guard looks exactly like a passing one.
+        run: |
+          set -o pipefail
+          [ "$(id -u)" -ne 0 ] || { echo "::error::unit tests must run as a non-root user"; exit 1; }
+          bats .devcontainer/test/unit/ --tap | tee "$RUNNER_TEMP/bats.tap"
+
+      - name: No unit test may skip in CI
+        # zsh and a non-root user are both provided above, so nothing has a
+        # reason to skip here. A skip is a guard that did not run.
+        run: |
+          if grep -E '^ok [0-9]+ .* # skip' "$RUNNER_TEMP/bats.tap"; then
+            echo "::error::the tests above were skipped in CI"; exit 1
+          fi
+          echo "no skipped tests"

@@ -106,9 +106,12 @@ make_fixtures() {
 echo "dtctl $*" >> "$DTCTL_LOG"
 cfg="${DTCTL_CONFIG:-$XDG_CONFIG_HOME/dtctl/config}"
 mkdir -p "$(dirname "$cfg")"
-# A child that echoes the token (what _devToolStep must mask).
-[ -n "${DTCTL_STUB_ECHO_TOKEN:-}" ] && echo "debug: token=$DT_DTCTL_TOKEN"
 [ -n "${DTCTL_STUB_FAIL:-}" ] && [ "$1 $2" = "config set-context" ] && exit 1
+# A dtctl that writes the token from its ENVIRONMENT into the config on every
+# config write (what env -u in enableDtctl must make impossible).
+if [ -n "${DTCTL_STUB_WRITE_ENV:-}" ] && [ "$1" = "config" ] && [ -n "${DT_DTCTL_TOKEN:-}" ]; then
+  [ ! -f "$cfg" ] || [ -w "$cfg" ] && echo "# from env: $DT_DTCTL_TOKEN" >> "$cfg"
+fi
 # Real dtctl 0.43 opens the config for writing on every `config` write and
 # fails on a read-only file ("failed to write config file: permission denied").
 if [ "$1" = "config" ] && [ "$2" != "current-context" ] && [ -f "$cfg" ] && [ ! -w "$cfg" ]; then
@@ -291,8 +294,11 @@ no_sentinel_anywhere() {
 
 @test "enableDtctl: a config holding the token VALUE is refused and removed" {
   source_functions
-  # A dtctl that bakes the value in, whatever the order.
-  sed -i 's|echo "      token: \$5"|{ echo "      token: \$5"; echo "      leaked: $DT_DTCTL_TOKEN"; }|' "$TEST_DIR/stage/dtctl"
+  # A dtctl that bakes the value in, whatever the order. enableDtctl strips the
+  # token from dtctl's environment, so this one gets it some other way (a
+  # keyring, another variable): the on-disk check is the backstop for that.
+  printenv DT_DTCTL_TOKEN > "$TEST_DIR/side-channel"
+  sed -i 's|echo "      token: \$5"|{ echo "      token: \$5"; echo "      leaked: $(cat "$TEST_DIR/side-channel")"; }|' "$TEST_DIR/stage/dtctl"
   tar -czf "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz" -C "$TEST_DIR/stage" dtctl
   (cd "$FIXTURES" && sha256sum dtctl_9.9.9_linux_amd64.tar.gz > checksums.txt)
   run enableDtctl
@@ -304,8 +310,9 @@ no_sentinel_anywhere() {
 
 @test "enableDtctl: a value WITHOUT the reference line is still found and removed" {
   source_functions
-  # A dtctl that writes the expanded value instead of the reference.
-  sed -i 's|echo "      token: \$5"|echo "      token: $DT_DTCTL_TOKEN"|' "$TEST_DIR/stage/dtctl"
+  # A dtctl that writes the value (from a side channel, see above) instead of the reference.
+  printenv DT_DTCTL_TOKEN > "$TEST_DIR/side-channel"
+  sed -i 's|echo "      token: \$5"|echo "      token: $(cat "$TEST_DIR/side-channel")"|' "$TEST_DIR/stage/dtctl"
   tar -czf "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz" -C "$TEST_DIR/stage" dtctl
   (cd "$FIXTURES" && sha256sum dtctl_9.9.9_linux_amd64.tar.gz > checksums.txt)
   run enableDtctl
@@ -820,7 +827,7 @@ fake_present() {
   [ "$(echo "$output" | grep -c "MISMATCH")" -eq 2 ]
 }
 
-@test "installDtctl: a version other than the pin warns it has no reviewed sha256" {
+@test "installDtctl: a version the repo overrode (not the pin) falls back to the release file, with a warning" {
   source_functions
   pin_devtools
   export DTCTL_VERSION=9.9.8
@@ -828,7 +835,22 @@ fake_present() {
   (cd "$FIXTURES" && sha256sum dtctl_9.9.8_linux_amd64.tar.gz >> checksums.txt)
   run installDtctl
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "no reviewed sha256 pinned"
+  [ -x "$INSTALL_DIR/dtctl" ]
+  echo "$output" | grep -q "not the framework's pinned version"
+}
+
+@test "installDevTools: the framework's pinned version with NO pin for this arch is refused, no fallback" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  # The release checksum files are fine; only the committed per-arch pin is missing.
+  export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64=""
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  [ "$(echo "$output" | grep -c "no reviewed sha256 is pinned for amd64 — refusing")" -eq 2 ]
+  refute grep -q "Checksum OK" <<< "$output"
 }
 
 @test "variables.sh: committed pins are 64-hex for both tools and both arches" {
@@ -911,6 +933,24 @@ fake_present() {
   done
 }
 
+@test "installDevTools: a non-numeric DEVTOOLS_TIME_BUDGET falls back to 180 s" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  export CURL_ARGS_LOG="$TEST_DIR/curl-args.log"
+  local b
+  for b in abc "1+1" "-5" "60s"; do
+    : > "$CURL_ARGS_LOG"; rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+    DEVTOOLS_TIME_BUDGET="$b" run installDevTools
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "DEVTOOLS_TIME_BUDGET '$b' is not a number of seconds — using 180"
+    [ -x "$INSTALL_DIR/dtctl" ]
+    [ -x "$INSTALL_DIR/monaco" ]
+    # max-time is the per-file cap (120/30), never more than the 180 s default.
+    refute grep -E -- "--max-time (1[89][0-9]|[2-9][0-9][0-9])" "$CURL_ARGS_LOG"
+  done
+}
+
 @test "installDevTools: exhausted time budget downloads nothing, non-fatal" {
   source_functions
   pin_devtools
@@ -936,23 +976,27 @@ fake_present() {
   refute grep -q "releases/download" "$CURL_LOG"
 }
 
-@test "installDevTools: a child echoing the token has the value masked in the replay" {
+# A fake dtctl that echoes both token values from its environment.
+fake_echoing_dtctl() {
+  printf '#!/bin/bash\necho "debug: token=$DT_DTCTL_TOKEN monaco=$DT_MONACO_TOKEN"\nexit "${1:-0}"\n' > "$INSTALL_DIR/dtctl"
+  chmod +x "$INSTALL_DIR/dtctl"
+}
+
+@test "_devToolStep: a child echoing the token has the value masked in the replay" {
   source_functions
-  pin_devtools
-  export DTCTL_STUB_ECHO_TOKEN=1
-  run installDevTools
+  fake_echoing_dtctl
+  run _devToolStep dtctl "$INSTALL_DIR/dtctl" 0
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "token=<redacted>"
+  echo "$output" | grep -qF "debug: token=<redacted> monaco=<redacted>"
   no_sentinel_anywhere
 }
 
-@test "installDevTools: the token is masked on the FAILURE replay too" {
+@test "_devToolStep: the token is masked on the FAILURE replay too" {
   source_functions
-  pin_devtools
-  export DTCTL_STUB_ECHO_TOKEN=1 DTCTL_STUB_FAIL=1
-  run installDevTools
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -q "devtools (non-fatal): debug: token=<redacted>"
+  fake_echoing_dtctl
+  run _devToolStep dtctl "$INSTALL_DIR/dtctl" 1
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qF "devtools (non-fatal): debug: token=<redacted> monaco=<redacted>"
   no_sentinel_anywhere
 }
 
@@ -970,6 +1014,15 @@ fake_present() {
   [ "$status" -eq 0 ]
   [ ! -w "$cfg" ]
   grep -qF 'token: ${DT_DTCTL_TOKEN}' "$cfg"
+}
+
+@test "enableDtctl: every dtctl config write runs WITHOUT the token in its environment" {
+  source_functions
+  export DTCTL_STUB_WRITE_ENV=1
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  no_sentinel_anywhere
 }
 
 @test "_maskTokens works under zsh (the learner's shell)" {

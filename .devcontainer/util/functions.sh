@@ -858,15 +858,22 @@ _devToolReports() {
 }
 
 _verifyAsset() {
-  # _verifyAsset <tool> <file> <pinned-sha256> <release-sha256> — the reviewed
-  # pin first, the release's own checksum file second. Both must match. With
-  # no pin (a version other than the framework's) only the release file is
-  # checked, and that is said out loud.
-  local tool="$1" file="$2" pinned="$3" release="$4"
-  if [ -n "$pinned" ]; then
+  # _verifyAsset <DTCTL|MONACO> <version> <arch> <file> <release-sha256> — the
+  # reviewed pin first, the release's own checksum file second; both must
+  # match. For the framework's own pinned version a missing pin REFUSES: the
+  # release file alone is not enough. Only a version the repo overrode (not
+  # the framework's) falls back to the release file, and says so.
+  local tool="$1" version="${2#v}" arch="$3" file="$4" release="$5" pin pinned
+  eval "pin=\${${tool}_PIN_VERSION:-}"
+  if [ -n "$pin" ] && [ "$version" = "${pin#v}" ]; then
+    pinned=$(_pinnedSha "$tool" "$version" "$arch")
+    if [ -z "$pinned" ]; then
+      printError "$tool v$version is the framework's pinned version but no reviewed sha256 is pinned for $arch — refusing"
+      return 1
+    fi
     verifySha256 "$file" "$pinned" || return 1
   else
-    printWarn "$tool: no reviewed sha256 pinned for this version/arch — verified against the release checksum file only"
+    printWarn "$tool v$version is not the framework's pinned version (${pin:-none}) — no reviewed sha256, verified against the release checksum file only"
   fi
   verifySha256 "$file" "$release"
 }
@@ -914,7 +921,7 @@ installDtctl() {
     return 1
   fi
   expected=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1; exit}' "$tmp/checksums.txt")
-  if ! _verifyAsset dtctl "$tmp/$asset" "$(_pinnedSha DTCTL "$version" "$arch")" "$expected"; then
+  if ! _verifyAsset DTCTL "$version" "$arch" "$tmp/$asset" "$expected"; then
     rm -rf "$tmp"
     return 1
   fi
@@ -966,18 +973,20 @@ enableDtctl() {
   installDtctl "$dir" || return 1
 
   # The literal ${NAME} is stored in the config; dtctl expands it per command.
-  # set-credentials MUST be the last write: dtctl (0.42) rewrites the config
-  # with every ${VAR} EXPANDED on `config use-context`, which would put the
-  # token value — or an empty string — into the file.
+  # dtctl (0.42-0.43) rewrites the whole config with every ${VAR} EXPANDED on
+  # any config write. So every write here runs with $token_var UNSET (env -u):
+  # an expansion can only ever produce "", never the value, not even for a
+  # moment. set-credentials MUST be the last write — it puts back the
+  # reference that use-context blanked.
   local token_ref='${'"$token_var"'}' cfg
   cfg=$(_dtctlConfigFile)
   export DTCTL_TOKEN_STORAGE=file
   # A previous enableDtctl left the config read-only (see below).
   [ -f "$cfg" ] && chmod u+w "$cfg" 2>/dev/null
-  if ! "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
+  if ! env -u "$token_var" "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
          --token-ref "$ctx" --safety-level "$level" \
-     || ! "$dir/dtctl" config use-context "$ctx" \
-     || ! "$dir/dtctl" config set-credentials "$ctx" --token "$token_ref"; then
+     || ! env -u "$token_var" "$dir/dtctl" config use-context "$ctx" \
+     || ! env -u "$token_var" "$dir/dtctl" config set-credentials "$ctx" --token "$token_ref"; then
     # use-context may already have expanded a ${VAR} into the file.
     _dtctlDropLeakedConfig "$cfg" "$token_var"
     printError "dtctl: configuring context '$ctx' failed"
@@ -1000,6 +1009,9 @@ enableDtctl() {
   # expanded, on any later config write — `use-context`, or `set-credentials`
   # for another context — which would put the token value on disk. Read
   # commands only read the file; a config write now fails instead of leaking.
+  # This holds because dtctl 0.43.0 writes the config IN PLACE (strace:
+  # openat O_WRONLY|O_TRUNC on the file, no temp file, no rename). A dtctl that
+  # switched to temp+rename would bypass a file mode — re-check on every bump.
   if ! chmod 0400 "$cfg" 2>/dev/null; then
     printWarn "dtctl: could not make $cfg read-only — a later 'dtctl config' write would store the token value"
   fi
@@ -1068,7 +1080,7 @@ installMonaco() {
     return 1
   fi
   expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
-  if ! _verifyAsset monaco "$tmp/$asset" "$(_pinnedSha MONACO "$version" "$arch")" "$expected"; then
+  if ! _verifyAsset MONACO "$version" "$arch" "$tmp/$asset" "$expected"; then
     rm -rf "$tmp"
     return 1
   fi
@@ -1094,9 +1106,16 @@ installDevTools() {
       return 0 ;;
   esac
   printInfoSection "Installing dev tools: dtctl ${DTCTL_VERSION:-latest}, Monaco ${MONACO_VERSION:-latest}"
-  # One download budget for both tools (seconds), read by _fetch.
-  local DEVTOOLS_DEADLINE
-  DEVTOOLS_DEADLINE=$(( $(date +%s) + ${DEVTOOLS_TIME_BUDGET:-180} ))
+  # One download budget for both tools (seconds), read by _fetch. Anything but
+  # a plain non-negative integer falls back to 180: $(( )) would otherwise
+  # evaluate the value as an expression.
+  local DEVTOOLS_DEADLINE budget="${DEVTOOLS_TIME_BUDGET:-180}"
+  case "$budget" in
+    ''|*[!0-9]*)
+      printWarn "DEVTOOLS_TIME_BUDGET '$budget' is not a number of seconds — using 180"
+      budget=180 ;;
+  esac
+  DEVTOOLS_DEADLINE=$(( $(date +%s) + budget ))
   if _varIsSet DT_DTCTL_TOKEN && [ -n "$DT_ENVIRONMENT" ]; then
     _devToolStep "dtctl" enableDtctl
   else

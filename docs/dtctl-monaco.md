@@ -47,8 +47,10 @@ therefore commits, next to each pinned version in `.devcontainer/util/variables.
 | `MONACO_PIN_SHA256_AMD64` / `_ARM64` | the Monaco binary (which is the release asset) |
 
 A download that does not match the committed hash is refused even when the release's checksum
-file agrees with it. A repo that overrides `DTCTL_VERSION` / `MONACO_VERSION` gets no reviewed
-hash; the install then warns and checks the release file only. **Bumping a version is a
+file agrees with it. For the framework's own pinned version a **missing** hash for the machine's
+architecture also refuses — there is no fallback to the release file. Only a repo that overrides
+`DTCTL_VERSION` / `MONACO_VERSION` to another version gets no reviewed hash; that install warns
+and checks the release file only. **Bumping a version is a
 framework release that bumps its hashes in the same commit.**
 
 ## Never fatal
@@ -69,7 +71,7 @@ still installs. Token values are masked (`<redacted>`) in everything replayed.
 Nothing in the step can hang post-create:
 
 - every download has `--connect-timeout 10`, and both tools share **one time budget** of
-  180 s (`DEVTOOLS_TIME_BUDGET`); once spent, the remaining downloads are skipped as a failure;
+  180 s (`DEVTOOLS_TIME_BUDGET`; anything but a whole number of seconds falls back to 180); once spent, the remaining downloads are skipped as a failure;
 - `sudo` runs as `sudo -n`, so a box without passwordless sudo fails at once instead of
   waiting on a password prompt.
 
@@ -79,10 +81,20 @@ dtctl 0.43 rewrites its whole config on **any** `dtctl config` write — `use-co
 `set-credentials` for another context — with every `${VAR}` **expanded**, which puts the token
 value on disk. Checked with the real 0.43.0 binary and a fake token in a throwaway `HOME`:
 `enableDtctl` leaves only `~/.config/dtctl/config`, holding the reference; nothing is written
-under `~/.local/share/dtctl`, and read commands do not write. So `enableDtctl` leaves the config
-`0400`: read commands work, and a later `dtctl config` write fails with
-`permission denied` instead of storing the token. Re-run `enableDtctl` to change the context —
-it restores the mode itself.
+under `~/.local/share/dtctl`, and read commands do not write.
+
+`enableDtctl` defends twice:
+
+- it runs every one of its own `dtctl config` writes with the token variable **removed from
+  dtctl's environment** (`env -u DT_DTCTL_TOKEN`), so an expansion can only ever produce `""`,
+  never the value — not even for a moment. The last write puts the reference back;
+- it leaves the config `0400`. Read commands work, and a later `dtctl config` write fails with
+  `permission denied` instead of storing the token. dtctl 0.43.0 writes the config **in place**
+  (`open(O_WRONLY|O_TRUNC)` on the file; no temporary file, no rename — checked with `strace`),
+  so the file mode is what stops it. A dtctl version that switched to temp-file-and-rename would
+  bypass a file mode: re-check this on every version bump.
+
+Re-run `enableDtctl` to change the context — it restores the mode itself.
 
 ## Turning it off
 
