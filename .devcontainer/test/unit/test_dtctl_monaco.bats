@@ -597,3 +597,161 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(grep -c '^monaco delete' "$MONACO_LOG")" -eq 2 ]
 }
+
+# ── installDevTools (every environment, from finalizePostCreation) ────────────
+
+pin_devtools() {
+  export DTCTL_VERSION=9.9.9 MONACO_VERSION=9.9.9
+}
+
+@test "installDevTools: default installs dtctl and Monaco at the pinned versions, verified" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  grep -q "dtctl/releases/download/v9.9.9/checksums.txt" "$CURL_LOG"
+  grep -q "configuration-as-code/releases/download/v9.9.9/monaco-linux-amd64.sha256" "$CURL_LOG"
+  refute grep -q "releases/latest" "$CURL_LOG"
+  echo "$output" | grep -q "Checksum OK"
+}
+
+@test "installDevTools: no DT_DTCTL_TOKEN → binary only, no dtctl context" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  run installDevTools
+  [ "$status" -eq 0 ]
+  refute grep -q "config set-context" "$DTCTL_LOG"
+  [ ! -f "$XDG_CONFIG_HOME/dtctl/config" ]
+}
+
+@test "installDevTools: DT_DTCTL_TOKEN set → readonly context with a REFERENCE, value never written" {
+  source_functions
+  pin_devtools
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -q "safety-level: readonly" "$XDG_CONFIG_HOME/dtctl/config"
+  grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
+  no_sentinel_anywhere
+}
+
+@test "installDevTools: token set but no DT_ENVIRONMENT → installed, warned, no context" {
+  source_functions
+  pin_devtools
+  unset DT_ENVIRONMENT
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  echo "$output" | grep -q "DT_ENVIRONMENT is not"
+  refute grep -q "config set-context" "$DTCTL_LOG"
+}
+
+@test "installDevTools: FRAMEWORK_DEVTOOLS=off (any case) skips everything — no download" {
+  source_functions
+  pin_devtools
+  local v
+  for v in off OFF false 0 no; do
+    FRAMEWORK_DEVTOOLS="$v" run installDevTools
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "skipped"
+  done
+  [ ! -s "$CURL_LOG" ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+}
+
+@test "installDevTools: FRAMEWORK_DEVTOOLS=off from .devcontainer/.env is honoured" {
+  echo "FRAMEWORK_DEVTOOLS=off" > "$FAKE_REPO/.devcontainer/.env"
+  echo '[ -e "$ENV_FILE" ] && source "$ENV_FILE"' >> "$FAKE_REPO/.devcontainer/util/variables.sh"
+  source_functions
+  pin_devtools
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "installDevTools: corrupt dtctl archive is refused, NOT fatal, Monaco still installs" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  echo "$output" | grep -q "MISMATCH"
+  echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
+}
+
+@test "installDevTools: corrupt Monaco binary is refused, NOT fatal" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
+}
+
+@test "installDevTools: a failure is not counted as a container-creation error" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/monaco-*
+  run installDevTools
+  [ "$status" -eq 0 ]
+  # Every error/failed line it printed must be tagged, so the filter drops it.
+  local untagged
+  untagged=$(echo "$output" | grep -i -E 'error|failed' | grep -v 'devtools (non-fatal)' || true)
+  [ -z "$untagged" ]
+  grep -qF -- "-e 'devtools (non-fatal)'" "$FAKE_REPO/.devcontainer/util/functions.sh"
+}
+
+@test "installDevTools: binaries already at the pinned version are verified, not downloaded" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  printf '#!/bin/bash\necho "dtctl version 9.9.9"\n' > "$INSTALL_DIR/dtctl"
+  printf '#!/bin/bash\necho "monaco version 9.9.9"\n' > "$INSTALL_DIR/monaco"
+  chmod +x "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  [ ! -s "$CURL_LOG" ]
+  echo "$output" | grep -q "dtctl v9.9.9 already present"
+  echo "$output" | grep -q "Monaco v9.9.9 already present"
+}
+
+@test "installDevTools: a binary at a DIFFERENT version is replaced by the verified pin" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  printf '#!/bin/bash\necho "dtctl version 9.9.10"\n' > "$INSTALL_DIR/dtctl"
+  chmod +x "$INSTALL_DIR/dtctl"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -q "dtctl_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  refute grep -q 'echo "dtctl version 9.9.10"' "$INSTALL_DIR/dtctl"
+}
+
+@test "finalizePostCreation runs installDevTools (every repo gets it with no edits)" {
+  source_functions
+  installDevTools() { echo "INSTALL_DEVTOOLS_RAN"; }
+  verifyContainerCreation() { :; }
+  postCodespaceTracker() { :; }
+  CODESPACE_NAME="learner" run finalizePostCreation
+  echo "$output" | grep -q "INSTALL_DEVTOOLS_RAN"
+}
+
+@test "variables.sh pins DTCTL_VERSION and MONACO_VERSION to x.y.z (never 'latest')" {
+  source_functions
+  local real="$BATS_TEST_DIRNAME/../../util/variables.sh" d m
+  d=$(sed -n 's/^DTCTL_VERSION="\${DTCTL_VERSION:-\(.*\)}"$/\1/p' "$real")
+  m=$(sed -n 's/^MONACO_VERSION="\${MONACO_VERSION:-\(.*\)}"$/\1/p' "$real")
+  _isVersion "$d"
+  _isVersion "$m"
+}

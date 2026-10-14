@@ -123,10 +123,12 @@ selectEnvironment && enableMCP  # switch environments and re-enable
 
 MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-server` via `npx` and reads credentials from `.devcontainer/.env`.
 
-### dtctl & Monaco (opt-in)
+### dtctl & Monaco
 
 | Function | Signature | Description |
 |---|---|---|
+| `installDevTools` | `installDevTools` | Run by `finalizePostCreation` in **every** repo: installs dtctl and Monaco at the framework's pinned versions, plus a read-only dtctl context when `DT_DTCTL_TOKEN` is set. Off with `FRAMEWORK_DEVTOOLS=off`. Never fatal — see [dtctl & Monaco](dtctl-monaco.md) |
+| `installDtctl` | `installDtctl [dir]` | Installs dtctl only (no context), checksum-verified |
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Read-only unless `--readwrite` |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
 | `installMonaco` | `installMonaco` | Installs the latest [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) (checksum-verified) |
@@ -134,7 +136,8 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `undeployMonaco` | `undeployMonaco [tenant\|env]` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
 | `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
 
-Nothing calls these by default — a repo opts in from its `post-create.sh`:
+Both binaries are already on the `PATH` in every environment (`installDevTools`, see
+[dtctl & Monaco](dtctl-monaco.md)). Deploying config is still opt-in, from a repo's `post-create.sh`:
 
 ```bash
 deployMonaco tenant      # early: tenant-only config (dashboards, notebooks, settings)
@@ -144,8 +147,9 @@ deployMonaco env         # after the app answers
 enableDtctl              # optional: learners inspect what was deployed
 ```
 
-**Verified installs.** Both installers resolve the latest GitHub release, or the version pinned
-in `DTCTL_VERSION` / `MONACO_VERSION`. dtctl's archive is checked against the release's
+**Verified installs.** Both installers use the version in `DTCTL_VERSION` / `MONACO_VERSION` —
+pinned by the framework in `variables.sh` — or, when that is empty, the latest GitHub release.
+A binary that already reports the wanted version is kept, not downloaded again. dtctl's archive is checked against the release's
 `checksums.txt`, Monaco's binary against its `.sha256`. A mismatch, or an asset missing from the
 checksum file, refuses the install. The checksum file comes from the same release, so this
 proves the download is intact, not who published it; pin a reviewed version for a delivery.

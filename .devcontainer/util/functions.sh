@@ -689,10 +689,10 @@ setupMCPServer(){
 }
 
 # ======================================================================
-#          ------- dtctl & Monaco (opt-in) -------                     #
-#  enableDtctl / disableDtctl, installMonaco, deployMonaco /           #
-#  undeployMonaco. Nothing calls these by default: a repo opts in      #
-#  from its post-create.sh, so existing repos change nothing.          #
+#          ------- dtctl & Monaco -------                              #
+#  installDevTools (run by finalizePostCreation in every repo; off     #
+#  with FRAMEWORK_DEVTOOLS=off), installDtctl / enableDtctl /          #
+#  disableDtctl, installMonaco, deployMonaco / undeployMonaco.         #
 #                                                                      #
 #  Every binary is checksum-verified before it is installed; a         #
 #  mismatch refuses the install. No function prints a token value:     #
@@ -812,6 +812,75 @@ _dtctlDropLeakedConfig() {
   return 0
 }
 
+_devToolReports() {
+  # _devToolReports <binary> <version> — 0 when <binary> runs and its
+  # `version` output names <version>. Lets an image that bakes the binary in
+  # skip the download; anything else falls through to a verified install.
+  local bin="$1" want="${2#v}"
+  [ -x "$bin" ] && [ -n "$want" ] || return 1
+  "$bin" version 2>/dev/null | awk -v v="$want" '
+    NR == 1 { for (i = 1; i <= NF; i++) { f = $i; sub(/^v/, "", f); if (f == v) ok = 1 } }
+    END { exit !ok }'
+}
+
+installDtctl() {
+  # installDtctl [dir] — installs dtctl only (no context), verified against the
+  # release's checksums.txt. Version: DTCTL_VERSION, else the latest release.
+  local dir="${1:-${DTCTL_INSTALL_DIR:-/usr/local/bin}}"
+  local arch version tag
+  if ! arch=$(_releaseArch); then
+    printError "dtctl: unsupported architecture '${ARCH:-$(uname -m)}' (amd64 and arm64 only)"
+    return 1
+  fi
+  if [ -n "$DTCTL_VERSION" ]; then
+    if ! _isVersion "$DTCTL_VERSION"; then
+      printError "dtctl: DTCTL_VERSION '$DTCTL_VERSION' is not a version (x.y.z)"
+      return 1
+    fi
+    version="${DTCTL_VERSION#v}"
+  else
+    if ! tag=$(_githubLatestTag "dynatrace-oss/dtctl"); then
+      printError "dtctl: could not resolve the latest release — set DTCTL_VERSION to pin one"
+      return 1
+    fi
+    version="${tag#v}"
+  fi
+
+  if _devToolReports "$dir/dtctl" "$version"; then
+    printInfo "dtctl v$version already present at $dir/dtctl"
+    return 0
+  fi
+
+  local asset="dtctl_${version}_linux_${arch}.tar.gz"
+  local base="https://github.com/dynatrace-oss/dtctl/releases/download/v${version}"
+  local tmp expected
+  tmp=$(mktemp -d)
+  printInfo "Downloading $asset and checksums.txt (dtctl v$version)"
+  if ! curl -fsSL --max-time 120 -o "$tmp/$asset" "$base/$asset" \
+     || ! curl -fsSL --max-time 30 -o "$tmp/checksums.txt" "$base/checksums.txt"; then
+    printError "dtctl: download of v$version failed"
+    rm -rf "$tmp"
+    return 1
+  fi
+  expected=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1; exit}' "$tmp/checksums.txt")
+  if ! verifySha256 "$tmp/$asset" "$expected"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -xzf "$tmp/$asset" -C "$tmp" dtctl 2>/dev/null || [ ! -f "$tmp/dtctl" ]; then
+    printError "dtctl: archive $asset holds no dtctl binary"
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! _installBinary "$tmp/dtctl" "$dir" dtctl; then
+    printError "dtctl: could not install into $dir"
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  printInfo "dtctl v$version installed at $dir/dtctl"
+}
+
 enableDtctl() {
   # enableDtctl [--readwrite] [--token-var NAME]
   # Installs the latest dtctl (pin with DTCTL_VERSION), verified against the
@@ -843,53 +912,7 @@ enableDtctl() {
     return 1
   fi
 
-  local arch version tag
-  if ! arch=$(_releaseArch); then
-    printError "dtctl: unsupported architecture '${ARCH:-$(uname -m)}' (amd64 and arm64 only)"
-    return 1
-  fi
-  if [ -n "$DTCTL_VERSION" ]; then
-    if ! _isVersion "$DTCTL_VERSION"; then
-      printError "dtctl: DTCTL_VERSION '$DTCTL_VERSION' is not a version (x.y.z)"
-      return 1
-    fi
-    version="${DTCTL_VERSION#v}"
-  else
-    if ! tag=$(_githubLatestTag "dynatrace-oss/dtctl"); then
-      printError "dtctl: could not resolve the latest release — set DTCTL_VERSION to pin one"
-      return 1
-    fi
-    version="${tag#v}"
-  fi
-
-  local asset="dtctl_${version}_linux_${arch}.tar.gz"
-  local base="https://github.com/dynatrace-oss/dtctl/releases/download/v${version}"
-  local tmp expected
-  tmp=$(mktemp -d)
-  printInfo "Downloading $asset and checksums.txt (dtctl v$version)"
-  if ! curl -fsSL --max-time 120 -o "$tmp/$asset" "$base/$asset" \
-     || ! curl -fsSL --max-time 30 -o "$tmp/checksums.txt" "$base/checksums.txt"; then
-    printError "dtctl: download of v$version failed"
-    rm -rf "$tmp"
-    return 1
-  fi
-  expected=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1; exit}' "$tmp/checksums.txt")
-  if ! verifySha256 "$tmp/$asset" "$expected"; then
-    rm -rf "$tmp"
-    return 1
-  fi
-  if ! tar -xzf "$tmp/$asset" -C "$tmp" dtctl 2>/dev/null || [ ! -f "$tmp/dtctl" ]; then
-    printError "dtctl: archive $asset holds no dtctl binary"
-    rm -rf "$tmp"
-    return 1
-  fi
-  if ! _installBinary "$tmp/dtctl" "$dir" dtctl; then
-    printError "dtctl: could not install into $dir"
-    rm -rf "$tmp"
-    return 1
-  fi
-  rm -rf "$tmp"
-  printInfo "dtctl v$version installed at $dir/dtctl"
+  installDtctl "$dir" || return 1
 
   # The literal ${NAME} is stored in the config; dtctl expands it per command.
   # set-credentials MUST be the last write: dtctl (0.42) rewrites the config
@@ -964,6 +987,10 @@ installMonaco() {
     fi
     version="${tag#v}"
   fi
+  if _devToolReports "$dir/monaco" "$version"; then
+    printInfo "Monaco v$version already present at $dir/monaco"
+    return 0
+  fi
   printInfoSection "Installing Monaco v$version ($arch)"
 
   local asset="monaco-linux-${arch}"
@@ -988,6 +1015,45 @@ installMonaco() {
   fi
   rm -rf "$tmp"
   printInfo "Monaco v$version installed at $dir/monaco"
+}
+
+installDevTools() {
+  # installDevTools — called from finalizePostCreation, so every repo gets
+  # dtctl and Monaco at the framework's pinned versions (DTCTL_VERSION,
+  # MONACO_VERSION in variables.sh), checksum-verified. When DT_DTCTL_TOKEN is
+  # set it also configures a read-only dtctl context (enableDtctl).
+  # FRAMEWORK_DEVTOOLS=off (environment or .devcontainer/.env) skips it all.
+  # Never fatal: a failure is a warning and post-create carries on.
+  case "$(echo "${FRAMEWORK_DEVTOOLS:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|false|no|0)
+      printInfo "Dev tools (dtctl, Monaco) skipped: FRAMEWORK_DEVTOOLS=$FRAMEWORK_DEVTOOLS"
+      return 0 ;;
+  esac
+  printInfoSection "Installing dev tools: dtctl ${DTCTL_VERSION:-latest}, Monaco ${MONACO_VERSION:-latest}"
+  if _varIsSet DT_DTCTL_TOKEN && [ -n "$DT_ENVIRONMENT" ]; then
+    _devToolStep "dtctl" enableDtctl
+  else
+    _devToolStep "dtctl" installDtctl
+    _varIsSet DT_DTCTL_TOKEN && printWarn "DT_DTCTL_TOKEN is set but DT_ENVIRONMENT is not — dtctl installed without a context"
+  fi
+  _devToolStep "Monaco" installMonaco
+  return 0
+}
+
+_devToolStep() {
+  # _devToolStep <name> <command...> — runs one install step. On failure its
+  # output is replayed tagged "devtools (non-fatal)", which
+  # verifyContainerCreation filters out: a missing dev tool must not mark the
+  # whole container as failed.
+  local name="$1" out
+  shift
+  if out=$("$@" 2>&1); then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  printf '%s\n' "$out" | sed 's/^/devtools (non-fatal): /'
+  printWarn "devtools (non-fatal): $name not installed — post-create continues without it"
+  return 1
 }
 
 _monacoUnsupportedTypes() {
@@ -3866,6 +3932,7 @@ verifyContainerCreation(){
       -e 'failedScheduling' \
       -e 'Failed to check' \
       -e 'FAILED_PRECONDITION' \
+      -e 'devtools (non-fatal)' \
     || true)
   fi
 
@@ -3928,6 +3995,10 @@ finalizePostCreation(){
   # and hardcoded to have a name starting with dttest-bash b
   # Then run the e2e test harness
   # Otherwise, send the startup ping
+  # dtctl + Monaco in every environment; FRAMEWORK_DEVTOOLS=off skips it.
+  # Before verifyContainerCreation so its time counts in the creation time.
+  installDevTools
+
   if [[ "$CODESPACE_NAME" == dttest-* ]]; then
       # Set default repository for gh CLI
       gh repo set-default "$GITHUB_REPOSITORY"

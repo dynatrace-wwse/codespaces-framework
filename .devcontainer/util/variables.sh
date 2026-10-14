@@ -23,6 +23,15 @@ CERTMANAGER_VERSION=1.15.3
 # RUNME Version
 RUNME_CLI_VERSION=3.13.2
 
+# dtctl + Monaco, installed in every environment by installDevTools (one pinned,
+# checksum-verified version per framework release; FRAMEWORK_DEVTOOLS=off skips).
+# https://github.com/dynatrace-oss/dtctl/releases
+# https://github.com/Dynatrace/dynatrace-configuration-as-code/releases
+DTCTL_VERSION="${DTCTL_VERSION:-0.43.0}"
+export DTCTL_VERSION
+MONACO_VERSION="${MONACO_VERSION:-2.30.1}"
+export MONACO_VERSION
+
 # Ingress configuration — apps are exposed exclusively via nginx ingress.
 # App registry file — tracks deployed apps for ingress routing
 export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"
