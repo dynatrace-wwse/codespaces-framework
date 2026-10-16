@@ -473,6 +473,166 @@ no_sentinel_anywhere() {
   grep -q "/v2.30.1/monaco-linux-amd64" "$CURL_LOG"
 }
 
+# ── installMonaco: the framework's patched build (ENH-114) ────────────────────
+
+PATCHED_URL="https://github.com/dynatrace-wwse/codespaces-framework/releases/download/monaco-2.30.1-wwse.1"
+UPSTREAM_DL="github.com/Dynatrace/dynatrace-configuration-as-code/releases/download"
+
+pin_patched() {
+  # The framework pin is 2.30.1 + build wwse.1 from PATCHED_URL; the reviewed
+  # hashes are the fixtures' (one per arch, and the two differ).
+  export MONACO_VERSION=2.30.1 MONACO_PIN_VERSION=2.30.1 MONACO_PIN_BUILD=wwse.1
+  export MONACO_PIN_URL="$PATCHED_URL"
+  local a A
+  for a in amd64 arm64; do
+    A=$(echo "$a" | tr '[:lower:]' '[:upper:]')
+    export "MONACO_PIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
+    export "MONACO_PIN_BIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
+  done
+}
+
+@test "installMonaco patched: pinned version installs the framework's build from MONACO_PIN_URL, never upstream's" {
+  source_functions
+  pin_patched
+  run installMonaco
+  [ "$status" -eq 0 ]
+  grep -qxF "$PATCHED_URL/monaco-linux-amd64" "$CURL_LOG"
+  refute grep -q "$UPSTREAM_DL" "$CURL_LOG"
+  refute grep -q "api.github.com" "$CURL_LOG"
+  [ "$(sha256sum "$INSTALL_DIR/monaco" | cut -d' ' -f1)" = "$MONACO_PIN_SHA256_AMD64" ]
+  echo "$output" | grep -q "Monaco v2.30.1+wwse.1 installed"
+}
+
+@test "installMonaco patched: arm64 machine fetches and verifies the arm64 build" {
+  source_functions
+  pin_patched
+  export FAKE_UNAME_M=aarch64
+  run installMonaco
+  [ "$status" -eq 0 ]
+  grep -qxF "$PATCHED_URL/monaco-linux-arm64" "$CURL_LOG"
+  refute grep -q "monaco-linux-amd64" "$CURL_LOG"
+  [ "$(sha256sum "$INSTALL_DIR/monaco" | cut -d' ' -f1)" = "$MONACO_PIN_SHA256_ARM64" ]
+  [ "$MONACO_PIN_SHA256_ARM64" != "$MONACO_PIN_SHA256_AMD64" ]
+}
+
+@test "installMonaco patched: the other arch's build under this arch's name is refused" {
+  source_functions
+  pin_patched
+  cp "$FIXTURES/monaco-linux-amd64" "$FIXTURES/monaco-linux-arm64"
+  export FAKE_UNAME_M=aarch64
+  run installMonaco
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "MISMATCH"
+  [ ! -e "$INSTALL_DIR/monaco" ]
+}
+
+@test "installMonaco patched: one-byte-corrupt build is refused, stock Monaco NOT installed instead" {
+  source_functions
+  pin_patched
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  run installMonaco
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "MISMATCH"
+  echo "$output" | grep -q "the stock release is not installed instead"
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  refute grep -q "$UPSTREAM_DL" "$CURL_LOG"
+}
+
+@test "installMonaco patched: a failed download refuses, no fallback to upstream" {
+  source_functions
+  pin_patched
+  rm -f "$FIXTURES/monaco-linux-amd64"
+  run installMonaco
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "the stock release is not installed instead"
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  refute grep -q "$UPSTREAM_DL" "$CURL_LOG"
+}
+
+@test "installMonaco patched: no reviewed sha256 for this arch refuses before any download" {
+  source_functions
+  pin_patched
+  unset MONACO_PIN_SHA256_ARM64
+  export FAKE_UNAME_M=aarch64
+  run installMonaco
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "no reviewed sha256 is pinned for the patched v2.30.1+wwse.1 on arm64"
+  [ ! -s "$CURL_LOG" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+}
+
+@test "installMonaco patched: a MONACO_PIN_URL that is not https:// is refused, no download" {
+  source_functions
+  pin_patched
+  local u
+  for u in "http://example.com/monaco" "file:///tmp/monaco" "example.com/monaco"; do
+    MONACO_PIN_URL="$u" run installMonaco
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "is not https://"
+  done
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "installMonaco patched: a present binary is kept only with the pinned sha256 AND version 2.30.1+wwse.1" {
+  source_functions
+  pin_patched
+  export MONACO_PIN_BIN_SHA256_AMD64="$(fake_present monaco 2.30.1+wwse.1)"
+  run installMonaco
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "already present"
+  [ ! -s "$CURL_LOG" ]
+  # Same bytes check, but the binary reports the STOCK version: replaced.
+  export MONACO_PIN_BIN_SHA256_AMD64="$(fake_present monaco 2.30.1)"
+  run installMonaco
+  [ "$status" -eq 0 ]
+  grep -qxF "$PATCHED_URL/monaco-linux-amd64" "$CURL_LOG"
+  [ "$(sha256sum "$INSTALL_DIR/monaco" | cut -d' ' -f1)" = "$MONACO_PIN_SHA256_AMD64" ]
+}
+
+@test "installMonaco patched: a repo overriding MONACO_VERSION gets the upstream release" {
+  source_functions
+  pin_patched
+  MONACO_VERSION=9.9.9 run installMonaco
+  [ "$status" -eq 0 ]
+  grep -q "$UPSTREAM_DL/v9.9.9/monaco-linux-amd64.sha256" "$CURL_LOG"
+  refute grep -q "dynatrace-wwse" "$CURL_LOG"
+}
+
+@test "installDevTools: the framework pin installs the patched Monaco (wiring)" {
+  source_functions
+  pin_devtools
+  pin_patched
+  unset DT_DTCTL_TOKEN
+  run installDevTools
+  [ "$status" -eq 0 ]
+  grep -qxF "$PATCHED_URL/monaco-linux-amd64" "$CURL_LOG"
+  refute grep -q "$UPSTREAM_DL/v2.30.1" "$CURL_LOG"
+  [ -x "$INSTALL_DIR/monaco" ]
+}
+
+@test "variables.sh pins the patched Monaco consistently with monaco-patched/build.sh" {
+  local root="$BATS_TEST_DIRNAME/../../.."
+  local real="$root/.devcontainer/util/variables.sh" build="$root/monaco-patched/build.sh"
+  local v b url a64 r64
+  v=$(sed -n 's/^MONACO_PIN_VERSION=//p' "$real")
+  b=$(sed -n 's/^MONACO_PIN_BUILD=//p' "$real")
+  url=$(sed -n 's/^MONACO_PIN_URL=//p' "$real")
+  a64=$(sed -n 's/^MONACO_PIN_SHA256_AMD64=//p' "$real")
+  r64=$(sed -n 's/^MONACO_PIN_SHA256_ARM64=//p' "$real")
+  [ -n "$b" ]
+  [ "$url" = "https://github.com/dynatrace-wwse/codespaces-framework/releases/download/monaco-$v-$b" ]
+  echo "$a64" | grep -qxE '[0-9a-f]{64}'
+  echo "$r64" | grep -qxE '[0-9a-f]{64}'
+  [ "$a64" != "$r64" ]
+  # Not upstream's stock hashes: those binaries still make the discovery call.
+  [ "$a64" != "1ded55f7f78a64a338bcb41795cd2710076750944ae369d58ca97b61a52aeaf6" ]
+  [ "$r64" != "0c4f4b359ca17851a813e8331af7fe02f02f7900cb5b9c0a79e6e75e4e6e64c5" ]
+  grep -qxF "UPSTREAM_TAG=v$v" "$build"
+  grep -qxF "VERSION=$v+$b" "$build"
+  grep -q "discussions/2208" "$real"
+  [ -f "$root/monaco-patched/enh114-skip-discovery.patch" ]
+}
+
 # ── deployMonaco ──────────────────────────────────────────────────────────────
 
 @test "deployMonaco tenant: per-learner project <repo>-<DT_SESSION_ID>, LEARNER_PREFIX, delete file first" {

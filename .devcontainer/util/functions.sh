@@ -1052,9 +1052,13 @@ disableDtctl() {
 }
 
 installMonaco() {
-  # Installs the latest Monaco (pin with MONACO_VERSION), verified against the
-  # release's per-asset .sha256 file.
-  local dir="${MONACO_INSTALL_DIR:-/usr/local/bin}" arch version tag
+  # Installs Monaco at MONACO_VERSION (the latest release when it is empty).
+  # The framework's pinned version installs the framework's PATCHED build
+  # (ENH-114) from MONACO_PIN_URL, verified against the reviewed sha256 in
+  # variables.sh only — a mismatch refuses, and the stock release is never
+  # installed in its place: it cannot deploy with a learner token. Any other
+  # version installs the upstream release, verified against its .sha256 file.
+  local dir="${MONACO_INSTALL_DIR:-/usr/local/bin}" arch version tag patched="" label
   if ! arch=$(_releaseArch); then
     printError "monaco: unsupported architecture '$(uname -m)' (amd64 and arm64 only)"
     return 1
@@ -1072,29 +1076,58 @@ installMonaco() {
     fi
     version="${tag#v}"
   fi
-  if _devToolReports "$dir/monaco" "$version" "$(_pinnedSha MONACO "$version" "$arch" BIN_)"; then
-    printInfo "Monaco v$version already present at $dir/monaco (sha256 matches the pin)"
+  label="$version"
+  if [ -n "${MONACO_PIN_URL:-}" ] && [ "$version" = "${MONACO_PIN_VERSION#v}" ]; then
+    patched=1
+    label="$version${MONACO_PIN_BUILD:++$MONACO_PIN_BUILD}"
+  fi
+  if _devToolReports "$dir/monaco" "$label" "$(_pinnedSha MONACO "$version" "$arch" BIN_)"; then
+    printInfo "Monaco v$label already present at $dir/monaco (sha256 matches the pin)"
     return 0
   fi
-  printInfoSection "Installing Monaco v$version ($arch)"
+  printInfoSection "Installing Monaco v$label ($arch)"
 
   local asset="monaco-linux-${arch}"
   local base="https://github.com/Dynatrace/dynatrace-configuration-as-code/releases/download/v${version}"
   local tmp expected
+  if [ -n "$patched" ]; then
+    case "$MONACO_PIN_URL" in
+      https://*) base="${MONACO_PIN_URL%/}" ;;
+      *) printError "monaco: MONACO_PIN_URL '$MONACO_PIN_URL' is not https:// — refusing"; return 1 ;;
+    esac
+    expected=$(_pinnedSha MONACO "$version" "$arch")
+    if [ -z "$expected" ]; then
+      printError "monaco: no reviewed sha256 is pinned for the patched v$label on $arch — refusing"
+      return 1
+    fi
+  fi
   if ! tmp=$(mktemp -d); then
     printError "monaco: could not create a temporary directory"
     return 1
   fi
-  if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
-     || ! _fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 30; then
-    printError "monaco: download of v$version failed"
-    rm -rf "$tmp"
-    return 1
-  fi
-  expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
-  if ! _verifyAsset MONACO "$version" "$arch" "$tmp/$asset" "$expected"; then
-    rm -rf "$tmp"
-    return 1
+  if [ -n "$patched" ]; then
+    if ! _fetch "$base/$asset" "$tmp/$asset" 120; then
+      printError "monaco: download of the patched v$label failed — the stock release is not installed instead"
+      rm -rf "$tmp"
+      return 1
+    fi
+    if ! verifySha256 "$tmp/$asset" "$expected"; then
+      printError "monaco: the patched v$label does not match the reviewed sha256 — refusing; the stock release is not installed instead"
+      rm -rf "$tmp"
+      return 1
+    fi
+  else
+    if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
+       || ! _fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 30; then
+      printError "monaco: download of v$version failed"
+      rm -rf "$tmp"
+      return 1
+    fi
+    expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
+    if ! _verifyAsset MONACO "$version" "$arch" "$tmp/$asset" "$expected"; then
+      rm -rf "$tmp"
+      return 1
+    fi
   fi
   if ! _installBinary "$tmp/$asset" "$dir" monaco; then
     printError "monaco: could not install into $dir"
@@ -1102,7 +1135,7 @@ installMonaco() {
     return 1
   fi
   rm -rf "$tmp"
-  printInfo "Monaco v$version installed at $dir/monaco"
+  printInfo "Monaco v$label installed at $dir/monaco"
 }
 
 installDevTools() {
