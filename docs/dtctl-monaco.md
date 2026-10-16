@@ -33,8 +33,9 @@ pin for the installed binary **and** `<tool> version` names the pinned version. 
 bakes both tools in therefore pays nothing here — the step only verifies what is present. Any
 other binary (other bytes, other version) is replaced by the verified pin.
 
-The architecture is always `uname -m` (amd64 or arm64); a stray `ARCH` variable cannot select
-the wrong binary.
+The architecture is always `uname -m`: `x86_64`/`amd64` or `aarch64`/`arm64`. A 32-bit ARM
+userland (`armv8l`, `armv7l`) is refused — it cannot run the arm64 binary. A stray `ARCH`
+variable cannot select the wrong binary.
 
 ## Supply chain
 
@@ -75,16 +76,30 @@ uses it. `deployMonaco` writes platform-token manifests, so they never make the 
   the release and compare the sha256. `monaco version` reports `2.30.1+wwse.1`.
 - **Published** as release `monaco-2.30.1-wwse.1` of this repo (`MONACO_PIN_URL`). That adds no
   new trust: whoever can publish a release here can already change `functions.sh`.
-- **Install:** the download must match `MONACO_PIN_SHA256_<ARCH>`. A mismatch, a missing pin or a
-  failed download refuses the install. **The stock release is never installed in its place**,
-  because it would look installed and then fail every deploy.
+- **Install:** the download must match `MONACO_PIN_SHA256_<ARCH>`. A mismatch, a missing pin, a
+  non-`https://` pin URL or a failed download refuses the install. **The stock release is never
+  installed in its place**, because it would look installed and then fail every deploy — and a
+  refusal also **removes** any `monaco` already in the install directory (a stock binary baked
+  into an image), so nothing unverified is left there.
+- **Use:** `deployMonaco` and `undeployMonaco` check the `monaco` on the `PATH` before running
+  it: its sha256 must equal the pinned binary hash, or `monaco version` must name
+  `+wwse.1`. Anything else gets one `installMonaco`; still not verified, they fail loudly with
+  `MONACO NOT VERIFIED: …` and run nothing (a `monaco` elsewhere on the `PATH` that the install
+  cannot replace is refused the same way). `undeployMonaco` then keeps its delete file.
+- **CI guards** (`.github/workflows/monaco-pin.yaml`): *release-assets* downloads each pinned
+  asset from `MONACO_PIN_URL` and runs `sha256sum -c` against the pins — it fails while the
+  release is unpublished, which is what stops the pin being merged first; *reproducible-build*
+  rebuilds from `v2.30.1` + the patch with `build.sh` and checks the result against the same
+  pins.
 - **Upstream:** proposed in
   [Discussion #2208](https://github.com/Dynatrace/dynatrace-configuration-as-code/discussions/2208).
   Once an upstream release has the guard, the pin goes back to that release and its hashes, and
   `MONACO_PIN_BUILD`, `MONACO_PIN_URL` and `monaco-patched/` are removed.
 
-A repo that overrides `MONACO_VERSION` gets the **stock** release, so its `deployMonaco` needs a
-token that carries `app-engine:apps:run`.
+A repo that overrides `MONACO_VERSION` gets the **stock** release from `installMonaco`, but
+`deployMonaco` / `undeployMonaco` refuse to run it while the framework pins a patched build
+(`MONACO_PIN_URL` set): stock Monaco needs `app-engine:apps:run`, which a learner token does
+not carry.
 
 ## Never fatal
 
@@ -93,12 +108,22 @@ match its published checksum is never put on the `PATH` — but it does not stop
 The tool's output is replayed with the tag `devtools (non-fatal)`, followed by one warning:
 
 ```
-devtools (non-fatal): ... Checksum MISMATCH for dtctl_0.43.0_linux_amd64.tar.gz ...
-WARN | devtools (non-fatal): dtctl not installed — post-create continues without it
+devtools (non-fatal): ... monaco: download of the patched v2.30.1+wwse.1 failed ...
+WARN | devtools (non-fatal): Monaco not installed — post-create continues without it
 ```
 
 `verifyContainerCreation` filters that tag (`_creationNoiseFilter`), so a missing dev tool
-does not mark the whole container as failed in the greeting or the tracker. The other tool
+does not mark the whole container as failed in the greeting or the tracker.
+
+An **integrity** refusal is different: a checksum mismatch, a missing reviewed hash or a
+non-`https://` pin URL (every such message starts `INTEGRITY:`) is replayed with the tag
+`devtools INTEGRITY FAILED`, which the filter **keeps**. Post-create still carries on, but the
+container is reported as having an error — a tampered download is not noise.
+
+```
+devtools INTEGRITY FAILED: ... INTEGRITY: Checksum MISMATCH for dtctl_0.43.0_linux_amd64.tar.gz ...
+WARN | devtools (non-fatal): dtctl not installed — post-create continues without it
+``` The other tool
 still installs. Token values are masked (`<redacted>`) in everything replayed.
 
 Nothing in the step can hang post-create:

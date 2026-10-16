@@ -1,0 +1,102 @@
+name: Monaco patched pin
+# Guards the patched Monaco pin in .devcontainer/util/variables.sh (ENH-114).
+#
+# release-assets: downloads each pinned asset from MONACO_PIN_URL and checks it
+#   against MONACO_PIN_SHA256_*. It FAILS while the release is unpublished — a
+#   draft release has no public download URL — and that is intended: merging
+#   the pin before the release is published would make every installMonaco
+#   refuse (a 404 on MONACO_PIN_URL). Publish the release first, re-run, merge.
+# reproducible-build: rebuilds from upstream tag v2.30.1 + the patch with
+#   monaco-patched/build.sh and compares the result to the same pins, so the
+#   committed hashes are proven to be the patch and nothing else.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.devcontainer/util/variables.sh'
+      - 'monaco-patched/**'
+      - '.github/workflows/monaco-pin.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.devcontainer/util/variables.sh'
+      - 'monaco-patched/**'
+      - '.github/workflows/monaco-pin.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-assets:
+    name: Pinned release assets match the pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the pin
+        id: pin
+        run: |
+          set -euo pipefail
+          v=.devcontainer/util/variables.sh
+          url=$(sed -n 's/^MONACO_PIN_URL=//p' "$v")
+          amd=$(sed -n 's/^MONACO_PIN_SHA256_AMD64=//p' "$v")
+          arm=$(sed -n 's/^MONACO_PIN_SHA256_ARM64=//p' "$v")
+          if [ -z "$url" ]; then
+            echo "no MONACO_PIN_URL — the framework pins stock Monaco, nothing to check"
+            echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "$url" in https://*) ;; *) echo "::error::MONACO_PIN_URL is not https://"; exit 1 ;; esac
+          for h in "$amd" "$arm"; do
+            echo "$h" | grep -qxE '[0-9a-f]{64}' || { echo "::error::a MONACO_PIN_SHA256_* is not 64 hex"; exit 1; }
+          done
+          { echo "url=$url"; echo "amd=$amd"; echo "arm=$arm"; } >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify each pinned asset
+        if: steps.pin.outputs.skip != '1'
+        env:
+          URL: ${{ steps.pin.outputs.url }}
+          AMD: ${{ steps.pin.outputs.amd }}
+          ARM: ${{ steps.pin.outputs.arm }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl && cd dl
+          for a in amd64 arm64; do
+            if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "monaco-linux-$a" "$URL/monaco-linux-$a"; then
+              echo "::error::could not download $URL/monaco-linux-$a — is the release published? A DRAFT release has no public URL; publish it before merging this pin."
+              exit 1
+            fi
+          done
+          printf '%s  monaco-linux-amd64\n%s  monaco-linux-arm64\n' "$AMD" "$ARM" > pins.sha256
+          sha256sum -c pins.sha256
+
+  reproducible-build:
+    name: Rebuild from v2.30.1 + patch equals the pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Any go >= 1.21 bootstraps; build.sh selects the exact toolchain
+          # (GOTOOLCHAIN=go1.26.8, sumdb-verified) itself.
+          go-version: '1.22'
+          cache: false
+
+      - name: Build
+        run: ./monaco-patched/build.sh "$RUNNER_TEMP/out"
+
+      - name: Compare with the pins
+        run: |
+          set -euo pipefail
+          v=.devcontainer/util/variables.sh
+          amd=$(sed -n 's/^MONACO_PIN_SHA256_AMD64=//p' "$v")
+          arm=$(sed -n 's/^MONACO_PIN_SHA256_ARM64=//p' "$v")
+          cd "$RUNNER_TEMP/out"
+          printf '%s  monaco-linux-amd64\n%s  monaco-linux-arm64\n' "$amd" "$arm" > pins.sha256
+          cat monaco-linux-*.sha256
+          sha256sum -c pins.sha256
+          ./monaco-linux-amd64 version 2>&1 | tee version.txt
+          grep -qF '2.30.1+wwse.1' version.txt

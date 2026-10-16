@@ -131,8 +131,8 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `installDtctl` | `installDtctl [dir]` | Installs dtctl only (no context), checksum-verified |
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
-| `installMonaco` | `installMonaco` | Installs [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) at `MONACO_VERSION`: for the framework's pin, the framework's [patched build](dtctl-monaco.md#monaco-is-a-patched-build) (reviewed sha256, never a stock fallback); otherwise the upstream release (checksum-verified) |
-| `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project |
+| `installMonaco` | `installMonaco` | Installs [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) at `MONACO_VERSION`: for the framework's pin, the framework's [patched build](dtctl-monaco.md#monaco-is-a-patched-build) (reviewed sha256, never a stock fallback; a refusal removes any `monaco` left in the install dir); otherwise the upstream release (checksum-verified) |
+| `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project. Runs only the verified patched Monaco (pinned sha256 or `+wwse.1` in `monaco version`); otherwise one `installMonaco`, then fails loudly |
 | `undeployMonaco` | `undeployMonaco [tenant\|env]` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
 | `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
 
