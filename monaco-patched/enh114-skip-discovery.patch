@@ -1,0 +1,34 @@
+diff --git a/cmd/monaco/dynatrace/dynatrace.go b/cmd/monaco/dynatrace/dynatrace.go
+index bd4efddef..b5e3d6be1 100644
+--- a/cmd/monaco/dynatrace/dynatrace.go
++++ b/cmd/monaco/dynatrace/dynatrace.go
+@@ -64,7 +64,7 @@ func VerifyEnvironmentAuthentication(ctx context.Context, env manifest.Environme
+ 	classicUrl := env.URL.Value
+ 
+ 	// check if the platform connection works and get the classicURL in order to check the access token authentication next if given
+-	if env.HasPlatformCredentials() {
++	if env.HasPlatformCredentials() && env.Auth.AccessToken != nil {
+ 		var err error
+ 		if classicUrl, err = getDynatraceClassicURL(ctx, env.URL.Value, env.Auth.OAuth, env.Auth.PlatformToken); err != nil {
+ 			return fmt.Errorf("could not authorize against environment '%s' (%s) using platform credentials: %w", env.Name, env.URL.Value, err)
+diff --git a/pkg/client/clientset.go b/pkg/client/clientset.go
+index db9fe91a1..653cb8013 100644
+--- a/pkg/client/clientset.go
++++ b/pkg/client/clientset.go
+@@ -337,9 +337,13 @@ func CreateClientSetWithOptions(ctx context.Context, url string, auth manifest.A
+ 			return nil, err
+ 		}
+ 
+-		classicURL, err = metadata.GetDynatraceClassicURL(ctx, *client)
+-		if err != nil {
+-			return nil, err
++		// The classic URL is only needed for the access-token (classic API) client below.
++		// Discovering it needs 'app-engine:apps:run', which a platform-only setup may lack.
++		if auth.AccessToken != nil {
++			classicURL, err = metadata.GetDynatraceClassicURL(ctx, *client)
++			if err != nil {
++				return nil, err
++			}
+ 		}
+ 	}
+ 
