@@ -6,7 +6,7 @@ with two Dynatrace command-line tools already on the `PATH`:
 | Tool | What it is for | Pinned version |
 |---|---|---|
 | [`dtctl`](https://github.com/dynatrace-oss/dtctl) | Query and inspect the tenant: DQL, documents, settings | `DTCTL_VERSION` (0.43.0) |
-| [`monaco`](https://github.com/Dynatrace/dynatrace-configuration-as-code) | Configuration as code: deploy dashboards, notebooks, settings | `MONACO_VERSION` (2.30.1) |
+| [`monaco`](https://github.com/Dynatrace/dynatrace-configuration-as-code) | Configuration as code: deploy dashboards, notebooks, settings | `MONACO_VERSION` (2.30.1, the framework's patched build `2.30.1+wwse.1` — see [below](#monaco-is-a-patched-build)) |
 
 No repo has to change anything. `finalizePostCreation` — the step every repo's `post-create.sh`
 already calls ("do not remove") — runs `installDevTools` first.
@@ -17,8 +17,10 @@ already calls ("do not remove") — runs `installDevTools` first.
    everything below: no download, nothing installed.
 2. Installs **dtctl** at `DTCTL_VERSION`, verified against the **reviewed sha256 committed in
    the framework** first, and against the release's `checksums.txt` second.
-3. Installs **Monaco** at `MONACO_VERSION`, verified the same way (the release's `.sha256` file
-   second).
+3. Installs **Monaco** at `MONACO_VERSION`. For the framework's pinned version that is the
+   framework's **patched build** ([why](#monaco-is-a-patched-build)), verified against the
+   reviewed sha256 only; another version is the upstream release, verified like dtctl (its
+   `.sha256` file second).
 4. When **`DT_DTCTL_TOKEN`** is set (and `DT_ENVIRONMENT` is), it also runs `enableDtctl`: a
    `readonly` context named `enablement` whose token is the literal reference
    `${DT_DTCTL_TOKEN}`. The token value is never printed and never written to the config, and
@@ -31,8 +33,9 @@ pin for the installed binary **and** `<tool> version` names the pinned version. 
 bakes both tools in therefore pays nothing here — the step only verifies what is present. Any
 other binary (other bytes, other version) is replaced by the verified pin.
 
-The architecture is always `uname -m` (amd64 or arm64); a stray `ARCH` variable cannot select
-the wrong binary.
+The architecture is always `uname -m`: `x86_64`/`amd64` or `aarch64`/`arm64`. A 32-bit ARM
+userland (`armv8l`, `armv7l`) is refused — it cannot run the arm64 binary. A stray `ARCH`
+variable cannot select the wrong binary.
 
 ## Supply chain
 
@@ -44,7 +47,8 @@ therefore commits, next to each pinned version in `.devcontainer/util/variables.
 |---|---|
 | `DTCTL_PIN_SHA256_AMD64` / `_ARM64` | the dtctl release archive (`.tar.gz`) |
 | `DTCTL_PIN_BIN_SHA256_AMD64` / `_ARM64` | the dtctl binary inside it (for the already-present check) |
-| `MONACO_PIN_SHA256_AMD64` / `_ARM64` | the Monaco binary (which is the release asset) |
+| `MONACO_PIN_SHA256_AMD64` / `_ARM64` | the Monaco binary — for the pinned version, the framework's **patched** build at `MONACO_PIN_URL` |
+| `MONACO_PIN_BUILD` / `MONACO_PIN_URL` | the patched build's suffix (`wwse.1`) and the release it is downloaded from |
 
 A download that does not match the committed hash is refused even when the release's checksum
 file agrees with it. For the framework's own pinned version a **missing** hash for the machine's
@@ -53,6 +57,50 @@ architecture also refuses — there is no fallback to the release file. Only a r
 and checks the release file only. **Bumping a version is a
 framework release that bumps its hashes in the same commit.**
 
+### Monaco is a patched build
+
+Stock Monaco 2.30 calls `GET /platform/metadata/v1/classic-environment-domain` before every
+`deploy`, `delete` or `download` with a platform token. That endpoint needs
+`app-engine:apps:run`. A learner's token must not carry that scope, because it opens the
+Enablement app's own functions to the learner. So with stock Monaco, `deployMonaco` and
+`undeployMonaco` do nothing in a learner environment (ENH-114).
+
+The framework therefore installs **Monaco 2.30.1 plus a 2-file patch**: Monaco looks up the
+classic URL only when the manifest also has a classic access token, which is the only time it
+uses it. `deployMonaco` writes platform-token manifests, so they never make the call.
+
+- **Source:** upstream tag `v2.30.1` (`8eb538d04`) plus
+  [`monaco-patched/enh114-skip-discovery.patch`](https://github.com/dynatrace-wwse/codespaces-framework/tree/main/monaco-patched).
+- **Build:** `monaco-patched/build.sh`. It uses the same Go (1.26.8) and flags as upstream's
+  release, plus `-trimpath`. Two builds produce byte-identical binaries, so anyone can rebuild
+  the release and compare the sha256. `monaco version` reports `2.30.1+wwse.1`.
+- **Published** as release `monaco-2.30.1-wwse.1` of this repo (`MONACO_PIN_URL`). That adds no
+  new trust: whoever can publish a release here can already change `functions.sh`.
+- **Install:** the download must match `MONACO_PIN_SHA256_<ARCH>`. A mismatch, a missing pin, a
+  non-`https://` pin URL or a failed download refuses the install. **The stock release is never
+  installed in its place**, because it would look installed and then fail every deploy — and a
+  refusal also **removes** any `monaco` already in the install directory (a stock binary baked
+  into an image), so nothing unverified is left there.
+- **Use:** `deployMonaco` and `undeployMonaco` check the `monaco` on the `PATH` before running
+  it: its sha256 must equal the pinned binary hash, or `monaco version` must name
+  `+wwse.1`. Anything else gets one `installMonaco`; still not verified, they fail loudly with
+  `MONACO NOT VERIFIED: …` and run nothing (a `monaco` elsewhere on the `PATH` that the install
+  cannot replace is refused the same way). `undeployMonaco` then keeps its delete file.
+- **CI guards** (`.github/workflows/monaco-pin.yaml`): *release-assets* downloads each pinned
+  asset from `MONACO_PIN_URL` and runs `sha256sum -c` against the pins — it fails while the
+  release is unpublished, which is what stops the pin being merged first; *reproducible-build*
+  rebuilds from `v2.30.1` + the patch with `build.sh` and checks the result against the same
+  pins.
+- **Upstream:** proposed in
+  [Discussion #2208](https://github.com/Dynatrace/dynatrace-configuration-as-code/discussions/2208).
+  Once an upstream release has the guard, the pin goes back to that release and its hashes, and
+  `MONACO_PIN_BUILD`, `MONACO_PIN_URL` and `monaco-patched/` are removed.
+
+A repo that overrides `MONACO_VERSION` gets the **stock** release from `installMonaco`, but
+`deployMonaco` / `undeployMonaco` refuse to run it while the framework pins a patched build
+(`MONACO_PIN_URL` set): stock Monaco needs `app-engine:apps:run`, which a learner token does
+not carry.
+
 ## Never fatal
 
 A failed download or a checksum mismatch **refuses that install** — a binary that does not
@@ -60,12 +108,22 @@ match its published checksum is never put on the `PATH` — but it does not stop
 The tool's output is replayed with the tag `devtools (non-fatal)`, followed by one warning:
 
 ```
-devtools (non-fatal): ... Checksum MISMATCH for dtctl_0.43.0_linux_amd64.tar.gz ...
-WARN | devtools (non-fatal): dtctl not installed — post-create continues without it
+devtools (non-fatal): ... monaco: download of the patched v2.30.1+wwse.1 failed ...
+WARN | devtools (non-fatal): Monaco not installed — post-create continues without it
 ```
 
 `verifyContainerCreation` filters that tag (`_creationNoiseFilter`), so a missing dev tool
-does not mark the whole container as failed in the greeting or the tracker. The other tool
+does not mark the whole container as failed in the greeting or the tracker.
+
+An **integrity** refusal is different: a checksum mismatch, a missing reviewed hash or a
+non-`https://` pin URL (every such message starts `INTEGRITY:`) is replayed with the tag
+`devtools INTEGRITY FAILED`, which the filter **keeps**. Post-create still carries on, but the
+container is reported as having an error — a tampered download is not noise.
+
+```
+devtools INTEGRITY FAILED: ... INTEGRITY: Checksum MISMATCH for dtctl_0.43.0_linux_amd64.tar.gz ...
+WARN | devtools (non-fatal): dtctl not installed — post-create continues without it
+``` The other tool
 still installs. Token values are masked (`<redacted>`) in everything replayed.
 
 Nothing in the step can hang post-create:
@@ -128,7 +186,7 @@ whatever "latest" was on the day:
 
 ```bash
 DTCTL_VERSION="${DTCTL_VERSION:-0.43.0}"
-MONACO_VERSION="${MONACO_VERSION:-2.30.1}"
+MONACO_VERSION="${MONACO_VERSION:-2.30.1}"   # installs the patched 2.30.1+wwse.1
 ```
 
 A repo may override either (environment or `.devcontainer/.env`). A value that is not `x.y.z`

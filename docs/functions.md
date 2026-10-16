@@ -131,8 +131,8 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `installDtctl` | `installDtctl [dir]` | Installs dtctl only (no context), checksum-verified |
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
-| `installMonaco` | `installMonaco` | Installs the latest [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) (checksum-verified) |
-| `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project |
+| `installMonaco` | `installMonaco` | Installs [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) at `MONACO_VERSION`: for the framework's pin, the framework's [patched build](dtctl-monaco.md#monaco-is-a-patched-build) (reviewed sha256, never a stock fallback; a refusal removes any `monaco` left in the install dir); otherwise the upstream release (checksum-verified) |
+| `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project. Runs only the verified patched Monaco (pinned sha256 or `+wwse.1` in `monaco version`); otherwise one `installMonaco`, then fails loudly |
 | `undeployMonaco` | `undeployMonaco [tenant\|env]` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
 | `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
 
@@ -153,7 +153,9 @@ For the pinned version the download must match the reviewed sha256 committed in 
 **and** the release's checksum file; see [dtctl & Monaco](dtctl-monaco.md#supply-chain). A
 binary is kept only when its sha256 matches the pin and it reports the wanted version. dtctl's archive is checked against the release's
 `checksums.txt`, Monaco's binary against its `.sha256`. A mismatch, or an asset missing from the
-checksum file, refuses the install. The checksum file comes from the same release, so this
+checksum file, refuses the install. The pinned Monaco is the framework's
+[patched build](dtctl-monaco.md#monaco-is-a-patched-build), checked against the reviewed sha256
+only; a mismatch refuses it and does **not** install stock Monaco instead. The checksum file comes from the same release, so this
 proves the download is intact, not who published it; pin a reviewed version for a delivery.
 A pin that is not `x.y.z` is refused before any download: nothing is written to `/usr/local/bin` (override with
 `DTCTL_INSTALL_DIR` / `MONACO_INSTALL_DIR`). Architectures: `amd64` and `arm64`.
