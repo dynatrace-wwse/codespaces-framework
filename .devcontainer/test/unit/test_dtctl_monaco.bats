@@ -610,6 +610,184 @@ pin_patched() {
   [ -x "$INSTALL_DIR/monaco" ]
 }
 
+# A stock Monaco baked into an image: present, runnable, but not the patched
+# build. `version` answers without logging (the check may ask it); any other
+# command logs "STOCK" — which no test may ever see.
+bake_stock_monaco() {
+  printf '#!/bin/bash\n[ "$1" = version ] && { echo "monaco version 2.30.1"; exit 0; }\necho "STOCK monaco $*" >> "$MONACO_LOG"\n' > "$INSTALL_DIR/monaco"
+  chmod +x "$INSTALL_DIR/monaco"
+}
+
+@test "installMonaco patched: every refusal removes a baked stock binary" {
+  source_functions
+  pin_patched
+  local why
+  for why in corrupt download nopin http; do
+    pin_patched
+    make_fixtures
+    bake_stock_monaco
+    case "$why" in
+      corrupt)  corrupt_one_byte "$FIXTURES/monaco-linux-amd64" ;;
+      download) rm -f "$FIXTURES/monaco-linux-amd64" ;;
+      nopin)    unset MONACO_PIN_SHA256_AMD64 ;;
+      http)     export MONACO_PIN_URL="http://example.com/monaco" ;;
+    esac
+    run installMonaco
+    [ "$status" -ne 0 ] || { echo "$why: installMonaco succeeded"; return 1; }
+    [ ! -e "$INSTALL_DIR/monaco" ] || { echo "$why: baked stock binary left behind"; return 1; }
+    echo "$output" | grep -q "removed $INSTALL_DIR/monaco" || { echo "$why: removal not reported"; return 1; }
+  done
+}
+
+@test "installMonaco patched: refusal with nothing installed is still a refusal (no removal noise)" {
+  source_functions
+  pin_patched
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  run installMonaco
+  [ "$status" -ne 0 ]
+  refute grep -q "removed" <<<"$output"
+}
+
+@test "deployMonaco: a stock monaco on PATH is replaced by the verified build before use" {
+  source_functions
+  pin_patched
+  make_monaco_project env
+  bake_stock_monaco
+  run deployMonaco env
+  [ "$status" -eq 0 ]
+  grep -qxF "$PATCHED_URL/monaco-linux-amd64" "$CURL_LOG"
+  [ "$(sha256sum "$INSTALL_DIR/monaco" | cut -d' ' -f1)" = "$MONACO_PIN_SHA256_AMD64" ]
+  refute grep -q "^STOCK" "$MONACO_LOG"
+  grep -q "^monaco deploy manifest.yaml -e learner" "$MONACO_LOG"
+}
+
+@test "deployMonaco: verified build unobtainable → fails LOUDLY, stock monaco never run, nothing deployed" {
+  source_functions
+  pin_patched
+  make_monaco_project env
+  bake_stock_monaco
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  run deployMonaco env
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "MONACO NOT VERIFIED"
+  echo "$output" | grep -q "app-engine:apps:run"
+  echo "$output" | grep -q "Nothing was deployed."
+  [ ! -s "$MONACO_LOG" ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/env/manifest.yaml" ]
+}
+
+@test "deployMonaco: a stock monaco the install cannot remove is refused, never run" {
+  source_functions
+  pin_patched
+  make_monaco_project env
+  # Not in INSTALL_DIR: an image's monaco elsewhere on PATH, ahead of it.
+  mkdir -p "$TEST_DIR/baked"
+  printf '#!/bin/bash\n[ "$1" = version ] && { echo "monaco version 2.30.1"; exit 0; }\necho "STOCK monaco $*" >> "$MONACO_LOG"\n' > "$TEST_DIR/baked/monaco"
+  chmod +x "$TEST_DIR/baked/monaco"
+  export PATH="$TEST_DIR/baked:$PATH"
+  run deployMonaco env
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "MONACO NOT VERIFIED: $TEST_DIR/baked/monaco"
+  refute grep -q "^STOCK" "$MONACO_LOG"
+}
+
+@test "deployMonaco: a binary whose version names +wwse.1 is accepted (sha differs: e.g. a rebuild)" {
+  source_functions
+  pin_patched
+  make_monaco_project env
+  printf '#!/bin/bash\n[ "$1" = version ] && { echo "monaco version 2.30.1+wwse.1"; exit 0; }\necho "PATCHED monaco $*" >> "$MONACO_LOG"\n[ "$1 $2" = "generate deletefile" ] && echo "delete: []" > "%s/.devcontainer/.monaco/env/delete.yaml"\nexit 0\n' "$FAKE_REPO" > "$INSTALL_DIR/monaco"
+  chmod +x "$INSTALL_DIR/monaco"
+  run deployMonaco env
+  [ "$status" -eq 0 ]
+  [ ! -s "$CURL_LOG" ]
+  grep -q "^PATCHED monaco deploy" "$MONACO_LOG"
+}
+
+@test "undeployMonaco: refuses to delete with an unverified monaco, keeps the delete file" {
+  source_functions
+  make_monaco_project env
+  run deployMonaco env
+  [ "$status" -eq 0 ]
+  pin_patched
+  bake_stock_monaco
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  : > "$MONACO_LOG"
+  run undeployMonaco env
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "MONACO NOT VERIFIED"
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/env/delete.yaml" ]
+  [ ! -s "$MONACO_LOG" ]
+}
+
+@test "installDevTools: an integrity refusal is tagged so verifyContainerCreation KEEPS it" {
+  source_functions
+  pin_patched
+  pin_devtools
+  pin_patched
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  local left
+  left=$(printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter || true)
+  echo "$left" | grep -q "devtools INTEGRITY FAILED: .*MISMATCH for monaco-linux-amd64"
+  echo "$left" | grep -q "devtools INTEGRITY FAILED: .*patched v2.30.1+wwse.1 does not match"
+  # A plain download failure stays non-fatal noise (the existing contract).
+  refute grep -q "download of" <<<"$left"
+}
+
+@test "installDevTools: a failed download (not integrity) is still dropped as noise" {
+  source_functions
+  pin_patched
+  pin_devtools
+  pin_patched
+  unset DT_DTCTL_TOKEN
+  rm -f "$FIXTURES/monaco-linux-amd64"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "devtools (non-fatal): .*download of the patched"
+  local left
+  left=$(printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter || true)
+  [ -z "$left" ]
+}
+
+@test "installDevTools: a corrupt dtctl archive is an INTEGRITY failure the filter keeps" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz"
+  run installDevTools
+  [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter | grep -q "devtools INTEGRITY FAILED: .*MISMATCH for dtctl_9.9.9_linux_amd64.tar.gz"
+}
+
+@test "_creationNoiseFilter: keeps a devtools INTEGRITY FAILED line" {
+  source_functions
+  local line="devtools INTEGRITY FAILED: [x| ERROR |t| INTEGRITY: Checksum MISMATCH for monaco-linux-amd64 — expected a, got b. Refusing to install.  |"
+  [ -n "$(printf '%s\n' "$line" | _creationNoiseFilter || true)" ]
+}
+
+@test "_releaseArch: aarch64 and arm64 map to arm64; armv8l / armv7l are refused" {
+  source_functions
+  local m
+  for m in aarch64 arm64; do
+    [ "$(FAKE_UNAME_M=$m _releaseArch)" = arm64 ] || { echo "$m not arm64"; return 1; }
+  done
+  for m in armv8l armv8 armv7l i686; do
+    if FAKE_UNAME_M=$m _releaseArch >/dev/null; then echo "$m accepted"; return 1; fi
+  done
+}
+
+@test "installMonaco: an armv8l (32-bit) machine is refused before any download" {
+  source_functions
+  pin_patched
+  export FAKE_UNAME_M=armv8l
+  run installMonaco
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "unsupported architecture 'armv8l'"
+  [ ! -s "$CURL_LOG" ]
+}
+
 @test "variables.sh pins the patched Monaco consistently with monaco-patched/build.sh" {
   local root="$BATS_TEST_DIRNAME/../../.."
   local real="$root/.devcontainer/util/variables.sh" build="$root/monaco-patched/build.sh"
