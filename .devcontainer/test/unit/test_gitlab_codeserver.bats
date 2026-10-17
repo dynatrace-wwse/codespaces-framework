@@ -475,3 +475,11 @@ no_secret_anywhere() {
   [ "$status" -eq 1 ]
   [ ! -s "$APP_REGISTRY" ]
 }
+
+@test "functions.sh: sources in an interactive zsh where oh-my-zsh aliases g=git" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  run zsh -c "alias g=git; source '$FAKE_REPO/.devcontainer/util/functions.sh' 2>&1; whence -w gitlabSeedRepo startCodeServer checkCodeServerRunning"
+  [[ "$output" != *"parse error"* ]]
+  [[ "$output" == *"gitlabSeedRepo: function"* ]]
+  [[ "$output" == *"checkCodeServerRunning: function"* ]]
+}

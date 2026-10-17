@@ -4195,8 +4195,8 @@ gitlabSeedRepo() {
     export GIT_ASKPASS="$ap" GIT_TERMINAL_PROMPT=0
     GITLAB_ASKPASS_TOKEN=$(_gitlabSecretValue gitlab-pat token)
     export GITLAB_ASKPASS_TOKEN
-    g() { git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= "$@"; }
-    g clone -q "$url" "$work/repo" 2>/dev/null || { echo "clone failed" >&2; exit 1; }
+    git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
+      clone -q "$url" "$work/repo" 2>/dev/null || { echo "clone failed" >&2; exit 1; }
     tar -C "$src" --exclude=.git -cf - . | tar -C "$work/repo" -xf - || exit 1
     cd "$work/repo" || exit 1
     git checkout -q -B main
@@ -4206,7 +4206,8 @@ gitlabSeedRepo() {
     fi
     git -c user.name="Enablement Framework" -c user.email="framework@enablement.local" \
       commit -q -m "Seed from $(basename "$src")" || exit 1
-    g push -q origin main > "$work/push.log" 2>&1
+    git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
+      push -q origin main > "$work/push.log" 2>&1
     pushed=$?
     sed 's/glpat-[A-Za-z0-9_.-]*/<token>/g' "$work/push.log" >&2
     exit "$pushed"
