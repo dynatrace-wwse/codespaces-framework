@@ -191,7 +191,7 @@ no_secret_anywhere() {
   [[ "$output" == *"external_url 'https://gitlab--j1.staging.example.com'"* ]]
   [[ "$output" == *"nginx['listen_https'] = false"* ]]
   [[ "$output" == *"'X-Forwarded-Proto' => 'https'"* ]]
-  [[ "$output" == *"'Host' => 'gitlab--j1.staging.example.com'"* ]]
+  [[ "$output" == *"'Host' => 'gitlab--j1.staging.example.com', 'X-Forwarded-Host' => 'gitlab--j1.staging.example.com'"* ]]
   [[ "$output" == *"puma['worker_processes'] = 0"* ]]
   [[ "$output" == *"registry['enable'] = false"* ]]
 }

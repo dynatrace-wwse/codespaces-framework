@@ -3849,14 +3849,15 @@ registry['enable'] = false
 gitlab_kas['enable'] = false
 gitlab_pages['enable'] = false
 mattermost['enable'] = false"
-  # Host: Rails builds redirects from the request's Host, and a proxy in front
-  # may send another name (Orbital sends the app's sslip ingress host), which
-  # would send the browser away from the address it is on. Pinned here.
+  # Host + X-Forwarded-Host: Rails builds redirects from them, and the proxies
+  # in front send another name (Orbital sends the app's sslip ingress host and
+  # ingress-nginx forwards it), which would send the browser away from the
+  # address it is on. Both pinned to the external host here.
   case "$url" in
     https://*) cfg="${cfg}
-nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }" ;;
+nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Host' => '${host}', 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }" ;;
     *) cfg="${cfg}
-nginx['proxy_set_headers'] = { 'Host' => '${host}' }" ;;
+nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Host' => '${host}' }" ;;
   esac
   printf '%s\n' "$cfg"
 }
