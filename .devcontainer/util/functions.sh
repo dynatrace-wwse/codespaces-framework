@@ -4110,7 +4110,7 @@ deployGitlab() {
 
   cfg=$(_gitlabOmnibusConfig "$url")
   sha=$(printf '%s' "$cfg" | sha256sum | cut -c1-16)
-  kubectl -n "$ns" create configmap gitlab-omnibus --from-literal=gitlab.rb="$cfg" \
+  kubectl -n "$ns" create cm gitlab-omnibus --from-literal=gitlab.rb="$cfg" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
   _gitlabApplyManifests "$sha" >/dev/null || { printError "Could not apply the GitLab manifests"; return 1; }
 
