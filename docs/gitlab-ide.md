@@ -85,11 +85,16 @@ configuration changed (for example a new external URL). The registry keeps one `
 
 ### Time and memory
 
-| | measured (Orbital staging worker, m6a.2xlarge) |
+Measured in an Orbital-shaped sandbox on a staging worker (m6a.2xlarge, 2026-10-17):
+
+| | |
 |---|---|
-| first boot to sign-in 200 | see the PR's validation numbers |
-| GitLab steady | ~2.3 GiB |
-| Runner | ~30 MiB idle (+ one pod per running job) |
+| `deployGitlab`, cold host (3.8 GB image pull included) | 361 s: ready 226 s, API token 43 s, Runner 90 s |
+| `deployGitlab` re-run with a config change (pod rolls) | 126 s |
+| GitLab pod, steady | 2.4 GiB (`kubectl top`) |
+| Runner, idle | 20 MiB (+ one pod per running job) |
+| whole environment (K3d + ingress + ToDo + GitLab + Runner) | 4.1 GiB working set (1.1 GiB before GitLab) |
+| 50 MB `git push` | 3–6 s; a pipeline job: ~14 s, queued 1–2 s |
 
 The image is 3.8 GB: cache it in the scenario image to take the pull off the start time.
 
@@ -121,6 +126,8 @@ stopCodeServer
   sets to `x86_64`, and fails.) `startCodeServer` installs it when missing. ~700 MB on disk.
 * **Settings** (written once, a learner's edits are kept): no workspace-trust prompt, no Chat/agent
   panel, terminal profile zsh, no telemetry or update checks.
+* **Memory**: 166 MiB idle; ~600 MiB with one window and a terminal open. Start to `/healthz`
+  ~1.3 s.
 * **Abandoned tabs**: `--reconnection-grace-time` (`CODE_SERVER_RECONNECT_GRACE`, 600 s) ends what a
   closed browser tab keeps alive; without it each abandoned window kept its extension host and
   terminals (~350 MiB each).
