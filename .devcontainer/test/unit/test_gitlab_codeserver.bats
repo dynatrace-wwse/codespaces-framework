@@ -121,7 +121,7 @@ EOF
 }
 
 make_helm_stub() {
-  printf '#!/bin/bash\necho "helm $*" >> "$ARGS_LOG"\ncat > /dev/null\nexit 0\n' > "$BIN/helm"
+  printf '#!/bin/bash\necho "helm $*" >> "$ARGS_LOG"\ncase "$*" in *"--values -"*) cat > /dev/null ;; esac\nexit 0\n' > "$BIN/helm"
   chmod +x "$BIN/helm"
 }
 
@@ -191,6 +191,7 @@ no_secret_anywhere() {
   [[ "$output" == *"external_url 'https://gitlab--j1.staging.example.com'"* ]]
   [[ "$output" == *"nginx['listen_https'] = false"* ]]
   [[ "$output" == *"'X-Forwarded-Proto' => 'https'"* ]]
+  [[ "$output" == *"'Host' => 'gitlab--j1.staging.example.com'"* ]]
   [[ "$output" == *"puma['worker_processes'] = 0"* ]]
   [[ "$output" == *"registry['enable'] = false"* ]]
 }
@@ -200,6 +201,7 @@ no_secret_anywhere() {
   run _gitlabOmnibusConfig "http://gitlab.10.0.0.1.sslip.io"
   [ "$status" -eq 0 ]
   [[ "$output" != *"X-Forwarded-Proto"* ]]
+  [[ "$output" == *"'Host' => 'gitlab.10.0.0.1.sslip.io'"* ]]
 }
 
 @test "_gitlabExternalUrl: Orbital subdomain on the staging domain from ORBITAL_BASE_URL" {

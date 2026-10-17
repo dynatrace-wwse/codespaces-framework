@@ -3832,7 +3832,8 @@ _gitlabOmnibusConfig() {
   # listens on plain 80. For an https external URL it forces the forwarded
   # scheme itself: Rails only issues its Secure session cookie when it
   # believes the request was https, and no proxy in front has to send it.
-  local url="$1" cfg
+  local url="$1" cfg host
+  host="${url#*://}"; host="${host%%/*}"
   cfg="external_url '${url}'
 nginx['listen_port'] = 80
 nginx['listen_https'] = false
@@ -3848,9 +3849,14 @@ registry['enable'] = false
 gitlab_kas['enable'] = false
 gitlab_pages['enable'] = false
 mattermost['enable'] = false"
+  # Host: Rails builds redirects from the request's Host, and a proxy in front
+  # may send another name (Orbital sends the app's sslip ingress host), which
+  # would send the browser away from the address it is on. Pinned here.
   case "$url" in
     https://*) cfg="${cfg}
-nginx['proxy_set_headers'] = { 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }" ;;
+nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }" ;;
+    *) cfg="${cfg}
+nginx['proxy_set_headers'] = { 'Host' => '${host}' }" ;;
   esac
   printf '%s\n' "$cfg"
 }
@@ -4254,7 +4260,8 @@ _codeServerInstalledVersion() {
   local bin
   bin=$(_codeServerBin)
   [ -x "$bin" ] || return 1
-  "$bin" --version 2>/dev/null | awk 'NR == 1 { print $1 }'
+  # The first run also prints a log line ("[timestamp] Wrote default config…").
+  "$bin" --version 2>/dev/null | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/ { print $1; exit }'
 }
 
 _codeServerSettings() {

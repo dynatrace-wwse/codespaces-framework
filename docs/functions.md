@@ -456,6 +456,7 @@ Available apps:
 | 6 | f | todoapp | ✅ | ✅ |
 | 7 | g | unguard | ✅ | ❌ |
 | 8 | h | opentelemetry-demo | ✅ | ✅ |
+| 9 | i | gitlab (GitLab CE + Runner) | ✅ | ✅ |
 
 ### Individual Deploy Functions
 
@@ -471,6 +472,8 @@ Available apps:
 | `undeployUnguard` | Removes Unguard and its MariaDB |
 | `deployOpentelemetryDemo` | Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained) |
 | `undeployOpentelemetryDemo` | Removes the OTel Demo and its namespace |
+| `deployGitlab` / `uninstallGitlab` | GitLab CE (Omnibus, one Deployment) + Runner — see [GitLab & browser IDE](gitlab-ide.md) |
+| `startCodeServer` / `stopCodeServer` | VS Code in the browser inside the learner container — see [GitLab & browser IDE](gitlab-ide.md) |
 
 All deploy functions expose apps exclusively via nginx ingress (`registerApp`). The legacy NodePort path has been removed.
 
