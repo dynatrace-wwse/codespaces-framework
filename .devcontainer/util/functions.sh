@@ -4239,8 +4239,11 @@ uninstallGitlab() {
 #
 #  Runs as the learner (vscode) in the same container as the browser
 #  terminal: same files, kubectl context, tools and zsh greeting.
-#  --auth none: whatever fronts the port (Orbital's IDE proxy) owns
-#  access control, so outside Orbital it binds 127.0.0.1 only.
+#  Auth: code-server's own password whenever PASSWORD (its native env
+#  var) is set — Orbital sets it and logs in server-side, because a
+#  slot's ports on the worker are reachable from every OTHER learner's
+#  container on that host. Under Orbital it refuses to start without
+#  one. Elsewhere, unset PASSWORD means --auth none on 127.0.0.1.
 # ======================================================================
 
 _codeServerHome() { echo "${CODE_SERVER_HOME:-$HOME/.local/lib/code-server}"; }
@@ -4335,7 +4338,7 @@ startCodeServer() {
   # its own session, opening <dir> (default: the repo). Already healthy -> no-op.
   # Bind: 0.0.0.0 under Orbital (the slot publishes the port to the master
   # only), 127.0.0.1 anywhere else. CODE_SERVER_BIND overrides.
-  local dir="${1:-${REPO_PATH:-$PWD}}" port="${CODE_SERVER_PORT:-8443}" bind pidf bin i
+  local dir="${1:-${REPO_PATH:-$PWD}}" port="${CODE_SERVER_PORT:-8443}" bind pidf bin i auth
   if [ ! -d "$dir" ]; then
     printError "startCodeServer: '$dir' is not a directory"
     return 1
@@ -4352,6 +4355,16 @@ startCodeServer() {
     orbital|orbital_codespaces) bind="${CODE_SERVER_BIND:-0.0.0.0}" ;;
     *) bind="${CODE_SERVER_BIND:-127.0.0.1}" ;;
   esac
+  if [ -n "${PASSWORD:-}" ] || [ -n "${HASHED_PASSWORD:-}" ]; then
+    auth=password
+  else
+    case "$(detectRunEnvironment)" in
+      orbital|orbital_codespaces)
+        printError "startCodeServer: PASSWORD is not set — under Orbital another learner's container can reach this port, so code-server will not run without auth. Refusing."
+        return 1 ;;
+    esac
+    auth=none
+  fi
   pidf=$(_codeServerPidFile)
   mkdir -p "$(dirname "$pidf")" || return 1
   # setsid: own session, so stopCodeServer can end it with every extension
@@ -4361,7 +4374,7 @@ startCodeServer() {
   # an interactive shell made the job a group leader and setsid had to fork.
   rm -f "$pidf"
   ( setsid sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$pidf" \
-      "$bin" --bind-addr "${bind}:${port}" --auth none \
+      "$bin" --bind-addr "${bind}:${port}" --auth "$auth" \
       --disable-telemetry --disable-update-check --disable-workspace-trust \
       --reconnection-grace-time "${CODE_SERVER_RECONNECT_GRACE:-600}" \
       "$dir" > "$(dirname "$pidf")/code-server.log" 2>&1 < /dev/null & )
@@ -4374,7 +4387,7 @@ startCodeServer() {
     printError "code-server did not answer /healthz within 30s — see $(dirname "$pidf")/code-server.log"
     return 1
   fi
-  printInfo "code-server running on ${bind}:${port} (pid $(cat "$pidf" 2>/dev/null)), workspace $dir"
+  printInfo "code-server running on ${bind}:${port} (auth $auth, pid $(cat "$pidf" 2>/dev/null)), workspace $dir"
   registerCodeServer
 }
 
@@ -4390,15 +4403,19 @@ registerCodeServer() {
   # registerCodeServer — exposes code-server like every other app: app "ide" in
   # the app registry, an Ingress, and a selector-less Service whose endpoint is
   # this container (code-server is not a pod). Orbital reads the registry, so
-  # the IDE opens from the workspace through the same slot port 80 as the
-  # other apps — no second slot port. Only under Orbital by default: with
-  # --auth none, a registered IDE elsewhere would publish a shell on the
-  # ingress. CODE_SERVER_REGISTER=1 forces it.
+  # the IDE is listed with the workspace's apps like any other. Only under
+  # Orbital by default, and never without a password (an unauthenticated
+  # IDE on the ingress is a shell for anyone who reaches it).
+  # CODE_SERVER_REGISTER=1 forces it outside Orbital.
   local ns="${CODE_SERVER_NAMESPACE:-ide}" port="${CODE_SERVER_PORT:-8443}" gw
   case "$(detectRunEnvironment)" in
     orbital|orbital_codespaces) ;;
     *) [ "${CODE_SERVER_REGISTER:-}" = "1" ] || { printInfo "code-server not registered as an app outside Orbital (set CODE_SERVER_REGISTER=1 to force)"; return 0; } ;;
   esac
+  if [ -z "${PASSWORD:-}" ] && [ -z "${HASHED_PASSWORD:-}" ]; then
+    printWarn "registerCodeServer: code-server has no password — not exposing it through the ingress"
+    return 0
+  fi
   gw=$(_codeServerGateway)
   case "$gw" in
     *.*.*.*) ;;
