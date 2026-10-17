@@ -419,6 +419,32 @@ no_secret_anywhere() {
   [[ "$pol" == *"port: 6443"* ]]
 }
 
+@test "deployGitlab: job pods get the fence-gate init container (valid TOML + patch); GITLAB_CI_FENCE=0 drops it" {
+  command -v python3 >/dev/null || skip "python3 not installed"
+  python3 -c 'import yaml, tomllib' 2>/dev/null || skip "python3 yaml/tomllib missing"
+  source_functions
+  run deployGitlab
+  [ "$status" -eq 0 ]
+  run python3 -c '
+import sys, yaml, tomllib
+cfg = tomllib.loads(yaml.safe_load(open(sys.argv[1]))["runners"]["config"])
+r = cfg["runners"][0]
+assert r["feature_flags"]["FF_USE_ADVANCED_POD_SPEC_CONFIGURATION"] is True
+assert r["kubernetes"]["pod_labels"]["enablement-framework/ci-job"] == "true"
+ps = r["kubernetes"]["pod_spec"][0]
+assert ps["patch_type"] == "strategic"
+ic = yaml.safe_load(ps["patch"])["initContainers"][0]
+assert ic["name"] == "wait-for-egress-fence"
+cmd = ic["command"][2]
+assert "nc -z -w 1 10.0.0.5 10250" in cmd and "exit 1" in cmd, cmd
+print("gate ok")' "$STATE/helm-values"
+  [ "$status" -eq 0 ]; [[ "$output" == *"gate ok"* ]]
+  GITLAB_CI_FENCE=0 run deployGitlab
+  [ "$status" -eq 0 ]
+  ! grep -q "wait-for-egress-fence" "$STATE/helm-values" || false
+  grep -q '"enablement-framework/ci-job" = "true"' "$STATE/helm-values"
+}
+
 @test "uninstallGitlab: a failed namespace delete is reported, rc 1" {
   source_functions
   run deployGitlab

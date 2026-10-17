@@ -46,6 +46,12 @@ them with the workspace's apps.
   `169.254/16`, `127/8`). That keeps them off the learner container's own ports — code-server
   listens there — and off the cloud metadata endpoint. A training whose jobs must reach such an
   address adds its own policy.
+* k3s enforces the policy about **1–2 s after** a pod starts — measured, long enough for a job's
+  first script line or a `services:` entrypoint. So every job pod gets an **init container**
+  (`wait-for-egress-fence`, runner `pod_spec` patch) that runs before all of them and waits until
+  the node's kubelet port (inside the fenced range) stops answering — typically 2 s. A cluster
+  that never enforces NetworkPolicy fails the job after 60 s rather than run it unfenced;
+  `GITLAB_CI_FENCE=0` removes the gate.
 
 ### Address
 

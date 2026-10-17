@@ -4074,6 +4074,32 @@ _gitlabEnsureRunner() {
   fi
   rtok=""
 
+  # Fence gate: the egress policy is enforced ~1-2 s after a pod starts —
+  # long enough for a job's script or a `services:` entrypoint to reach this
+  # container. An init container (runs before both) waits until the kubelet
+  # port on the node — inside the fenced range, reachable without the fence —
+  # stops answering. A cluster that never enforces the policy fails the job
+  # (fail closed); GITLAB_CI_FENCE=0 drops the gate.
+  local ep gate=""
+  if [ "${GITLAB_CI_FENCE:-1}" != "0" ]; then
+    if ep=$(_gitlabApiEndpoint); then
+      gate="
+      [runners.feature_flags]
+        FF_USE_ADVANCED_POD_SPEC_CONFIGURATION = true
+      [[runners.kubernetes.pod_spec]]
+        name = \"wait-for-egress-fence\"
+        patch_type = \"strategic\"
+        patch = '''
+          initContainers:
+          - name: wait-for-egress-fence
+            image: alpine:3.20
+            command: [\"sh\", \"-c\", \"i=0; while nc -z -w 1 ${ep% *} 10250; do i=\$((i+1)); if [ \$i -ge 60 ]; then echo 'egress fence not enforced (NetworkPolicy ci-job-egress), refusing to run the job'; exit 1; fi; sleep 1; done\"]
+        '''"
+    else
+      printWarn "Could not find the node address — CI jobs run without the egress-fence gate"
+    fi
+  fi
+
   printInfo "Installing GitLab Runner (chart ${GITLAB_RUNNER_CHART_VERSION:-0.81.0}, Kubernetes executor)"
   if ! helm upgrade --install gitlab-runner gitlab-runner \
       --repo https://charts.gitlab.io \
@@ -4094,7 +4120,7 @@ runners:
         image = "alpine:3.20"
         poll_timeout = 300
         [runners.kubernetes.pod_labels]
-          "enablement-framework/ci-job" = "true"
+          "enablement-framework/ci-job" = "true"${gate}
 RUNNEREOF
   then
     printError "helm install gitlab-runner failed"
@@ -4111,6 +4137,16 @@ _isIPv4() {
   printf '%s\n' "$1" | grep -Eqx '((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
 }
 
+_gitlabApiEndpoint() {
+  # "<ip> <port>" of the Kubernetes API (on k3s: the server node's address).
+  local ip port
+  ip=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].addresses[0].ip}' 2>/dev/null)
+  port=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].ports[0].port}' 2>/dev/null)
+  case "$port" in ''|*[!0-9]*) port=6443 ;; esac
+  _isIPv4 "$ip" || return 1
+  echo "$ip $port"
+}
+
 _gitlabApplyJobPolicy() {
   # CI jobs run whatever a pipeline says. Their pods (label
   # enablement-framework/ci-job, set by the runner config; a job cannot change
@@ -4119,13 +4155,13 @@ _gitlabApplyJobPolicy() {
   # the cluster. That keeps them off this container's ports (code-server binds
   # 0.0.0.0 under Orbital and is reached through the k3d network gateway, which
   # is not a pod, so no ingress policy can guard it) and off the cloud metadata
-  # endpoint. k3s enforces NetworkPolicy with its embedded controller.
-  local ns api_ip api_port api_rule=""
+  # endpoint. k3s enforces NetworkPolicy with its embedded controller — about
+  # a second AFTER a pod starts, so the runner config also gives every job pod
+  # an init container that waits until the fence holds (_gitlabEnsureRunner).
+  local ns ep api_ip api_port api_rule=""
   ns=$(_gitlabNs)
-  api_ip=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].addresses[0].ip}' 2>/dev/null)
-  api_port=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].ports[0].port}' 2>/dev/null)
-  case "$api_port" in ''|*[!0-9]*) api_port=6443 ;; esac
-  if _isIPv4 "$api_ip"; then
+  if ep=$(_gitlabApiEndpoint); then
+    api_ip=${ep% *}; api_port=${ep#* }
     api_rule="  - to:
     - ipBlock:
         cidr: ${api_ip}/32
