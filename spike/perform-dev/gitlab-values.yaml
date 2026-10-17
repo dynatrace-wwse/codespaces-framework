@@ -1,0 +1,92 @@
+# Perform spike 92: GitLab chart trimmed for a per-learner lab.
+# External URL = the Orbital subdomain (TLS ends at Orbital nginx).
+global:
+  edition: ce
+  hosts:
+    domain: staging.autonomous-enablements.whydevslovedynatrace.com
+    https: true
+    gitlab:
+      name: gitlab--spike92.staging.autonomous-enablements.whydevslovedynatrace.com
+      https: true
+  ingress:
+    configureCertmanager: false
+    class: nginx
+    provider: nginx
+    tls:
+      enabled: false
+  initialRootPassword:
+    secret: spike-gitlab-root
+    key: password
+  appConfig:
+    initialDefaults:
+      signupEnabled: false
+  kas:
+    enabled: false
+  registry:
+    enabled: false
+  minio:
+    enabled: true
+  grafana:
+    enabled: false
+installCertmanager: false
+certmanager:
+  install: false
+nginx-ingress:
+  enabled: false
+prometheus:
+  install: false
+registry:
+  enabled: false
+gitlab-zoekt:
+  install: false
+gitlab:
+  kas:
+    enabled: false
+  gitlab-exporter:
+    enabled: false
+  gitlab-shell:
+    enabled: false
+  toolbox:
+    enabled: false
+  webservice:
+    minReplicas: 1
+    maxReplicas: 1
+    workerProcesses: 1
+    hpa:
+      minReplicas: 1
+      maxReplicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 900M
+  sidekiq:
+    minReplicas: 1
+    maxReplicas: 1
+    concurrency: 10
+    resources:
+      requests:
+        cpu: 50m
+        memory: 400M
+  gitaly:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 200M
+gitlab-runner:
+  install: true
+  rbac:
+    create: true
+    clusterWideAccess: true
+  # runner talks to GitLab in-cluster, not through the public URL
+  gitlabUrl: http://gitlab-webservice-default.gitlab.svc:8181
+  runners:
+    config: |
+      [[runners]]
+        clone_url = "http://gitlab-webservice-default.gitlab.svc:8181"
+        [runners.kubernetes]
+          image = "alpine:3.20"
+# minio/minio + minio/mc tags are gone from Docker Hub; GitLab mirrors them.
+minio:
+  image: registry.gitlab.com/gitlab-org/cloud-native/mirror/images/minio/minio
+  minioMc:
+    image: registry.gitlab.com/gitlab-org/cloud-native/mirror/images/minio/mc
