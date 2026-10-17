@@ -119,7 +119,7 @@ printRunningApplications(){
         while IFS='|' read -r app_name namespace service_name service_port ingress_host cs_port orbital_subdomain; do
             running_app=true
             if [[ "$_greet_env" == "orbital" && -n "$orbital_subdomain" ]]; then
-                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${orbital_subdomain}.autonomous-enablements.whydevslovedynatrace.com"
+                echo -e "${CYAN}   $app_name ${NORMAL}is reachable under ${RESET}https://${orbital_subdomain}.${ORBITAL_APP_DOMAIN:-autonomous-enablements.whydevslovedynatrace.com}"
             elif [[ "$_greet_env" == "codespaces" ]]; then
                 # Field 6 of the registry is the forwarded port: empty for apps
                 # served by the :80 ingress catch-all, 8000 for mkdocs.
