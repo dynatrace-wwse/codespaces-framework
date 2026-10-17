@@ -8,6 +8,9 @@
 # The secrets the stubs mint are sentinels, and the tests grep EVERY output and
 # every logged argument list for them: a secret on a command line or in a log
 # is a failure, not a style issue.
+#
+# Every negated assertion ends in "|| false": bats runs tests under set -e,
+# which ignores a "! cmd" that fails — only "|| false" makes it count.
 
 PAT_SENTINEL="glpat-SENTINELPAT0123456789"
 RUNNER_SENTINEL="glrt-SENTINELRUNNER0123456789"
@@ -30,7 +33,8 @@ setup() {
   export APP_REGISTRY="$TEST_DIR/app-registry"
   export EXTERNAL_IP="10.0.0.1"
   export MAGIC_DOMAIN="sslip.io"
-  export CODE_SERVER_PORT=18443
+  # A free-ish port per test: the stub code-server really listens on it.
+  export CODE_SERVER_PORT=$((20000 + RANDOM % 20000))
 
   cat > "$FAKE_REPO/.devcontainer/util/variables.sh" <<'VARSEOF'
 LOGNAME="test"
@@ -49,10 +53,13 @@ VARSEOF
   export BIN="$TEST_DIR/bin" STATE="$TEST_DIR/state" ARGS_LOG="$TEST_DIR/args.log"
   mkdir -p "$BIN" "$STATE"
   : > "$ARGS_LOG"
+  export REAL_GIT
+  REAL_GIT=$(command -v git)
   export PATH="$BIN:$PATH"
   make_kubectl_stub
   make_helm_stub
   make_curl_stub
+  make_git_stub
 }
 
 teardown() {
@@ -60,6 +67,8 @@ teardown() {
   local p
   p=$(cat "$XDG_CACHE_HOME/code-server/pid" 2>/dev/null)
   [ -n "$p" ] && kill -TERM -- "-$p" 2>/dev/null; kill "$p" 2>/dev/null
+  p=$(cat "$TEST_DIR/foreign.pid" 2>/dev/null)
+  [ -n "$p" ] && kill "$p" 2>/dev/null
   rm -rf "$TEST_DIR"
 }
 
@@ -95,11 +104,15 @@ case "$args" in
   *"get secret"*)
     name=$(echo "$args" | sed -E 's/.*get secret ([^ ]+).*/\1/')
     ls "$STATE"/secret-"$name"-* >/dev/null 2>&1; exit $? ;;
+  *"get endpoints kubernetes"*"addresses"*) printf 10.0.0.5; exit 0 ;;
+  *"get endpoints kubernetes"*"ports"*) printf 6443; exit 0 ;;
+  *"delete namespace"*) [ -n "${STUB_DELETE_FAIL:-}" ] && exit 1; exit 0 ;;
   *"gitlab-rails runner"*)
     echo "some rails warning"; echo; echo "GLPAT_SENTINEL_PLACEHOLDER"; exit 0 ;;
   *"exec -i deploy/gitlab"*"runners/verify"*)
     read -r t; [ "$t" = "$(cat "$STATE/secret-gitlab-runner-secret-runner-token" 2>/dev/null)" ] && printf 200 || printf 403; exit 0 ;;
   *"exec -i deploy/gitlab"*"curl"*)
+    [ -n "${STUB_API_DOWN:-}" ] && { cat > /dev/null; printf '\nHTTP 000\n'; exit 0; }
     read -r hdr
     echo "$hdr" | grep -q "PRIVATE-TOKEN: $(cat "$STATE/secret-gitlab-pat-token" 2>/dev/null)" || { printf '\nHTTP 401\n'; exit 0; }
     case "$args" in
@@ -121,7 +134,7 @@ EOF
 }
 
 make_helm_stub() {
-  printf '#!/bin/bash\necho "helm $*" >> "$ARGS_LOG"\ncase "$*" in *"--values -"*) cat > /dev/null ;; esac\nexit 0\n' > "$BIN/helm"
+  printf '#!/bin/bash\necho "helm $*" >> "$ARGS_LOG"\ncase "$*" in *"--values -"*) cat > "$STATE/helm-values" ;; esac\nexit 0\n' > "$BIN/helm"
   chmod +x "$BIN/helm"
 }
 
@@ -148,6 +161,30 @@ EOF
   chmod +x "$BIN/curl"
 }
 
+make_git_stub() {
+  # clone: an empty local repo instead of the network. push: asks GIT_ASKPASS
+  # for the password like git does, echoes it back the way a remote error can,
+  # and records the pushed tree. Everything else is real git.
+  cat > "$BIN/git" <<'EOF'
+#!/bin/bash
+echo "git $*" >> "$ARGS_LOG"
+a=("$@"); i=0; sub=""
+while [ $i -lt ${#a[@]} ]; do
+  case "${a[$i]}" in -c|-C) i=$((i + 2)) ;; *) sub="${a[$i]}"; break ;; esac
+done
+case "$sub" in
+  clone) "$REAL_GIT" init -q "${@: -1}"; exit 0 ;;
+  push)
+    tok=$("$GIT_ASKPASS" "Password for 'http://root@gitlab': ")
+    echo "remote: error at https://root:${tok}@gitlab/root/demo.git" >&2
+    "$REAL_GIT" ls-tree -r --name-only HEAD > "$STATE/pushed"
+    exit 0 ;;
+esac
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$BIN/git"
+}
+
 make_codeserver_fixture() {
   # make_codeserver_fixture <version> — a release tarball whose code-server
   # logs its argv + whether PASSWORD reached it, marks itself listening, sleeps.
@@ -159,8 +196,13 @@ make_codeserver_fixture() {
 #!/bin/bash
 if [ "\$1" = "--version" ]; then echo "$v abc123 with Code 1.0"; exit 0; fi
 echo "code-server \$* | password-env=\$([ -n "\$PASSWORD" ] && echo yes || echo no)" >> "\$ARGS_LOG"
-touch "\$TEST_DIR/cs-listening"
-trap 'rm -f "\$TEST_DIR/cs-listening"; exit 0' TERM
+# A real listener in this session (code-server's HTTP server is a child too).
+python3 -c 'import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(5)
+open(sys.argv[2], "w").close(); time.sleep(100000)' "\$CODE_SERVER_PORT" "\$TEST_DIR/cs-listening" &
+child=\$!
+trap 'kill \$child 2>/dev/null; rm -f "\$TEST_DIR/cs-listening"; exit 0' TERM
 while :; do sleep 1; done
 EOF
   chmod +x "$d/bin/code-server"
@@ -229,7 +271,7 @@ no_secret_anywhere() {
   run deployGitlab
   [ "$status" -eq 1 ]
   [[ "$output" == *"no Kubernetes cluster"* ]]
-  ! grep -q "helm" "$ARGS_LOG"
+  ! grep -q "helm" "$ARGS_LOG" || false
 }
 
 @test "deployGitlab: full run registers gitlab once, installs the runner, prints no secret" {
@@ -264,9 +306,9 @@ no_secret_anywhere() {
   run deployGitlab
   [ "$status" -eq 0 ]
   [ "$(cat "$STATE/secret-gitlab-root-password")" = "$pw_before" ]
-  ! grep -q "create secret generic gitlab-root" "$ARGS_LOG"
-  ! grep -q "gitlab-rails runner" "$ARGS_LOG"
-  ! grep -q "create secret generic gitlab-runner-secret" "$ARGS_LOG"
+  ! grep -q "create secret generic gitlab-root" "$ARGS_LOG" || false
+  ! grep -q "gitlab-rails runner" "$ARGS_LOG" || false
+  ! grep -q "create secret generic gitlab-runner-secret" "$ARGS_LOG" || false
   [[ "$output" == *"token present and valid"* ]]
   [ "$(grep -c '^gitlab|' "$APP_REGISTRY")" -eq 1 ]
   no_secret_anywhere "$output"
@@ -313,7 +355,77 @@ no_secret_anywhere() {
   [ "$status" -eq 0 ]
   grep -q "helm uninstall gitlab-runner -n gitlab" "$ARGS_LOG"
   grep -q "kubectl delete namespace gitlab" "$ARGS_LOG"
-  ! grep -q '^gitlab|' "$APP_REGISTRY"
+  ! grep -q '^gitlab|' "$APP_REGISTRY" || false
+}
+
+@test "deployGitlab: a GitLab that does not answer is not a rejected token — no re-mint, rc 1" {
+  source_functions
+  run deployGitlab
+  : > "$ARGS_LOG"
+  STUB_API_DOWN=1 run deployGitlab
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not replacing the token"* ]]
+  ! grep -q "gitlab-rails runner" "$ARGS_LOG" || false
+  [ "$(cat "$STATE/secret-gitlab-pat-token")" = "$PAT_SENTINEL" ]
+}
+
+@test "deployGitlab: the mint revokes earlier framework tokens; API calls are time-bounded" {
+  source_functions
+  run deployGitlab
+  [ "$status" -eq 0 ]
+  grep "gitlab-rails runner" "$ARGS_LOG" | grep -q "where('name LIKE ?', 'enablement-framework-%').each(&:revoke!)"
+  # every in-pod curl has --max-time
+  ! grep "exec -i deploy/gitlab" "$ARGS_LOG" | grep -v -- "--max-time" | grep -q curl || false
+}
+
+@test "deployGitlab: runner token verified from stdin (token@-), never via sh -c or argv" {
+  source_functions
+  run deployGitlab
+  : > "$ARGS_LOG"
+  run deployGitlab
+  [ "$status" -eq 0 ]
+  grep -q -- "--data-urlencode token@- http://127.0.0.1/api/v4/runners/verify" "$ARGS_LOG"
+  ! grep "runners/verify" "$ARGS_LOG" | grep -q "sh -c" || false
+  no_secret_anywhere "$output"
+}
+
+@test "deployGitlab: a runner token that does not verify fails — it does not register a second runner" {
+  source_functions
+  run deployGitlab
+  printf 'glrt-deleted' > "$STATE/secret-gitlab-runner-secret-runner-token"
+  # make the stub's verify compare against something else
+  sed -i 's#\[ "\$t" = "\$(cat "\$STATE/secret-gitlab-runner-secret-runner-token" 2>/dev/null)" \]#[ "$t" = never ]#' "$BIN/kubectl"
+  : > "$ARGS_LOG"
+  run deployGitlab
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not verify"* ]]
+  ! grep -q "/api/v4/user/runners" "$ARGS_LOG" || false
+  ! grep -q "helm upgrade" "$ARGS_LOG" || false
+  [ "$(cat "$STATE/secret-gitlab-runner-secret-runner-token")" = "glrt-deleted" ]
+}
+
+@test "deployGitlab: CI job pods are labelled and fenced off private/link-local addresses" {
+  source_functions
+  run deployGitlab
+  [ "$status" -eq 0 ]
+  grep -q '"enablement-framework/ci-job" = "true"' "$STATE/helm-values"
+  local pol
+  pol=$(awk '/name: ci-job-egress/,/^---/' "$STATE/applied.yaml")
+  [[ "$pol" == *"enablement-framework/ci-job: \"true\""* ]]
+  [[ "$pol" == *"policyTypes: [Egress]"* ]]
+  [[ "$pol" == *"cidr: 0.0.0.0/0"* ]]
+  [[ "$pol" == *"except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]"* ]]
+  [[ "$pol" == *"cidr: 10.0.0.5/32"* ]]     # the Kubernetes API endpoint
+  [[ "$pol" == *"port: 6443"* ]]
+}
+
+@test "uninstallGitlab: a failed namespace delete is reported, rc 1" {
+  source_functions
+  run deployGitlab
+  STUB_DELETE_FAIL=1 run uninstallGitlab
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed or timed out"* ]]
+  [[ "$output" != *"GitLab removed"* ]]
 }
 
 # ============================================================
@@ -344,9 +456,63 @@ no_secret_anywhere() {
   [ -f "$STATE/project" ]          # the project was created first
   : > "$ARGS_LOG"
   run gitlabSeedRepo demo "$FAKE_REPO"
-  ! grep -q -- "-X POST.*/api/v4/projects " "$ARGS_LOG"
-  ! grep -q "name=demo" "$ARGS_LOG"
+  ! grep -q -- "-X POST.*/api/v4/projects$" "$ARGS_LOG" || false
+  ! grep -q "name=demo" "$ARGS_LOG" || false
   no_secret_anywhere "$output"
+}
+
+@test "gitlabSeedRepo: pushes through GIT_ASKPASS, redacts an echoed token, git calls time-bounded" {
+  source_functions
+  run deployGitlab
+  echo hello > "$FAKE_REPO/README.md"
+  run gitlabSeedRepo demo "$FAKE_REPO"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Seeded root/demo"* ]]
+  grep -qx "README.md" "$STATE/pushed"
+  # the stub remote echoed the askpass answer: it must come out redacted
+  [[ "$output" == *"https://root:<token>@gitlab"* ]]
+  grep -q "^git -c http.curloptResolve=gitlab\.10\.0\.0\.1\.sslip\.io:80:127\.0\.0\.1 -c credential.helper= push" "$ARGS_LOG"
+  grep -q "git -c http.curloptResolve=.* clone -q http://gitlab.10.0.0.1.sslip.io/root/demo.git" "$ARGS_LOG"
+  no_secret_anywhere "$output"
+}
+
+@test "gitlabSeedRepo: a git work tree seeds tracked files only, never .env* (tracked or not)" {
+  source_functions
+  run deployGitlab
+  cd "$FAKE_REPO"
+  "$REAL_GIT" init -q .
+  printf '.devcontainer/.env\nbuild/\n' > .gitignore
+  echo "DT_TOKEN=dt0c01.SECRET" > .devcontainer/.env
+  mkdir -p build config; echo junk > build/out.bin
+  echo "X=1" > config/.env.local
+  echo hello > README.md
+  echo untracked > notes.txt
+  "$REAL_GIT" add .gitignore README.md .devcontainer config
+  "$REAL_GIT" add -f config/.env.local
+  echo gone > deleted.txt; "$REAL_GIT" add deleted.txt; rm deleted.txt
+  run gitlabSeedRepo demo "$FAKE_REPO"
+  [ "$status" -eq 0 ]
+  grep -qx "README.md" "$STATE/pushed"
+  grep -qx ".devcontainer/util/functions.sh" "$STATE/pushed"
+  ! grep -q "\.env" "$STATE/pushed" || false
+  ! grep -q "^build/" "$STATE/pushed" || false
+  ! grep -qx "notes.txt" "$STATE/pushed" || false
+  ! grep -qx "deleted.txt" "$STATE/pushed" || false
+}
+
+@test "gitlabSeedRepo: a plain directory seeds everything but .git and .env*" {
+  source_functions
+  run deployGitlab
+  local d="$TEST_DIR/plain"
+  mkdir -p "$d/sub" "$d/.git"
+  echo a > "$d/a.txt"; echo b > "$d/sub/b.txt"; echo s > "$d/.env"; echo s > "$d/sub/.env.prod"
+  echo g > "$d/.git/config"
+  run gitlabSeedRepo plain "$d"
+  [ "$status" -eq 0 ]
+  grep -qx "a.txt" "$STATE/pushed"
+  grep -qx "sub/b.txt" "$STATE/pushed"
+  ! grep -q "\.env" "$STATE/pushed" || false
+  ! grep -q "^\.git/" "$STATE/pushed" || false
 }
 
 # ============================================================
@@ -358,7 +524,7 @@ no_secret_anywhere() {
   run installCodeServer 9.9.9
   [ "$status" -eq 1 ]
   [[ "$output" == *"no reviewed sha256"* ]]
-  ! grep -q "github.com/coder" "$ARGS_LOG"
+  ! grep -q "github.com/coder" "$ARGS_LOG" || false
 }
 
 @test "installCodeServer: the pinned version refuses bytes that are not the reviewed release" {
@@ -415,7 +581,7 @@ no_secret_anywhere() {
   run startCodeServer "$FAKE_REPO"
   [ "$status" -eq 1 ]
   [[ "$output" == *"PASSWORD is not set"* ]]
-  ! grep -q "^code-server --bind" "$ARGS_LOG"
+  ! grep -q "^code-server --bind" "$ARGS_LOG" || false
 }
 
 @test "startCodeServer: local default is auth none on 127.0.0.1, and it is not registered" {
@@ -424,7 +590,7 @@ no_secret_anywhere() {
   CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
   run startCodeServer "$FAKE_REPO"
   [ "$status" -eq 0 ]
-  grep -q "^code-server --bind-addr 127.0.0.1:18443 --auth none " "$ARGS_LOG"
+  grep -q "^code-server --bind-addr 127.0.0.1:${CODE_SERVER_PORT} --auth none " "$ARGS_LOG"
   [ ! -s "$APP_REGISTRY" ]
   run stopCodeServer
   [[ "$output" == *"stopped"* ]]
@@ -439,8 +605,8 @@ no_secret_anywhere() {
   docker() { echo "172.18.0.1"; }   # k3d network gateway
   run startCodeServer "$FAKE_REPO"
   [ "$status" -eq 0 ]
-  grep -q "^code-server --bind-addr 0.0.0.0:18443 --auth password .*| password-env=yes" "$ARGS_LOG"
-  [ "$(awk -F'|' '$1=="ide"{print $2"|"$3"|"$4"|"$7}' "$APP_REGISTRY")" = "ide|ide|18443|ide--job1" ]
+  grep -q "^code-server --bind-addr 0.0.0.0:${CODE_SERVER_PORT} --auth password .*| password-env=yes" "$ARGS_LOG"
+  [ "$(awk -F'|' '$1=="ide"{print $2"|"$3"|"$4"|"$7}' "$APP_REGISTRY")" = "ide|ide|${CODE_SERVER_PORT}|ide--job1" ]
   grep -q 'addresses: \["172.18.0.1"\]' "$STATE/applied.yaml"
   no_secret_anywhere "$output"
   # already healthy -> no second server, still one registry row
@@ -454,7 +620,46 @@ no_secret_anywhere() {
   pid=$(cat "$XDG_CACHE_HOME/code-server/pid")
   run stopCodeServer
   sleep 1
-  ! kill -0 "$pid" 2>/dev/null
+  ! kill -0 "$pid" 2>/dev/null || false
+  # and Orbital no longer lists an IDE that is gone
+  ! grep -q '^ide|' "$APP_REGISTRY" || false
+  [[ "$output" == *"ide removed from the app registry"* ]]
+}
+
+@test "startCodeServer: outside Orbital, a non-loopback bind without PASSWORD is refused" {
+  source_functions
+  export CODE_SERVER_SHA256 CODE_SERVER_VERSION=9.9.9
+  CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
+  CODE_SERVER_BIND=0.0.0.0 run startCodeServer "$FAKE_REPO"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Refusing"* ]]
+  ! grep -q "^code-server --bind" "$ARGS_LOG" || false
+  # with a password it is fine
+  PASSWORD="cs-SENTINEL-pass-42" CODE_SERVER_BIND=0.0.0.0 run startCodeServer "$FAKE_REPO"
+  [ "$status" -eq 0 ]
+  grep -q "^code-server --bind-addr 0.0.0.0:${CODE_SERVER_PORT} --auth password" "$ARGS_LOG"
+}
+
+@test "_codeServerHealthy: a 200 from a listener that is not our code-server does not count" {
+  source_functions
+  # a foreign process owns the port, and /healthz "answers 200"
+  python3 -c 'import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(5); time.sleep(100000)' "$CODE_SERVER_PORT" &
+  echo $! > "$TEST_DIR/foreign.pid"
+  touch "$TEST_DIR/cs-listening"
+  sleep 0.5
+  run _codeServerHealthy
+  [ "$status" -ne 0 ]
+  # a pid file naming a live session leader that does not own the listener
+  mkdir -p "$XDG_CACHE_HOME/code-server"
+  setsid sh -c 'echo $$ > "$1"; exec sleep 100000' sh "$XDG_CACHE_HOME/code-server/pid" &
+  sleep 0.5
+  [ -s "$XDG_CACHE_HOME/code-server/pid" ]
+  run _codeServerHealthy
+  [ "$status" -ne 0 ]
+  run checkCodeServerRunning
+  [ "$status" -eq 1 ]
 }
 
 @test "registerCodeServer: never registers an IDE without a password" {
@@ -470,10 +675,20 @@ no_secret_anywhere() {
 @test "registerCodeServer: refuses a gateway that is not an IPv4 address" {
   export ORBITAL_ENVIRONMENT=true ORBITAL_JOB_ID=job1 PASSWORD=x
   source_functions
-  docker() { echo ""; }
-  run registerCodeServer
-  [ "$status" -eq 1 ]
+  # (not named gw: registerCodeServer's own "local gw" would shadow it)
+  local fake_gw
+  for fake_gw in "" "a.b.c.d" "999.1.1.1" "1.2.3" "1.2.3.4.5" "172.18.0.1 x"; do
+    docker() { echo "$fake_gw"; }
+    run registerCodeServer
+    [ "$status" -eq 1 ] || { echo "accepted gateway '$fake_gw'"; false; }
+    [[ "$output" == *"could not find the k3d network gateway"* ]] || { echo "gateway '$fake_gw' got past the guard"; false; }
+  done
   [ ! -s "$APP_REGISTRY" ]
+  # control: a real address passes the guard
+  fake_gw=172.18.0.1
+  run registerCodeServer
+  [ "$status" -eq 0 ]
+  grep -q '^ide|' "$APP_REGISTRY"
 }
 
 @test "functions.sh: sources in an interactive zsh where oh-my-zsh aliases g=git" {

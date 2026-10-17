@@ -3877,13 +3877,16 @@ _gitlabApi() {
   # _gitlabApi <METHOD> <path> [curl data args...] — GitLab API call made
   # INSIDE the GitLab pod (no route, DNS or ingress involved). The token goes
   # in as a header on stdin (curl -H @-), so it is in no process' arguments.
-  # Prints the body, then a last line "HTTP <code>".
+  # Prints the body, then a last line "HTTP <code>" ("HTTP 000" when GitLab
+  # did not answer within GITLAB_API_TIMEOUT seconds).
   local method="$1" api_path="$2" tok
   shift 2
   tok=$(_gitlabSecretValue gitlab-pat token)
   [ -n "$tok" ] || { echo "HTTP 000"; return 1; }
-  printf 'PRIVATE-TOKEN: %s\n' "$tok" | kubectl -n "$(_gitlabNs)" exec -i deploy/gitlab -c gitlab -- \
-    curl -s -X "$method" -H @- -w '\nHTTP %{http_code}\n' "$@" "http://127.0.0.1/api/v4${api_path}"
+  printf 'PRIVATE-TOKEN: %s\n' "$tok" | timeout "$(( ${GITLAB_API_TIMEOUT:-30} + 15 ))" \
+    kubectl -n "$(_gitlabNs)" exec -i deploy/gitlab -c gitlab -- \
+    curl -s --max-time "${GITLAB_API_TIMEOUT:-30}" -X "$method" -H @- -w '\nHTTP %{http_code}\n' "$@" \
+    "http://127.0.0.1/api/v4${api_path}"
 }
 
 _gitlabHttpCode() {
@@ -4003,15 +4006,24 @@ _gitlabEnsureToken() {
   ns=$(_gitlabNs)
   if kubectl -n "$ns" get secret gitlab-pat >/dev/null 2>&1; then
     code=$(_gitlabApi GET /user 2>/dev/null | _gitlabHttpCode)
-    if [ "$code" = "200" ]; then
-      printInfo "GitLab API token present and valid (secret $ns/gitlab-pat)"
-      return 0
-    fi
-    printWarn "GitLab API token in $ns/gitlab-pat no longer authenticates (HTTP ${code:-none}) — minting a new one"
+    case "$code" in
+      200)
+        printInfo "GitLab API token present and valid (secret $ns/gitlab-pat)"
+        return 0 ;;
+      401)
+        printWarn "GitLab API token in $ns/gitlab-pat is rejected (HTTP 401) — minting a new one" ;;
+      *)
+        # Not an answer about the token (timeout, 5xx while GitLab restarts):
+        # replacing a token that may be fine would be wrong. Fail, re-run later.
+        printError "GitLab API did not answer usably (HTTP ${code:-none}) — not replacing the token; re-run deployGitlab when GitLab is ready"
+        return 1 ;;
+    esac
   fi
+  # The mint also revokes every earlier framework token, so exactly one is
+  # live — the one in the secret.
   printInfo "Minting a GitLab API token in-cluster (gitlab-rails, ~1 min)"
-  tok=$(kubectl -n "$ns" exec deploy/gitlab -c gitlab -- gitlab-rails runner \
-    "u = User.find_by_username('root'); t = u.personal_access_tokens.create!(name: \"enablement-framework-#{Time.now.to_i}\", scopes: %w[api read_repository write_repository], expires_at: 364.days.from_now); ApplicationSetting.current.update!(signup_enabled: false); puts; puts t.token" \
+  tok=$(timeout "${GITLAB_RAILS_TIMEOUT:-300}" kubectl -n "$ns" exec deploy/gitlab -c gitlab -- gitlab-rails runner \
+    "u = User.find_by_username('root'); u.personal_access_tokens.active.where('name LIKE ?', 'enablement-framework-%').each(&:revoke!); t = u.personal_access_tokens.create!(name: \"enablement-framework-#{Time.now.to_i}\", scopes: %w[api read_repository write_repository], expires_at: 364.days.from_now); ApplicationSetting.current.update!(signup_enabled: false); puts; puts t.token" \
     2>/dev/null | grep -E '^glpat-' | tail -n 1)
   if [ -z "$tok" ]; then
     printError "Could not mint a GitLab API token (gitlab-rails runner returned none)"
@@ -4026,14 +4038,24 @@ _gitlabEnsureToken() {
 _gitlabEnsureRunner() {
   # Registers an instance runner through the API (runner authentication token,
   # GitLab >= 16 flow) into secret gitlab-runner-secret, then installs the
-  # gitlab-runner chart with the Kubernetes executor. Re-run: a runner token
-  # GitLab still knows is kept; the chart is upgraded in place.
-  local ns out rtok
+  # gitlab-runner chart with the Kubernetes executor. Re-run: the runner token
+  # is kept and must still verify; one that does not is an error to look at,
+  # not a reason to register a second runner. The chart is upgraded in place.
+  local ns out rtok code
   ns=$(_gitlabNs)
   rtok=$(_gitlabSecretValue gitlab-runner-secret runner-token)
-  if [ -n "$rtok" ] && printf '%s' "$rtok" | kubectl -n "$ns" exec -i deploy/gitlab -c gitlab -- \
-      sh -c 'read -r t; curl -s -o /dev/null -w "%{http_code}" -X POST --data-urlencode "token=$t" http://127.0.0.1/api/v4/runners/verify' 2>/dev/null \
-      | grep -qx 200; then
+  if [ -n "$rtok" ]; then
+    # token@- : curl reads the value from stdin, so it is in no argv, here
+    # or inside the pod.
+    code=$(printf '%s' "$rtok" | timeout "$(( ${GITLAB_API_TIMEOUT:-30} + 15 ))" \
+      kubectl -n "$ns" exec -i deploy/gitlab -c gitlab -- \
+      curl -s --max-time "${GITLAB_API_TIMEOUT:-30}" -o /dev/null -w '%{http_code}' -X POST \
+      --data-urlencode token@- http://127.0.0.1/api/v4/runners/verify 2>/dev/null)
+    if [ "$code" != "200" ]; then
+      printError "The runner token in $ns/gitlab-runner-secret does not verify (HTTP ${code:-none})"
+      printError "If the runner was deleted in GitLab: kubectl -n $ns delete secret gitlab-runner-secret, then re-run deployGitlab"
+      return 1
+    fi
     printInfo "GitLab Runner token present and valid (secret $ns/gitlab-runner-secret)"
   else
     printInfo "Registering a GitLab instance runner"
@@ -4071,6 +4093,8 @@ runners:
         namespace = "${ns}"
         image = "alpine:3.20"
         poll_timeout = 300
+        [runners.kubernetes.pod_labels]
+          "enablement-framework/ci-job" = "true"
 RUNNEREOF
   then
     printError "helm install gitlab-runner failed"
@@ -4081,6 +4105,56 @@ RUNNEREOF
     return 1
   fi
   printInfo "GitLab Runner ready"
+}
+
+_isIPv4() {
+  printf '%s\n' "$1" | grep -Eqx '((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+}
+
+_gitlabApplyJobPolicy() {
+  # CI jobs run whatever a pipeline says. Their pods (label
+  # enablement-framework/ci-job, set by the runner config; a job cannot change
+  # it) get an egress NetworkPolicy: any pod in the cluster, the Kubernetes API,
+  # and the internet — but no private, link-local or loopback address outside
+  # the cluster. That keeps them off this container's ports (code-server binds
+  # 0.0.0.0 under Orbital and is reached through the k3d network gateway, which
+  # is not a pod, so no ingress policy can guard it) and off the cloud metadata
+  # endpoint. k3s enforces NetworkPolicy with its embedded controller.
+  local ns api_ip api_port api_rule=""
+  ns=$(_gitlabNs)
+  api_ip=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].addresses[0].ip}' 2>/dev/null)
+  api_port=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].ports[0].port}' 2>/dev/null)
+  case "$api_port" in ''|*[!0-9]*) api_port=6443 ;; esac
+  if _isIPv4 "$api_ip"; then
+    api_rule="  - to:
+    - ipBlock:
+        cidr: ${api_ip}/32
+    ports:
+    - protocol: TCP
+      port: ${api_port}"
+  else
+    printWarn "Could not find the Kubernetes API endpoint — CI jobs will not reach the API"
+  fi
+  kubectl apply -f - >/dev/null <<POLICYEOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ci-job-egress
+  namespace: ${ns}
+spec:
+  podSelector:
+    matchLabels:
+      enablement-framework/ci-job: "true"
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {}
+${api_rule}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]
+POLICYEOF
 }
 
 deployGitlab() {
@@ -4113,6 +4187,7 @@ deployGitlab() {
   kubectl -n "$ns" create cm gitlab-omnibus --from-literal=gitlab.rb="$cfg" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
   _gitlabApplyManifests "$sha" >/dev/null || { printError "Could not apply the GitLab manifests"; return 1; }
+  _gitlabApplyJobPolicy || { printError "Could not apply the CI job NetworkPolicy"; return 1; }
 
   # A re-run must not leave two registry rows for one app.
   if [ -f "$APP_REGISTRY" ]; then
@@ -4156,9 +4231,11 @@ gitlabSeedRepo() {
   # gitlabSeedRepo <name> <dir> — creates project root/<name> (private) if it
   # does not exist and pushes <dir>'s files to its main branch, as one commit
   # on top of what is there. Re-running with unchanged files pushes nothing.
+  # Files: what git tracks when <dir> is a git work tree (nothing gitignored),
+  # everything otherwise — and never .git or a .env* file, tracked or not.
   # Git reaches GitLab through the cluster ingress on this host (the same
   # route the browser uses, minus Orbital), authenticated via GIT_ASKPASS.
-  local name="$1" src="$2" ns code host url work ap rc
+  local name="$1" src="$2" ns code host url work ap rc gt="${GITLAB_GIT_TIMEOUT:-600}"
   if [ -z "$name" ] || [ -z "$src" ]; then
     printError "gitlabSeedRepo: usage: gitlabSeedRepo <name> <dir>"
     return 1
@@ -4195,9 +4272,16 @@ gitlabSeedRepo() {
     export GIT_ASKPASS="$ap" GIT_TERMINAL_PROMPT=0
     GITLAB_ASKPASS_TOKEN=$(_gitlabSecretValue gitlab-pat token)
     export GITLAB_ASKPASS_TOKEN
-    git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
+    timeout "$gt" git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
       clone -q "$url" "$work/repo" 2>/dev/null || { echo "clone failed" >&2; exit 1; }
-    tar -C "$src" --exclude=.git -cf - . | tar -C "$work/repo" -xf - || exit 1
+    if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      # Tracked files that exist (a deleted, not yet committed file is skipped).
+      git -C "$src" ls-files -z | ( cd "$src" && xargs -0 -r sh -c \
+        'for f; do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh )
+    else
+      ( cd "$src" && find . -mindepth 1 \( -name .git -prune \) -o \( ! -type d -print0 \) )
+    fi | grep -zEv '(^|/)\.git(/|$)|(^|/)\.env[^/]*$' \
+      | tar -C "$src" --null --no-recursion -T - -cf - | tar -C "$work/repo" -xf - || exit 1
     cd "$work/repo" || exit 1
     git checkout -q -B main
     git add -A
@@ -4206,7 +4290,7 @@ gitlabSeedRepo() {
     fi
     git -c user.name="Enablement Framework" -c user.email="framework@enablement.local" \
       commit -q -m "Seed from $(basename "$src")" || exit 1
-    git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
+    timeout "$gt" git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
       push -q origin main > "$work/push.log" 2>&1
     pushed=$?
     sed 's/glpat-[A-Za-z0-9_.-]*/<token>/g' "$work/push.log" >&2
@@ -4236,9 +4320,12 @@ uninstallGitlab() {
   local ns
   ns=$(_gitlabNs)
   printInfoSection "Uninstalling GitLab (namespace $ns)"
-  helm uninstall gitlab-runner -n "$ns" >/dev/null 2>&1 || true
+  helm uninstall gitlab-runner -n "$ns" >/dev/null 2>&1 || true   # absent release is fine
   unregisterApp gitlab "$ns"
-  kubectl delete namespace "$ns" --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1
+  if ! kubectl delete namespace "$ns" --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1; then
+    printError "uninstallGitlab: deleting namespace $ns failed or timed out — check: kubectl get ns $ns"
+    return 1
+  fi
   printInfo "GitLab removed"
 }
 
@@ -4338,8 +4425,36 @@ installCodeServer() {
   printInfo "code-server $(_codeServerInstalledVersion) installed in $home"
 }
 
+_codeServerOwnsPort() {
+  # True when the listener on CODE_SERVER_PORT belongs to OUR code-server: a
+  # process in the session whose leader is in the pid file (code-server's
+  # HTTP server is a child of the process started). Reads /proc only.
+  local pid port hex inodes p sid i
+  port="${CODE_SERVER_PORT:-8443}"
+  pid=$(cat "$(_codeServerPidFile)" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "/proc/$pid" ] || return 1
+  hex=$(printf '%04X' "$port")
+  # state 0A = LISTEN; field 10 = socket inode
+  inodes=$(awk -v h=":$hex" '$4 == "0A" && substr($2, length($2) - 4) == h { print $10 }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+  [ -n "$inodes" ] || return 1
+  for p in /proc/[0-9]*; do
+    # session id: 4th field after the ")" that closes the command name
+    sid=$(sed 's/^.*) //' "$p/stat" 2>/dev/null | cut -d' ' -f4)
+    [ "$sid" = "$pid" ] || continue
+    for i in $inodes; do
+      ls -l "$p/fd" 2>/dev/null | grep -qF "socket:[$i]" && return 0
+    done
+  done
+  return 1
+}
+
 _codeServerHealthy() {
-  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${CODE_SERVER_PORT:-8443}/healthz" 2>/dev/null)" = "200" ]
+  # /healthz answers 200 AND the answering listener is ours — another process
+  # on the port must not pass for code-server.
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${CODE_SERVER_PORT:-8443}/healthz" 2>/dev/null)" = "200" ] \
+    && _codeServerOwnsPort
 }
 
 startCodeServer() {
@@ -4371,6 +4486,13 @@ startCodeServer() {
       orbital|orbital_codespaces)
         printError "startCodeServer: PASSWORD is not set — under Orbital another learner's container can reach this port, so code-server will not run without auth. Refusing."
         return 1 ;;
+    esac
+    # No password is only acceptable when nothing but this container can
+    # connect: a non-loopback bind would hand a shell to the network.
+    case "$bind" in
+      127.*|localhost|::1|'[::1]') ;;
+      *) printError "startCodeServer: CODE_SERVER_BIND=$bind without PASSWORD would serve an unauthenticated IDE beyond this container. Set PASSWORD or bind 127.0.0.1. Refusing."
+         return 1 ;;
     esac
     auth=none
   fi
@@ -4426,10 +4548,10 @@ registerCodeServer() {
     return 0
   fi
   gw=$(_codeServerGateway)
-  case "$gw" in
-    *.*.*.*) ;;
-    *) printError "registerCodeServer: could not find the k3d network gateway — is the cluster running?"; return 1 ;;
-  esac
+  if ! _isIPv4 "$gw"; then
+    printError "registerCodeServer: could not find the k3d network gateway — is the cluster running?"
+    return 1
+  fi
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
   kubectl apply -f - >/dev/null <<IDEEOF || { printError "registerCodeServer: could not create the ide Service"; return 1; }
 apiVersion: v1
@@ -4466,7 +4588,10 @@ IDEEOF
 }
 
 stopCodeServer() {
-  # Ends code-server's whole session (server, extension hosts, terminals).
+  # Ends code-server's whole session (server, extension hosts, terminals) and
+  # takes the `ide` app out of the registry, so Orbital stops listing an IDE
+  # that is not there. Its Service stays (harmless without a listener); the
+  # next startCodeServer registers it again.
   local pidf pid
   pidf=$(_codeServerPidFile)
   pid=$(cat "$pidf" 2>/dev/null)
@@ -4477,6 +4602,10 @@ stopCodeServer() {
     printInfo "code-server is not running"
   fi
   rm -f "$pidf"
+  if [ -f "$APP_REGISTRY" ] && grep -q '^ide|' "$APP_REGISTRY" 2>/dev/null; then
+    unregisterApp ide "${CODE_SERVER_NAMESPACE:-ide}" >/dev/null 2>&1
+    printInfo "ide removed from the app registry"
+  fi
 }
 
 uninstallCodeServer() {
