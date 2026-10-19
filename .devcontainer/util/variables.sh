@@ -47,6 +47,24 @@ MONACO_PIN_BIN_SHA256_ARM64=$MONACO_PIN_SHA256_ARM64
 MONACO_VERSION="${MONACO_VERSION:-$MONACO_PIN_VERSION}"
 export MONACO_VERSION
 
+# GitLab (deployGitlab): Omnibus CE as ONE Deployment in the cluster + a Runner
+# from its own chart. 18.4.0 is the tag spike 92 measured (2.31 GiB steady).
+GITLAB_VERSION="${GITLAB_VERSION:-18.4.0-ce.0}"
+# https://gitlab.com/gitlab-org/charts/gitlab-runner — 0.81.0 ships runner 18.4.0
+GITLAB_RUNNER_CHART_VERSION="${GITLAB_RUNNER_CHART_VERSION:-0.81.0}"
+GITLAB_NAMESPACE="${GITLAB_NAMESPACE:-gitlab}"
+export GITLAB_VERSION GITLAB_RUNNER_CHART_VERSION GITLAB_NAMESPACE
+
+# code-server (browser VS Code inside the learner container). Reviewed sha256 of
+# the release tarballs; installCodeServer refuses any other bytes for this version.
+# https://github.com/coder/code-server/releases
+CODE_SERVER_PIN_VERSION=4.141.0
+CODE_SERVER_PIN_SHA256_AMD64=65bcd20b524d03eb1b5adb7f360244599ef0e5b74089a46a982d32c074b97a29
+CODE_SERVER_PIN_SHA256_ARM64=e5cc78da1d631c6cf6162f9b18eeaa8ee9d3239e1a88bb99d0602cdc5fa1852d
+CODE_SERVER_VERSION="${CODE_SERVER_VERSION:-$CODE_SERVER_PIN_VERSION}"
+CODE_SERVER_PORT="${CODE_SERVER_PORT:-8443}"
+export CODE_SERVER_VERSION CODE_SERVER_PORT
+
 # Ingress configuration — apps are exposed exclusively via nginx ingress.
 # App registry file — tracks deployed apps for ingress routing
 export APP_REGISTRY="${APP_REGISTRY:-${HOME}/.cache/dt-framework/app-registry}"
@@ -119,6 +137,12 @@ fi
 
 # Orbital ops server — overridable so a dev/staging deployment can be pointed at.
 export ORBITAL_BASE_URL="${ORBITAL_BASE_URL:-https://autonomous-enablements.whydevslovedynatrace.com}"
+# Domain Orbital serves app subdomains on: {app}--{job}.<domain>. Follows
+# ORBITAL_BASE_URL unless set, so a staging host (staging.autonomous-enablements…)
+# needs to pass only one of the two.
+_obu="${ORBITAL_BASE_URL#*://}"
+export ORBITAL_APP_DOMAIN="${ORBITAL_APP_DOMAIN:-${_obu%%/*}}"
+unset _obu
 
 # Confirm "orbital_codespaces" against Orbital itself.
 #

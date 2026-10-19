@@ -15,6 +15,7 @@ nav:
   - "10. Monitoring": monitoring.md
   - "11. Functions Reference": functions.md
   - "11a. dtctl & Monaco": dtctl-monaco.md
+  - "11b. GitLab & browser IDE": gitlab-ide.md
   - "12. Versioning Policy": versioning.md
   - "13. Cleanup": cleanup.md
   - "14. Resources": resources.md

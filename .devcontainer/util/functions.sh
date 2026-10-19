@@ -3175,7 +3175,7 @@ getAppURL() {
   if [[ "$(detectRunEnvironment)" == "orbital" ]] && [[ -n "${ORBITAL_JOB_ID:-}" ]]; then
     local subdomain
     subdomain=$(computeOrbitalSubdomain "$app_name")
-    echo "https://${subdomain}.autonomous-enablements.whydevslovedynatrace.com"
+    echo "https://${subdomain}.${ORBITAL_APP_DOMAIN:-autonomous-enablements.whydevslovedynatrace.com}"
   elif [[ "$CODESPACES" == true ]]; then
     # Orgs can be issued a non-default forwarding domain.
     echo "https://${CODESPACE_NAME}-${cs_port}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
@@ -3798,6 +3798,870 @@ undeployOpentelemetryDemo(){
   kubectl delete namespace opentelemetry-demo --force 2>/dev/null
 }
 
+# ======================================================================
+#  GitLab in the cluster (deployGitlab) — Perform developer sessions
+#
+#  GitLab Omnibus CE as ONE Deployment (one PVC, one Service) plus a
+#  Runner from its own chart (Kubernetes executor), registered by itself.
+#  Spike 92 measured Omnibus at 2.31 GiB steady vs 3.85 GiB for the
+#  trimmed cloud-native chart, with the same ~3 min start.
+#
+#  Secrets: the root password is generated INTO a k8s secret and never
+#  printed; the API token (PAT) is minted in-cluster into a secret; git
+#  gets it through GIT_ASKPASS, never on a command line or in a URL.
+#
+#  Written for bash AND zsh (the learner's shell).
+# ======================================================================
+
+_gitlabNs() { echo "${GITLAB_NAMESPACE:-gitlab}"; }
+
+_gitlabExternalUrl() {
+  # The address the LEARNER sees: Orbital's https subdomain, Codespaces'
+  # forwarded port, or the sslip host. GITLAB_EXTERNAL_URL overrides.
+  if [ -n "${GITLAB_EXTERNAL_URL:-}" ]; then
+    echo "${GITLAB_EXTERNAL_URL%/}"
+  else
+    getAppURL gitlab
+  fi
+}
+
+_gitlabOmnibusConfig() {
+  # _gitlabOmnibusConfig <external-url> — the gitlab.rb handed to Omnibus.
+  # GitLab's "memory-constrained environment" settings, as measured in spike 92.
+  # TLS ends in front of the cluster (Orbital's nginx), so Omnibus' own nginx
+  # listens on plain 80. For an https external URL it forces the forwarded
+  # scheme itself: Rails only issues its Secure session cookie when it
+  # believes the request was https, and no proxy in front has to send it.
+  local url="$1" cfg host
+  host="${url#*://}"; host="${host%%/*}"
+  cfg="external_url '${url}'
+nginx['listen_port'] = 80
+nginx['listen_https'] = false
+nginx['client_max_body_size'] = '512m'
+letsencrypt['enable'] = false
+puma['worker_processes'] = 0
+sidekiq['concurrency'] = 10
+prometheus_monitoring['enable'] = false
+gitlab_rails['env'] = { 'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000' }
+gitaly['env'] = { 'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000' }
+gitlab_rails['usage_ping_enabled'] = false
+registry['enable'] = false
+gitlab_kas['enable'] = false
+gitlab_pages['enable'] = false
+mattermost['enable'] = false"
+  # Host + X-Forwarded-Host: Rails builds redirects from them, and the proxies
+  # in front send another name (Orbital sends the app's sslip ingress host and
+  # ingress-nginx forwards it), which would send the browser away from the
+  # address it is on. Both pinned to the external host here.
+  case "$url" in
+    https://*) cfg="${cfg}
+nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Host' => '${host}', 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }" ;;
+    *) cfg="${cfg}
+nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Host' => '${host}' }" ;;
+  esac
+  printf '%s\n' "$cfg"
+}
+
+_gitlabGenPassword() {
+  # 24 alphanumerics. Printed ONLY into a pipe that kubectl reads as a file.
+  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24
+}
+
+_gitlabSecretValue() {
+  # _gitlabSecretValue <secret> <key> — prints a secret's value for capture
+  # into a variable by the caller. Never call it bare.
+  kubectl -n "$(_gitlabNs)" get secret "$1" -o "jsonpath={.data.$2}" 2>/dev/null | base64 -d 2>/dev/null
+}
+
+_gitlabApi() {
+  # _gitlabApi <METHOD> <path> [curl data args...] — GitLab API call made
+  # INSIDE the GitLab pod (no route, DNS or ingress involved). The token goes
+  # in as a header on stdin (curl -H @-), so it is in no process' arguments.
+  # Prints the body, then a last line "HTTP <code>" ("HTTP 000" when GitLab
+  # did not answer within GITLAB_API_TIMEOUT seconds).
+  local method="$1" api_path="$2" tok
+  shift 2
+  tok=$(_gitlabSecretValue gitlab-pat token)
+  [ -n "$tok" ] || { echo "HTTP 000"; return 1; }
+  printf 'PRIVATE-TOKEN: %s\n' "$tok" | timeout "$(( ${GITLAB_API_TIMEOUT:-30} + 15 ))" \
+    kubectl -n "$(_gitlabNs)" exec -i deploy/gitlab -c gitlab -- \
+    curl -s --max-time "${GITLAB_API_TIMEOUT:-30}" -X "$method" -H @- -w '\nHTTP %{http_code}\n' "$@" \
+    "http://127.0.0.1/api/v4${api_path}"
+}
+
+_gitlabHttpCode() {
+  # Last line of _gitlabApi output -> the status code.
+  tail -n 1 | sed -n 's/^HTTP //p'
+}
+
+_gitlabApplyManifests() {
+  # _gitlabApplyManifests <config-sha> — PVC, Service, Deployment. Re-applying
+  # is a no-op unless the config changed (the sha annotation rolls the pod).
+  local ns sha="$1"
+  ns=$(_gitlabNs)
+  kubectl apply -f - <<GITLABEOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitlab-data
+  namespace: ${ns}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab
+  namespace: ${ns}
+  labels:
+    app: gitlab
+spec:
+  selector:
+    app: gitlab
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlab
+  namespace: ${ns}
+  labels:
+    app: gitlab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gitlab
+  template:
+    metadata:
+      labels:
+        app: gitlab
+      annotations:
+        enablement-framework/config-sha: "${sha}"
+    spec:
+      containers:
+      - name: gitlab
+        image: gitlab/gitlab-ce:${GITLAB_VERSION:-18.4.0-ce.0}
+        ports:
+        - name: http
+          containerPort: 80
+        env:
+        - name: GITLAB_OMNIBUS_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: gitlab-omnibus
+              key: gitlab.rb
+        - name: GITLAB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gitlab-root
+              key: password
+        readinessProbe:
+          httpGet:
+            path: /users/sign_in
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+        volumeMounts:
+        - name: data
+          mountPath: /etc/gitlab
+          subPath: config
+        - name: data
+          mountPath: /var/opt/gitlab
+          subPath: data
+        - name: data
+          mountPath: /var/log/gitlab
+          subPath: logs
+        - name: shm
+          mountPath: /dev/shm
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: gitlab-data
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+GITLABEOF
+}
+
+_gitlabEnsureToken() {
+  # An API token (PAT, scopes api + repository) in secret gitlab-pat. Kept when
+  # it still authenticates; otherwise minted in-cluster with gitlab-rails and
+  # piped straight into the secret.
+  local ns tok code
+  ns=$(_gitlabNs)
+  if kubectl -n "$ns" get secret gitlab-pat >/dev/null 2>&1; then
+    code=$(_gitlabApi GET /user 2>/dev/null | _gitlabHttpCode)
+    case "$code" in
+      200)
+        printInfo "GitLab API token present and valid (secret $ns/gitlab-pat)"
+        return 0 ;;
+      401)
+        printWarn "GitLab API token in $ns/gitlab-pat is rejected (HTTP 401) — minting a new one" ;;
+      *)
+        # Not an answer about the token (timeout, 5xx while GitLab restarts):
+        # replacing a token that may be fine would be wrong. Fail, re-run later.
+        printError "GitLab API did not answer usably (HTTP ${code:-none}) — not replacing the token; re-run deployGitlab when GitLab is ready"
+        return 1 ;;
+    esac
+  fi
+  # The mint also revokes every earlier framework token, so exactly one is
+  # live — the one in the secret.
+  printInfo "Minting a GitLab API token in-cluster (gitlab-rails, ~1 min)"
+  tok=$(timeout "${GITLAB_RAILS_TIMEOUT:-300}" kubectl -n "$ns" exec deploy/gitlab -c gitlab -- gitlab-rails runner \
+    "u = User.find_by_username('root'); u.personal_access_tokens.active.where('name LIKE ?', 'enablement-framework-%').each(&:revoke!); t = u.personal_access_tokens.create!(name: \"enablement-framework-#{Time.now.to_i}\", scopes: %w[api read_repository write_repository], expires_at: 364.days.from_now); ApplicationSetting.current.update!(signup_enabled: false); puts; puts t.token" \
+    2>/dev/null | grep -E '^glpat-' | tail -n 1)
+  if [ -z "$tok" ]; then
+    printError "Could not mint a GitLab API token (gitlab-rails runner returned none)"
+    return 1
+  fi
+  printf '%s' "$tok" | kubectl -n "$ns" create secret generic gitlab-pat --from-file=token=/dev/stdin \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null || { printError "Could not store the GitLab API token"; return 1; }
+  tok=""
+  printInfo "GitLab API token stored in secret $ns/gitlab-pat"
+}
+
+_gitlabEnsureRunner() {
+  # Registers an instance runner through the API (runner authentication token,
+  # GitLab >= 16 flow) into secret gitlab-runner-secret, then installs the
+  # gitlab-runner chart with the Kubernetes executor. Re-run: the runner token
+  # is kept and must still verify; one that does not is an error to look at,
+  # not a reason to register a second runner. The chart is upgraded in place.
+  local ns out rtok code
+  ns=$(_gitlabNs)
+  rtok=$(_gitlabSecretValue gitlab-runner-secret runner-token)
+  if [ -n "$rtok" ]; then
+    # token@- : curl reads the value from stdin, so it is in no argv, here
+    # or inside the pod.
+    code=$(printf '%s' "$rtok" | timeout "$(( ${GITLAB_API_TIMEOUT:-30} + 15 ))" \
+      kubectl -n "$ns" exec -i deploy/gitlab -c gitlab -- \
+      curl -s --max-time "${GITLAB_API_TIMEOUT:-30}" -o /dev/null -w '%{http_code}' -X POST \
+      --data-urlencode token@- http://127.0.0.1/api/v4/runners/verify 2>/dev/null)
+    if [ "$code" != "200" ]; then
+      printError "The runner token in $ns/gitlab-runner-secret does not verify (HTTP ${code:-none})"
+      printError "If the runner was deleted in GitLab: kubectl -n $ns delete secret gitlab-runner-secret, then re-run deployGitlab"
+      return 1
+    fi
+    printInfo "GitLab Runner token present and valid (secret $ns/gitlab-runner-secret)"
+  else
+    printInfo "Registering a GitLab instance runner"
+    out=$(_gitlabApi POST /user/runners --data 'runner_type=instance_type' --data 'run_untagged=true' \
+      --data 'description=enablement-framework-k8s')
+    if [ "$(printf '%s\n' "$out" | _gitlabHttpCode)" != "201" ]; then
+      printError "Runner registration failed (HTTP $(printf '%s\n' "$out" | _gitlabHttpCode))"
+      return 1
+    fi
+    rtok=$(printf '%s\n' "$out" | grep -o '"token":"glrt-[^"]*"' | head -n 1 | sed 's/.*:"//; s/"$//')
+    out=""
+    [ -n "$rtok" ] || { printError "Runner registration returned no token"; return 1; }
+    printf '%s' "$rtok" | kubectl -n "$ns" create secret generic gitlab-runner-secret \
+      --from-literal=runner-registration-token= --from-file=runner-token=/dev/stdin \
+      --dry-run=client -o yaml | kubectl apply -f - >/dev/null || { printError "Could not store the runner token"; return 1; }
+  fi
+  rtok=""
+
+  # Fence gate: the egress policy is enforced ~1-2 s after a pod starts —
+  # long enough for a job's script or a `services:` entrypoint to reach this
+  # container. An init container (runs before both) waits until the kubelet
+  # port on the node — inside the fenced range, reachable without the fence —
+  # stops answering. A cluster that never enforces the policy fails the job
+  # (fail closed); GITLAB_CI_FENCE=0 drops the gate.
+  local ep gate=""
+  if [ "${GITLAB_CI_FENCE:-1}" != "0" ]; then
+    if ep=$(_gitlabApiEndpoint); then
+      gate="
+      [runners.feature_flags]
+        FF_USE_ADVANCED_POD_SPEC_CONFIGURATION = true
+      [[runners.kubernetes.pod_spec]]
+        name = \"wait-for-egress-fence\"
+        patch_type = \"strategic\"
+        patch = '''
+          initContainers:
+          - name: wait-for-egress-fence
+            image: alpine:3.20
+            command: [\"sh\", \"-c\", \"i=0; while nc -z -w 1 ${ep% *} 10250; do i=\$((i+1)); if [ \$i -ge 60 ]; then echo 'egress fence not enforced (NetworkPolicy ci-job-egress), refusing to run the job'; exit 1; fi; sleep 1; done\"]
+        '''"
+    else
+      printWarn "Could not find the node address — CI jobs run without the egress-fence gate"
+    fi
+  fi
+
+  printInfo "Installing GitLab Runner (chart ${GITLAB_RUNNER_CHART_VERSION:-0.81.0}, Kubernetes executor)"
+  if ! helm upgrade --install gitlab-runner gitlab-runner \
+      --repo https://charts.gitlab.io \
+      --version "${GITLAB_RUNNER_CHART_VERSION:-0.81.0}" \
+      --namespace "$ns" \
+      --set gitlabUrl="http://gitlab.${ns}.svc" \
+      --set runners.secret=gitlab-runner-secret \
+      --set rbac.create=true \
+      --set concurrent=4 \
+      --set resources.requests.memory=64Mi \
+      --values - >/dev/null <<RUNNEREOF
+runners:
+  config: |
+    [[runners]]
+      clone_url = "http://gitlab.${ns}.svc"
+      [runners.kubernetes]
+        namespace = "${ns}"
+        image = "alpine:3.20"
+        poll_timeout = 300
+        [runners.kubernetes.pod_labels]
+          "enablement-framework/ci-job" = "true"${gate}
+RUNNEREOF
+  then
+    printError "helm install gitlab-runner failed"
+    return 1
+  fi
+  if ! kubectl -n "$ns" rollout status deploy/gitlab-runner --timeout="${GITLAB_RUNNER_READY_TIMEOUT:-300}s" >/dev/null; then
+    printError "GitLab Runner did not become ready"
+    return 1
+  fi
+  printInfo "GitLab Runner ready"
+}
+
+_isIPv4() {
+  printf '%s\n' "$1" | grep -Eqx '((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+}
+
+_gitlabApiEndpoint() {
+  # "<ip> <port>" of the Kubernetes API (on k3s: the server node's address).
+  local ip port
+  ip=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].addresses[0].ip}' 2>/dev/null)
+  port=$(kubectl get endpoints kubernetes -n default -o 'jsonpath={.subsets[0].ports[0].port}' 2>/dev/null)
+  case "$port" in ''|*[!0-9]*) port=6443 ;; esac
+  _isIPv4 "$ip" || return 1
+  echo "$ip $port"
+}
+
+_gitlabApplyJobPolicy() {
+  # CI jobs run whatever a pipeline says. Their pods (label
+  # enablement-framework/ci-job, set by the runner config; a job cannot change
+  # it) get an egress NetworkPolicy: any pod in the cluster, the Kubernetes API,
+  # and the internet — but no private, link-local or loopback address outside
+  # the cluster. That keeps them off this container's ports (code-server binds
+  # 0.0.0.0 under Orbital and is reached through the k3d network gateway, which
+  # is not a pod, so no ingress policy can guard it) and off the cloud metadata
+  # endpoint. k3s enforces NetworkPolicy with its embedded controller — about
+  # a second AFTER a pod starts, so the runner config also gives every job pod
+  # an init container that waits until the fence holds (_gitlabEnsureRunner).
+  local ns ep api_ip api_port api_rule=""
+  ns=$(_gitlabNs)
+  if ep=$(_gitlabApiEndpoint); then
+    api_ip=${ep% *}; api_port=${ep#* }
+    api_rule="  - to:
+    - ipBlock:
+        cidr: ${api_ip}/32
+    ports:
+    - protocol: TCP
+      port: ${api_port}"
+  else
+    printWarn "Could not find the Kubernetes API endpoint — CI jobs will not reach the API"
+  fi
+  kubectl apply -f - >/dev/null <<POLICYEOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ci-job-egress
+  namespace: ${ns}
+spec:
+  podSelector:
+    matchLabels:
+      enablement-framework/ci-job: "true"
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {}
+${api_rule}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]
+POLICYEOF
+}
+
+deployGitlab() {
+  # deployGitlab — GitLab CE + Runner in the cluster, exposed like every app
+  # (registerApp gitlab). Idempotent: a re-run keeps the password, the data,
+  # a still-valid API token and runner, and only rolls GitLab when its config
+  # (e.g. the external URL) changed.
+  local ns url cfg sha
+  ns=$(_gitlabNs)
+  if ! kubectl cluster-info >/dev/null 2>&1; then
+    printError "deployGitlab: no Kubernetes cluster reachable — run startCluster first"
+    return 1
+  fi
+  printInfoSection "Deploying GitLab CE ${GITLAB_VERSION:-18.4.0-ce.0} + Runner (namespace $ns)"
+
+  url=$(_gitlabExternalUrl)
+  [ -n "$url" ] || { printError "deployGitlab: could not determine GitLab's external URL"; return 1; }
+  printInfo "GitLab external URL: $url"
+
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+
+  if ! kubectl -n "$ns" get secret gitlab-root >/dev/null 2>&1; then
+    _gitlabGenPassword | kubectl -n "$ns" create secret generic gitlab-root --from-file=password=/dev/stdin >/dev/null \
+      || { printError "Could not create the GitLab root password secret"; return 1; }
+    printInfo "Root password generated into secret $ns/gitlab-root (not printed)"
+  fi
+
+  cfg=$(_gitlabOmnibusConfig "$url")
+  sha=$(printf '%s' "$cfg" | sha256sum | cut -c1-16)
+  kubectl -n "$ns" create cm gitlab-omnibus --from-literal=gitlab.rb="$cfg" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+  _gitlabApplyManifests "$sha" >/dev/null || { printError "Could not apply the GitLab manifests"; return 1; }
+  _gitlabApplyJobPolicy || { printError "Could not apply the CI job NetworkPolicy"; return 1; }
+
+  # A re-run must not leave two registry rows for one app.
+  if [ -f "$APP_REGISTRY" ]; then
+    grep -v '^gitlab|' "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null
+    mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY"
+  fi
+  registerApp gitlab "$ns" gitlab 80 '    nginx.ingress.kubernetes.io/proxy-body-size: "512m"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"' || return 1
+
+  waitForGitlabReady || return 1
+  _gitlabEnsureToken || return 1
+  _gitlabEnsureRunner || return 1
+
+  printInfoSection "GitLab is ready"
+  printInfo "URL:  $url"
+  gitlabCredentials
+}
+
+waitForGitlabReady() {
+  # waitForGitlabReady [timeout-seconds] — waits for the GitLab pod to pass its
+  # readiness probe (sign-in page 200). First boot runs DB migrations: ~3 min
+  # warm, plus the image pull (3.8 GB) on a cold host.
+  local t="${1:-${GITLAB_READY_TIMEOUT:-1200}}"
+  printInfo "Waiting for GitLab to be ready (up to ${t}s; first boot runs migrations)"
+  if ! kubectl -n "$(_gitlabNs)" rollout status deploy/gitlab --timeout="${t}s" >/dev/null; then
+    printError "GitLab did not become ready within ${t}s"
+    printError "Inspect with: kubectl -n $(_gitlabNs) logs deploy/gitlab --tail=50"
+    return 1
+  fi
+  printInfo "GitLab is ready"
+}
+
+gitlabCredentials() {
+  # Says how to sign in. Prints the command that reveals the password, never
+  # the password itself — this output lands in setup logs Orbital stores.
+  printInfo "User: root"
+  printInfo "Password: kubectl -n $(_gitlabNs) get secret gitlab-root -o jsonpath='{.data.password}' | base64 -d; echo"
+}
+
+gitlabSeedRepo() {
+  # gitlabSeedRepo <name> <dir> — creates project root/<name> (private) if it
+  # does not exist and pushes <dir>'s files to its main branch, as one commit
+  # on top of what is there. Re-running with unchanged files pushes nothing.
+  # Files: what git tracks when <dir> is a git work tree (nothing gitignored),
+  # everything otherwise — and never .git or a .env* file, tracked or not.
+  # Git reaches GitLab through the cluster ingress on this host (the same
+  # route the browser uses, minus Orbital), authenticated via GIT_ASKPASS.
+  local name="$1" src="$2" ns code host url work ap rc gt="${GITLAB_GIT_TIMEOUT:-600}"
+  if [ -z "$name" ] || [ -z "$src" ]; then
+    printError "gitlabSeedRepo: usage: gitlabSeedRepo <name> <dir>"
+    return 1
+  fi
+  case "$name" in
+    *[!a-zA-Z0-9._-]*|[._-]*) printError "gitlabSeedRepo: invalid project name '$name'"; return 1 ;;
+  esac
+  if [ ! -d "$src" ]; then
+    printError "gitlabSeedRepo: '$src' is not a directory"
+    return 1
+  fi
+  ns=$(_gitlabNs)
+
+  code=$(_gitlabApi GET "/projects/root%2F${name}" -o /dev/null | _gitlabHttpCode)
+  if [ "$code" = "404" ]; then
+    code=$(_gitlabApi POST /projects --data "name=${name}" --data "path=${name}" \
+      --data 'visibility=private' -o /dev/null | _gitlabHttpCode)
+    [ "$code" = "201" ] || { printError "gitlabSeedRepo: could not create project $name (HTTP ${code:-none})"; return 1; }
+    printInfo "Created GitLab project root/$name"
+  elif [ "$code" != "200" ]; then
+    printError "gitlabSeedRepo: GitLab API not usable (HTTP ${code:-none}) — is GitLab deployed and ready?"
+    return 1
+  fi
+
+  host=$(awk -F'|' '$1 == "gitlab" { print $5 }' "$APP_REGISTRY" 2>/dev/null | tail -n 1)
+  [ -n "$host" ] || { printError "gitlabSeedRepo: gitlab is not in the app registry — run deployGitlab"; return 1; }
+  url="${GITLAB_GIT_URL:-http://${host}}/root/${name}.git"
+
+  work=$(mktemp -d) || return 1
+  ap="$work/askpass"
+  printf '#!/bin/sh\ncase "$1" in Username*) echo root ;; *) printf "%%s\\n" "$GITLAB_ASKPASS_TOKEN" ;; esac\n' > "$ap"
+  chmod 700 "$ap"
+  (
+    export GIT_ASKPASS="$ap" GIT_TERMINAL_PROMPT=0
+    GITLAB_ASKPASS_TOKEN=$(_gitlabSecretValue gitlab-pat token)
+    export GITLAB_ASKPASS_TOKEN
+    timeout "$gt" git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
+      clone -q "$url" "$work/repo" 2>/dev/null || { echo "clone failed" >&2; exit 1; }
+    if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      # Tracked files that exist (a deleted, not yet committed file is skipped).
+      git -C "$src" ls-files -z | ( cd "$src" && xargs -0 -r sh -c \
+        'for f; do if [ -e "$f" ] || [ -L "$f" ]; then printf "%s\0" "$f"; fi; done' sh )
+    else
+      ( cd "$src" && find . -mindepth 1 \( -name .git -prune \) -o \( ! -type d -print0 \) )
+    fi | grep -zEv '(^|/)\.git(/|$)|(^|/)\.env[^/]*$' \
+      | tar -C "$src" --null --no-recursion -T - -cf - | tar -C "$work/repo" -xf - || exit 1
+    cd "$work/repo" || exit 1
+    git checkout -q -B main
+    git add -A
+    if git diff --cached --quiet; then
+      echo "nothing to push" >&2; exit 0
+    fi
+    git -c user.name="Enablement Framework" -c user.email="framework@enablement.local" \
+      commit -q -m "Seed from $(basename "$src")" || exit 1
+    timeout "$gt" git -c "http.curloptResolve=${host}:80:127.0.0.1" -c credential.helper= \
+      push -q origin main > "$work/push.log" 2>&1
+    pushed=$?
+    sed 's/glpat-[A-Za-z0-9_.-]*/<token>/g' "$work/push.log" >&2
+    exit "$pushed"
+  )
+  rc=$?
+  rm -rf "$work"
+  if [ "$rc" -ne 0 ]; then
+    printError "gitlabSeedRepo: push of $src to root/$name failed"
+    return 1
+  fi
+  printInfo "Seeded root/$name from $src"
+}
+
+checkGitlabRunning() {
+  [ -n "${LAB_WAIT:-}" ] && ( waitForGitlabReady )
+  if kubectl -n "$(_gitlabNs)" get deploy gitlab -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qx 1; then
+    printInfo "GitLab is running and ready"; return 0
+  fi
+  printError "GitLab is not ready yet — the environment may still be starting"; return 1
+}
+waitForGitlabRunning() { LAB_WAIT=1 checkGitlabRunning; }
+
+uninstallGitlab() {
+  # Removes the runner, the GitLab ingress + registry row and the namespace
+  # (which deletes the PVC: the repositories and the database go with it).
+  local ns
+  ns=$(_gitlabNs)
+  printInfoSection "Uninstalling GitLab (namespace $ns)"
+  helm uninstall gitlab-runner -n "$ns" >/dev/null 2>&1 || true   # absent release is fine
+  unregisterApp gitlab "$ns"
+  if ! kubectl delete namespace "$ns" --ignore-not-found --wait=true --timeout=300s >/dev/null 2>&1; then
+    printError "uninstallGitlab: deleting namespace $ns failed or timed out — check: kubectl get ns $ns"
+    return 1
+  fi
+  printInfo "GitLab removed"
+}
+
+# ======================================================================
+#  code-server — VS Code in the browser, inside the learner container
+#
+#  Runs as the learner (vscode) in the same container as the browser
+#  terminal: same files, kubectl context, tools and zsh greeting.
+#  Auth: code-server's own password whenever PASSWORD (its native env
+#  var) is set — Orbital sets it and logs in server-side, because a
+#  slot's ports on the worker are reachable from every OTHER learner's
+#  container on that host. Under Orbital it refuses to start without
+#  one. Elsewhere, unset PASSWORD means --auth none on 127.0.0.1.
+# ======================================================================
+
+_codeServerHome() { echo "${CODE_SERVER_HOME:-$HOME/.local/lib/code-server}"; }
+_codeServerBin() { echo "$(_codeServerHome)/bin/code-server"; }
+_codeServerPidFile() { echo "${XDG_CACHE_HOME:-$HOME/.cache}/code-server/pid"; }
+
+_codeServerInstalledVersion() {
+  local bin
+  bin=$(_codeServerBin)
+  [ -x "$bin" ] || return 1
+  # The first run also prints a log line ("[timestamp] Wrote default config…").
+  "$bin" --version 2>/dev/null | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+$/ { print $1; exit }'
+}
+
+_codeServerSettings() {
+  # User settings, written once (a learner's later edits are kept):
+  # no workspace-trust modal, no chat/agent panel, zsh terminal (the same
+  # shell + greeting as the browser terminal), no telemetry or update checks.
+  local dir="${XDG_DATA_HOME:-$HOME/.local/share}/code-server/User"
+  [ -f "$dir/settings.json" ] && return 0
+  mkdir -p "$dir" || return 1
+  cat > "$dir/settings.json" <<'CSEOF'
+{
+  "security.workspace.trust.enabled": false,
+  "terminal.integrated.defaultProfile.linux": "zsh",
+  "chat.disableAIFeatures": true,
+  "chat.commandCenter.enabled": false,
+  "workbench.startupEditor": "none",
+  "telemetry.telemetryLevel": "off",
+  "update.mode": "none",
+  "extensions.autoCheckUpdates": false
+}
+CSEOF
+}
+
+installCodeServer() {
+  # installCodeServer [version] — code-server from the release tarball (its
+  # install.sh reads $ARCH, which Orbital sets to x86_64, and refuses). The
+  # framework's pinned version is verified against the reviewed sha256; any
+  # other version needs CODE_SERVER_SHA256, or it is refused.
+  local version="${1:-${CODE_SERVER_VERSION:-${CODE_SERVER_PIN_VERSION:-}}}" arch have sha tmp home
+  version="${version#v}"
+  _isVersion "$version" || { printError "installCodeServer: invalid version '$version'"; return 1; }
+  arch=$(_releaseArch) || { printError "installCodeServer: unsupported architecture $(uname -m)"; return 1; }
+
+  have=$(_codeServerInstalledVersion)
+  if [ "$have" = "$version" ]; then
+    printInfo "code-server $version already installed"
+    _codeServerSettings
+    return 0
+  fi
+
+  if [ "$version" = "${CODE_SERVER_PIN_VERSION:-}" ]; then
+    if [ "$arch" = "amd64" ]; then sha="${CODE_SERVER_PIN_SHA256_AMD64:-}"; else sha="${CODE_SERVER_PIN_SHA256_ARM64:-}"; fi
+  else
+    sha="${CODE_SERVER_SHA256:-}"
+  fi
+  if [ -z "$sha" ]; then
+    printError "installCodeServer: no reviewed sha256 for code-server $version ($arch) — set CODE_SERVER_SHA256 or use the pinned ${CODE_SERVER_PIN_VERSION:-version}. Refusing."
+    return 1
+  fi
+
+  printInfoSection "Installing code-server $version ($arch)"
+  tmp=$(mktemp -d) || return 1
+  if ! _fetch "https://github.com/coder/code-server/releases/download/v${version}/code-server-${version}-linux-${arch}.tar.gz" \
+      "$tmp/cs.tgz" 600; then
+    printError "installCodeServer: download failed"
+    rm -rf "$tmp"; return 1
+  fi
+  if ! verifySha256 "$tmp/cs.tgz" "$sha"; then
+    rm -rf "$tmp"; return 1
+  fi
+  home=$(_codeServerHome)
+  mkdir -p "$(dirname "$home")" "$HOME/.local/bin" || { rm -rf "$tmp"; return 1; }
+  if ! tar -C "$tmp" -xzf "$tmp/cs.tgz"; then
+    printError "installCodeServer: could not unpack the tarball"
+    rm -rf "$tmp"; return 1
+  fi
+  rm -rf "$home"
+  mv "$tmp/code-server-${version}-linux-${arch}" "$home" || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  ln -sfn "$home/bin/code-server" "$HOME/.local/bin/code-server"
+  _codeServerSettings
+  printInfo "code-server $(_codeServerInstalledVersion) installed in $home"
+}
+
+_codeServerOwnsPort() {
+  # True when the listener on CODE_SERVER_PORT belongs to OUR code-server: a
+  # process in the session whose leader is in the pid file (code-server's
+  # HTTP server is a child of the process started). Reads /proc only.
+  local pid port hex inodes p sid i
+  port="${CODE_SERVER_PORT:-8443}"
+  pid=$(cat "$(_codeServerPidFile)" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "/proc/$pid" ] || return 1
+  hex=$(printf '%04X' "$port")
+  # state 0A = LISTEN; field 10 = socket inode
+  inodes=$(awk -v h=":$hex" '$4 == "0A" && substr($2, length($2) - 4) == h { print $10 }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+  [ -n "$inodes" ] || return 1
+  for p in /proc/[0-9]*; do
+    # session id: 4th field after the ")" that closes the command name
+    sid=$(sed 's/^.*) //' "$p/stat" 2>/dev/null | cut -d' ' -f4)
+    [ "$sid" = "$pid" ] || continue
+    for i in $inodes; do
+      ls -l "$p/fd" 2>/dev/null | grep -qF "socket:[$i]" && return 0
+    done
+  done
+  return 1
+}
+
+_codeServerHealthy() {
+  # /healthz answers 200 AND the answering listener is ours — another process
+  # on the port must not pass for code-server.
+  [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${CODE_SERVER_PORT:-8443}/healthz" 2>/dev/null)" = "200" ] \
+    && _codeServerOwnsPort
+}
+
+startCodeServer() {
+  # startCodeServer [dir] — starts code-server on CODE_SERVER_PORT (8443) in
+  # its own session, opening <dir> (default: the repo). Already healthy -> no-op.
+  # Bind: 0.0.0.0 under Orbital (the slot publishes the port to the master
+  # only), 127.0.0.1 anywhere else. CODE_SERVER_BIND overrides.
+  local dir="${1:-${REPO_PATH:-$PWD}}" port="${CODE_SERVER_PORT:-8443}" bind pidf bin i auth
+  if [ ! -d "$dir" ]; then
+    printError "startCodeServer: '$dir' is not a directory"
+    return 1
+  fi
+  case "$port" in ''|*[!0-9]*) printError "startCodeServer: invalid CODE_SERVER_PORT '$port'"; return 1 ;; esac
+  if _codeServerHealthy; then
+    printInfo "code-server already running on port $port"
+    registerCodeServer
+    return
+  fi
+  [ -n "$(_codeServerInstalledVersion)" ] || installCodeServer || return 1
+  bin=$(_codeServerBin)
+  case "$(detectRunEnvironment)" in
+    orbital|orbital_codespaces) bind="${CODE_SERVER_BIND:-0.0.0.0}" ;;
+    *) bind="${CODE_SERVER_BIND:-127.0.0.1}" ;;
+  esac
+  if [ -n "${PASSWORD:-}" ] || [ -n "${HASHED_PASSWORD:-}" ]; then
+    auth=password
+  else
+    case "$(detectRunEnvironment)" in
+      orbital|orbital_codespaces)
+        printError "startCodeServer: PASSWORD is not set — under Orbital another learner's container can reach this port, so code-server will not run without auth. Refusing."
+        return 1 ;;
+    esac
+    # No password is only acceptable when nothing but this container can
+    # connect: a non-loopback bind would hand a shell to the network.
+    case "$bind" in
+      127.*|localhost|::1|'[::1]') ;;
+      *) printError "startCodeServer: CODE_SERVER_BIND=$bind without PASSWORD would serve an unauthenticated IDE beyond this container. Set PASSWORD or bind 127.0.0.1. Refusing."
+         return 1 ;;
+    esac
+    auth=none
+  fi
+  pidf=$(_codeServerPidFile)
+  mkdir -p "$(dirname "$pidf")" || return 1
+  # setsid: own session, so stopCodeServer can end it with every extension
+  # host and terminal it spawned. --reconnection-grace-time bounds what an
+  # abandoned browser tab keeps alive (spike 92: six closed tabs held 2.2 GiB).
+  # The session leader writes its own pid: $! would name setsid itself when
+  # an interactive shell made the job a group leader and setsid had to fork.
+  rm -f "$pidf"
+  ( setsid sh -c 'echo $$ > "$1"; shift; exec "$@"' sh "$pidf" \
+      "$bin" --bind-addr "${bind}:${port}" --auth "$auth" \
+      --disable-telemetry --disable-update-check --disable-workspace-trust \
+      --reconnection-grace-time "${CODE_SERVER_RECONNECT_GRACE:-600}" \
+      "$dir" > "$(dirname "$pidf")/code-server.log" 2>&1 < /dev/null & )
+  i=0
+  while [ "$i" -lt 60 ]; do
+    _codeServerHealthy && break
+    i=$((i + 1)); sleep 0.5
+  done
+  if ! _codeServerHealthy; then
+    printError "code-server did not answer /healthz within 30s — see $(dirname "$pidf")/code-server.log"
+    return 1
+  fi
+  printInfo "code-server running on ${bind}:${port} (auth $auth, pid $(cat "$pidf" 2>/dev/null)), workspace $dir"
+  registerCodeServer
+}
+
+_codeServerGateway() {
+  # The address pods (and the ingress controller) reach this container on: the
+  # gateway of the k3d node's docker network. Under Orbital the learner
+  # container shares the slot's network namespace, which owns that gateway.
+  local node="${CODE_SERVER_K3D_NODE:-k3d-${K3D_CLUSTER_NAME:-enablement}-server-0}"
+  docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$node" 2>/dev/null | awk 'NF { print; exit }'
+}
+
+registerCodeServer() {
+  # registerCodeServer — exposes code-server like every other app: app "ide" in
+  # the app registry, an Ingress, and a selector-less Service whose endpoint is
+  # this container (code-server is not a pod). Orbital reads the registry, so
+  # the IDE is listed with the workspace's apps like any other. Only under
+  # Orbital by default, and never without a password (an unauthenticated
+  # IDE on the ingress is a shell for anyone who reaches it).
+  # CODE_SERVER_REGISTER=1 forces it outside Orbital.
+  local ns="${CODE_SERVER_NAMESPACE:-ide}" port="${CODE_SERVER_PORT:-8443}" gw
+  case "$(detectRunEnvironment)" in
+    orbital|orbital_codespaces) ;;
+    *) [ "${CODE_SERVER_REGISTER:-}" = "1" ] || { printInfo "code-server not registered as an app outside Orbital (set CODE_SERVER_REGISTER=1 to force)"; return 0; } ;;
+  esac
+  if [ -z "${PASSWORD:-}" ] && [ -z "${HASHED_PASSWORD:-}" ]; then
+    printWarn "registerCodeServer: code-server has no password — not exposing it through the ingress"
+    return 0
+  fi
+  gw=$(_codeServerGateway)
+  if ! _isIPv4 "$gw"; then
+    printError "registerCodeServer: could not find the k3d network gateway — is the cluster running?"
+    return 1
+  fi
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+  kubectl apply -f - >/dev/null <<IDEEOF || { printError "registerCodeServer: could not create the ide Service"; return 1; }
+apiVersion: v1
+kind: Service
+metadata:
+  name: ide
+  namespace: ${ns}
+spec:
+  ports:
+  - name: http
+    port: ${port}
+    targetPort: ${port}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: ide-learner-container
+  namespace: ${ns}
+  labels:
+    kubernetes.io/service-name: ide
+addressType: IPv4
+ports:
+- name: http
+  port: ${port}
+  protocol: TCP
+endpoints:
+- addresses: ["${gw}"]
+IDEEOF
+  if [ -f "$APP_REGISTRY" ]; then
+    grep -v '^ide|' "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null
+    mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY"
+  fi
+  registerApp ide "$ns" ide "$port"
+}
+
+stopCodeServer() {
+  # Ends code-server's whole session (server, extension hosts, terminals) and
+  # takes the `ide` app out of the registry, so Orbital stops listing an IDE
+  # that is not there. Its Service stays (harmless without a listener); the
+  # next startCodeServer registers it again.
+  local pidf pid
+  pidf=$(_codeServerPidFile)
+  pid=$(cat "$pidf" 2>/dev/null)
+  if [ -n "$pid" ] && grep -q code-server "/proc/$pid/cmdline" 2>/dev/null; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    printInfo "code-server stopped (pid $pid)"
+  else
+    printInfo "code-server is not running"
+  fi
+  rm -f "$pidf"
+  if [ -f "$APP_REGISTRY" ] && grep -q '^ide|' "$APP_REGISTRY" 2>/dev/null; then
+    unregisterApp ide "${CODE_SERVER_NAMESPACE:-ide}" >/dev/null 2>&1
+    printInfo "ide removed from the app registry"
+  fi
+}
+
+uninstallCodeServer() {
+  # Stops code-server, removes its app registration and the install. User
+  # settings and extensions stay.
+  stopCodeServer
+  unregisterApp ide "${CODE_SERVER_NAMESPACE:-ide}" >/dev/null 2>&1
+  kubectl delete namespace "${CODE_SERVER_NAMESPACE:-ide}" --ignore-not-found >/dev/null 2>&1
+  rm -rf "$(_codeServerHome)"
+  rm -f "$HOME/.local/bin/code-server"
+  printInfo "code-server removed"
+}
+
+checkCodeServerRunning() {
+  if _codeServerHealthy; then
+    printInfo "code-server is running on port ${CODE_SERVER_PORT:-8443}"; return 0
+  fi
+  printError "code-server is not running on port ${CODE_SERVER_PORT:-8443}"; return 1
+}
+
 deployApp(){
   
   if [ "$#" -eq 0 ]; then
@@ -3900,6 +4764,14 @@ deployApp(){
       fi
       ;;
 
+    9 | i | gitlab)
+       if [[ $delete ]]; then
+        uninstallGitlab
+      else
+        deployGitlab
+      fi
+      ;;
+
     *)
       printWarn "Invalid selection: '$input'. Please choose a valid app identifier."
       showDeployAppUsage
@@ -3927,6 +4799,7 @@ showDeployAppUsage(){
   printInfo "[6]   f   todoapp               +       +                                   "
   printInfo "[7]   g   unguard               +       -                                   "
   printInfo "[8]   h   opentelemetry-demo    +       +    (CNCF upstream)                "
+  printInfo "[9]   i   gitlab                +       +    (GitLab CE + Runner)          "
   printInfo "----------------------------------------------------------------------------"
   printInfo "Astroshop = Dynatrace-curated demo | OpenTelemetry Demo = CNCF upstream    "
 }
