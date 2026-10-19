@@ -718,12 +718,12 @@ verifySha256() {
     return 1
   fi
   if ! echo "$expected" | grep -qE '^[0-9a-f]{64}$'; then
-    printError "verifySha256: no valid expected checksum for $(basename "$file") — refusing"
+    printError "INTEGRITY: verifySha256: no valid expected checksum for $(basename "$file") — refusing"
     return 1
   fi
   actual=$(_sha256Of "$file")
   if [ "$actual" != "$expected" ]; then
-    printError "Checksum MISMATCH for $(basename "$file") — expected $expected, got ${actual:-<none>}. Refusing to install."
+    printError "INTEGRITY: Checksum MISMATCH for $(basename "$file") — expected $expected, got ${actual:-<none>}. Refusing to install."
     return 1
   fi
   printInfo "Checksum OK for $(basename "$file") ($actual)"
@@ -758,7 +758,9 @@ _releaseArch() {
   # set, and a wrong one would install a binary that cannot run.
   case "$(uname -m)" in
     x86_64|amd64) echo "amd64" ;;
-    aarch64|arm64|armv8*) echo "arm64" ;;
+    # Only a 64-bit kernel: armv8l is a 32-bit userland on an ARMv8 core and
+    # cannot exec the arm64 binary.
+    aarch64|arm64) echo "arm64" ;;
     *) return 1 ;;
   esac
 }
@@ -878,7 +880,7 @@ _verifyAsset() {
   if [ -n "$pin" ] && [ "$version" = "${pin#v}" ]; then
     pinned=$(_pinnedSha "$tool" "$version" "$arch")
     if [ -z "$pinned" ]; then
-      printError "$tool v$version is the framework's pinned version but no reviewed sha256 is pinned for $arch — refusing"
+      printError "INTEGRITY: $tool v$version is the framework's pinned version but no reviewed sha256 is pinned for $arch — refusing"
       return 1
     fi
     verifySha256 "$file" "$pinned" || return 1
@@ -1052,9 +1054,13 @@ disableDtctl() {
 }
 
 installMonaco() {
-  # Installs the latest Monaco (pin with MONACO_VERSION), verified against the
-  # release's per-asset .sha256 file.
-  local dir="${MONACO_INSTALL_DIR:-/usr/local/bin}" arch version tag
+  # Installs Monaco at MONACO_VERSION (the latest release when it is empty).
+  # The framework's pinned version installs the framework's PATCHED build
+  # (ENH-114) from MONACO_PIN_URL, verified against the reviewed sha256 in
+  # variables.sh only — a mismatch refuses, and the stock release is never
+  # installed in its place: it cannot deploy with a learner token. Any other
+  # version installs the upstream release, verified against its .sha256 file.
+  local dir="${MONACO_INSTALL_DIR:-/usr/local/bin}" arch version tag patched="" label
   if ! arch=$(_releaseArch); then
     printError "monaco: unsupported architecture '$(uname -m)' (amd64 and arm64 only)"
     return 1
@@ -1072,37 +1078,118 @@ installMonaco() {
     fi
     version="${tag#v}"
   fi
-  if _devToolReports "$dir/monaco" "$version" "$(_pinnedSha MONACO "$version" "$arch" BIN_)"; then
-    printInfo "Monaco v$version already present at $dir/monaco (sha256 matches the pin)"
+  label="$version"
+  if [ -n "${MONACO_PIN_URL:-}" ] && [ "$version" = "${MONACO_PIN_VERSION#v}" ]; then
+    patched=1
+    label="$version${MONACO_PIN_BUILD:++$MONACO_PIN_BUILD}"
+  fi
+  if _devToolReports "$dir/monaco" "$label" "$(_pinnedSha MONACO "$version" "$arch" BIN_)"; then
+    printInfo "Monaco v$label already present at $dir/monaco (sha256 matches the pin)"
     return 0
   fi
-  printInfoSection "Installing Monaco v$version ($arch)"
+  printInfoSection "Installing Monaco v$label ($arch)"
 
   local asset="monaco-linux-${arch}"
   local base="https://github.com/Dynatrace/dynatrace-configuration-as-code/releases/download/v${version}"
   local tmp expected
+  if [ -n "$patched" ]; then
+    case "$MONACO_PIN_URL" in
+      https://*) base="${MONACO_PIN_URL%/}" ;;
+      *) _monacoRefusePatched "$dir" "INTEGRITY: monaco: MONACO_PIN_URL '$MONACO_PIN_URL' is not https:// — refusing"; return 1 ;;
+    esac
+    expected=$(_pinnedSha MONACO "$version" "$arch")
+    if [ -z "$expected" ]; then
+      _monacoRefusePatched "$dir" "INTEGRITY: monaco: no reviewed sha256 is pinned for the patched v$label on $arch — refusing"
+      return 1
+    fi
+  fi
   if ! tmp=$(mktemp -d); then
     printError "monaco: could not create a temporary directory"
+    [ -n "$patched" ] && _monacoRefusePatched "$dir"
     return 1
   fi
-  if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
-     || ! _fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 30; then
-    printError "monaco: download of v$version failed"
-    rm -rf "$tmp"
-    return 1
-  fi
-  expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
-  if ! _verifyAsset MONACO "$version" "$arch" "$tmp/$asset" "$expected"; then
-    rm -rf "$tmp"
-    return 1
+  if [ -n "$patched" ]; then
+    if ! _fetch "$base/$asset" "$tmp/$asset" 120; then
+      rm -rf "$tmp"
+      _monacoRefusePatched "$dir" "monaco: download of the patched v$label failed — the stock release is not installed instead"
+      return 1
+    fi
+    if ! verifySha256 "$tmp/$asset" "$expected"; then
+      rm -rf "$tmp"
+      _monacoRefusePatched "$dir" "INTEGRITY: monaco: the patched v$label does not match the reviewed sha256 — refusing; the stock release is not installed instead"
+      return 1
+    fi
+  else
+    if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
+       || ! _fetch "$base/$asset.sha256" "$tmp/$asset.sha256" 30; then
+      printError "monaco: download of v$version failed"
+      rm -rf "$tmp"
+      return 1
+    fi
+    expected=$(awk '{print $1; exit}' "$tmp/$asset.sha256")
+    if ! _verifyAsset MONACO "$version" "$arch" "$tmp/$asset" "$expected"; then
+      rm -rf "$tmp"
+      return 1
+    fi
   fi
   if ! _installBinary "$tmp/$asset" "$dir" monaco; then
     printError "monaco: could not install into $dir"
     rm -rf "$tmp"
+    [ -n "$patched" ] && _monacoRefusePatched "$dir"
     return 1
   fi
   rm -rf "$tmp"
-  printInfo "Monaco v$version installed at $dir/monaco"
+  printInfo "Monaco v$label installed at $dir/monaco"
+}
+
+_monacoRefusePatched() {
+  # _monacoRefusePatched <dir> [message] — the patched install refused: print
+  # the reason and remove $dir/monaco, so no stock binary baked into the image
+  # (which cannot run with a learner token) is left for deployMonaco to find.
+  [ -n "${2:-}" ] && printError "$2"
+  [ -e "$1/monaco" ] || return 0
+  if _removeBinary "$1/monaco" && [ ! -e "$1/monaco" ]; then
+    printError "monaco: removed $1/monaco — no unverified Monaco is left installed"
+  else
+    printError "monaco: could not remove $1/monaco — it is NOT the verified patched build; deployMonaco refuses to run it"
+  fi
+}
+
+_monacoIsPatched() {
+  # _monacoIsPatched — 0 when the `monaco` on PATH may run with a learner token.
+  # With the patched pin configured (MONACO_PIN_URL) that means the framework's
+  # build: sha256 equal to the pinned binary hash for this arch, or a
+  # `monaco version` naming +$MONACO_PIN_BUILD. No patched pin: any monaco.
+  local bin arch pin=""
+  bin=$(command -v monaco 2>/dev/null) || return 1
+  [ -n "${MONACO_PIN_URL:-}" ] || return 0
+  arch=$(_releaseArch) && pin=$(_pinnedSha MONACO "${MONACO_PIN_VERSION:-}" "$arch" BIN_)
+  if [ -n "$pin" ] && [ "$(_sha256Of "$bin")" = "$(echo "$pin" | tr '[:upper:]' '[:lower:]')" ]; then
+    return 0
+  fi
+  "$bin" version 2>/dev/null | grep -qF "+${MONACO_PIN_BUILD:-wwse}"
+}
+
+_monacoReady() {
+  # _monacoReady <what-happens-instead> — makes sure the verified Monaco is on
+  # PATH before deployMonaco/undeployMonaco run it: one installMonaco when it
+  # is missing or not the patched build, then the check again. Still not
+  # verified → fails LOUDLY: stock Monaco asks
+  # /platform/metadata/v1/classic-environment-domain, which needs
+  # 'app-engine:apps:run', and would fail against a learner token anyway.
+  _monacoIsPatched && return 0
+  installMonaco
+  _monacoIsPatched && return 0
+  local bin
+  bin=$(command -v monaco 2>/dev/null || echo "(none on PATH)")
+  printError "MONACO NOT VERIFIED: $bin is not the framework's patched Monaco v${MONACO_PIN_VERSION:-?}+${MONACO_PIN_BUILD:-?}"
+  printError "  its sha256 is not the pinned one and \`monaco version\` does not name +${MONACO_PIN_BUILD:-?}."
+  printError "  Stock Monaco needs 'app-engine:apps:run' (classic-environment-domain discovery), which a learner token does not carry."
+  if [ -n "${MONACO_VERSION:-}" ] && [ "${MONACO_VERSION#v}" != "${MONACO_PIN_VERSION#v}" ]; then
+    printError "  MONACO_VERSION=$MONACO_VERSION overrides the framework pin ${MONACO_PIN_VERSION:-} — the patched build exists only for the pin."
+  fi
+  printError "  $1"
+  return 1
 }
 
 installDevTools() {
@@ -1162,6 +1249,9 @@ _devToolStep() {
   # replayed with token values masked (a child tool may echo one). On failure
   # each line is tagged "devtools (non-fatal)", which _creationNoiseFilter
   # drops: a missing dev tool must not mark the whole container as failed.
+  # An INTEGRITY refusal (checksum mismatch, missing pin, non-https pin URL) is
+  # tagged "devtools INTEGRITY FAILED" instead, which the filter KEEPS: a
+  # tampered download is a real error, not noise.
   local name="$1" out
   shift
   if out=$("$@" 2>&1); then
@@ -1169,7 +1259,7 @@ _devToolStep() {
     return 0
   fi
   out=$(_maskTokens "$out")
-  printf '%s\n' "$out" | sed 's/^/devtools (non-fatal): /'
+  printf '%s\n' "$out" | sed -e '/INTEGRITY:/s/^/devtools INTEGRITY FAILED: /' -e '/INTEGRITY:/!s/^/devtools (non-fatal): /'
   printWarn "devtools (non-fatal): $name not installed — post-create continues without it"
   return 1
 }
@@ -1300,7 +1390,7 @@ deployMonaco() {
     printError "No usable DT_SESSION_ID (DT_HOSTGROUP or GITHUB_USER; lowercase, digits, dashes) — refusing: without it every learner would share one Monaco project. Nothing was deployed."
     return 1
   fi
-  command -v monaco >/dev/null 2>&1 || installMonaco || return 1
+  _monacoReady "Nothing was deployed." || return 1
 
   # The manifest's project path must sit below the manifest (Monaco reads the
   # project relative to it), so the run dir holds a snapshot of the configs.
@@ -1354,10 +1444,32 @@ MANIFESTEOF
   printInfo "monaco/$phase deployed. Undo with: undeployMonaco (delete file: $run/delete.yaml)"
 }
 
+_monacoOnlyTrashRefused() {
+  # _monacoOnlyTrashRefused <monaco-delete-output> — succeeds, printing the
+  # count, when the ONLY failures in a failed `monaco delete` are trash purges
+  # refused with 403: monaco deletes a document first (it is then in the
+  # trash) and purges it second, and a learner token holds no
+  # document:trash.documents:delete (ENH-114). Every other ERROR line —
+  # anything but those purges and monaco's own summary lines — means a real
+  # failure, and so does seeing no refused purge at all.
+  local log="$1" trashed
+  trashed=$(grep 'level=ERROR msg="Failed to delete document"' "$log" \
+    | grep -c 'failed to DELETE in resource documents-trash with id .* failed with status code 403')
+  [ "$trashed" -gt 0 ] || return 1
+  grep 'level=ERROR' "$log" \
+    | grep -v 'msg="Failed to delete document".*failed to DELETE in resource documents-trash with id .* failed with status code 403' \
+    | grep -v "msg=\"Error during deletion\".*error.details=\"failed to delete $trashed document(s)\"" \
+    | grep -v 'msg="Failed to delete all configurations from environment' \
+    | grep -v 'msg="Error: encountered deletion errors for the following environments: learner"' \
+    | grep -v 'msg="error logs written to ' \
+    | grep -q . && return 1
+  echo "$trashed"
+}
+
 undeployMonaco() {
   # undeployMonaco [tenant|env] — deletes what deployMonaco created, using the
   # delete file persisted at deploy time. No argument: both phases, env first.
-  local phases rc=0 phase run token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
+  local phases rc=0 phase run out trashed drc token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
   case "$1" in
     "") phases="env tenant" ;;
     tenant|env) phases="$1" ;;
@@ -1376,14 +1488,23 @@ undeployMonaco() {
       rc=1
       continue
     fi
-    command -v monaco >/dev/null 2>&1 || installMonaco || { rc=1; continue; }
-    if (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner); then
+    _monacoReady "Nothing was deleted. Delete file kept at $run/delete.yaml" || { rc=1; continue; }
+    # Kept in a file: a refused trash purge is told apart by monaco's output.
+    out=$(mktemp) || { printError "monaco/$phase: mktemp failed — nothing was deleted. Delete file kept at $run/delete.yaml"; rc=1; continue; }
+    (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner) > "$out" 2>&1
+    drc=$?
+    cat "$out"
+    if [ "$drc" -eq 0 ]; then
       rm -rf "$run"
       printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+    elif trashed=$(_monacoOnlyTrashRefused "$out"); then
+      rm -rf "$run"
+      printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed."
     else
       printError "monaco/$phase: monaco delete failed — delete file kept at $run/delete.yaml"
       rc=1
     fi
+    rm -f "$out"
   done < <(echo "$phases" | tr ' ' '\n')
   return $rc
 }
