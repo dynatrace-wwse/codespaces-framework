@@ -243,6 +243,15 @@ removed from `monaco/` since the last deploy is still deleted (Monaco skips obje
 already gone). `undeployMonaco` runs `monaco delete` with that file and removes the snapshot;
 if the delete fails, the delete file is kept so it can be retried.
 
+**Deleted documents stay in the trash.** Monaco deletes a document and then purges it from the
+tenant's trash. The learner's token has no `document:trash.documents:delete`, by design (the
+token acts as the person whose account owns the tenant's mint client, so a purge scope would
+let a learner permanently destroy that person's trashed documents). The purge therefore gets
+403 and `monaco delete` exits 1. `undeployMonaco` reads monaco's output: when the **only**
+errors are refused trash purges, the undeploy counts as done — the snapshot is removed and it
+warns `N document(s) deleted but left in the tenant's trash`. Any other error, mixed in or
+alone, still fails and keeps the delete file.
+
 A `configs` file the check cannot read — a flow list (`configs: [...]`) or no top-level
 `configs:` — is refused like an unsupported type: the check fails closed. Deploy and
 undeploy output lands in the provisioning log through `printInfoSection`.

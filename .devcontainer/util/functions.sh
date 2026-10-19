@@ -1444,10 +1444,32 @@ MANIFESTEOF
   printInfo "monaco/$phase deployed. Undo with: undeployMonaco (delete file: $run/delete.yaml)"
 }
 
+_monacoOnlyTrashRefused() {
+  # _monacoOnlyTrashRefused <monaco-delete-output> — succeeds, printing the
+  # count, when the ONLY failures in a failed `monaco delete` are trash purges
+  # refused with 403: monaco deletes a document first (it is then in the
+  # trash) and purges it second, and a learner token holds no
+  # document:trash.documents:delete (ENH-114). Every other ERROR line —
+  # anything but those purges and monaco's own summary lines — means a real
+  # failure, and so does seeing no refused purge at all.
+  local log="$1" trashed
+  trashed=$(grep 'level=ERROR msg="Failed to delete document"' "$log" \
+    | grep -c 'failed to DELETE in resource documents-trash with id .* failed with status code 403')
+  [ "$trashed" -gt 0 ] || return 1
+  grep 'level=ERROR' "$log" \
+    | grep -v 'msg="Failed to delete document".*failed to DELETE in resource documents-trash with id .* failed with status code 403' \
+    | grep -v "msg=\"Error during deletion\".*error.details=\"failed to delete $trashed document(s)\"" \
+    | grep -v 'msg="Failed to delete all configurations from environment' \
+    | grep -v 'msg="Error: encountered deletion errors for the following environments: learner"' \
+    | grep -v 'msg="error logs written to ' \
+    | grep -q . && return 1
+  echo "$trashed"
+}
+
 undeployMonaco() {
   # undeployMonaco [tenant|env] — deletes what deployMonaco created, using the
   # delete file persisted at deploy time. No argument: both phases, env first.
-  local phases rc=0 phase run token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
+  local phases rc=0 phase run out trashed drc token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
   case "$1" in
     "") phases="env tenant" ;;
     tenant|env) phases="$1" ;;
@@ -1467,13 +1489,22 @@ undeployMonaco() {
       continue
     fi
     _monacoReady "Nothing was deleted. Delete file kept at $run/delete.yaml" || { rc=1; continue; }
-    if (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner); then
+    # Kept in a file: a refused trash purge is told apart by monaco's output.
+    out=$(mktemp) || { printError "monaco/$phase: mktemp failed — nothing was deleted. Delete file kept at $run/delete.yaml"; rc=1; continue; }
+    (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner) > "$out" 2>&1
+    drc=$?
+    cat "$out"
+    if [ "$drc" -eq 0 ]; then
       rm -rf "$run"
       printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+    elif trashed=$(_monacoOnlyTrashRefused "$out"); then
+      rm -rf "$run"
+      printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed."
     else
       printError "monaco/$phase: monaco delete failed — delete file kept at $run/delete.yaml"
       rc=1
     fi
+    rm -f "$out"
   done < <(echo "$phases" | tr ' ' '\n')
   return $rc
 }

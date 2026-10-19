@@ -169,6 +169,9 @@ if [ "$1 $2" = "generate deletefile" ]; then
   done
   [ -n "${MONACO_STUB_NO_DELETEFILE:-}" ] || echo "delete: []" > "$dir/$file"
 fi
+# Replays monaco output: delete-trash-403-real.txt is 2.30.1+wwse.1 against pqa0332h with a
+# 14-scope seat token (host genericised); the others are edited from that shape.
+[ "$1" = delete ] && [ -n "${MONACO_STUB_DELETE_OUTPUT:-}" ] && cat "$MONACO_STUB_DELETE_OUTPUT"
 exit "${MONACO_STUB_RC:-0}"
 EOF
   { cat "$FIXTURES/monaco-linux-amd64"; echo "# arm64 build"; } > "$FIXTURES/monaco-linux-arm64"
@@ -982,6 +985,89 @@ EOF
   MONACO_STUB_RC=1 run undeployMonaco tenant
   [ "$status" -ne 0 ]
   [ -f "$FAKE_REPO/.devcontainer/.monaco/tenant/delete.yaml" ]
+}
+
+# A learner token holds no document:trash.documents:delete (ENH-114): monaco
+# deletes the document, then its trash purge 403s and monaco exits 1. That is
+# a completed undeploy (the document is gone from the tenant's documents), so
+# it succeeds with a warning. Any other failure still fails.
+MONACO_OUT="$BATS_TEST_DIRNAME/monaco-output"
+
+@test "undeployMonaco: only a trash purge refused (403) succeeds with a warning and clears the run dir" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403.txt" run undeployMonaco env
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/env" ]
+  echo "$output" | grep -q "1 document(s) deleted but left in the tenant's trash"
+  echo "$output" | grep -q "document:trash.documents:delete"
+  ! echo "$output" | grep -q "monaco delete failed"
+}
+
+@test "undeployMonaco: real monaco output (pqa0332h, 14-scope seat token) succeeds with the trash warning" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403-real.txt" run undeployMonaco env
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/env" ]
+  echo "$output" | grep -q "1 document(s) deleted but left in the tenant's trash"
+}
+
+@test "undeployMonaco: two documents, both only refused the trash purge, count both" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403-two.txt" run undeployMonaco env
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "2 document(s) deleted but left in the tenant's trash"
+}
+
+@test "undeployMonaco: a document delete refused (403, not the trash) still fails and keeps the delete file" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-document-403.txt" run undeployMonaco env
+  [ "$status" -ne 0 ]
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/env/delete.yaml" ]
+  echo "$output" | grep -q "monaco delete failed"
+}
+
+@test "undeployMonaco: a trash 403 mixed with any other failure still fails" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403-and-document-403.txt" run undeployMonaco env
+  [ "$status" -ne 0 ]
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/env/delete.yaml" ]
+  ! echo "$output" | grep -q "left in the tenant's trash"
+}
+
+@test "undeployMonaco: a failure with no output at all still fails (no 403 seen is not a pass)" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 run undeployMonaco env
+  [ "$status" -ne 0 ]
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/env/delete.yaml" ]
+}
+
+@test "undeployMonaco: trash-403 output on a SUCCESSFUL delete is not re-read as a warning" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403.txt" run undeployMonaco env
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q "left in the tenant's trash"
+}
+
+@test "undeployMonaco: monaco's own output still reaches the learner" {
+  source_functions
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-document-403.txt" run undeployMonaco env
+  echo "$output" | grep -q 'msg="Failed to delete document"'
 }
 
 @test "undeployMonaco: nothing deployed is a clean no-op" {

@@ -96,6 +96,11 @@ uses it. `deployMonaco` writes platform-token manifests, so they never make the 
   Once an upstream release has the guard, the pin goes back to that release and its hashes, and
   `MONACO_PIN_BUILD`, `MONACO_PIN_URL` and `monaco-patched/` are removed.
 
+**`undeployMonaco` leaves documents in the trash.** The learner token cannot purge the trash
+(no `document:trash.documents:delete`), so Monaco's purge after each document delete is
+refused with 403. `undeployMonaco` treats that — and only that — as success with a warning;
+see [dtctl & Monaco in functions](functions.md#dtctl-monaco), "Deleted documents stay in the trash".
+
 A repo that overrides `MONACO_VERSION` gets the **stock** release from `installMonaco`, but
 `deployMonaco` / `undeployMonaco` refuse to run it while the framework pins a patched build
 (`MONACO_PIN_URL` set): stock Monaco needs `app-engine:apps:run`, which a learner token does
