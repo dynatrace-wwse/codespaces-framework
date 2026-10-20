@@ -4601,7 +4601,7 @@ _codeServerSettings() {
   # shell + greeting as the browser terminal), no telemetry or update checks,
   # dark theme, and the terminal in MesloLGS NF: the prompt's git branch glyph
   # is a Nerd Font private-use glyph (the browser needs the font; Orbital
-  # serves it to the IDE window).
+  # serves it to the IDE window same-origin: orbital #168).
   local dir="${XDG_DATA_HOME:-$HOME/.local/share}/code-server/User"
   [ -f "$dir/settings.json" ] && return 0
   mkdir -p "$dir" || return 1
@@ -4635,7 +4635,7 @@ installCodeServer() {
   if [ "$have" = "$version" ]; then
     printInfo "code-server $version already installed"
     _codeServerSettings
-    _codeServerRegistryRow
+    _codeServerRegistryRow || return 1
     return 0
   fi
 
@@ -4670,7 +4670,7 @@ installCodeServer() {
   rm -rf "$tmp"
   ln -sfn "$home/bin/code-server" "$HOME/.local/bin/code-server"
   _codeServerSettings
-  _codeServerRegistryRow
+  _codeServerRegistryRow || return 1
   printInfo "code-server $(_codeServerInstalledVersion) installed in $home"
 }
 
@@ -4690,12 +4690,17 @@ _codeServerRegistryRow() {
   if [ "$(detectRunEnvironment)" = "orbital" ] && [ -n "${ORBITAL_JOB_ID:-}" ]; then
     sub=$(computeOrbitalSubdomain ide)
   fi
-  mkdir -p "$(dirname "$APP_REGISTRY")" || return 1
+  mkdir -p "$(dirname "$APP_REGISTRY")" || { printError "VS Code (ide) NOT registered: cannot create $(dirname "$APP_REGISTRY")"; return 1; }
   if [ -f "$APP_REGISTRY" ]; then
-    grep -v '^ide|' "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null
-    mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY"
+    # grep -v exits 1 when every row was an ide row: that is not a failure.
+    { grep -v '^ide|' "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" || [ $? -eq 1 ]; } 2>/dev/null \
+      && mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" \
+      || { rm -f "${APP_REGISTRY}.tmp" 2>/dev/null; printError "VS Code (ide) NOT registered: could not rewrite $APP_REGISTRY (left as it was)"; return 1; }
   fi
-  echo "ide|${ns}|ide|${port}|ide.$(detectIP).${MAGIC_DOMAIN}||${sub}" >> "$APP_REGISTRY"
+  if ! echo "ide|${ns}|ide|${port}|ide.$(detectIP).${MAGIC_DOMAIN}||${sub}" >> "$APP_REGISTRY" 2>/dev/null; then
+    printError "VS Code (ide) NOT registered: could not write $APP_REGISTRY"
+    return 1
+  fi
   printInfo "VS Code (ide) registered in the app registry"
 }
 
@@ -4865,9 +4870,11 @@ stopCodeServer() {
   # Ends code-server's whole session (server, extension hosts, terminals). The
   # `ide` registry row STAYS: it means "installed", not "running". Orbital
   # stops code-server after a failed sign-in, and dropping the row there would
-  # hide the VS Code button for the rest of the session. Only
-  # uninstallCodeServer removes it. The Service stays too (harmless without a
-  # listener).
+  # hide the VS Code button for the rest of the session; the next click starts
+  # it again. Only uninstallCodeServer removes the row. The Ingress registerApp
+  # made IS deleted, so the host answers 404 (no route), never a 502 from an
+  # ingress pointing at a dead listener; registerCodeServer re-creates it on
+  # the next start. The Service stays (harmless without a route).
   local pidf pid
   pidf=$(_codeServerPidFile)
   pid=$(cat "$pidf" 2>/dev/null)
@@ -4878,6 +4885,7 @@ stopCodeServer() {
     printInfo "code-server is not running"
   fi
   rm -f "$pidf"
+  kubectl delete ingress ide-ingress -n "${CODE_SERVER_NAMESPACE:-ide}" --ignore-not-found >/dev/null 2>&1
 }
 
 uninstallCodeServer() {

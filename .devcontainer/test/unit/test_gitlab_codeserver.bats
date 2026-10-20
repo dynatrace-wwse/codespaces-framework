@@ -603,9 +603,12 @@ print("gate ok")' "$STATE/helm-values"
   export CODE_SERVER_SHA256
   CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
   echo "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io||todoapp--job1" > "$APP_REGISTRY"
+  # A password in the environment must not reach the row, the output or disk:
+  # the install needs none and must not record one.
+  export PASSWORD="cs-SENTINEL-install-77"
   run installCodeServer 9.9.9
   [ "$status" -eq 0 ]
-  [ -z "${PASSWORD:-}" ]
+  no_secret_anywhere "$output"
   [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
   [ "$(grep '^ide|' "$APP_REGISTRY")" = "ide|ide|ide|${CODE_SERVER_PORT}|ide.10.0.0.1.sslip.io||ide--job1" ]
   # other apps untouched
@@ -623,6 +626,51 @@ print("gate ok")' "$STATE/helm-values"
   [ "$status" -eq 0 ]
   [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
   no_secret_anywhere "$output"
+}
+
+@test "installCodeServer under Orbital, no registry yet: creates it with exactly the ide row" {
+  export ORBITAL_ENVIRONMENT=true ORBITAL_JOB_ID=job1
+  export APP_REGISTRY="$TEST_DIR/not-yet/dt-framework/app-registry"
+  source_functions
+  export CODE_SERVER_SHA256
+  CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
+  [ ! -e "$APP_REGISTRY" ]
+  run installCodeServer 9.9.9
+  [ "$status" -eq 0 ]
+  [ "$(cat "$APP_REGISTRY")" = "ide|ide|ide|${CODE_SERVER_PORT}|ide.10.0.0.1.sslip.io||ide--job1" ]
+}
+
+@test "installCodeServer under Orbital: a registry it cannot rewrite fails loudly, other rows intact" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores directory permissions"
+  export ORBITAL_ENVIRONMENT=true ORBITAL_JOB_ID=job1
+  source_functions
+  export CODE_SERVER_SHA256
+  CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
+  local row="todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io||todoapp--job1"
+  echo "$row" > "$APP_REGISTRY"
+  chmod 555 "$(dirname "$APP_REGISTRY")"   # no .tmp can be created next to it
+  run installCodeServer 9.9.9
+  chmod 755 "$(dirname "$APP_REGISTRY")"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NOT registered"* ]]
+  [[ "$output" != *"registered in the app registry"* ]]
+  [ "$(cat "$APP_REGISTRY")" = "$row" ]
+  # read-only file in a read-only directory: neither rewrite nor append can land
+  chmod 444 "$APP_REGISTRY"; chmod 555 "$(dirname "$APP_REGISTRY")"
+  run _codeServerRegistryRow
+  chmod 755 "$(dirname "$APP_REGISTRY")"; chmod 644 "$APP_REGISTRY"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$APP_REGISTRY")" = "$row" ]
+}
+
+@test "_codeServerRegistryRow: a registry holding only an ide row is rewritten, not refused" {
+  export ORBITAL_ENVIRONMENT=true ORBITAL_JOB_ID=job1
+  source_functions
+  echo "ide|ide|ide|1|old.host||ide--job1" > "$APP_REGISTRY"
+  run _codeServerRegistryRow
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  ! grep -q old.host "$APP_REGISTRY" || false
 }
 
 @test "installCodeServer outside Orbital: no registry row (CODE_SERVER_REGISTER=1 forces it)" {
@@ -713,6 +761,15 @@ print("gate ok")' "$STATE/helm-values"
   # the row means "installed", not "running": it stays (Orbital stops
   # code-server after a failed sign-in; the VS Code button must survive that)
   [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  # ...but its route goes: no 502 from an ingress pointing at a dead listener
+  grep -q "^kubectl delete ingress ide-ingress -n ide --ignore-not-found" "$ARGS_LOG"
+  # the next start re-creates the ingress and keeps one row
+  : > "$STATE/applied.yaml"
+  run startCodeServer "$FAKE_REPO"
+  [ "$status" -eq 0 ]
+  grep -q 'name: ide-ingress' "$STATE/applied.yaml"
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  run stopCodeServer
   # only uninstall removes it
   run uninstallCodeServer
   ! grep -q '^ide|' "$APP_REGISTRY" || false
