@@ -585,6 +585,65 @@ print("gate ok")' "$STATE/helm-values"
   [ "$(grep -c "github.com/coder" "$ARGS_LOG")" -eq "$n" ]
 }
 
+@test "installCodeServer: settings are dark and the terminal uses MesloLGS NF; valid JSON" {
+  source_functions
+  export CODE_SERVER_SHA256
+  CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
+  run installCodeServer 9.9.9
+  [ "$status" -eq 0 ]
+  local s="$XDG_DATA_HOME/code-server/User/settings.json"
+  python3 -m json.tool "$s" >/dev/null
+  [ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["workbench.colorTheme"])' "$s")" = "Default Dark Modern" ]
+  [ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["terminal.integrated.fontFamily"])' "$s")" = "'MesloLGS NF', monospace" ]
+}
+
+@test "installCodeServer under Orbital: writes exactly one ide registry row, no password, no kubectl" {
+  export ORBITAL_ENVIRONMENT=true ORBITAL_JOB_ID=job1
+  source_functions
+  export CODE_SERVER_SHA256
+  CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
+  echo "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io||todoapp--job1" > "$APP_REGISTRY"
+  run installCodeServer 9.9.9
+  [ "$status" -eq 0 ]
+  [ -z "${PASSWORD:-}" ]
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  [ "$(grep '^ide|' "$APP_REGISTRY")" = "ide|ide|ide|${CODE_SERVER_PORT}|ide.10.0.0.1.sslip.io||ide--job1" ]
+  # other apps untouched
+  grep -qx "todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io||todoapp--job1" "$APP_REGISTRY"
+  # the row only: no Service/Ingress at install time
+  ! grep -q '^kubectl' "$ARGS_LOG" || false
+  # re-run (already installed) keeps one row
+  run installCodeServer 9.9.9
+  [[ "$output" == *"already installed"* ]]
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  # a later startCodeServer rewrites the same row, still one
+  export PASSWORD="cs-SENTINEL-pass-42" CODE_SERVER_VERSION=9.9.9
+  docker() { echo "172.18.0.1"; }
+  run startCodeServer "$FAKE_REPO"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  no_secret_anywhere "$output"
+}
+
+@test "installCodeServer outside Orbital: no registry row (CODE_SERVER_REGISTER=1 forces it)" {
+  source_functions
+  export CODE_SERVER_SHA256
+  CODE_SERVER_SHA256=$(make_codeserver_fixture 9.9.9)
+  run installCodeServer 9.9.9
+  [ "$status" -eq 0 ]
+  ! grep -q '^ide|' "$APP_REGISTRY" 2>/dev/null || false
+  CODE_SERVER_REGISTER=1 run installCodeServer 9.9.9
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+}
+
+@test "no installCodeServer -> no ide row (a failed install registers nothing)" {
+  export ORBITAL_ENVIRONMENT=true ORBITAL_JOB_ID=job1
+  source_functions
+  run installCodeServer 9.9.9
+  [ "$status" -eq 1 ]
+  ! grep -q '^ide|' "$APP_REGISTRY" 2>/dev/null || false
+}
+
 @test "installCodeServer: a learner's own settings are kept" {
   source_functions
   export CODE_SERVER_SHA256
@@ -651,9 +710,12 @@ print("gate ok")' "$STATE/helm-values"
   run stopCodeServer
   sleep 1
   ! kill -0 "$pid" 2>/dev/null || false
-  # and Orbital no longer lists an IDE that is gone
+  # the row means "installed", not "running": it stays (Orbital stops
+  # code-server after a failed sign-in; the VS Code button must survive that)
+  [ "$(grep -c '^ide|' "$APP_REGISTRY")" -eq 1 ]
+  # only uninstall removes it
+  run uninstallCodeServer
   ! grep -q '^ide|' "$APP_REGISTRY" || false
-  [[ "$output" == *"ide removed from the app registry"* ]]
 }
 
 @test "startCodeServer: outside Orbital, a non-loopback bind without PASSWORD is refused" {

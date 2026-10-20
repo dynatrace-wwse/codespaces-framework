@@ -13,9 +13,9 @@ them with the workspace's apps.
 | `gitlabCredentials` | Prints the user (`root`) and the **command** that reveals the password |
 | `gitlabSeedRepo <name> <dir>` | Creates project `root/<name>` if missing and pushes `<dir>`'s files to `main` |
 | `uninstallGitlab` | Removes the Runner, the ingress + registry row, and the namespace (data included); rc 1 if the namespace delete fails |
-| `installCodeServer [version]` | Installs code-server from its release tarball, checksum-verified |
+| `installCodeServer [version]` | Installs code-server from its release tarball, checksum-verified, and (under Orbital) writes the `ide` registry row — the workspace then shows VS Code |
 | `startCodeServer [dir]` | Starts code-server on `CODE_SERVER_PORT` (8443), opening `dir` (default: the repo) |
-| `stopCodeServer` | Ends code-server and every extension host and terminal it started, and removes app `ide` from the registry |
+| `stopCodeServer` | Ends code-server and every extension host and terminal it started; the `ide` registry row stays (it means "installed") |
 | `registerCodeServer` | Registers code-server as app `ide` (run by `startCodeServer` under Orbital) |
 | `checkCodeServerRunning` | `/healthz` answers 200 **and** the listener belongs to the code-server `startCodeServer` started |
 | `uninstallCodeServer` | Stops it, removes the registration and the install (settings stay) |
@@ -154,7 +154,10 @@ stopCodeServer
   needs `CODE_SERVER_SHA256` or is refused. (The upstream `install.sh` reads `$ARCH`, which Orbital
   sets to `x86_64`, and fails.) `startCodeServer` installs it when missing. ~700 MB on disk.
 * **Settings** (written once, a learner's edits are kept): no workspace-trust prompt, no Chat/agent
-  panel, terminal profile zsh, no telemetry or update checks.
+  panel, terminal profile zsh, no telemetry or update checks, theme **Default Dark Modern**, and
+  terminal font `'MesloLGS NF', monospace` — the prompt's git branch icon is a Nerd Font glyph,
+  so the font must reach the browser (Orbital serves it to the IDE window; without it the glyph
+  renders blank).
 * **Memory**: 166 MiB idle; ~600 MiB with one window and a terminal open. Start to `/healthz`
   ~1.3 s.
 * **Abandoned tabs**: `--reconnection-grace-time` (`CODE_SERVER_RECONNECT_GRACE`, 600 s) ends what a
@@ -176,12 +179,18 @@ session cookie. `CODE_SERVER_BIND` overrides the bind address.
 
 ### Registered as an app
 
+**The `ide` row means "installed", not "running".** Under Orbital, `installCodeServer` writes the
+row as soon as code-server is installed (normally from `post-create.sh`) — just the row, no
+Service, no password — so Orbital shows the VS Code button only for a workspace that has it, before
+anyone opens it. A training that never calls `installCodeServer` has no row and no button. The row
+is upserted (always one), `stopCodeServer` keeps it, and only `uninstallCodeServer` removes it.
+
 Under Orbital, and only when it has a password, `startCodeServer` registers code-server as app
 **`ide`** (namespace `ide`): a Service with no selector and an EndpointSlice pointing at the k3d
 network's gateway — the learner container's network namespace — plus the usual `registerApp`
 ingress. It therefore appears in the app registry Orbital reads, next to `gitlab` and the
 training's apps. Outside Orbital it is not registered (`CODE_SERVER_REGISTER=1` forces it).
-`stopCodeServer` removes the `ide` row again (the Service stays; the next start re-registers).
+`stopCodeServer` keeps the `ide` row (and the Service); the next start rewrites it.
 
 The gateway is not a pod, so no NetworkPolicy *on the IDE* can restrict who connects; the fence is
 on the side that runs untrusted code — the CI job pods (see GitLab above) — and code-server's
@@ -194,6 +203,6 @@ password guards every other path.
 | start | as the learner, in `/workspaces/<repo>`: `PASSWORD=<generated>` in the environment, then `source .devcontainer/util/source_framework.sh; startCodeServer` |
 | port | `CODE_SERVER_PORT`, default `8443` |
 | health | `GET :8443/healthz` → 200 (`checkCodeServerRunning` also checks the listener is ours) |
-| stop | `stopCodeServer` (also deregisters `ide`) |
-| registry | app `ide`, namespace `ide`, service `ide:8443` |
+| stop | `stopCodeServer` (the `ide` row stays) |
+| registry | app `ide`, namespace `ide`, service `ide:8443`; row written by `installCodeServer`, removed only by `uninstallCodeServer` |
 | files | pid `~/.cache/code-server/pid`, log `~/.cache/code-server/code-server.log` |

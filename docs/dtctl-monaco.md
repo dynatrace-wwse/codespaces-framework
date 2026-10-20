@@ -27,6 +27,8 @@ already calls ("do not remove") — runs `installDevTools` first.
    the config is left **read-only** (see below). Without the token, dtctl is installed with no
    context.
 5. Monaco needs no context: `deployMonaco` reads `DT_MONACO_TOKEN` by name when a repo deploys.
+   How a repo deploys and undoes it: [The `monaco/` folder](functions.md#the-monaco-folder), or
+   `deployMonaco -h` / `undeployMonaco -h` in the terminal.
 
 A binary already present is **kept, not downloaded**, only when its sha256 equals the committed
 pin for the installed binary **and** `<tool> version` names the pinned version. An image that
