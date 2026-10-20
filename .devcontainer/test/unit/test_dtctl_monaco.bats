@@ -49,6 +49,7 @@ VARSEOF
   export PATH="$INSTALL_DIR:$BIN:/usr/bin:/bin"
 
   make_curl_stub
+  make_rum_fake
   make_uname_stub
   make_fixtures
 
@@ -66,6 +67,7 @@ make_curl_stub() {
   cat > "$BIN/curl" <<'EOF'
 #!/bin/bash
 ARGS="$*"
+ORIG=("$@")
 out="" url=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,6 +80,8 @@ while [ $# -gt 0 ]; do
 done
 echo "$url" >> "$CURL_LOG"
 [ -n "${CURL_ARGS_LOG:-}" ] && echo "$ARGS" >> "$CURL_ARGS_LOG"
+# Tenant API calls (ENH-130 M5 RUM frontends) go to the fake platform.
+case "$url" in "${DT_ENVIRONMENT%/}"/*) exec "$BIN/rumfake" "${ORIG[@]}" ;; esac
 case "$url" in
   https://api.github.com/repos/*/releases/latest) echo '{"url": "x", "tag_name": "v9.9.9", "name": "v9.9.9"}'; exit 0 ;;
 esac
@@ -160,7 +164,7 @@ EOF
   # The "released" monaco: logs arguments + whether the token is present.
   cat > "$FIXTURES/monaco-linux-amd64" <<'EOF'
 #!/bin/bash
-echo "monaco $* | LEARNER_PREFIX=${LEARNER_PREFIX:-} | token-set=$([ -n "$DT_MONACO_TOKEN" ] && echo yes || echo no) | cwd=$PWD" >> "$MONACO_LOG"
+echo "monaco $* | LEARNER_PREFIX=${LEARNER_PREFIX:-} | token-set=$([ -n "$DT_MONACO_TOKEN" ] && echo yes || echo no) | cwd=$PWD | rum=${TODO_RUM_APP_ID:-}" >> "$MONACO_LOG"
 if [ "$1 $2" = "generate deletefile" ]; then
   dir="" file="delete.yaml"
   while [ $# -gt 0 ]; do
@@ -182,6 +186,107 @@ EOF
     (cd "$FIXTURES" && sha256sum "monaco-linux-$a" > "monaco-linux-$a.sha256")
   done
 }
+
+make_rum_fake() {
+  # A fake Dynatrace platform for the RUM frontend hooks (ENH-130 M5): RUM
+  # frontends, settings builtin:rum.frontend.name, Smartscape DQL. It mimics
+  # what PVF does (spike 130, worker 131): a second POST of the same name
+  # answers the same FRONTEND id but adds ANOTHER classic application; a
+  # DELETE of an id that is gone answers 404. State in $RUM_STATE; every call
+  # is logged "<METHOD> <path>" to $RUM_LOG and its argv to $RUM_ARGS_LOG.
+  # A call without the Monaco token in its -H header FILE answers 401.
+  export RUM_STATE="$TEST_DIR/rum.state" RUM_LOG="$HOME/rum.log" RUM_ARGS_LOG="$HOME/rum.args"
+  : > "$RUM_STATE"
+  cat > "$BIN/rumfake" <<'EOF'
+#!/usr/bin/env python3
+import json, os, re, sys, urllib.parse
+a = sys.argv[1:]
+method, out, url, hdr, data = "GET", None, None, "", None
+i = 0
+while i < len(a):
+    x = a[i]
+    if x == "-X": method = a[i + 1]; i += 1
+    elif x == "-o": out = a[i + 1]; i += 1
+    elif x == "-H":
+        h = a[i + 1]; i += 1
+        hdr += open(h[1:]).read() if h.startswith("@") else h + "\n"
+    elif x == "--data-binary":
+        d = a[i + 1]; i += 1
+        data = open(d[1:]).read() if d.startswith("@") else d
+    elif x in ("-w", "--max-time"): i += 1
+    elif not x.startswith("-"): url = x
+    i += 1
+with open(os.environ["RUM_ARGS_LOG"], "a") as f: f.write(" ".join(a) + "\n")
+u = urllib.parse.urlparse(url); q = urllib.parse.parse_qs(u.query)
+with open(os.environ["RUM_LOG"], "a") as f: f.write(f"{method} {u.path}{'?' + u.query if u.query else ''}\n")
+rows = [l.rstrip("\n").split("|") for l in open(os.environ["RUM_STATE"]) if l.strip()]  # fid|name|aid
+def save():
+    with open(os.environ["RUM_STATE"], "w") as f: f.writelines("|".join(r) + "\n" for r in rows)
+def bump(k):
+    p = os.path.join(os.path.dirname(os.environ["RUM_STATE"]), k)
+    n = int(open(p).read()) if os.path.exists(p) else 0
+    open(p, "w").write(str(n + 1)); return n + 1
+def reply(code, body=""):
+    if out: open(out, "w").write(body if isinstance(body, str) else json.dumps(body))
+    sys.stdout.write(str(code)); sys.exit(0)
+if f"Authorization: Bearer {os.environ.get('DT_MONACO_TOKEN', '')}" not in hdr or not os.environ.get("DT_MONACO_TOKEN"):
+    reply(401, {"error": {"code": 401, "message": "no token"}})
+env = os.environ
+if u.path == "/platform/rum/v1/frontends" and method == "POST":
+    if env.get("RUM_FAKE_CREATE_CODE"): reply(int(env["RUM_FAKE_CREATE_CODE"]), {"error": {"message": "refused"}})
+    b = json.loads(data)
+    assert b["type"] == "WEB_AUTO_INJECTED", b
+    n = bump("seq")
+    fid = next((r[0] for r in rows if r[1] == b["frontendName"] and r[0]), f"FRONTEND-{n:016X}")
+    rows.append([fid, b["frontendName"], f"APPLICATION-{0xA0000 + n:016X}"]); save()
+    with open(os.path.join(os.path.dirname(env["RUM_STATE"]), "display"), "a") as f: f.write(b["displayName"] + "\n")
+    if env.get("RUM_FAKE_CREATE_THEN"): reply(int(env["RUM_FAKE_CREATE_THEN"]), "")  # created, answer lost
+    reply(201, {"id": fid, "type": b["type"], "displayName": b["displayName"], "frontendName": b["frontendName"]})
+m = re.fullmatch(r"/platform/rum/v1/frontends/(.+)", u.path)
+if m and method == "DELETE":
+    fid = m.group(1)
+    if not any(r[0] == fid for r in rows): reply(404, {"error": {"code": 404, "message": "not found"}})
+    if env.get("RUM_FAKE_DELETE_LIES"): reply(204)
+    if bump("deletes") <= int(env.get("RUM_FAKE_DELETE_NOOPS", "0")): reply(200)
+    rows[:] = [r for r in rows if r[0] != fid]; save()
+    with open(os.path.join(os.path.dirname(env["RUM_STATE"]), "deleted-after-monaco"), "a") as f:
+        ml = env.get("MONACO_LOG", "")
+        f.write(("yes" if ml and os.path.exists(ml) and "monaco delete" in open(ml).read() else "no") + "\n")
+    reply(204)
+if u.path == "/platform/classic/environment-api/v2/settings/objects" and method == "GET":
+    if env.get("RUM_FAKE_SETTINGS_CODE"): reply(int(env["RUM_FAKE_SETTINGS_CODE"]), "{}")
+    assert q.get("schemaIds") == ["builtin:rum.frontend.name"] or "nextPageKey" in q, q
+    scopes = q.get("scopes", [None])[0]
+    if env.get("RUM_FAKE_PAGE_LOOP") and scopes is None:
+        reply(200, {"items": [], "totalCount": 1000, "nextPageKey": "same-key"})
+    if env.get("RUM_FAKE_SETTINGS_LAG") and scopes is None:
+        reply(200, {"items": [], "totalCount": 0})  # the by-name listing has not caught up
+    items = [{"scope": r[2], "value": {"frontendName": r[1]}} for r in rows if scopes in (None, r[2])]
+    items.append({"scope": "APPLICATION-EA7C4B59F27D43EB", "value": {"frontendName": "My_web_application"}}) if scopes is None else None
+    reply(200, {"items": items, "totalCount": len(items)})
+if u.path == "/platform/storage/query/v1/query:execute" and method == "POST":
+    dq = json.loads(data)["query"]
+    recs = []
+    if not env.get("RUM_FAKE_SMARTSCAPE_EMPTY"):
+        n = re.search(r'frontend\.name == "([^"]+)"', dq); i_ = re.search(r'toSmartscapeId\("([^"]+)"\)', dq)
+        seen = set()
+        for r in rows:
+            if (n and r[1] == n.group(1) or i_ and r[0] == i_.group(1)) and r[0] not in seen:
+                seen.add(r[0]); recs.append({"id": r[0], "id_classic": r[2]})  # the FIRST classic app is the frontend's
+    reply(200, {"state": "SUCCEEDED", "result": {"records": recs}})
+reply(500, {"error": {"message": f"fake: no route {method} {u.path}"}})
+EOF
+  chmod +x "$BIN/rumfake"
+}
+
+rum_project() {
+  # rum_project <phase> — a monaco project with a TODOApp frontend + its rule.
+  make_monaco_project "$1"
+  printf '# <ENV_VAR> <name> <display name>\nTODO_RUM_APP_ID todoapp TODOApp\n' > "$FAKE_REPO/monaco/$1/rum-frontends.txt"
+  export ORBITAL_JOB_ID="Job123abc" RUM_RETRY_SLEEP=0 RUM_VERIFY_SLEEP=0
+}
+
+rum_count() { grep -c "^$1 $2" "$RUM_LOG" 2>/dev/null || true; }
 
 corrupt_one_byte() {
   printf 'X' | dd of="$1" bs=1 seek=40 count=1 conv=notrunc 2>/dev/null
@@ -1622,4 +1727,344 @@ fake_echoing_dtctl() {
   grep -qxF 'MONACO_VERSION="${MONACO_VERSION:-$MONACO_PIN_VERSION}"' "$real"
   _isVersion "$d"
   _isVersion "$m"
+}
+
+# ── RUM frontends: rum-frontends.txt (ENH-130 M5) ────────────────────────────
+
+@test "deployMonaco: rum-frontends.txt creates the seat's frontend, exports its classic id to Monaco, prints every call" {
+  source_functions
+  rum_project tenant
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 1 ]
+  # name unique per seat (the job), display names the learner and the job
+  grep -q "|todoapp-job123abc|" "$RUM_STATE"
+  grep -qx "TODOApp learner-ab12 (job123abc)" "$TEST_DIR/display"
+  local aid; aid=$(cut -d'|' -f3 "$RUM_STATE")
+  # Monaco ran with the CLASSIC id (APPLICATION-…), never the FRONTEND id
+  grep "^monaco deploy" "$MONACO_LOG" | grep -q "rum=$aid$"
+  grep -qx "TODO_RUM_APP_ID|todoapp-job123abc|FRONTEND-[0-9A-F]*|$aid" "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  echo "$output" | grep -q "Dynatrace API: POST /platform/rum/v1/frontends"
+  echo "$output" | grep -q "Dynatrace API: GET /platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name"
+  echo "$output" | grep -q "RUM frontend(s) undeployMonaco also deletes: todoapp-job123abc"
+  # the token reached the API only through the header FILE, never curl's argv
+  refute grep -q SENTINEL "$RUM_ARGS_LOG"
+  no_sentinel_anywhere
+}
+
+@test "deployMonaco: a re-deploy reuses the seat's frontend — no second POST (a second POST adds another classic app)" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local aid; aid=$(cut -d'|' -f3 "$RUM_STATE")
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 1 ]
+  [ "$(wc -l < "$RUM_STATE")" -eq 1 ]
+  echo "$output" | grep -q "reusing FRONTEND-"
+  [ "$(grep -c "^monaco deploy.*rum=$aid$" "$MONACO_LOG")" -eq 2 ]
+}
+
+@test "deployMonaco: reuse without the run dir finds the frontend through Smartscape" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  rm -rf "$FAKE_REPO/.devcontainer/.monaco"
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 1 ]
+  [ "$(rum_count POST /platform/storage/query/v1/query:execute)" -ge 1 ]
+  echo "$output" | grep -q 'DQL: smartscapeNodes FRONTEND | filter frontend.name == "todoapp-job123abc"'
+  echo "$output" | grep -q "reusing FRONTEND-"
+}
+
+@test "deployMonaco: two seats of one learner (same session, other job) get two frontends" {
+  source_functions
+  rum_project tenant
+  MONACO_RUN_DIR="$TEST_DIR/a" ORBITAL_JOB_ID=jobA run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  MONACO_RUN_DIR="$TEST_DIR/b" ORBITAL_JOB_ID=jobB run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  grep -q "|todoapp-joba|" "$RUM_STATE"
+  grep -q "|todoapp-jobb|" "$RUM_STATE"
+}
+
+@test "deployMonaco: frontend exists but Smartscape has no live node — refuses, creates none, Monaco never runs" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  rm -rf "$FAKE_REPO/.devcontainer/.monaco"; : > "$MONACO_LOG"
+  RUM_FAKE_SMARTSCAPE_EMPTY=1 RUM_SMARTSCAPE_WAIT=0 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 1 ]
+  echo "$output" | grep -q "not creating another"
+  refute grep -q "^monaco deploy" "$MONACO_LOG"
+}
+
+@test "deployMonaco: 403 on create names the missing scope, Monaco never runs" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_CREATE_CODE=403 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "rum:frontends:write"
+  [ ! -e "$MONACO_LOG" ] || refute grep -q "^monaco deploy" "$MONACO_LOG"
+}
+
+@test "deployMonaco: unreadable settings is not 'no frontend' — no POST" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_SETTINGS_CODE=403 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 0 ]
+  echo "$output" | grep -q "reading builtin:rum.frontend.name failed (HTTP 403)"
+}
+
+@test "deployMonaco: a malformed rum-frontends.txt line is refused before any API call" {
+  source_functions
+  rum_project tenant
+  echo "todo-app Bad_Name" > "$FAKE_REPO/monaco/tenant/rum-frontends.txt"
+  run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "is not '<ENV_VAR> <name> <display name>'"
+  [ ! -s "$RUM_LOG" ]
+}
+
+@test "deployMonaco: no rum-frontends.txt makes no tenant API call (unchanged behaviour)" {
+  source_functions
+  make_monaco_project tenant
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ ! -s "$RUM_LOG" ]
+}
+
+@test "undeployMonaco: deletes the frontend AFTER monaco delete and proves it gone by re-reading it" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local aid fid; fid=$(cut -d'|' -f1 "$RUM_STATE"); aid=$(cut -d'|' -f3 "$RUM_STATE")
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ ! -s "$RUM_STATE" ]
+  [ "$(cat "$TEST_DIR/deleted-after-monaco")" = yes ]
+  echo "$output" | grep -q "Dynatrace API: DELETE /platform/rum/v1/frontends/$fid"
+  grep -q "^GET /platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name&scopes=$aid" "$RUM_LOG"
+  echo "$output" | grep -q "verified gone: $aid"
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant" ]
+  no_sentinel_anywhere
+}
+
+@test "undeployMonaco: a DELETE that answers 204 but leaves the frontend is NOT gone — fails, keeps the state" {
+  # The negative control for "204 is not proof": the re-read must catch it.
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  RUM_FAKE_DELETE_LIES=1 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "still exists after 9 DELETEs"
+  [ -s "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" ]
+  [ -s "$RUM_STATE" ]
+  # monaco's part is done; only the frontend is left for the next run
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant/delete.yaml" ]
+  RUM_FAKE_DELETE_LIES= run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ ! -s "$RUM_STATE" ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant" ]
+}
+
+@test "undeployMonaco: a just-created frontend whose first DELETEs are no-ops (PVF: 200) is retried until gone" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  RUM_FAKE_DELETE_NOOPS=2 run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 3 ]
+  echo "$output" | grep -q "still there after DELETE answered 200"
+  [ ! -s "$RUM_STATE" ]
+}
+
+@test "undeployMonaco: a frontend already gone (404) is proven gone by the re-read, not by the 404" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  : > "$RUM_STATE"
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "verified gone: .*(DELETE answered 404)"
+}
+
+@test "deployMonaco failing after the create keeps the frontend recorded; undeployMonaco still deletes it" {
+  source_functions
+  rum_project tenant
+  MONACO_STUB_NO_DELETEFILE=1 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant/delete.yaml" ]
+  [ -s "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" ]
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ ! -s "$RUM_STATE" ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant" ]
+}
+
+@test "deployMonaco -h / undeployMonaco -h document the RUM frontend step, call nothing" {
+  source_functions
+  rum_project tenant
+  run deployMonaco -h
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "rum-frontends.txt"
+  echo "$output" | grep -q "POST /platform/rum/v1/frontends"
+  echo "$output" | grep -q "rum:frontends:write"
+  run undeployMonaco -h
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "DELETE /platform/rum/v1/frontends/<FRONTEND id>"
+  echo "$output" | grep -q "PROVES it gone"
+  [ ! -s "$RUM_LOG" ]
+}
+
+@test "RUM frontend deploy + undeploy work under zsh (the learner's shell)" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  rum_project tenant
+  run zsh -c 'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh >/dev/null; deployMonaco tenant && echo "APP=$TODO_RUM_APP_ID" && undeployMonaco tenant && echo "AFTER=${TODO_RUM_APP_ID:-unset}"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^APP=APPLICATION-"
+  echo "$output" | grep -q "^AFTER=unset"
+  [ ! -s "$RUM_STATE" ]
+}
+
+# ── R2 (orch review of #195): nothing is dropped from the state without evidence ──
+
+@test "undeployMonaco: unknown classic id + by-name listing lags — not proven gone, keeps the state, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  sed -i -E 's/\|APPLICATION-[0-9A-F]+$/|/' "$st"
+  RUM_FAKE_SETTINGS_LAG=1 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "not proven gone"
+  refute grep -q "verified" <<< "$output"
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 0 ]
+  grep -q "^TODO_RUM_APP_ID|todoapp-job123abc|FRONTEND-" "$st"
+  [ -s "$RUM_STATE" ]
+  # once the listing catches up the same line resolves and is deleted
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "resolved: FRONTEND-"
+  [ ! -s "$RUM_STATE" ]
+}
+
+@test "undeployMonaco: unknown classic id, two classic apps and no Smartscape node — kept, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" fid
+  fid=$(cut -d'|' -f1 "$RUM_STATE")
+  echo "$fid|todoapp-job123abc|APPLICATION-00000000000BEEF1" >> "$RUM_STATE"
+  sed -i -E 's/\|APPLICATION-[0-9A-F]+$/|/' "$st"
+  RUM_FAKE_SMARTSCAPE_EMPTY=1 RUM_SMARTSCAPE_WAIT=0 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 0 ]
+  grep -q "^TODO_RUM_APP_ID|todoapp-job123abc|$fid|" "$st"
+}
+
+@test "undeployMonaco: 403 on the settings re-read — not proven gone, keeps the state, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  RUM_FAKE_SETTINGS_CODE=403 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "could not re-read .* (HTTP 403)"
+  [ -s "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" ]
+}
+
+@test "undeployMonaco: 403 resolving a line with no classic id — kept, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  sed -i -E 's/\|APPLICATION-[0-9A-F]+$/|/' "$st"
+  RUM_FAKE_SETTINGS_CODE=403 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 0 ]
+  grep -q "^TODO_RUM_APP_ID|todoapp-job123abc|FRONTEND-" "$st"
+}
+
+@test "deployMonaco: a create whose answer is lost (504) stays pending; undeployMonaco finds it by name and deletes it" {
+  source_functions
+  rum_project tenant
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  RUM_FAKE_CREATE_THEN=504 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ -s "$RUM_STATE" ]                                       # it was created
+  grep -qx "TODO_RUM_APP_ID|todoapp-job123abc||" "$st"      # and is pending
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "pending create"
+  echo "$output" | grep -q "resolved: FRONTEND-"
+  [ ! -s "$RUM_STATE" ]
+  [ ! -e "$st" ]
+}
+
+@test "deployMonaco: a re-deploy after a lost answer reuses the frontend and leaves ONE state line" {
+  source_functions
+  rum_project tenant
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  RUM_FAKE_CREATE_THEN=504 deployMonaco tenant >/dev/null || true
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 1 ]
+  [ "$(wc -l < "$st")" -eq 1 ]
+  grep -qE "^TODO_RUM_APP_ID\|todoapp-job123abc\|FRONTEND-[0-9A-F]+\|APPLICATION-[0-9A-F]+$" "$st"
+}
+
+@test "deployMonaco: a refused create (403) leaves no pending line" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_CREATE_CODE=403 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ ! -s "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" ]
+}
+
+@test "undeployMonaco: a pending line with nothing by that name in 3 complete listings is dropped" {
+  source_functions
+  rum_project tenant
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  mkdir -p "$(dirname "$st")"
+  echo "TODO_RUM_APP_ID|todoapp-job123abc||" > "$st"
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count GET /platform/classic/environment-api/v2/settings/objects)" -eq 3 ]
+  echo "$output" | grep -q "the create never landed"
+  [ ! -e "$st" ]
+}
+
+@test "deployMonaco: a settings listing whose nextPageKey repeats is incomplete — fails, no POST" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_PAGE_LOOP=1 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "nextPageKey repeated"
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 0 ]
+  [ "$(rum_count GET /platform/classic/environment-api/v2/settings/objects)" -eq 2 ]
+}
+
+@test "_rumAppIdsByName: page cap — more than RUM_MAX_PAGES pages fails" {
+  source_functions
+  rum_project tenant
+  export DT_ENVIRONMENT DT_MONACO_TOKEN
+  RUM_FAKE_PAGE_LOOP=1 RUM_MAX_PAGES=1 run _rumAppIdsByName todoapp-x
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "more than 1 pages"
+}
+
+@test "deployMonaco: rum-frontends.txt may not name a reserved variable" {
+  source_functions
+  rum_project tenant
+  local v
+  for v in DT_MONACO_TOKEN PATH HOME KUBECONFIG LEARNER_PREFIX MY_API_KEY; do
+    echo "$v todoapp TODOApp" > "$FAKE_REPO/monaco/tenant/rum-frontends.txt"
+    run deployMonaco tenant
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "'$v' is a reserved name"
+  done
+  [ ! -s "$RUM_LOG" ]
 }
