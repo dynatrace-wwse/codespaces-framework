@@ -296,6 +296,16 @@ the token never is — it reaches curl through a file descriptor, not its comman
   answers 204 or 404, and a frontend only seconds old answers 200 or 400 and stays. So it
   deletes and re-reads until the object is gone (~90 s at most); one that is not proven gone
   stays in the state file, `undeployMonaco` returns non-zero, and running it again retries.
+- **Nothing leaves the state without evidence.** A line is written *before* the create
+  (`<ENV_VAR>|<name>||`, pending), because a create whose answer is lost — timeout, 5xx, no id —
+  may still have made the frontend; only an outright refusal (400/401/403) removes it. At undo a
+  line missing an id is resolved first (by name, then Smartscape). A failed or incomplete read
+  (any non-200, more than 20 pages, a repeating `nextPageKey`) or a lag that outlasts the bound
+  keeps the line and fails; a pending line is dropped only after 3 complete listings name no
+  such frontend.
+- **`<ENV_VAR>` may not be a reserved name** — anything holding a token, key, secret or password,
+  `DT_*`, `ORBITAL_*`, `MONACO_*`, `PATH`, `HOME`, `KUBECONFIG`, `LEARNER_PREFIX` and other shell
+  or framework variables are refused before any API call.
 - **Token.** The seat's `DT_MONACO_TOKEN` carries `rum:frontends:write` and
   `rum:frontends:delete` from app ENH-130 M5. Without them the create answers 403 and
   `deployMonaco` stops before Monaco runs. Needs `jq`.

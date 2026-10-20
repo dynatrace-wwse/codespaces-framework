@@ -240,6 +240,7 @@ if u.path == "/platform/rum/v1/frontends" and method == "POST":
     fid = next((r[0] for r in rows if r[1] == b["frontendName"] and r[0]), f"FRONTEND-{n:016X}")
     rows.append([fid, b["frontendName"], f"APPLICATION-{0xA0000 + n:016X}"]); save()
     with open(os.path.join(os.path.dirname(env["RUM_STATE"]), "display"), "a") as f: f.write(b["displayName"] + "\n")
+    if env.get("RUM_FAKE_CREATE_THEN"): reply(int(env["RUM_FAKE_CREATE_THEN"]), "")  # created, answer lost
     reply(201, {"id": fid, "type": b["type"], "displayName": b["displayName"], "frontendName": b["frontendName"]})
 m = re.fullmatch(r"/platform/rum/v1/frontends/(.+)", u.path)
 if m and method == "DELETE":
@@ -254,8 +255,12 @@ if m and method == "DELETE":
     reply(204)
 if u.path == "/platform/classic/environment-api/v2/settings/objects" and method == "GET":
     if env.get("RUM_FAKE_SETTINGS_CODE"): reply(int(env["RUM_FAKE_SETTINGS_CODE"]), "{}")
-    assert q.get("schemaIds") == ["builtin:rum.frontend.name"], q
+    assert q.get("schemaIds") == ["builtin:rum.frontend.name"] or "nextPageKey" in q, q
     scopes = q.get("scopes", [None])[0]
+    if env.get("RUM_FAKE_PAGE_LOOP") and scopes is None:
+        reply(200, {"items": [], "totalCount": 1000, "nextPageKey": "same-key"})
+    if env.get("RUM_FAKE_SETTINGS_LAG") and scopes is None:
+        reply(200, {"items": [], "totalCount": 0})  # the by-name listing has not caught up
     items = [{"scope": r[2], "value": {"frontendName": r[1]}} for r in rows if scopes in (None, r[2])]
     items.append({"scope": "APPLICATION-EA7C4B59F27D43EB", "value": {"frontendName": "My_web_application"}}) if scopes is None else None
     reply(200, {"items": items, "totalCount": len(items)})
@@ -1923,4 +1928,143 @@ fake_echoing_dtctl() {
   echo "$output" | grep -q "^APP=APPLICATION-"
   echo "$output" | grep -q "^AFTER=unset"
   [ ! -s "$RUM_STATE" ]
+}
+
+# ── R2 (orch review of #195): nothing is dropped from the state without evidence ──
+
+@test "undeployMonaco: unknown classic id + by-name listing lags — not proven gone, keeps the state, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  sed -i -E 's/\|APPLICATION-[0-9A-F]+$/|/' "$st"
+  RUM_FAKE_SETTINGS_LAG=1 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "not proven gone"
+  refute grep -q "verified" <<< "$output"
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 0 ]
+  grep -q "^TODO_RUM_APP_ID|todoapp-job123abc|FRONTEND-" "$st"
+  [ -s "$RUM_STATE" ]
+  # once the listing catches up the same line resolves and is deleted
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "resolved: FRONTEND-"
+  [ ! -s "$RUM_STATE" ]
+}
+
+@test "undeployMonaco: unknown classic id, two classic apps and no Smartscape node — kept, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" fid
+  fid=$(cut -d'|' -f1 "$RUM_STATE")
+  echo "$fid|todoapp-job123abc|APPLICATION-00000000000BEEF1" >> "$RUM_STATE"
+  sed -i -E 's/\|APPLICATION-[0-9A-F]+$/|/' "$st"
+  RUM_FAKE_SMARTSCAPE_EMPTY=1 RUM_SMARTSCAPE_WAIT=0 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 0 ]
+  grep -q "^TODO_RUM_APP_ID|todoapp-job123abc|$fid|" "$st"
+}
+
+@test "undeployMonaco: 403 on the settings re-read — not proven gone, keeps the state, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  RUM_FAKE_SETTINGS_CODE=403 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "could not re-read .* (HTTP 403)"
+  [ -s "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" ]
+}
+
+@test "undeployMonaco: 403 resolving a line with no classic id — kept, rc!=0" {
+  source_functions
+  rum_project tenant
+  deployMonaco tenant >/dev/null
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  sed -i -E 's/\|APPLICATION-[0-9A-F]+$/|/' "$st"
+  RUM_FAKE_SETTINGS_CODE=403 run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ "$(rum_count DELETE /platform/rum/v1/frontends/)" -eq 0 ]
+  grep -q "^TODO_RUM_APP_ID|todoapp-job123abc|FRONTEND-" "$st"
+}
+
+@test "deployMonaco: a create whose answer is lost (504) stays pending; undeployMonaco finds it by name and deletes it" {
+  source_functions
+  rum_project tenant
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  RUM_FAKE_CREATE_THEN=504 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ -s "$RUM_STATE" ]                                       # it was created
+  grep -qx "TODO_RUM_APP_ID|todoapp-job123abc||" "$st"      # and is pending
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "pending create"
+  echo "$output" | grep -q "resolved: FRONTEND-"
+  [ ! -s "$RUM_STATE" ]
+  [ ! -e "$st" ]
+}
+
+@test "deployMonaco: a re-deploy after a lost answer reuses the frontend and leaves ONE state line" {
+  source_functions
+  rum_project tenant
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  RUM_FAKE_CREATE_THEN=504 deployMonaco tenant >/dev/null || true
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 1 ]
+  [ "$(wc -l < "$st")" -eq 1 ]
+  grep -qE "^TODO_RUM_APP_ID\|todoapp-job123abc\|FRONTEND-[0-9A-F]+\|APPLICATION-[0-9A-F]+$" "$st"
+}
+
+@test "deployMonaco: a refused create (403) leaves no pending line" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_CREATE_CODE=403 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ ! -s "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state" ]
+}
+
+@test "undeployMonaco: a pending line with nothing by that name in 3 complete listings is dropped" {
+  source_functions
+  rum_project tenant
+  local st="$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  mkdir -p "$(dirname "$st")"
+  echo "TODO_RUM_APP_ID|todoapp-job123abc||" > "$st"
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(rum_count GET /platform/classic/environment-api/v2/settings/objects)" -eq 3 ]
+  echo "$output" | grep -q "the create never landed"
+  [ ! -e "$st" ]
+}
+
+@test "deployMonaco: a settings listing whose nextPageKey repeats is incomplete — fails, no POST" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_PAGE_LOOP=1 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "nextPageKey repeated"
+  [ "$(rum_count POST /platform/rum/v1/frontends)" -eq 0 ]
+  [ "$(rum_count GET /platform/classic/environment-api/v2/settings/objects)" -eq 2 ]
+}
+
+@test "_rumAppIdsByName: page cap — more than RUM_MAX_PAGES pages fails" {
+  source_functions
+  rum_project tenant
+  export DT_ENVIRONMENT DT_MONACO_TOKEN
+  RUM_FAKE_PAGE_LOOP=1 RUM_MAX_PAGES=1 run _rumAppIdsByName todoapp-x
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "more than 1 pages"
+}
+
+@test "deployMonaco: rum-frontends.txt may not name a reserved variable" {
+  source_functions
+  rum_project tenant
+  local v
+  for v in DT_MONACO_TOKEN PATH HOME KUBECONFIG LEARNER_PREFIX MY_API_KEY; do
+    echo "$v todoapp TODOApp" > "$FAKE_REPO/monaco/tenant/rum-frontends.txt"
+    run deployMonaco tenant
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "'$v' is a reserved name"
+  done
+  [ ! -s "$RUM_LOG" ]
 }

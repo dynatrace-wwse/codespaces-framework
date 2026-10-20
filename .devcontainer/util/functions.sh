@@ -1473,15 +1473,21 @@ _rumApi() {
 _rumAppIdsByName() {
   # _rumAppIdsByName <frontendName> — every classic APPLICATION id whose
   # builtin:rum.frontend.name is <frontendName>, one per line. Fails when the
-  # settings cannot be read (not the same as "none").
-  local name="$1" api_path="/platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name&fields=scope,value&pageSize=500" next ids=""
+  # settings cannot be read (not the same as "none"), and when the listing
+  # cannot be completed: more than RUM_MAX_PAGES (20) pages, or a nextPageKey
+  # that repeats — an incomplete listing proves nothing about absence.
+  local name="$1" api_path="/platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name&fields=scope,value&pageSize=500" next ids="" seen=" " pages=0
   while :; do
+    pages=$((pages + 1))
+    [ "$pages" -le "${RUM_MAX_PAGES:-20}" ] || { printError "reading builtin:rum.frontend.name: more than ${RUM_MAX_PAGES:-20} pages — listing not complete" >&2; return 1; }
     _rumApi GET "$api_path" >&2
     [ "$RUM_HTTP_CODE" = 200 ] || { printError "reading builtin:rum.frontend.name failed (HTTP $RUM_HTTP_CODE)" >&2; return 1; }
     ids="$ids$(printf '%s' "$RUM_HTTP_BODY" | jq -r --arg n "$name" '.items[]? | select(.value.frontendName == $n) | .scope')
 "
     next=$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.nextPageKey // empty')
     [ -n "$next" ] || break
+    case "$seen" in *" $next "*) printError "reading builtin:rum.frontend.name: nextPageKey repeated — listing not complete" >&2; return 1 ;; esac
+    seen="$seen$next "
     api_path="/platform/classic/environment-api/v2/settings/objects?nextPageKey=$next"
   done
   printf '%s' "$ids" | grep -E '^APPLICATION-[0-9A-F]+$'
@@ -1528,6 +1534,27 @@ _rumSmartscapeWait() {
   printf '%s\n' "$found" | head -1
 }
 
+_rumStateSet() {
+  # _rumStateSet <state-file> <var> <fname> <fid> <aid> — the ONE line for
+  # <var>|<fname>, replacing any earlier (pending or partial) line for it.
+  local f="$1" tmp
+  tmp=$(mktemp) || return 1
+  [ -f "$f" ] && grep -v "^$2|$3|" "$f" > "$tmp"
+  printf '%s|%s|%s|%s\n' "$2" "$3" "$4" "$5" >> "$tmp"
+  mv "$tmp" "$f"
+}
+
+_rumReservedVar() {
+  # A rum-frontends.txt <ENV_VAR> must not overwrite anything the shell, the
+  # framework or a token lives in.
+  case "$1" in
+    *TOKEN*|*SECRET*|*PASSWORD*|*KEY*|DT_*|ORBITAL_*|MONACO_*|DTCTL_*|GITHUB_*|CODESPACE*|RUM_*) return 0 ;;
+    PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|IFS|PS1|PS2|PS4|TERM|LANG|TMPDIR|HOSTNAME) return 0 ;;
+    KUBECONFIG|LEARNER_PREFIX|REPO_PATH|RepositoryName|ENV_FILE|LD_*|BASH*|ZSH*|FPATH|PROMPT_COMMAND) return 0 ;;
+  esac
+  return 1
+}
+
 _monacoRumFrontends() {
   # _monacoRumFrontends <phase> <run-dir> [previous-state] — the deploy pre-hook.
   # Creates (or reuses) every frontend monaco/<phase>/rum-frontends.txt
@@ -1546,6 +1573,9 @@ _monacoRumFrontends() {
     [ -n "$var" ] || continue
     if ! _isVarName "$var" || ! printf '%s' "$name" | grep -qxE '[a-z0-9][a-z0-9-]*' || [ -z "$display" ]; then
       printError "rum-frontends.txt: '$line' is not '<ENV_VAR> <name> <display name>' (name: lowercase, digits, dashes)"; rc=1; break
+    fi
+    if _rumReservedVar "$var"; then
+      printError "rum-frontends.txt: '$var' is a reserved name (shell, framework or token variable) — pick another, e.g. TODO_RUM_APP_ID"; rc=1; break
     fi
     fname=$(printf '%s-%s' "$name" "$seat" | cut -c1-100)
     display="$display $session${ORBITAL_JOB_ID:+ ($seat)}"
@@ -1569,17 +1599,25 @@ _monacoRumFrontends() {
       fi
       printInfo "  reusing $fid ($aid) — already created for this seat"
     else
+      # Pending BEFORE the POST: a timeout, a 5xx or an answer without an id can
+      # still have created it; undeployMonaco resolves a pending line by name.
+      _rumStateSet "$run/rum-frontends.state" "$var" "$fname" "" ""
       _rumApi POST "/platform/rum/v1/frontends" \
         "$(jq -nc --arg f "$fname" --arg d "$display" '{frontendName: $f, displayName: $d, type: "WEB_AUTO_INJECTED", enableRum: true}')"
+      if [ "$RUM_HTTP_CODE" = 403 ] || [ "$RUM_HTTP_CODE" = 401 ] || [ "$RUM_HTTP_CODE" = 400 ]; then
+        # Refused outright: nothing was created, so nothing is pending.
+        grep -v "^$var|$fname|" "$run/rum-frontends.state" > "$run/rum-frontends.state.tmp"; mv "$run/rum-frontends.state.tmp" "$run/rum-frontends.state"
+        [ -s "$run/rum-frontends.state" ] || rm -f "$run/rum-frontends.state"
+      fi
       if [ "$RUM_HTTP_CODE" = 403 ]; then
-        printError "creating RUM frontend refused (HTTP 403): the token lacks rum:frontends:write — the seat token carries it from app 1.0.4xx (ENH-130 M5). Nothing was deployed."
+        printError "creating RUM frontend refused (HTTP 403): the token lacks rum:frontends:write (the Enablement app's seat token carries it since ENH-130 M5). Nothing was deployed."
         rc=1; break
       fi
       [ "$RUM_HTTP_CODE" = 201 ] || [ "$RUM_HTTP_CODE" = 200 ] || { printError "creating RUM frontend '$fname' failed (HTTP $RUM_HTTP_CODE): $(printf '%s' "$RUM_HTTP_BODY" | jq -r '.error.message // empty' 2>/dev/null)"; rc=1; break; }
       fid=$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.id // empty')
       printf '%s' "$fid" | grep -qxE 'FRONTEND-[0-9A-F]+' || { printError "creating RUM frontend '$fname' answered no FRONTEND id"; rc=1; break; }
       # Recorded before the classic id is known: undeployMonaco can delete it either way.
-      printf '%s|%s|%s|\n' "$var" "$fname" "$fid" >> "$run/rum-frontends.state"
+      _rumStateSet "$run/rum-frontends.state" "$var" "$fname" "$fid" ""
       ids=$(_rumAppIdsByName "$fname") || { rc=1; break; }
       if [ "$(printf '%s' "$ids" | grep -c .)" -eq 1 ]; then
         aid="$ids"
@@ -1588,15 +1626,48 @@ _monacoRumFrontends() {
         aid=$(_rumSmartscapeWait "id == toSmartscapeId(\"$fid\")" | awk '{print $2}') || aid=""
       fi
       [ -n "$aid" ] || { printError "RUM frontend $fid created, but its classic APPLICATION id could not be resolved — undo with: undeployMonaco $phase"; rc=1; break; }
-      sed -i "s#^$var|$fname|$fid|\$#$var|$fname|$fid|$aid#" "$run/rum-frontends.state"
       printInfo "  created $fid ($aid)"
     fi
-    grep -q "^$var|$fname|$fid|$aid\$" "$run/rum-frontends.state" 2>/dev/null \
-      || printf '%s|%s|%s|%s\n' "$var" "$fname" "$fid" "$aid" >> "$run/rum-frontends.state"
+    _rumStateSet "$run/rum-frontends.state" "$var" "$fname" "$fid" "$aid"
     export "$var=$aid"
     printInfo "  $var=$aid (classic id — the app-detection rule's applicationId)"
   done < "$decl"
   return $rc
+}
+
+_rumResolve() {
+  # _rumResolve <fname> <fid> — sets RUM_FID / RUM_AID for a state line whose
+  # ids are not both known (a pending line, or a create whose classic id was
+  # never resolved). Returns 0 resolved, 3 "nothing by that name exists" (only
+  # for a pending line, after RUM_RESOLVE_TRIES (3) complete listings), 1 not
+  # resolvable — a failed read, or a lag that outlasts the bound. Only 0 and 3
+  # are evidence; 1 keeps the line.
+  local fname="$1" fid="$2" ids n try=0 line
+  RUM_FID="$fid" RUM_AID=""
+  while :; do
+    try=$((try + 1))
+    ids=$(_rumAppIdsByName "$fname") || return 1
+    n=$(printf '%s' "$ids" | grep -c .)
+    if [ "$n" -eq 1 ] && [ -n "$fid" ]; then RUM_AID="$ids"; return 0; fi
+    if [ "$n" -ge 1 ]; then
+      if [ -n "$fid" ]; then
+        line=$(_rumSmartscapeWait "id == toSmartscapeId(\"$fid\")") || return 1
+      else
+        line=$(_rumSmartscapeWait "frontend.name == \"$fname\"") || return 1
+      fi
+      [ -n "$line" ] || { printError "  '$fname' exists ($n classic app(s)) but Smartscape names no FRONTEND for it" >&2; return 1; }
+      RUM_FID="${line%% *}"; RUM_AID="${line#* }"
+      return 0
+    fi
+    [ "$try" -lt "${RUM_RESOLVE_TRIES:-3}" ] || break
+    printInfo "  no builtin:rum.frontend.name '$fname' (yet?) — listing again in ${RUM_RETRY_SLEEP:-10}s" >&2
+    sleep "${RUM_RETRY_SLEEP:-10}"
+  done
+  # A FRONTEND id we were given, but no classic app by that name: lag or a
+  # renamed app — not evidence it is gone.
+  [ -z "$fid" ] && return 3
+  printError "  '$fname' ($fid): no classic id found after $try listings — not proven gone" >&2
+  return 1
 }
 
 _monacoRumUndeploy() {
@@ -1608,25 +1679,32 @@ _monacoRumUndeploy() {
   # answers 204 or 404; a frontend created seconds before answers 200 and stays,
   # or 400 "no application with id …", and only a later DELETE removes it.
   # So: DELETE, read back, and again every RUM_RETRY_SLEEP (10) s, ~90 s at most.
-  local state="$1/rum-frontends.state" var fname fid aid left rc=0 try code gone
+  # The classic id is resolved BEFORE the delete (afterwards nothing is left to
+  # resolve it from); a line it cannot be resolved for is kept, never dropped.
+  local state="$1/rum-frontends.state" var fname fid aid left rc=0 try code gone rrc
   [ -f "$state" ] || return 0
   left=$(mktemp) || return 1
   while IFS='|' read -r var fname fid aid; do
-    [ -n "$fid" ] || continue
-    printInfo "RUM frontend '$fname' ($fid${aid:+, $aid})"
+    [ -n "$fname" ] || continue
+    printInfo "RUM frontend '$fname' (${fid:-pending create}${aid:+, $aid})"
     gone=""
+    if [ -z "$fid" ] || [ -z "$aid" ]; then
+      _rumResolve "$fname" "$fid"; rrc=$?
+      case "$rrc" in
+        0) fid="$RUM_FID"; aid="$RUM_AID"; printInfo "  resolved: $fid ($aid)" ;;
+        3) printInfo "  verified: no builtin:rum.frontend.name '$fname' in ${RUM_RESOLVE_TRIES:-3} complete listings — the create never landed"; gone=1 ;;
+        *) printError "  kept for the next undeployMonaco (ids not resolvable)"
+           printf '%s|%s|%s|%s\n' "$var" "$fname" "$fid" "$aid" >> "$left"; rc=1; continue ;;
+      esac
+    fi
     try=0
-    while :; do
+    while [ -z "$gone" ]; do
       _rumApi DELETE "/platform/rum/v1/frontends/$fid"
       code="$RUM_HTTP_CODE"
       case "$code" in
         200|204|404|400) ;;
         *) printError "  delete failed (HTTP $code)"; break ;;
       esac
-      [ -n "$aid" ] || aid=$(_rumAppIdsByName "$fname" | head -1)
-      if [ -z "$aid" ]; then
-        printInfo "  verified: no builtin:rum.frontend.name '$fname' left"; gone=1; break
-      fi
       sleep "${RUM_VERIFY_SLEEP:-3}"
       _rumAppIdExists "$aid"
       case $? in
