@@ -245,6 +245,62 @@ if the delete fails, the delete file is kept so it can be retried. Every deploy 
 tenant — success **or** failure — ends with a closing block naming `undeployMonaco <phase>`, the
 delete file and this page, so the way back is the last thing on screen.
 
+**RUM web frontends (`rum-frontends.txt`).** Monaco has no config type for a 3rd-gen RUM
+frontend (a "web application"), and a `builtin:rum.web.app-detection` rule needs one that already
+exists. A phase folder can declare them, one per line:
+
+```
+# monaco/tenant/rum-frontends.txt — <ENV_VAR> <name> <display name>
+TODO_RUM_APP_ID todoapp TODOApp
+```
+
+Before Monaco runs, `deployMonaco` creates **the seat's own** frontend for each line and exports
+`<ENV_VAR>` with its **classic id** (`APPLICATION-…`) — the id a detection rule's
+`applicationId` takes; the rule refuses the `FRONTEND-…` id. Use it like any environment
+parameter:
+
+```yaml
+# monaco/tenant/rum-todoapp/config.yaml
+configs:
+- id: todoapp-detection
+  config:
+    name: {type: environment, name: LEARNER_PREFIX}
+    parameters:
+      applicationId: {type: environment, name: TODO_RUM_APP_ID}
+      host: {type: environment, name: TODO_APP_HOST}
+    template: rule.json      # {"applicationId": "{{ .applicationId }}", "matcher": "URL_CONTAINS", "pattern": "{{ .host }}", ...}
+  type:
+    settings: {schema: builtin:rum.web.app-detection, scope: environment}
+```
+
+| | Value |
+|---|---|
+| `frontendName` | `<name>-<seat id>` — seat id is `ORBITAL_JOB_ID`, else `CODESPACE_NAME`, else the hostname, so two sessions of one learner never share a frontend |
+| `displayName` | `<display name> <DT_SESSION_ID>`, plus ` (<job>)` under Orbital — e.g. `TODOApp alice-20261020 (k3x9a1b2)` |
+| `type` | `WEB_AUTO_INJECTED` (RUM is enabled) |
+| state | `.devcontainer/.monaco/<phase>/rum-frontends.state` — `<ENV_VAR>\|<frontendName>\|<FRONTEND id>\|<APPLICATION id>` |
+
+Every Dynatrace API call is printed as `Dynatrace API: <METHOD> <path>` (and the DQL text);
+the token never is — it reaches curl through a file descriptor, not its command line.
+
+- **Re-deploy reuses it.** The frontend is looked up by name first
+  (`GET …/settings/objects?schemaIds=builtin:rum.frontend.name`) and reused — from the state
+  file, else through Smartscape (`smartscapeNodes FRONTEND | filter frontend.name == …`, which
+  lags a new frontend by up to ~80 s). It must not be POSTed twice: a second create of the same
+  name answers the **same** `FRONTEND` id but adds **another** classic application (measured on
+  PVF), and that orphan has no frontend node, so the RUM API cannot delete it.
+- **Undo.** `undeployMonaco` runs `monaco delete` first, then
+  `DELETE /platform/rum/v1/frontends/<FRONTEND id>` — deleting a frontend also removes the
+  detection rules pointing at it — and **proves it gone by reading its
+  `builtin:rum.frontend.name` back**. The DELETE's status proves nothing: an id already gone
+  answers 204 or 404, and a frontend only seconds old answers 200 or 400 and stays. So it
+  deletes and re-reads until the object is gone (~90 s at most); one that is not proven gone
+  stays in the state file, `undeployMonaco` returns non-zero, and running it again retries.
+- **Token.** The seat's `DT_MONACO_TOKEN` carries `rum:frontends:write` and
+  `rum:frontends:delete` from app ENH-130 M5. Without them the create answers 403 and
+  `deployMonaco` stops before Monaco runs. Needs `jq`.
+- **API maturity.** `/platform/rum/v1/frontends` is `EARLY_ADOPTER`; its contract can change.
+
 **Help.** `deployMonaco -h` and `undeployMonaco -h` print the usage, the phases, what each step
 does, the required variables (names only) and the undo command, with a link to this section. They
 touch nothing — no tenant call, no file.

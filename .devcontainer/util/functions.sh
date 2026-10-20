@@ -1365,7 +1365,11 @@ What it does, step by step:
        .devcontainer/.monaco/<phase>/delete.yaml
      No delete file -> nothing was deployed for that phase; nothing to do.
   2. Runs: monaco delete --manifest manifest.yaml --file delete.yaml
-  3. On success removes .devcontainer/.monaco/<phase>. On failure the delete
+  3. RUM frontends deployMonaco created (rum-frontends.txt): deletes each one
+       DELETE /platform/rum/v1/frontends/<FRONTEND id>
+     and PROVES it gone by reading its builtin:rum.frontend.name back (the
+     DELETE's status alone proves nothing). Every API call is printed.
+  4. On success removes .devcontainer/.monaco/<phase>. On failure the delete
      file is KEPT, so you can run undeployMonaco again.
      Documents land in the tenant's trash (the learner token cannot purge it,
      by design) — reported as a warning, not an error.
@@ -1397,18 +1401,252 @@ What it does, step by step:
      manifest.yaml naming ONE project per learner: <repo>-<DT_SESSION_ID>.
      LEARNER_PREFIX=<DT_SESSION_ID> is exported for config names, so your
      objects never collide with another learner's.
-  4. Runs: monaco generate deletefile — BEFORE deploying, so even a partial
+  4. RUM frontends: for each line of monaco/<phase>/rum-frontends.txt
+       <ENV_VAR> <name> <display name>     e.g.  TODO_RUM_APP_ID todoapp TODOApp
+     creates YOUR web frontend <name>-<seat id> ("<display name> <session>")
+       POST /platform/rum/v1/frontends   (reused if it already exists)
+     and exports <ENV_VAR>=APPLICATION-… (its classic id, what an app-detection
+     rule takes). Every API call is printed, method and path; never the token.
+  5. Runs: monaco generate deletefile — BEFORE deploying, so even a partial
      deploy can be undone.
-  5. Runs: monaco deploy manifest.yaml -e learner
+  6. Runs: monaco deploy manifest.yaml -e learner
 
 Required variables (names only):
   DT_ENVIRONMENT  the environment URL
   ${token_var}  platform token (override the name with MONACO_TOKEN_VAR)
   DT_SESSION_ID   your learner id (derived from DT_HOSTGROUP or GITHUB_USER)
+  (rum-frontends.txt only) the token needs rum:frontends:write and
+  rum:frontends:delete; jq
 
 Undo: undeployMonaco <tenant|env>   (undeployMonaco -h for details)
 Docs: $(_monacoDocsUrl)
 HELPEOF
+}
+
+# ── RUM frontends (ENH-130 M5) ────────────────────────────────────────────
+# A phase folder may declare 3rd-gen RUM web frontends in
+# monaco/<phase>/rum-frontends.txt, one per line:
+#     <ENV_VAR> <name> <display name...>
+#     TODO_RUM_APP_ID todoapp TODOApp
+# deployMonaco creates each one for THIS seat before Monaco runs
+# (POST /platform/rum/v1/frontends, frontendName <name>-<seat id>) and exports
+# <ENV_VAR> with its classic id (APPLICATION-…), which is what a
+# builtin:rum.web.app-detection rule takes — the FRONTEND-… id is refused.
+# Monaco has no type for a frontend, so the framework owns its lifecycle;
+# undeployMonaco deletes it after monaco delete and proves it is gone by
+# reading it back (the DELETE answers 204 or 404 for an id that is already
+# gone, so its status proves nothing). Every API call is printed, method and
+# path; the token never is. State: <run>/rum-frontends.state, one line per
+# frontend: <ENV_VAR>|<frontendName>|<FRONTEND id>|<APPLICATION id>.
+
+_rumSeatId() {
+  # The seat's own id, so two sessions of one learner never share a frontend:
+  # the Orbital job, else the Codespace, else this host.
+  local id="${ORBITAL_JOB_ID:-${CODESPACE_NAME:-$(hostname 2>/dev/null)}}"
+  id=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
+}
+
+_rumApi() {
+  # _rumApi <METHOD> <path> [json-body] — one platform API call with the Monaco
+  # token. Prints "Dynatrace API: <METHOD> <path>" (never the token); sets
+  # RUM_HTTP_CODE and RUM_HTTP_BODY. The token goes to curl on a file
+  # descriptor, not on its command line.
+  local method="$1" api_path="$2" data="$3" token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}" tok out
+  eval "tok=\${$token_var}"
+  printInfo "Dynatrace API: $method $(printf '%s' "$api_path" | cut -c1-160)"
+  out=$(mktemp) || { RUM_HTTP_CODE=000; RUM_HTTP_BODY=""; return 1; }
+  if [ -n "$data" ]; then
+    RUM_HTTP_CODE=$(curl -sS --max-time 60 -o "$out" -w '%{http_code}' -X "$method" \
+      -H @<(printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$tok") \
+      --data-binary @<(printf '%s' "$data") "${DT_ENVIRONMENT%/}$api_path" 2>/dev/null)
+  else
+    RUM_HTTP_CODE=$(curl -sS --max-time 60 -o "$out" -w '%{http_code}' -X "$method" \
+      -H @<(printf 'Authorization: Bearer %s\n' "$tok") "${DT_ENVIRONMENT%/}$api_path" 2>/dev/null)
+  fi
+  [ -n "$RUM_HTTP_CODE" ] || RUM_HTTP_CODE=000
+  RUM_HTTP_BODY=$(cat "$out" 2>/dev/null)
+  rm -f "$out"
+}
+
+_rumAppIdsByName() {
+  # _rumAppIdsByName <frontendName> — every classic APPLICATION id whose
+  # builtin:rum.frontend.name is <frontendName>, one per line. Fails when the
+  # settings cannot be read (not the same as "none").
+  local name="$1" api_path="/platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name&fields=scope,value&pageSize=500" next ids=""
+  while :; do
+    _rumApi GET "$api_path" >&2
+    [ "$RUM_HTTP_CODE" = 200 ] || { printError "reading builtin:rum.frontend.name failed (HTTP $RUM_HTTP_CODE)" >&2; return 1; }
+    ids="$ids$(printf '%s' "$RUM_HTTP_BODY" | jq -r --arg n "$name" '.items[]? | select(.value.frontendName == $n) | .scope')
+"
+    next=$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.nextPageKey // empty')
+    [ -n "$next" ] || break
+    api_path="/platform/classic/environment-api/v2/settings/objects?nextPageKey=$next"
+  done
+  printf '%s' "$ids" | grep -E '^APPLICATION-[0-9A-F]+$'
+  return 0
+}
+
+_rumAppIdExists() {
+  # _rumAppIdExists <APPLICATION id> — 0 present, 1 gone, 2 unreadable.
+  _rumApi GET "/platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name&scopes=$1&fields=scope"
+  [ "$RUM_HTTP_CODE" = 200 ] || return 2
+  [ "$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.items | length')" -gt 0 ]
+}
+
+_rumSmartscape() {
+  # _rumSmartscape <DQL filter> — "<FRONTEND id> <APPLICATION id>" of live
+  # FRONTEND nodes matching it. Smartscape lags a new frontend by ~30 s.
+  local q="smartscapeNodes FRONTEND | filter $1 | fields id, id_classic" body token
+  body=$(jq -nc --arg q "$q" '{query: $q, requestTimeoutMilliseconds: 30000}')
+  printInfo "  DQL: $q" >&2
+  _rumApi POST "/platform/storage/query/v1/query:execute" "$body" >&2
+  local tries=0
+  while [ "$RUM_HTTP_CODE" = 202 ] || { [ "$RUM_HTTP_CODE" = 200 ] && [ "$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.state // "SUCCEEDED"')" = RUNNING ]; }; do
+    token=$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.requestToken // empty')
+    [ -n "$token" ] && [ "$tries" -lt 30 ] || break
+    tries=$((tries + 1)); sleep 1
+    _rumApi GET "/platform/storage/query/v1/query:poll?request-token=$(jq -rn --arg t "$token" '$t|@uri')" >&2
+  done
+  [ "$RUM_HTTP_CODE" = 200 ] || { printError "Smartscape query failed (HTTP $RUM_HTTP_CODE)" >&2; return 1; }
+  printf '%s' "$RUM_HTTP_BODY" | jq -r '.result.records[]? | select(.id and .id_classic) | "\(.id) \(.id_classic)"'
+}
+
+_rumSmartscapeWait() {
+  # _rumSmartscapeWait <DQL filter> — _rumSmartscape, asked again every
+  # RUM_RETRY_SLEEP (10) s for up to ~180 s while it finds nothing: a frontend
+  # created moments ago is not in Smartscape yet (~80 s measured on PVF).
+  local found="" waited=0 step="${RUM_RETRY_SLEEP:-10}"
+  while :; do
+    found=$(_rumSmartscape "$1") || return 1
+    [ -n "$found" ] && break
+    [ "$waited" -ge "${RUM_SMARTSCAPE_WAIT:-180}" ] && break
+    printInfo "  not in Smartscape yet — asking again in ${step}s" >&2
+    sleep "$step"; waited=$((waited + step))
+  done
+  printf '%s\n' "$found" | head -1
+}
+
+_monacoRumFrontends() {
+  # _monacoRumFrontends <phase> <run-dir> [previous-state] — the deploy pre-hook.
+  # Creates (or reuses) every frontend monaco/<phase>/rum-frontends.txt
+  # declares, exports its <ENV_VAR>, records it in <run>/rum-frontends.state.
+  local phase="$1" run="$2" prev="$3" decl="$2/project/rum-frontends.txt" seat session
+  [ -f "$decl" ] || return 0
+  command -v jq >/dev/null 2>&1 || { printError "rum-frontends.txt needs jq, which is not installed — nothing was deployed"; return 1; }
+  seat=$(_rumSeatId) || { printError "No seat id (ORBITAL_JOB_ID, CODESPACE_NAME or hostname) for the RUM frontend name — nothing was deployed"; return 1; }
+  session="${DT_SESSION_ID:-$(getDtSessionId)}"
+  local var name display fname ids n fid aid line rc=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    var=$(printf '%s\n' "$line" | awk '{print $1}')
+    name=$(printf '%s\n' "$line" | awk '{print $2}')
+    display=$(printf '%s\n' "$line" | awk '{$1=""; $2=""; sub(/^ +/, ""); print}')
+    [ -n "$var" ] || continue
+    if ! _isVarName "$var" || ! printf '%s' "$name" | grep -qxE '[a-z0-9][a-z0-9-]*' || [ -z "$display" ]; then
+      printError "rum-frontends.txt: '$line' is not '<ENV_VAR> <name> <display name>' (name: lowercase, digits, dashes)"; rc=1; break
+    fi
+    fname=$(printf '%s-%s' "$name" "$seat" | cut -c1-100)
+    display="$display $session${ORBITAL_JOB_ID:+ ($seat)}"
+    printInfo "RUM frontend '$fname' (\"$display\") for $var"
+    ids=$(_rumAppIdsByName "$fname") || { rc=1; break; }
+    n=$(printf '%s' "$ids" | grep -c . )
+    fid="" aid=""
+    if [ "$n" -gt 0 ]; then
+      # Reuse. A second POST of the same name is NOT idempotent: it answers the
+      # same FRONTEND id but creates another classic application.
+      line=$([ -n "$prev" ] && [ -f "$prev" ] && grep "^$var|$fname|" "$prev" | head -1)
+      if [ -n "$line" ] && printf '%s\n' "$ids" | grep -qx "$(printf '%s' "$line" | cut -d'|' -f4)"; then
+        fid=$(printf '%s' "$line" | cut -d'|' -f3); aid=$(printf '%s' "$line" | cut -d'|' -f4)
+      else
+        line=$(_rumSmartscapeWait "frontend.name == \"$fname\"") || { rc=1; break; }
+        fid="${line%% *}"; aid="${line#* }"
+      fi
+      if [ -z "$fid" ] || [ -z "$aid" ]; then
+        printError "RUM frontend '$fname' exists ($n classic application(s)) but Smartscape names no live FRONTEND for it — not creating another. Delete it in the tenant, then deploy again."
+        rc=1; break
+      fi
+      printInfo "  reusing $fid ($aid) — already created for this seat"
+    else
+      _rumApi POST "/platform/rum/v1/frontends" \
+        "$(jq -nc --arg f "$fname" --arg d "$display" '{frontendName: $f, displayName: $d, type: "WEB_AUTO_INJECTED", enableRum: true}')"
+      if [ "$RUM_HTTP_CODE" = 403 ]; then
+        printError "creating RUM frontend refused (HTTP 403): the token lacks rum:frontends:write — the seat token carries it from app 1.0.4xx (ENH-130 M5). Nothing was deployed."
+        rc=1; break
+      fi
+      [ "$RUM_HTTP_CODE" = 201 ] || [ "$RUM_HTTP_CODE" = 200 ] || { printError "creating RUM frontend '$fname' failed (HTTP $RUM_HTTP_CODE): $(printf '%s' "$RUM_HTTP_BODY" | jq -r '.error.message // empty' 2>/dev/null)"; rc=1; break; }
+      fid=$(printf '%s' "$RUM_HTTP_BODY" | jq -r '.id // empty')
+      printf '%s' "$fid" | grep -qxE 'FRONTEND-[0-9A-F]+' || { printError "creating RUM frontend '$fname' answered no FRONTEND id"; rc=1; break; }
+      # Recorded before the classic id is known: undeployMonaco can delete it either way.
+      printf '%s|%s|%s|\n' "$var" "$fname" "$fid" >> "$run/rum-frontends.state"
+      ids=$(_rumAppIdsByName "$fname") || { rc=1; break; }
+      if [ "$(printf '%s' "$ids" | grep -c .)" -eq 1 ]; then
+        aid="$ids"
+      else
+        # Ambiguous (or not yet visible): ask Smartscape which classic id is this FRONTEND's.
+        aid=$(_rumSmartscapeWait "id == toSmartscapeId(\"$fid\")" | awk '{print $2}') || aid=""
+      fi
+      [ -n "$aid" ] || { printError "RUM frontend $fid created, but its classic APPLICATION id could not be resolved — undo with: undeployMonaco $phase"; rc=1; break; }
+      sed -i "s#^$var|$fname|$fid|\$#$var|$fname|$fid|$aid#" "$run/rum-frontends.state"
+      printInfo "  created $fid ($aid)"
+    fi
+    grep -q "^$var|$fname|$fid|$aid\$" "$run/rum-frontends.state" 2>/dev/null \
+      || printf '%s|%s|%s|%s\n' "$var" "$fname" "$fid" "$aid" >> "$run/rum-frontends.state"
+    export "$var=$aid"
+    printInfo "  $var=$aid (classic id — the app-detection rule's applicationId)"
+  done < "$decl"
+  return $rc
+}
+
+_monacoRumUndeploy() {
+  # _monacoRumUndeploy <run-dir> — the undeploy post-hook. Deletes every
+  # frontend in <run>/rum-frontends.state and proves each gone by re-reading
+  # its builtin:rum.frontend.name. Deleting a frontend also removes the
+  # detection rules that point at it, so it runs AFTER monaco delete.
+  # The DELETE's status is never the proof. Measured on PVF: an id already gone
+  # answers 204 or 404; a frontend created seconds before answers 200 and stays,
+  # or 400 "no application with id …", and only a later DELETE removes it.
+  # So: DELETE, read back, and again every RUM_RETRY_SLEEP (10) s, ~90 s at most.
+  local state="$1/rum-frontends.state" var fname fid aid left rc=0 try code gone
+  [ -f "$state" ] || return 0
+  left=$(mktemp) || return 1
+  while IFS='|' read -r var fname fid aid; do
+    [ -n "$fid" ] || continue
+    printInfo "RUM frontend '$fname' ($fid${aid:+, $aid})"
+    gone=""
+    try=0
+    while :; do
+      _rumApi DELETE "/platform/rum/v1/frontends/$fid"
+      code="$RUM_HTTP_CODE"
+      case "$code" in
+        200|204|404|400) ;;
+        *) printError "  delete failed (HTTP $code)"; break ;;
+      esac
+      [ -n "$aid" ] || aid=$(_rumAppIdsByName "$fname" | head -1)
+      if [ -z "$aid" ]; then
+        printInfo "  verified: no builtin:rum.frontend.name '$fname' left"; gone=1; break
+      fi
+      sleep "${RUM_VERIFY_SLEEP:-3}"
+      _rumAppIdExists "$aid"
+      case $? in
+        1) printInfo "  verified gone: $aid has no builtin:rum.frontend.name any more (DELETE answered $code)"; gone=1; break ;;
+        2) printError "  could not re-read $aid (HTTP $RUM_HTTP_CODE) — not proven gone"; break ;;
+      esac
+      try=$((try + 1))
+      [ "$try" -lt 9 ] || { printError "  $aid still exists after $try DELETEs (last answered $code) — not gone"; break; }
+      printInfo "  still there after DELETE answered $code (just created?) — again in ${RUM_RETRY_SLEEP:-10}s"
+      sleep "${RUM_RETRY_SLEEP:-10}"
+    done
+    if [ -n "$gone" ]; then
+      unset "$var"
+    else
+      printError "  kept for the next undeployMonaco"
+      printf '%s|%s|%s|%s\n' "$var" "$fname" "$fid" "$aid" >> "$left"; rc=1
+    fi
+  done < "$state"
+  if [ -s "$left" ]; then mv "$left" "$state"; else rm -f "$left" "$state"; fi
+  return $rc
 }
 
 _monacoUndoHint() {
@@ -1422,6 +1660,7 @@ _monacoUndoHint() {
     printInfoSection "monaco/$phase FAILED part-way — undo what landed: undeployMonaco $phase"
   fi
   printInfo "Delete file: $run/delete.yaml"
+  [ -s "$run/rum-frontends.state" ] && printInfo "RUM frontend(s) undeployMonaco also deletes: $(cut -d'|' -f2,3 "$run/rum-frontends.state" | tr '|\n' ' ;')"
   printInfo "How it works: deployMonaco -h · undeployMonaco -h · $(_monacoDocsUrl)"
 }
 
@@ -1488,9 +1727,16 @@ deployMonaco() {
     previous=$(mktemp)
     cp "$run/delete.yaml" "$previous"
   fi
+  local prev_rum=""
+  if [ -f "$run/rum-frontends.state" ]; then
+    prev_rum=$(mktemp)
+    cp "$run/rum-frontends.state" "$prev_rum"
+  fi
   rm -rf "$run"
   mkdir -p "$run"
   cp -R "$src" "$run/project"
+  # Frontends an earlier deploy created stay recorded until undeployMonaco proves them gone.
+  [ -n "$prev_rum" ] && cp "$prev_rum" "$run/rum-frontends.state"
   cat > "$run/manifest.yaml" <<MANIFESTEOF
 manifestVersion: "1.0"
 projects:
@@ -1509,6 +1755,16 @@ environmentGroups:
             name: $token_var
 MANIFESTEOF
   printInfo "Monaco project '$project' (LEARNER_PREFIX=$session) → $DT_ENVIRONMENT"
+
+  # Pre-hook: the RUM frontends monaco/<phase>/rum-frontends.txt declares (ENH-130 M5).
+  if ! _monacoRumFrontends "$phase" "$run" "$prev_rum"; then
+    rm -f "$prev_rum"
+    [ -n "$previous" ] && mv "$previous" "$run/delete.yaml"
+    printError "monaco/$phase: RUM frontend step failed — Monaco did not run."
+    [ -s "$run/rum-frontends.state" ] && printError "  What it created is recorded; undo with: undeployMonaco $phase"
+    return 1
+  fi
+  rm -f "$prev_rum"
 
   if ! (cd "$run" && LEARNER_PREFIX="$session" monaco generate deletefile manifest.yaml -o "$run" --file delete.yaml) \
      || [ ! -f "$run/delete.yaml" ]; then
@@ -1564,7 +1820,7 @@ undeployMonaco() {
   # read lines, not `for p in $phases`: zsh does not word-split.
   while IFS= read -r phase; do
     run=$(_monacoRunDir "$phase")
-    if [ ! -f "$run/delete.yaml" ]; then
+    if [ ! -f "$run/delete.yaml" ] && [ ! -f "$run/rum-frontends.state" ]; then
       printInfo "monaco/$phase: nothing deployed (no $run/delete.yaml)"
       continue
     fi
@@ -1573,18 +1829,36 @@ undeployMonaco() {
       rc=1
       continue
     fi
+    if [ ! -f "$run/delete.yaml" ]; then
+      # Only frontends (a deploy that stopped before Monaco ran).
+      if _monacoRumUndeploy "$run"; then
+        rm -rf "$run"
+        printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+      else
+        printError "monaco/$phase: RUM frontend(s) not proven gone — kept in $run/rum-frontends.state"
+        rc=1
+      fi
+      continue
+    fi
     _monacoReady "Nothing was deleted. Delete file kept at $run/delete.yaml" || { rc=1; continue; }
     # Kept in a file: a refused trash purge is told apart by monaco's output.
     out=$(mktemp) || { printError "monaco/$phase: mktemp failed — nothing was deleted. Delete file kept at $run/delete.yaml"; rc=1; continue; }
     (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner) > "$out" 2>&1
     drc=$?
     cat "$out"
-    if [ "$drc" -eq 0 ]; then
-      rm -rf "$run"
-      printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
-    elif trashed=$(_monacoOnlyTrashRefused "$out"); then
-      rm -rf "$run"
-      printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed."
+    if [ "$drc" -eq 0 ] || trashed=$(_monacoOnlyTrashRefused "$out"); then
+      # Post-hook: the frontends, after monaco delete (deleting one also drops its detection rules).
+      if ! _monacoRumUndeploy "$run"; then
+        rm -f "$run/delete.yaml"
+        printError "monaco/$phase: configuration deleted, but RUM frontend(s) not proven gone — kept in $run/rum-frontends.state; run undeployMonaco $phase again"
+        rc=1
+      elif [ "$drc" -eq 0 ]; then
+        rm -rf "$run"
+        printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+      else
+        rm -rf "$run"
+        printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed."
+      fi
     else
       printError "monaco/$phase: monaco delete failed — delete file kept at $run/delete.yaml"
       rc=1
