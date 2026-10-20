@@ -172,6 +172,8 @@ fi
 # Replays monaco output: delete-trash-403-real.txt is 2.30.1+wwse.1 against pqa0332h with a
 # 14-scope seat token (host genericised); the others are edited from that shape.
 [ "$1" = delete ] && [ -n "${MONACO_STUB_DELETE_OUTPUT:-}" ] && cat "$MONACO_STUB_DELETE_OUTPUT"
+# Fails only the deploy step (the delete file was generated): a partial deploy.
+[ "$1" = deploy ] && [ -n "${MONACO_STUB_DEPLOY_RC:-}" ] && exit "$MONACO_STUB_DEPLOY_RC"
 exit "${MONACO_STUB_RC:-0}"
 EOF
   { cat "$FIXTURES/monaco-linux-amd64"; echo "# arm64 build"; } > "$FIXTURES/monaco-linux-arm64"
@@ -962,6 +964,74 @@ EOF
   make_monaco_project tenant
   MONACO_STUB_RC=1 run deployMonaco tenant
   [ "$status" -ne 0 ]
+}
+
+@test "deployMonaco -h / --help: real help, rc 0, touches nothing" {
+  source_functions
+  make_monaco_project tenant
+  local f
+  for f in -h --help; do
+    run deployMonaco "$f"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "^Usage: deployMonaco <tenant|env>"
+    echo "$output" | grep -q "monaco generate deletefile"
+    echo "$output" | grep -q "monaco deploy manifest.yaml"
+    echo "$output" | grep -q "^  DT_MONACO_TOKEN "
+    echo "$output" | grep -q "^  DT_ENVIRONMENT "
+    echo "$output" | grep -q "^Undo: undeployMonaco <tenant|env>"
+    echo "$output" | grep -qF "Docs: https://dynatrace-wwse.github.io/codespaces-framework/functions/#the-monaco-folder"
+  done
+  # no monaco call, no run dir, no variable VALUE in the help
+  [ ! -e "$MONACO_LOG" ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco" ]
+  no_sentinel_anywhere
+  # a bad argument still fails with rc 2 and points at -h
+  run deployMonaco everything
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q "deployMonaco -h"
+}
+
+@test "undeployMonaco -h / --help: real help, rc 0, deletes nothing" {
+  source_functions
+  make_monaco_project tenant
+  deployMonaco tenant >/dev/null
+  : > "$MONACO_LOG"
+  run undeployMonaco -h
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^Usage: undeployMonaco \[tenant|env\]"
+  echo "$output" | grep -q "monaco delete --manifest manifest.yaml --file delete.yaml"
+  echo "$output" | grep -q "^  DT_MONACO_TOKEN "
+  echo "$output" | grep -qF "Docs: https://dynatrace-wwse.github.io/codespaces-framework/functions/#the-monaco-folder"
+  [ ! -s "$MONACO_LOG" ]
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/tenant/delete.yaml" ]
+  run undeployMonaco bogus
+  [ "$status" -eq 2 ]
+  echo "$output" | grep -q "undeployMonaco -h"
+}
+
+@test "deployMonaco: success ends with the undo block (undeployMonaco <phase>, delete file, docs)" {
+  source_functions
+  make_monaco_project tenant
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "monaco/tenant deployed — to undo: undeployMonaco tenant"
+  echo "$output" | grep -q "Delete file: .*/.devcontainer/.monaco/tenant/delete.yaml"
+  # the closing block is the LAST thing printed
+  echo "$output" | tail -1 | grep -qF "deployMonaco -h · undeployMonaco -h · https://dynatrace-wwse.github.io/codespaces-framework/functions/#the-monaco-folder"
+}
+
+@test "deployMonaco: failure ends with the undo block too" {
+  source_functions
+  make_monaco_project tenant
+  MONACO_STUB_DEPLOY_RC=1 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  grep -q "^monaco deploy" "$MONACO_LOG"
+  echo "$output" | grep -q "monaco/tenant FAILED part-way — undo what landed: undeployMonaco tenant"
+  echo "$output" | tail -1 | grep -qF "undeployMonaco -h"
+  # nothing reached the tenant (no deletefile) -> no undo block: there is nothing to undo
+  MONACO_STUB_NO_DELETEFILE=1 run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  ! echo "$output" | grep -q "to undo:\|undo what landed: undeployMonaco" || false
 }
 
 # ── undeployMonaco ────────────────────────────────────────────────────────────

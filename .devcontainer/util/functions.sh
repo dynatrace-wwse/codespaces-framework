@@ -1343,6 +1343,88 @@ _monacoProjectName() {
   echo "${repo}-${session}"
 }
 
+_monacoDocsUrl() {
+  echo "${MONACO_DOCS_URL:-https://dynatrace-wwse.github.io/codespaces-framework/functions/#the-monaco-folder}"
+}
+
+_monacoHelp() {
+  # _monacoHelp deploy|undeploy — the -h text. Prints only: no tenant call,
+  # no file written, no variable value (names only).
+  local token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
+  if [ "$1" = "undeploy" ]; then
+    cat <<HELPEOF
+Usage: undeployMonaco [tenant|env]
+       undeployMonaco -h | --help
+
+Deletes what deployMonaco created in your Dynatrace environment.
+  (no argument)  both phases, env first, then tenant
+  tenant | env   only that phase
+
+What it does, step by step:
+  1. Reads the delete file deployMonaco wrote BEFORE it deployed:
+       .devcontainer/.monaco/<phase>/delete.yaml
+     No delete file -> nothing was deployed for that phase; nothing to do.
+  2. Runs: monaco delete --manifest manifest.yaml --file delete.yaml
+  3. On success removes .devcontainer/.monaco/<phase>. On failure the delete
+     file is KEPT, so you can run undeployMonaco again.
+     Documents land in the tenant's trash (the learner token cannot purge it,
+     by design) — reported as a warning, not an error.
+
+Required variables (names only):
+  DT_ENVIRONMENT  the environment URL
+  ${token_var}  platform token (override the name with MONACO_TOKEN_VAR)
+
+Redeploy with: deployMonaco <tenant|env>
+Docs: $(_monacoDocsUrl)
+HELPEOF
+    return 0
+  fi
+  cat <<HELPEOF
+Usage: deployMonaco <tenant|env>
+       deployMonaco -h | --help
+
+Deploys the Monaco project in monaco/<phase>/ of this repo to your Dynatrace
+environment, as configuration-as-code.
+  tenant   monaco/tenant/ — configuration for the whole environment
+  env      monaco/env/    — configuration for this lab's environment
+
+What it does, step by step:
+  1. Checks monaco/<phase>/ exists and holds only supported config types
+     (v1: settings and documents).
+  2. Checks DT_ENVIRONMENT and the platform token are set, and that the
+     framework's verified Monaco build is installed (installs it if not).
+  3. Copies monaco/<phase>/ to .devcontainer/.monaco/<phase>/ and writes a
+     manifest.yaml naming ONE project per learner: <repo>-<DT_SESSION_ID>.
+     LEARNER_PREFIX=<DT_SESSION_ID> is exported for config names, so your
+     objects never collide with another learner's.
+  4. Runs: monaco generate deletefile — BEFORE deploying, so even a partial
+     deploy can be undone.
+  5. Runs: monaco deploy manifest.yaml -e learner
+
+Required variables (names only):
+  DT_ENVIRONMENT  the environment URL
+  ${token_var}  platform token (override the name with MONACO_TOKEN_VAR)
+  DT_SESSION_ID   your learner id (derived from DT_HOSTGROUP or GITHUB_USER)
+
+Undo: undeployMonaco <tenant|env>   (undeployMonaco -h for details)
+Docs: $(_monacoDocsUrl)
+HELPEOF
+}
+
+_monacoUndoHint() {
+  # _monacoUndoHint <phase> <deployed|failed> <run-dir> — the closing block
+  # of every deploy that reached the tenant, so the way back is the last
+  # thing on screen (not buried under Monaco's log).
+  local phase="$1" outcome="$2" run="$3"
+  if [ "$outcome" = "deployed" ]; then
+    printInfoSection "monaco/$phase deployed — to undo: undeployMonaco $phase"
+  else
+    printInfoSection "monaco/$phase FAILED part-way — undo what landed: undeployMonaco $phase"
+  fi
+  printInfo "Delete file: $run/delete.yaml"
+  printInfo "How it works: deployMonaco -h · undeployMonaco -h · $(_monacoDocsUrl)"
+}
+
 deployMonaco() {
   # deployMonaco <tenant|env> — deploys monaco/<phase>/ from the repo as ONE
   # project per learner, named <repo>-<DT_SESSION_ID>. That name is Monaco's
@@ -1354,7 +1436,8 @@ deployMonaco() {
   local phase="$1" token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
   case "$phase" in
     tenant|env) ;;
-    *) printError "Usage: deployMonaco <tenant|env>"; return 2 ;;
+    -h|--help) _monacoHelp deploy; return 0 ;;
+    *) printError "Usage: deployMonaco <tenant|env>   (deployMonaco -h for help)"; return 2 ;;
   esac
 
   local src="${MONACO_DIR:-$REPO_PATH/monaco}/$phase"
@@ -1439,9 +1522,10 @@ MANIFESTEOF
   fi
   if ! (cd "$run" && LEARNER_PREFIX="$session" monaco deploy manifest.yaml -e learner); then
     printError "monaco deploy of monaco/$phase failed — undo what landed with: undeployMonaco $phase"
+    _monacoUndoHint "$phase" failed "$run"
     return 1
   fi
-  printInfo "monaco/$phase deployed. Undo with: undeployMonaco (delete file: $run/delete.yaml)"
+  _monacoUndoHint "$phase" deployed "$run"
 }
 
 _monacoOnlyTrashRefused() {
@@ -1473,7 +1557,8 @@ undeployMonaco() {
   case "$1" in
     "") phases="env tenant" ;;
     tenant|env) phases="$1" ;;
-    *) printError "Usage: undeployMonaco [tenant|env]"; return 2 ;;
+    -h|--help) _monacoHelp undeploy; return 0 ;;
+    *) printError "Usage: undeployMonaco [tenant|env]   (undeployMonaco -h for help)"; return 2 ;;
   esac
   printInfoSection "Removing Monaco configuration ($phases)"
   # read lines, not `for p in $phases`: zsh does not word-split.
@@ -4513,7 +4598,10 @@ _codeServerInstalledVersion() {
 _codeServerSettings() {
   # User settings, written once (a learner's later edits are kept):
   # no workspace-trust modal, no chat/agent panel, zsh terminal (the same
-  # shell + greeting as the browser terminal), no telemetry or update checks.
+  # shell + greeting as the browser terminal), no telemetry or update checks,
+  # dark theme, and the terminal in MesloLGS NF: the prompt's git branch glyph
+  # is a Nerd Font private-use glyph (the browser needs the font; Orbital
+  # serves it to the IDE window same-origin: orbital #168).
   local dir="${XDG_DATA_HOME:-$HOME/.local/share}/code-server/User"
   [ -f "$dir/settings.json" ] && return 0
   mkdir -p "$dir" || return 1
@@ -4526,7 +4614,9 @@ _codeServerSettings() {
   "workbench.startupEditor": "none",
   "telemetry.telemetryLevel": "off",
   "update.mode": "none",
-  "extensions.autoCheckUpdates": false
+  "extensions.autoCheckUpdates": false,
+  "workbench.colorTheme": "Default Dark Modern",
+  "terminal.integrated.fontFamily": "'MesloLGS NF', monospace"
 }
 CSEOF
 }
@@ -4545,6 +4635,7 @@ installCodeServer() {
   if [ "$have" = "$version" ]; then
     printInfo "code-server $version already installed"
     _codeServerSettings
+    _codeServerRegistryRow || return 1
     return 0
   fi
 
@@ -4579,7 +4670,38 @@ installCodeServer() {
   rm -rf "$tmp"
   ln -sfn "$home/bin/code-server" "$HOME/.local/bin/code-server"
   _codeServerSettings
+  _codeServerRegistryRow || return 1
   printInfo "code-server $(_codeServerInstalledVersion) installed in $home"
+}
+
+_codeServerRegistryRow() {
+  # Writes the `ide` app-registry row at install time, so Orbital knows this
+  # workspace HAS an IDE before anyone opens it: the row means "installed",
+  # not "running". Same seven fields registerApp writes; one row (upsert).
+  # Only the row — no Service/Ingress (post-create must not need the cluster)
+  # and no password: startCodeServer -> registerCodeServer creates those and
+  # rewrites the same row. Gated like registerCodeServer: Orbital only, or
+  # CODE_SERVER_REGISTER=1.
+  local ns="${CODE_SERVER_NAMESPACE:-ide}" port="${CODE_SERVER_PORT:-8443}" sub=""
+  case "$(detectRunEnvironment)" in
+    orbital|orbital_codespaces) ;;
+    *) [ "${CODE_SERVER_REGISTER:-}" = "1" ] || return 0 ;;
+  esac
+  if [ "$(detectRunEnvironment)" = "orbital" ] && [ -n "${ORBITAL_JOB_ID:-}" ]; then
+    sub=$(computeOrbitalSubdomain ide)
+  fi
+  mkdir -p "$(dirname "$APP_REGISTRY")" || { printError "VS Code (ide) NOT registered: cannot create $(dirname "$APP_REGISTRY")"; return 1; }
+  if [ -f "$APP_REGISTRY" ]; then
+    # grep -v exits 1 when every row was an ide row: that is not a failure.
+    { grep -v '^ide|' "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" || [ $? -eq 1 ]; } 2>/dev/null \
+      && mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" \
+      || { rm -f "${APP_REGISTRY}.tmp" 2>/dev/null; printError "VS Code (ide) NOT registered: could not rewrite $APP_REGISTRY (left as it was)"; return 1; }
+  fi
+  if ! echo "ide|${ns}|ide|${port}|ide.$(detectIP).${MAGIC_DOMAIN}||${sub}" >> "$APP_REGISTRY" 2>/dev/null; then
+    printError "VS Code (ide) NOT registered: could not write $APP_REGISTRY"
+    return 1
+  fi
+  printInfo "VS Code (ide) registered in the app registry"
 }
 
 _codeServerOwnsPort() {
@@ -4745,10 +4867,14 @@ IDEEOF
 }
 
 stopCodeServer() {
-  # Ends code-server's whole session (server, extension hosts, terminals) and
-  # takes the `ide` app out of the registry, so Orbital stops listing an IDE
-  # that is not there. Its Service stays (harmless without a listener); the
-  # next startCodeServer registers it again.
+  # Ends code-server's whole session (server, extension hosts, terminals). The
+  # `ide` registry row STAYS: it means "installed", not "running". Orbital
+  # stops code-server after a failed sign-in, and dropping the row there would
+  # hide the VS Code button for the rest of the session; the next click starts
+  # it again. Only uninstallCodeServer removes the row. The Ingress registerApp
+  # made IS deleted, so the host answers 404 (no route), never a 502 from an
+  # ingress pointing at a dead listener; registerCodeServer re-creates it on
+  # the next start. The Service stays (harmless without a route).
   local pidf pid
   pidf=$(_codeServerPidFile)
   pid=$(cat "$pidf" 2>/dev/null)
@@ -4759,10 +4885,7 @@ stopCodeServer() {
     printInfo "code-server is not running"
   fi
   rm -f "$pidf"
-  if [ -f "$APP_REGISTRY" ] && grep -q '^ide|' "$APP_REGISTRY" 2>/dev/null; then
-    unregisterApp ide "${CODE_SERVER_NAMESPACE:-ide}" >/dev/null 2>&1
-    printInfo "ide removed from the app registry"
-  fi
+  kubectl delete ingress ide-ingress -n "${CODE_SERVER_NAMESPACE:-ide}" --ignore-not-found >/dev/null 2>&1
 }
 
 uninstallCodeServer() {

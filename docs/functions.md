@@ -132,8 +132,8 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
 | `installMonaco` | `installMonaco` | Installs [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) at `MONACO_VERSION`: for the framework's pin, the framework's [patched build](dtctl-monaco.md#monaco-is-a-patched-build) (reviewed sha256, never a stock fallback; a refusal removes any `monaco` left in the install dir); otherwise the upstream release (checksum-verified) |
-| `deployMonaco` | `deployMonaco <tenant\|env>` | Deploys the repo's `monaco/<phase>/` as a per-learner project. Runs only the verified patched Monaco (pinned sha256 or `+wwse.1` in `monaco version`); otherwise one `installMonaco`, then fails loudly |
-| `undeployMonaco` | `undeployMonaco [tenant\|env]` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
+| `deployMonaco` | `deployMonaco <tenant\|env>` · `deployMonaco -h` | Deploys the repo's `monaco/<phase>/` as a per-learner project. Runs only the verified patched Monaco (pinned sha256 or `+wwse.1` in `monaco version`); otherwise one `installMonaco`, then fails loudly |
+| `undeployMonaco` | `undeployMonaco [tenant\|env]` · `undeployMonaco -h` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
 | `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
 
 Both binaries are already on the `PATH` in every environment (`installDevTools`, see
@@ -241,7 +241,13 @@ the manifest and a delete file from `monaco generate deletefile`. If the delete 
 generated, it does not deploy. A redeploy keeps the previous delete entries, so a config
 removed from `monaco/` since the last deploy is still deleted (Monaco skips objects that are
 already gone). `undeployMonaco` runs `monaco delete` with that file and removes the snapshot;
-if the delete fails, the delete file is kept so it can be retried.
+if the delete fails, the delete file is kept so it can be retried. Every deploy that reached the
+tenant — success **or** failure — ends with a closing block naming `undeployMonaco <phase>`, the
+delete file and this page, so the way back is the last thing on screen.
+
+**Help.** `deployMonaco -h` and `undeployMonaco -h` print the usage, the phases, what each step
+does, the required variables (names only) and the undo command, with a link to this section. They
+touch nothing — no tenant call, no file.
 
 **Deleted documents stay in the trash.** Monaco deletes a document and then purges it from the
 tenant's trash. The learner's token has no `document:trash.documents:delete`, by design (the
