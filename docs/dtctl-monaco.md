@@ -102,6 +102,9 @@ uses it. `deployMonaco` writes platform-token manifests, so they never make the 
 (no `document:trash.documents:delete`), so Monaco's purge after each document delete is
 refused with 403. `undeployMonaco` treats that — and only that — as success with a warning;
 see [dtctl & Monaco in functions](functions.md#dtctl-monaco), "Deleted documents stay in the trash".
+A trashed document keeps its id, so the next `deployMonaco` uses project `<repo>-<DT_SESSION_ID>-g<N>`
+and fresh ids; without that the redeploy answered `409 "id already exists"` ("A trashed document
+keeps its id").
 
 A repo that overrides `MONACO_VERSION` gets the **stock** release from `installMonaco`, but
 `deployMonaco` / `undeployMonaco` refuse to run it while the framework pins a patched build
