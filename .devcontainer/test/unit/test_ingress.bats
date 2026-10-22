@@ -533,3 +533,35 @@ setup_ingress_mocks() {
   run grep -n 'use-forwarded-headers' "$BATS_TEST_DIRNAME/../../yaml/ingress/values-kind.yaml"
   [ "$status" -ne 0 ]
 }
+
+# Render the chart exactly as installIngressController does (same chart version,
+# same values file) and read the key off the ConfigMap the controller consumes --
+# a values-file grep passes for a key the chart ignores. CI forbids skips, so a
+# runner without helm fails here instead of reading green.
+_renderIngressConfigMap() {
+  local engine="$1" ver chart
+  ver="$(sed -n 's/^export INGRESS_NGINX_VERSION="\(.*\)"$/\1/p' "$BATS_TEST_DIRNAME/../../util/variables.sh")"
+  [ -n "$ver" ] || return 2
+  chart="4.${ver#1.}"
+  helm template ingress-nginx ingress-nginx \
+    --repo https://kubernetes.github.io/ingress-nginx --version "$chart" \
+    --namespace ingress-nginx \
+    --values "$BATS_TEST_DIRNAME/../../yaml/ingress/values-${engine}.yaml" \
+    --show-only templates/controller-configmap.yaml
+}
+
+@test "ingress chart: rendered k3d controller ConfigMap sets use-forwarded-headers" {
+  command -v helm >/dev/null || skip "helm not installed"
+  run _renderIngressConfigMap k3d
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"name: ingress-nginx-controller"* ]]
+  [[ "$output" == *'use-forwarded-headers: "true"'* ]]
+}
+
+@test "ingress chart: rendered kind controller ConfigMap does not (negative control)" {
+  command -v helm >/dev/null || skip "helm not installed"
+  run _renderIngressConfigMap kind
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"name: ingress-nginx-controller"* ]]
+  [[ "$output" != *"use-forwarded-headers"* ]]
+}

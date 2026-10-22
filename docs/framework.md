@@ -173,6 +173,9 @@ Apps are published through **nginx ingress-nginx** on port 80. Each `registerApp
 
 On k3d the controller runs with `use-forwarded-headers: "true"` (`.devcontainer/yaml/ingress/values-k3d.yaml`): an incoming `X-Forwarded-Host` / `-Proto` is passed to the app instead of being overwritten with this hop's own values. Orbital routes an app window with `Host` = the sslip host and `X-Forwarded-Host` = the public window host. Dynatrace RUM picks the application host from `X-Forwarded-Host` first, so without this every learner app was detected under the sslip host. Routing still matches on `Host`. A request without `X-Forwarded-Host` is unchanged. Kind (Codespaces) keeps the default.
 
+!!! note "The app's identity moves from the sslip host to the public host (intended)"
+    With this, an app behind Orbital sees `Host` = its public window host (`todoapp--<job>.<orbital-host>`), no longer `todoapp.<worker-ip>.sslip.io`. That is deliberate: the per-seat RUM frontend rule already matches the public host, and nothing should key on the sslip name. It also reaches apps that read `Host` themselves (allowed-host lists, CSRF origin checks, OAuth `redirect_uri`): they now see the public host they are actually served on. Prove it with `bash .devcontainer/test/integration_forwarded_host.sh`.
+
 #### How each environment reaches the app
 
 === "VS Code / Local container"
