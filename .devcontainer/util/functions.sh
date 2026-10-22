@@ -4482,10 +4482,14 @@ registry['enable'] = false
 gitlab_kas['enable'] = false
 gitlab_pages['enable'] = false
 mattermost['enable'] = false"
-  # Host + X-Forwarded-Host: Rails builds redirects from them, and the proxies
-  # in front send another name (Orbital sends the app's sslip ingress host and
-  # ingress-nginx forwards it), which would send the browser away from the
-  # address it is on. Both pinned to the external host here.
+  # Host + X-Forwarded-Host: Rails builds redirects from them, so both are
+  # pinned to the external host here. On Orbital the k3d ingress now passes the
+  # public window host through (use-forwarded-headers, values-k3d.yaml), so the
+  # pin agrees with what arrives -- it stays because not every path in sends
+  # it: a request straight to the sslip host (Orbital's IDE leg, a VPC caller,
+  # Kind/Codespaces with the default ingress, an Orbital older than D10) still
+  # carries another name, which would send the browser away from the address
+  # it is on.
   case "$url" in
     https://*) cfg="${cfg}
 nginx['proxy_set_headers'] = { 'Host' => '${host}', 'X-Forwarded-Host' => '${host}', 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }" ;;

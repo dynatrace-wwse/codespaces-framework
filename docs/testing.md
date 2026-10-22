@@ -259,6 +259,7 @@ on the [Orbital](ops-platform.md) ops platform, in a Codespace, or on a local ma
 | `integration_cnfs_k3d_todoapp.sh` | Dynatrace **CloudNativeFullStack** on K3d | AMD64 **and** ARM64 | same three |
 | `integration_dtwiz_k3d.sh` | The `dtwiz` CLI path: install, `status`, `analyze`, `install kubernetes` | any | `DT_ENVIRONMENT` + **`DT_PLATFORM_TOKEN`** (`dt0s16`), not the classic tokens — **or** the tenant's own OAuth client, from which the suite mints one for the run (see below) |
 | `integration_kind_astroshop.sh` | Astroshop on Kind: ingress, HTML content, static assets | AMD64 only; skipped on Sysbox | No |
+| `integration_forwarded_host.sh` | The app behind the k3d ingress receives the **public** host in `Host` and `X-Forwarded-Host` for an Orbital-style request (Dynatrace RUM attribution, D10), with a chart-defaults negative control on the same cluster. Expected output is in the script header | Its own throwaway k3d cluster, deleted on exit | No |
 
 Credentials are never baked in: each suite reads them from `.devcontainer/.env` locally, or from
 secrets injected per job by the platform that schedules it.
