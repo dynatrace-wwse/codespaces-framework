@@ -49,10 +49,11 @@ controller:
   # and X-Forwarded-Host. A request without X-Forwarded-Host (local use, the
   # Orbital IDE) is unchanged.
   #
-  # Trust: whoever reaches this controller can set the host the app sees. On
-  # Orbital that is only the VPC (the app proxy ports are not open to the
-  # internet) and the learner's own sandbox, and the effect is limited to that
-  # learner's own app: which RUM application it lands in, and absolute URLs it
-  # builds from Host. Routing still uses the real Host.
+  # Trust: whoever reaches this controller can set the host the app sees --
+  # which RUM application its sessions land in, and absolute URLs it builds
+  # from Host. Routing still uses the real Host. On Orbital the app proxy ports
+  # are closed to the internet but open to the VPC, and (measured 2026-10-22)
+  # to OTHER learner sandboxes on the same worker; narrowing that reach is an
+  # Orbital network change, not something this file can do.
   config:
     use-forwarded-headers: "true"
