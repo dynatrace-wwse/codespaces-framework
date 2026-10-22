@@ -518,3 +518,18 @@ setup_ingress_mocks() {
   [[ "$output" == *'ingress-ready: "true"'* ]]
   [[ "$output" == *"watchIngressWithoutClass: true"* ]]
 }
+
+@test "ingress values: k3d passes X-Forwarded-Host through (Orbital RUM attribution)" {
+  run cat "$BATS_TEST_DIRNAME/../../yaml/ingress/values-k3d.yaml"
+  [ "$status" -eq 0 ]
+  # Under controller.config — a top-level `config:` would be ignored by the chart.
+  run grep -nE '^  config:$' "$BATS_TEST_DIRNAME/../../yaml/ingress/values-k3d.yaml"
+  [ "$status" -eq 0 ]
+  run grep -nE '^    use-forwarded-headers: "true"$' "$BATS_TEST_DIRNAME/../../yaml/ingress/values-k3d.yaml"
+  [ "$status" -eq 0 ]
+}
+
+@test "ingress values: kind (Codespaces) keeps the default forwarded-header handling" {
+  run grep -n 'use-forwarded-headers' "$BATS_TEST_DIRNAME/../../yaml/ingress/values-kind.yaml"
+  [ "$status" -ne 0 ]
+}

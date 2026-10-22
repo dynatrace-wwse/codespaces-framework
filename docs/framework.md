@@ -171,6 +171,8 @@ Apps are published through **nginx ingress-nginx** on port 80. Each `registerApp
 
 [sslip.io](https://sslip.io) is a wildcard DNS service that resolves `<anything>.<ip>.sslip.io` directly to `<ip>`. No DNS record management needed.
 
+On k3d the controller runs with `use-forwarded-headers: "true"` (`.devcontainer/yaml/ingress/values-k3d.yaml`): an incoming `X-Forwarded-Host` / `-Proto` is passed to the app instead of being overwritten with this hop's own values. Orbital routes an app window with `Host` = the sslip host and `X-Forwarded-Host` = the public window host. Dynatrace RUM picks the application host from `X-Forwarded-Host` first, so without this every learner app was detected under the sslip host. Routing still matches on `Host`. A request without `X-Forwarded-Host` is unchanged. Kind (Codespaces) keeps the default.
+
 #### How each environment reaches the app
 
 === "VS Code / Local container"

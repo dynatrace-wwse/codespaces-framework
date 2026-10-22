@@ -34,3 +34,25 @@ controller:
   # instead of being rejected up front.
   admissionWebhooks:
     enabled: false
+
+  # Pass the incoming X-Forwarded-Host / -Proto / -Port through instead of
+  # overwriting them with this hop's own values (ingress-nginx
+  # lua_ingress.rewrite(); without it X-Forwarded-Host is always $http_host).
+  #
+  # Why: Orbital proxies an app window to this controller with Host = the
+  # app's sslip ingress host (that is what routes it) and X-Forwarded-Host =
+  # the public window host the browser is on. The app pod's OneAgent picks the
+  # host for Real User Monitoring application detection from X-Forwarded-Host
+  # first, so without this every learner app was detected under
+  # todoapp.<worker-ip>.sslip.io and a learner's detection rule on the public
+  # host never matched. With it the backend sees the public host in both Host
+  # and X-Forwarded-Host. A request without X-Forwarded-Host (local use, the
+  # Orbital IDE) is unchanged.
+  #
+  # Trust: whoever reaches this controller can set the host the app sees. On
+  # Orbital that is only the VPC (the app proxy ports are not open to the
+  # internet) and the learner's own sandbox, and the effect is limited to that
+  # learner's own app: which RUM application it lands in, and absolute URLs it
+  # builds from Host. Routing still uses the real Host.
+  config:
+    use-forwarded-headers: "true"
