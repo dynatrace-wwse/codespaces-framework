@@ -176,6 +176,9 @@ fi
 # Replays monaco output: delete-trash-403-real.txt is 2.30.1+wwse.1 against pqa0332h with a
 # 14-scope seat token (host genericised); the others are edited from that shape.
 [ "$1" = delete ] && [ -n "${MONACO_STUB_DELETE_OUTPUT:-}" ] && cat "$MONACO_STUB_DELETE_OUTPUT"
+# deploy-document-409-real.txt is 2.30.1+wwse.1 against pvf2584h (157): the redeploy after an
+# undeploy that left the dashboard in the trash.
+[ "$1" = deploy ] && [ -n "${MONACO_STUB_DEPLOY_OUTPUT:-}" ] && cat "$MONACO_STUB_DEPLOY_OUTPUT"
 # Fails only the deploy step (the delete file was generated): a partial deploy.
 [ "$1" = deploy ] && [ -n "${MONACO_STUB_DEPLOY_RC:-}" ] && exit "$MONACO_STUB_DEPLOY_RC"
 exit "${MONACO_STUB_RC:-0}"
@@ -2067,4 +2070,137 @@ fake_echoing_dtctl() {
     echo "$output" | grep -q "'$v' is a reserved name"
   done
   [ ! -s "$RUM_LOG" ]
+}
+
+# ── 157: a trashed document keeps its id; every command is printed ───────────
+# Monaco's document id is derived from <project>:document:<configId>. After an
+# undeploy the document sits in the trash (no purge scope, ENH-114) and still
+# holds that id, so the redeploy's create answered 409 on PVF. The fix: the
+# next deploy moves to project <repo>-<session>-g<N>, and with it fresh ids.
+
+project_in_manifest() {
+  sed -n 's/^  - name: //p' "$FAKE_REPO/.devcontainer/.monaco/$1/manifest.yaml" | head -1
+}
+
+@test "157: deploy → undeploy (document left in trash) → deploy uses a new project, so new document ids" {
+  source_functions
+  make_monaco_project tenant
+  deployMonaco tenant >/dev/null
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12" ]
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403-real.txt" run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "next deployMonaco tenant uses a new project name (-g1)"
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12-g1" ]
+  # a redeploy WITHOUT an undeploy keeps the project: it updates in place
+  deployMonaco tenant >/dev/null
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12-g1" ]
+  # the second round moves on again
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403-real.txt" run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12-g2" ]
+  # the generation is per phase
+  make_monaco_project env
+  deployMonaco env >/dev/null
+  [ "$(project_in_manifest env)" = "test-enablement-learner-ab12" ]
+}
+
+@test "157 control: an undeploy that left nothing in the trash keeps the project name" {
+  source_functions
+  make_monaco_project tenant
+  deployMonaco tenant >/dev/null
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  deployMonaco tenant >/dev/null
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12" ]
+}
+
+@test "157 control: a failed undeploy (not only trash) does not move the project" {
+  source_functions
+  make_monaco_project tenant
+  deployMonaco tenant >/dev/null
+  MONACO_STUB_RC=1 MONACO_STUB_DELETE_OUTPUT="$MONACO_OUT/delete-trash-403-and-document-403.txt" run undeployMonaco tenant
+  [ "$status" -ne 0 ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/.tenant-generation" ]
+}
+
+@test "157: deploy refused with 409 'id already exists' (real PVF output) explains the trash and moves on" {
+  source_functions
+  make_monaco_project tenant
+  MONACO_STUB_DEPLOY_RC=1 MONACO_STUB_DEPLOY_OUTPUT="$MONACO_OUT/deploy-document-409-real.txt" run deployMonaco tenant
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "still held by a document in the tenant's trash (HTTP 409"
+  echo "$output" | grep -q "new project name, test-enablement-learner-ab12-g1"
+  echo "$output" | grep -q "Run again: deployMonaco tenant"
+  # monaco's own output is still shown
+  echo "$output" | grep -q 'id already exists: monaco-'
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12-g1" ]
+  # the failed attempt's delete entries are kept (merged), so undeploy still reaches them
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/tenant/delete.yaml" ]
+}
+
+@test "157 control: any other deploy failure is not called a trash collision and keeps the project" {
+  source_functions
+  make_monaco_project tenant
+  MONACO_STUB_DEPLOY_RC=1 MONACO_STUB_DEPLOY_OUTPUT="$MONACO_OUT/delete-document-403.txt" run deployMonaco tenant
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "monaco deploy of monaco/tenant failed"
+  ! echo "$output" | grep -q "tenant's trash"
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/.tenant-generation" ]
+}
+
+@test "157: deployMonaco prints each monaco command before running it, variables by NAME" {
+  source_functions
+  make_monaco_project tenant
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '→ cd .devcontainer/.monaco/tenant'
+  echo "$output" | grep -qF '→ LEARNER_PREFIX=$DT_SESSION_ID monaco generate deletefile manifest.yaml -o . --file delete.yaml'
+  echo "$output" | grep -qF '→ LEARNER_PREFIX=$DT_SESSION_ID monaco deploy manifest.yaml -e learner'
+  echo "$output" | grep -qF 'token from $DT_MONACO_TOKEN, by name'
+  # printed BEFORE it ran: the deploy line precedes monaco's success
+  [ "$(echo "$output" | grep -nF 'monaco deploy manifest.yaml' | head -1 | cut -d: -f1)" -lt "$(echo "$output" | grep -n 'deployed — to undo' | cut -d: -f1)" ]
+  # and the printed commands are the ones that ran
+  sed -n 1p "$MONACO_LOG" | grep -q "^monaco generate deletefile manifest.yaml -o . --file delete.yaml"
+  sed -n 2p "$MONACO_LOG" | grep -q "^monaco deploy manifest.yaml -e learner"
+  ! echo "$output" | grep -F '→' | grep -q "learner-ab12"
+  no_sentinel_anywhere
+}
+
+@test "157: undeployMonaco prints the monaco delete command" {
+  source_functions
+  make_monaco_project tenant
+  deployMonaco tenant >/dev/null
+  run undeployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '→ monaco delete --manifest manifest.yaml --file delete.yaml -e learner'
+  grep -q "^monaco delete --manifest manifest.yaml --file delete.yaml -e learner" "$MONACO_LOG"
+  no_sentinel_anywhere
+}
+
+@test "157: enableDtctl prints the dtctl config commands; the token as a \${NAME} reference" {
+  source_functions
+  run enableDtctl
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '→ dtctl config set-context enablement --environment $DT_ENVIRONMENT --token-ref enablement --safety-level readonly'
+  echo "$output" | grep -qF '→ dtctl config use-context enablement'
+  echo "$output" | grep -qF "→ dtctl config set-credentials enablement --token '\${DT_DTCTL_TOKEN}'"
+  ! echo "$output" | grep -F '→' | grep -q "abc12345"
+  no_sentinel_anywhere
+}
+
+@test "157: the 409 path and the generation work under zsh (the learner's shell)" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  make_monaco_project tenant
+  run zsh -c 'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh >/dev/null
+    MONACO_STUB_DEPLOY_RC=1 MONACO_STUB_DEPLOY_OUTPUT="'"$MONACO_OUT"'/deploy-document-409-real.txt" deployMonaco tenant; echo "RC1=$?"
+    deployMonaco tenant >/dev/null; echo "RC2=$?"'
+  echo "$output" | grep -q "^RC1=1"
+  echo "$output" | grep -q "^RC2=0"
+  [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12-g1" ]
 }

@@ -208,7 +208,7 @@ project of their own.
 
 | What | Value | Why |
 |---|---|---|
-| project name | `<repo>-<DT_SESSION_ID>` | Monaco derives settings and document ids from the project name. Two learners with the same project overwrite each other in a shared tenant |
+| project name | `<repo>-<DT_SESSION_ID>`, then `…-g<N>` after an undeploy left documents in the trash | Monaco derives settings and document ids from the project name. Two learners with the same project overwrite each other in a shared tenant. The `-g<N>` suffix: see "A trashed document keeps its id" |
 | `LEARNER_PREFIX` | `<DT_SESSION_ID>` | Exported to Monaco. Use it in every `name:` so learners can find their own objects |
 | environment | `learner`, URL from `DT_ENVIRONMENT`, `platformToken` from `DT_MONACO_TOKEN` | |
 
@@ -323,6 +323,39 @@ let a learner permanently destroy that person's trashed documents). The purge th
 errors are refused trash purges, the undeploy counts as done — the snapshot is removed and it
 warns `N document(s) deleted but left in the tenant's trash`. Any other error, mixed in or
 alone, still fails and keeps the delete file.
+
+**A trashed document keeps its id.** Monaco derives a document's id from
+`<project>:document:<configId>` (`monaco-<uuid>`), and a document in the trash still holds that
+id. A redeploy after `undeployMonaco` would create the same id, and the Document API answers
+`409 "id already exists: monaco-…"` (measured on PVF, 2026-10-22). The learner token cannot
+purge or restore the trash, so the framework moves to fresh ids instead:
+
+- When an undeploy leaves documents in the trash, it bumps a per-phase generation
+  (`.devcontainer/.monaco/.<phase>-generation`). The next `deployMonaco <phase>` names the
+  project `<repo>-<DT_SESSION_ID>-g<N>`, and with it new document ids. `LEARNER_PREFIX` (and
+  so the names a learner sees) does not change.
+- A redeploy **without** an undeploy keeps the project, so it updates the same objects in
+  place.
+- A deploy that still meets the 409 — the generation file is gone because a new container
+  started, or an earlier failed undeploy trashed a document — explains the trash, bumps the
+  generation, and asks you to run `deployMonaco <phase>` again. The failed attempt's delete
+  entries are merged into the next delete file, so `undeployMonaco` still reaches what it left.
+
+**Every command is printed.** `deployMonaco`, `undeployMonaco` and `enableDtctl` print each
+`monaco` / `dtctl` command before they run it, as `→ <command>`, so a learner sees the real call
+and can run it themselves. Variables are shown by name, never by value:
+
+```
+→ cd .devcontainer/.monaco/tenant
+→ LEARNER_PREFIX=$DT_SESSION_ID monaco generate deletefile manifest.yaml -o . --file delete.yaml
+→ LEARNER_PREFIX=$DT_SESSION_ID monaco deploy manifest.yaml -e learner
+→ monaco delete --manifest manifest.yaml --file delete.yaml -e learner
+→ dtctl config set-context enablement --environment $DT_ENVIRONMENT --token-ref enablement --safety-level readonly
+→ dtctl config set-credentials enablement --token '${DT_DTCTL_TOKEN}'
+```
+
+The manifest reads the URL from `$DT_ENVIRONMENT` and the token from `$DT_MONACO_TOKEN` by name.
+The RUM frontend API calls are printed as `Dynatrace API: <METHOD> <path>`.
 
 A `configs` file the check cannot read — a flow list (`configs: [...]`) or no top-level
 `configs:` — is refused like an unsupported type: the check fails closed. Deploy and

@@ -997,6 +997,9 @@ enableDtctl() {
   export DTCTL_TOKEN_STORAGE=file
   # A previous enableDtctl left the config read-only (see below).
   [ -f "$cfg" ] && chmod u+w "$cfg" 2>/dev/null
+  _showCmd "dtctl config set-context $ctx --environment \$DT_ENVIRONMENT --token-ref $ctx --safety-level $level"
+  _showCmd "dtctl config use-context $ctx"
+  _showCmd "dtctl config set-credentials $ctx --token '$token_ref'"
   if ! _dtctlConfigWrite "$dir/dtctl" config set-context "$ctx" --environment "$DT_ENVIRONMENT" \
          --token-ref "$ctx" --safety-level "$level" \
      || ! _dtctlConfigWrite "$dir/dtctl" config use-context "$ctx" \
@@ -1343,6 +1346,41 @@ _monacoProjectName() {
   echo "${repo}-${session}"
 }
 
+_monacoGenerationFile() {
+  echo "$(dirname "$(_monacoRunDir "$1")")/.$1-generation"
+}
+
+_monacoGeneration() {
+  # _monacoGeneration <phase> — how many times this phase's documents were
+  # left in the tenant's trash (0 when never). Monaco derives a document's id
+  # from <project>:document:<configId>, and a trashed document keeps holding
+  # its id: the next create of that id answers 409 "id already exists". The
+  # learner token cannot purge the trash (ENH-114), so deployMonaco moves to
+  # a new project name, <repo>-<session>-g<N>, and with it to fresh ids.
+  local g
+  g=$(cat "$(_monacoGenerationFile "$1")" 2>/dev/null)
+  case "$g" in ''|*[!0-9]*) echo 0 ;; *) echo "$g" ;; esac
+}
+
+_monacoBumpGeneration() {
+  local f
+  f=$(_monacoGenerationFile "$1")
+  mkdir -p "$(dirname "$f")" && echo $(( $(_monacoGeneration "$1") + 1 )) > "$f"
+}
+
+_monacoTrashCollision() {
+  # _monacoTrashCollision <monaco-deploy-output> — 0 when a document create
+  # was refused because its id is still held (by a trashed document).
+  grep -q 'failed with status code 409.*id already exists: monaco-' "$1"
+}
+
+_showCmd() {
+  # _showCmd <command> — prints the exact command a helper runs, before it
+  # runs it, so a learner sees the real monaco / dtctl call. Callers pass it
+  # in SINGLE quotes: a variable shows as $NAME, never its value.
+  printInfo "→ $1"
+}
+
 _monacoDocsUrl() {
   echo "${MONACO_DOCS_URL:-https://dynatrace-wwse.github.io/codespaces-framework/functions/#the-monaco-folder}"
 }
@@ -1364,7 +1402,7 @@ What it does, step by step:
   1. Reads the delete file deployMonaco wrote BEFORE it deployed:
        .devcontainer/.monaco/<phase>/delete.yaml
      No delete file -> nothing was deployed for that phase; nothing to do.
-  2. Runs: monaco delete --manifest manifest.yaml --file delete.yaml
+  2. Runs: monaco delete --manifest manifest.yaml --file delete.yaml -e learner
   3. RUM frontends deployMonaco created (rum-frontends.txt): deletes each one
        DELETE /platform/rum/v1/frontends/<FRONTEND id>
      and PROVES it gone by reading its builtin:rum.frontend.name back (the
@@ -1372,7 +1410,10 @@ What it does, step by step:
   4. On success removes .devcontainer/.monaco/<phase>. On failure the delete
      file is KEPT, so you can run undeployMonaco again.
      Documents land in the tenant's trash (the learner token cannot purge it,
-     by design) — reported as a warning, not an error.
+     by design) — reported as a warning, not an error. A trashed document
+     keeps its id, so the next deploy uses a new project name
+     (<repo>-<DT_SESSION_ID>-g<N>) and with it fresh document ids.
+  Every monaco command is printed before it runs (variables as \$NAME).
 
 Required variables (names only):
   DT_ENVIRONMENT  the environment URL
@@ -1407,9 +1448,13 @@ What it does, step by step:
        POST /platform/rum/v1/frontends   (reused if it already exists)
      and exports <ENV_VAR>=APPLICATION-… (its classic id, what an app-detection
      rule takes). Every API call is printed, method and path; never the token.
-  5. Runs: monaco generate deletefile — BEFORE deploying, so even a partial
-     deploy can be undone.
+  5. Runs: monaco generate deletefile manifest.yaml -o . --file delete.yaml
+     — BEFORE deploying, so even a partial deploy can be undone.
   6. Runs: monaco deploy manifest.yaml -e learner
+     Every monaco command is printed before it runs (variables as \$NAME).
+     After an undeploy left documents in the trash the project is
+     <repo>-<DT_SESSION_ID>-g<N>: a trashed document keeps its id, and a
+     create of that id answers 409 "id already exists".
 
 Required variables (names only):
   DT_ENVIRONMENT  the environment URL
@@ -1790,6 +1835,9 @@ deployMonaco() {
     printError "No usable DT_SESSION_ID (DT_HOSTGROUP or GITHUB_USER; lowercase, digits, dashes) — refusing: without it every learner would share one Monaco project. Nothing was deployed."
     return 1
   fi
+  local generation
+  generation=$(_monacoGeneration "$phase")
+  [ "$generation" -gt 0 ] && project="$project-g$generation"
   _monacoReady "Nothing was deployed." || return 1
 
   # The manifest's project path must sit below the manifest (Monaco reads the
@@ -1844,7 +1892,11 @@ MANIFESTEOF
   fi
   rm -f "$prev_rum"
 
-  if ! (cd "$run" && LEARNER_PREFIX="$session" monaco generate deletefile manifest.yaml -o "$run" --file delete.yaml) \
+  local rel="${run#"$REPO_PATH"/}"
+  printInfo "manifest.yaml reads the URL from \$DT_ENVIRONMENT and the token from \$$token_var, by name"
+  _showCmd "cd $rel"
+  _showCmd 'LEARNER_PREFIX=$DT_SESSION_ID monaco generate deletefile manifest.yaml -o . --file delete.yaml'
+  if ! (cd "$run" && LEARNER_PREFIX="$session" monaco generate deletefile manifest.yaml -o . --file delete.yaml) \
      || [ ! -f "$run/delete.yaml" ]; then
     [ -n "$previous" ] && mv "$previous" "$run/delete.yaml"
     printError "monaco: could not generate $run/delete.yaml — refusing to deploy what could not be undone"
@@ -1854,11 +1906,28 @@ MANIFESTEOF
     _monacoMergeDeleteFiles "$run/delete.yaml" "$previous"
     rm -f "$previous"
   fi
-  if ! (cd "$run" && LEARNER_PREFIX="$session" monaco deploy manifest.yaml -e learner); then
-    printError "monaco deploy of monaco/$phase failed — undo what landed with: undeployMonaco $phase"
+  _showCmd 'LEARNER_PREFIX=$DT_SESSION_ID monaco deploy manifest.yaml -e learner'
+  # Shown as it runs (tee) and kept in a file: a trash collision is told apart
+  # by monaco's output. The exit code travels in a file: zsh and bash name
+  # the pipeline status differently.
+  local out
+  out=$(mktemp) || { printError "monaco/$phase: mktemp failed — nothing was deployed"; return 1; }
+  { (cd "$run" && LEARNER_PREFIX="$session" monaco deploy manifest.yaml -e learner) 2>&1; echo $? > "$out.rc"; } | tee "$out"
+  if [ "$(cat "$out.rc" 2>/dev/null)" != 0 ]; then
+    if _monacoTrashCollision "$out"; then
+      _monacoBumpGeneration "$phase"
+      printError "monaco/$phase: a document id is still held by a document in the tenant's trash (HTTP 409 \"id already exists\")."
+      printError "  An earlier undeploy left it there; the learner token cannot purge the trash (by design)."
+      printError "  The next deploy uses a new project name, $(_monacoProjectName)-g$(_monacoGeneration "$phase"), and with it new document ids."
+      printError "  Run again: deployMonaco $phase"
+    else
+      printError "monaco deploy of monaco/$phase failed — undo what landed with: undeployMonaco $phase"
+    fi
+    rm -f "$out" "$out.rc"
     _monacoUndoHint "$phase" failed "$run"
     return 1
   fi
+  rm -f "$out" "$out.rc"
   _monacoUndoHint "$phase" deployed "$run"
 }
 
@@ -1921,10 +1990,16 @@ undeployMonaco() {
     _monacoReady "Nothing was deleted. Delete file kept at $run/delete.yaml" || { rc=1; continue; }
     # Kept in a file: a refused trash purge is told apart by monaco's output.
     out=$(mktemp) || { printError "monaco/$phase: mktemp failed — nothing was deleted. Delete file kept at $run/delete.yaml"; rc=1; continue; }
+    _showCmd "cd ${run#"$REPO_PATH"/}"
+    _showCmd 'monaco delete --manifest manifest.yaml --file delete.yaml -e learner'
     (cd "$run" && monaco delete --manifest manifest.yaml --file delete.yaml -e learner) > "$out" 2>&1
     drc=$?
     cat "$out"
+    trashed=""
     if [ "$drc" -eq 0 ] || trashed=$(_monacoOnlyTrashRefused "$out"); then
+      # Documents now in the trash still hold their ids: the next deploy of
+      # this phase must not create them again (_monacoGeneration).
+      [ -n "$trashed" ] && _monacoBumpGeneration "$phase"
       # Post-hook: the frontends, after monaco delete (deleting one also drops its detection rules).
       if ! _monacoRumUndeploy "$run"; then
         rm -f "$run/delete.yaml"
@@ -1935,7 +2010,7 @@ undeployMonaco() {
         printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
       else
         rm -rf "$run"
-        printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed."
+        printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed. They keep their ids, so the next deployMonaco $phase uses a new project name (-g$(_monacoGeneration "$phase")) and fresh ids."
       fi
     else
       printError "monaco/$phase: monaco delete failed — delete file kept at $run/delete.yaml"
