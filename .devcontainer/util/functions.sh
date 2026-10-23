@@ -4432,6 +4432,238 @@ undeployOpentelemetryDemo(){
 }
 
 # ======================================================================
+#  OpenTelemetry Collector in the cluster (deployOtelCollector)
+#
+#  A standalone collector that exports OTLP to the tenant: the Dynatrace
+#  distribution, one Deployment, receiving OTLP gRPC (4317) and HTTP (4318)
+#  from any app, enriching with Kubernetes metadata and exporting traces,
+#  metrics (as delta) and logs to $DT_OTEL_ENDPOINT with $DT_INGEST_TOKEN --
+#  the same contract as astroshop's gateway collector. Independent of the
+#  Dynatrace Operator: works with or without a DynaKube. The token travels
+#  on stdin into a Secret; it is never printed and never in argv.
+# ======================================================================
+
+_otelCollectorConfig() {
+  cat <<'CFGEOF'
+extensions:
+  health_check:
+    endpoint: ${env:MY_POD_IP}:13133
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:MY_POD_IP}:4317
+      http:
+        endpoint: ${env:MY_POD_IP}:4318
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  k8sattributes:
+    extract:
+      metadata:
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.deployment.name
+        - k8s.statefulset.name
+        - k8s.daemonset.name
+        - k8s.namespace.name
+        - k8s.node.name
+        - k8s.cluster.uid
+        - k8s.container.name
+    pod_association:
+      - sources:
+          - from: resource_attribute
+            name: k8s.pod.ip
+      - sources:
+          - from: resource_attribute
+            name: k8s.pod.uid
+      - sources:
+          - from: connection
+  cumulativetodelta: {}
+  batch: {}
+exporters:
+  otlp_http:
+    endpoint: ${env:DT_ENDPOINT}
+    headers:
+      Authorization: "Api-Token ${env:DT_API_TOKEN}"
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, batch]
+      exporters: [otlp_http]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, cumulativetodelta, batch]
+      exporters: [otlp_http]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, batch]
+      exporters: [otlp_http]
+CFGEOF
+}
+
+_otelCollectorManifests() {
+  # $1 namespace, $2 config sha (rolls the pod when the config changes).
+  local ns="$1" sha="$2"
+  local image="ghcr.io/dynatrace/dynatrace-otel-collector/dynatrace-otel-collector:${OTEL_COLLECTOR_VERSION}@${OTEL_COLLECTOR_DIGEST}"
+  cat <<MANEOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: $ns
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector-k8sattributes
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, watch, list]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-k8sattributes
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: $ns
+roleRef:
+  kind: ClusterRole
+  name: otel-collector-k8sattributes
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: $ns
+  labels:
+    app.kubernetes.io/name: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+      annotations:
+        enablement.dynatrace.com/config-sha: "$sha"
+    spec:
+      serviceAccountName: otel-collector
+      containers:
+        - name: collector
+          image: $image
+          args: ["--config=/conf/config.yaml"]
+          env:
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DT_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: dynatrace-otelcol-dt-api-credentials
+                  key: DT_ENDPOINT
+            - name: DT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dynatrace-otelcol-dt-api-credentials
+                  key: DT_API_TOKEN
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+          readinessProbe:
+            httpGet: {path: /, port: 13133}
+          livenessProbe:
+            httpGet: {path: /, port: 13133}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: conf, mountPath: /conf}
+      volumes:
+        - name: conf
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: $ns
+spec:
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}
+    - {name: otlp-http, port: 4318, targetPort: 4318}
+MANEOF
+}
+
+deployOtelCollector() {
+  # deployOtelCollector — the Dynatrace OpenTelemetry Collector in the cluster,
+  # exporting to the tenant. Apps send OTLP to
+  #   http://otel-collector.<ns>.svc.cluster.local:4318 (HTTP) or :4317 (gRPC).
+  # Idempotent: a re-run updates the credentials and the config in place.
+  local ns="$OTEL_COLLECTOR_NAMESPACE" cfg sha
+  if ! kubectl cluster-info >/dev/null 2>&1; then
+    printError "deployOtelCollector: no Kubernetes cluster reachable — run startCluster first"
+    return 1
+  fi
+  if [ -z "$DT_OTEL_ENDPOINT" ] || [ -z "$DT_INGEST_TOKEN" ]; then
+    dynatraceEvalReadSaveCredentials >/dev/null 2>&1
+  fi
+  if [ -z "$DT_OTEL_ENDPOINT" ] || [ -z "$DT_INGEST_TOKEN" ]; then
+    printError "deployOtelCollector: DT_OTEL_ENDPOINT and DT_INGEST_TOKEN are needed (set DT_ENVIRONMENT and DT_INGEST_TOKEN)"
+    return 1
+  fi
+  printInfoSection "Deploying the Dynatrace OpenTelemetry Collector ${OTEL_COLLECTOR_VERSION} (namespace $ns)"
+  printInfo "Exporting to $DT_OTEL_ENDPOINT (ingest token not printed)"
+
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+  printf 'DT_ENDPOINT=%s\nDT_API_TOKEN=%s\n' "$DT_OTEL_ENDPOINT" "$DT_INGEST_TOKEN" \
+    | kubectl -n "$ns" create secret generic dynatrace-otelcol-dt-api-credentials --from-env-file=/dev/stdin \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+    || { printError "Could not create the collector's credentials secret"; return 1; }
+
+  cfg=$(_otelCollectorConfig)
+  sha=$(printf '%s%s' "$cfg" "$DT_OTEL_ENDPOINT" | sha256sum | cut -c1-16)
+  kubectl -n "$ns" create cm otel-collector-config --from-literal=config.yaml="$cfg" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
+  _otelCollectorManifests "$ns" "$sha" >/dev/null || { printError "Could not apply the collector manifests"; return 1; }
+
+  if ! kubectl -n "$ns" rollout status deploy/otel-collector --timeout="${OTEL_COLLECTOR_READY_TIMEOUT:-300}s" >/dev/null; then
+    printError "The OpenTelemetry Collector did not become ready"
+    printError "Inspect with: kubectl -n $ns logs deploy/otel-collector --tail=50"
+    return 1
+  fi
+  printInfo "OpenTelemetry Collector is ready. Send OTLP to:"
+  printInfo "  http://otel-collector.$ns.svc.cluster.local:4318  (HTTP)"
+  printInfo "  otel-collector.$ns.svc.cluster.local:4317         (gRPC)"
+}
+
+undeployOtelCollector() {
+  local ns="$OTEL_COLLECTOR_NAMESPACE"
+  printInfoSection "Undeploying the OpenTelemetry Collector (namespace $ns)"
+  kubectl delete clusterrolebinding otel-collector-k8sattributes --ignore-not-found >/dev/null
+  kubectl delete clusterrole otel-collector-k8sattributes --ignore-not-found >/dev/null
+  kubectl delete namespace "$ns" --ignore-not-found >/dev/null \
+    || { printError "Could not delete namespace $ns"; return 1; }
+}
+
+# ======================================================================
 #  GitLab in the cluster (deployGitlab) — Perform developer sessions
 #
 #  GitLab Omnibus CE as ONE Deployment (one PVC, one Service) plus a

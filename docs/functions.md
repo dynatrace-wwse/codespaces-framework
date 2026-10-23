@@ -588,10 +588,39 @@ Available apps:
 | `undeployUnguard` | Removes Unguard and its MariaDB |
 | `deployOpentelemetryDemo` | Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained) |
 | `undeployOpentelemetryDemo` | Removes the OTel Demo and its namespace |
+| `deployOtelCollector` / `undeployOtelCollector` | A standalone Dynatrace OpenTelemetry Collector that exports to the tenant — see [below](#opentelemetry-collector) |
 | `deployGitlab` / `uninstallGitlab` | GitLab CE (Omnibus, one Deployment) + Runner — see [GitLab & browser IDE](gitlab-ide.md) |
 | `startCodeServer` / `stopCodeServer` | VS Code in the browser inside the learner container — see [GitLab & browser IDE](gitlab-ide.md) |
 
 All deploy functions expose apps exclusively via nginx ingress (`registerApp`). The legacy NodePort path has been removed.
+
+### OpenTelemetry Collector
+
+`deployOtelCollector` (since 1.17.0) runs the [Dynatrace distribution of the OpenTelemetry
+Collector](https://github.com/Dynatrace/dynatrace-otel-collector) in the cluster, for a training
+whose app sends its own OTLP. It is independent of the app and of the Dynatrace Operator: it works
+with or without a DynaKube (AppOnly, k8s-only), with any app.
+
+```bash
+startCluster
+deployOtelCollector            # namespace otel-collector, waits until Ready
+# apps send OTLP to:
+#   http://otel-collector.otel-collector.svc.cluster.local:4318   (HTTP)
+#   otel-collector.otel-collector.svc.cluster.local:4317          (gRPC)
+undeployOtelCollector          # namespace + cluster-wide RBAC
+```
+
+| | |
+|---|---|
+| Image | `ghcr.io/dynatrace/dynatrace-otel-collector/dynatrace-otel-collector`, pinned by tag **and** index digest in `variables.sh` (`OTEL_COLLECTOR_VERSION`, `OTEL_COLLECTOR_DIGEST`); amd64 and arm64 |
+| Export | traces, metrics and logs over OTLP/HTTP to `$DT_OTEL_ENDPOINT` with `Authorization: Api-Token $DT_INGEST_TOKEN` — the contract astroshop's gateway collector uses. Metrics go through `cumulativetodelta` (Dynatrace ingests delta) |
+| Pipeline | `otlp` receiver → `memory_limiter` → `k8sattributes` (pod, workload, namespace, node, cluster uid) → `batch` → `otlp_http` |
+| Credentials | `DT_OTEL_ENDPOINT` + `DT_INGEST_TOKEN`; if either is unset, `dynatraceEvalReadSaveCredentials` is asked (silently). Missing → `return 1` before anything is created. The token goes into Secret `dynatrace-otelcol-dt-api-credentials` through stdin — never printed, never in argv |
+| Re-run | idempotent: every object is applied; the pod rolls when the config or endpoint changes |
+
+The ingest token needs `openTelemetryTrace.ingest`, `metrics.ingest` and `logs.ingest`.
+Not the same thing as `deployOpentelemetryDemo`, whose collector belongs to the CNCF demo and does
+not export to Dynatrace, or `deployAstroshop`, whose collector ships inside that app.
 
 ---
 

@@ -258,6 +258,7 @@ on the [Orbital](ops-platform.md) ops platform, in a Codespace, or on a local ma
 | `integration_appmon_k3d_todoapp.sh` | Dynatrace **ApplicationMonitoring** end to end on K3d | AMD64 **and** ARM64, run independently | `DT_ENVIRONMENT`, `DT_OPERATOR_TOKEN`, `DT_INGEST_TOKEN` |
 | `integration_cnfs_k3d_todoapp.sh` | Dynatrace **CloudNativeFullStack** on K3d | AMD64 **and** ARM64 | same three |
 | `integration_dtwiz_k3d.sh` | The `dtwiz` CLI path: install, `status`, `analyze`, `install kubernetes` | any | `DT_ENVIRONMENT` + **`DT_PLATFORM_TOKEN`** (`dt0s16`), not the classic tokens — **or** the tenant's own OAuth client, from which the suite mints one for the run (see below) |
+| `integration_k3d_otel_collector.sh` | `deployOtelCollector` on K3d **without** the Operator: pod Ready, one OTLP/HTTP log and span with a unique marker accepted by the collector **and found in Grail** by DQL; no export errors in the collector log | AMD64 **and** ARM64 | `DT_ENVIRONMENT`, `DT_INGEST_TOKEN`, plus `DT_PLATFORM_TOKEN` (or the tenant's OAuth client, minted for the run) to read Grail |
 | `integration_kind_astroshop.sh` | Astroshop on Kind: ingress, HTML content, static assets | AMD64 only; skipped on Sysbox | No |
 | `integration_forwarded_host.sh` | The app behind the k3d ingress receives the **public** host in `Host` and `X-Forwarded-Host` for an Orbital-style request (Dynatrace RUM attribution, D10), with a chart-defaults negative control on the same cluster. Expected output is in the script header | Its own throwaway k3d cluster, deleted on exit | No |
 
