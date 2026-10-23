@@ -68,6 +68,14 @@ GITLAB_RUNNER_CHART_VERSION="${GITLAB_RUNNER_CHART_VERSION:-0.81.0}"
 GITLAB_NAMESPACE="${GITLAB_NAMESPACE:-gitlab}"
 export GITLAB_VERSION GITLAB_RUNNER_CHART_VERSION GITLAB_NAMESPACE
 
+# OpenTelemetry Collector (deployOtelCollector): the Dynatrace distribution, multi-arch
+# (amd64 + arm64). Tag for people, index digest for the bytes.
+# https://github.com/Dynatrace/dynatrace-otel-collector/releases
+OTEL_COLLECTOR_VERSION="${OTEL_COLLECTOR_VERSION:-0.58.0}"
+OTEL_COLLECTOR_DIGEST="${OTEL_COLLECTOR_DIGEST:-sha256:7210de4b4b3fe843e5d72673033eeb2d6864cbcdc107f42f6a63782e509bf165}"
+OTEL_COLLECTOR_NAMESPACE="${OTEL_COLLECTOR_NAMESPACE:-otel-collector}"
+export OTEL_COLLECTOR_VERSION OTEL_COLLECTOR_DIGEST OTEL_COLLECTOR_NAMESPACE
+
 # code-server (browser VS Code inside the learner container). Reviewed sha256 of
 # the release tarballs; installCodeServer refuses any other bytes for this version.
 # https://github.com/coder/code-server/releases
