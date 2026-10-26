@@ -96,12 +96,19 @@ The image is hosted on Docker Hub and is cross-compiled for ARM and AMD architec
 ### Versions and tags
 Everything that changes the image is pinned in `.devcontainer/Dockerfile`, so a rebuild reproduces
 the tag: base `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, `NODE_VERSION` (exact nodesource
-package), `NPM_MAJOR`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
+package), `NPM_MAJOR`, `DOCKER_CLI_VERSION`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
 so a failed fetch fails the build instead of saving an error page as a binary.
 
 A changed image is published under a **new tag** and never rebuilt over an existing one. A retag
 would make rollback impossible and hide drift. `v1.3` is `v1.2`'s toolset with Node **22.23.4**,
 which fixes CVE-2026-111497 (Brotli decoder out-of-bounds write).
+
+`v1.3.1` pins the Docker CLI to `27.5.1`, the client `v1.2` shipped. Ubuntu's `docker.io` moved to
+29.x, whose client speaks API 1.52 and has no fallback to older daemons. The GitHub Codespaces host
+daemon tops out at API 1.43, so every `docker` command in a `v1.3` Codespace failed with *client
+version 1.52 is too new*. k3d kept working because it talks to the API itself. The 27.x client
+negotiates down. The CLI is a static Go binary, so it does not link the Brotli C library.
+Use `v1.3.1`, not `v1.3`.
 
 ### Publishing a new tag
 The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for
