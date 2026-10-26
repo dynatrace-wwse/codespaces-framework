@@ -618,6 +618,31 @@ undeployOtelCollector          # namespace + cluster-wide RBAC
 | Credentials | `DT_OTEL_ENDPOINT` + `DT_INGEST_TOKEN`; if either is unset, `dynatraceEvalReadSaveCredentials` is asked (silently). Missing → `return 1` before anything is created. The token goes into Secret `dynatrace-otelcol-dt-api-credentials` through stdin — never printed, never in argv |
 | Re-run | idempotent: every object is applied; the pod rolls when the config or endpoint changes |
 
+#### Overriding the collector (since 1.17.1)
+
+Three optional variables, set before the call (e.g. in the repo's `my_functions.sh`). Unset, the
+collector is exactly the 1.17.0 one — a unit test renders both and compares them byte for byte.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `OTEL_COLLECTOR_MODE` | `deployment` (default) \| `daemonset` | One replica, or one collector per node. Switching deletes the other kind |
+| `OTEL_COLLECTOR_POD_LOGS` | `false` (default) \| `true` | Mounts the node's `/var/log/pods` read-only and runs the collector as root so a `filelog` receiver can read container logs. Needs `daemonset` — refused otherwise |
+| `OTEL_COLLECTOR_CONFIG_FILE` | path | Replaces the whole collector config with this file. Missing or unreadable → `return 1` before anything is created |
+
+A replacement config must keep what the manifests rely on: the `health_check` extension on
+`${env:MY_POD_IP}:13133` (the probes), receivers on 4317/4318, and an exporter using
+`${env:DT_ENDPOINT}` with `Authorization: "Api-Token ${env:DT_API_TOKEN}"`. In `daemonset` mode the
+pod also has `${env:K8S_NODE_NAME}`. Print the default with `_otelCollectorConfig` and start from it.
+
+```bash
+# per-node collector that also ships pod logs (filelog), with the training's own config
+OTEL_COLLECTOR_MODE=daemonset OTEL_COLLECTOR_POD_LOGS=true \
+OTEL_COLLECTOR_CONFIG_FILE="$REPO_PATH/.devcontainer/yaml/otel-collector.yaml" \
+  deployOtelCollector
+```
+
+A config change rolls the pods (the config hash is a pod annotation).
+
 The ingest token needs `openTelemetryTrace.ingest`, `metrics.ingest` and `logs.ingest`.
 Not the same thing as `deployOpentelemetryDemo`, whose collector belongs to the CNCF demo and does
 not export to Dynatrace, or `deployAstroshop`, whose collector ships inside that app.
