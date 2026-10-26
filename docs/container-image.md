@@ -108,7 +108,13 @@ which fixes CVE-2026-111497 (Brotli decoder out-of-bounds write).
 daemon tops out at API 1.43, so every `docker` command in a `v1.3` Codespace failed with *client
 version 1.52 is too new*. k3d kept working because it talks to the API itself. The 27.x client
 negotiates down. The CLI is a static Go binary, so it does not link the Brotli C library.
-Use `v1.3.1`, not `v1.3`.
+
+`v1.3.2` is `v1.3.1` with the entrypoint fix (ENH-075, #186). On a container's first start the
+socket's docker GID differs from the image's, so `/entrypoint.sh` runs `groupmod` and execs its
+command. The `groupmod` persists, so after `docker restart` or a stop/start the GIDs match. Up to
+`v1.3.1` the script then returned without running its command and the container exited 0: a
+Codespace that was stopped and started came back in recovery mode. From `v1.3.2` it execs the
+command on that path too. Use `v1.3.2`.
 
 ### Publishing a new tag
 The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for
@@ -133,7 +139,7 @@ To use the pre-built image, specify the "image" property in your devcontainer.js
 
 ``` json
   // Pulling the image from the Dockerhub, runs on AMD64 and ARM64. Pulling is normally faster.
-  "image":"shinojosa/dt-enablement:v1.3.1",
+  "image":"shinojosa/dt-enablement:v1.3.2",
 
 ```
 This will pull the published image from Docker Hub and use it as the base for your Codespace or Dev Container.
