@@ -21,7 +21,7 @@
 
   "postStartCommand": "./.devcontainer/post-start.sh",
   
-  "features": {},
+  "features": {"ghcr.io/devcontainers/features/sshd:1": {"version": "latest"}},  // 187 PROBE ONLY - never merge
   "customizations": {
     "vscode": {
       // Set container specific settings
