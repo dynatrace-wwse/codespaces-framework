@@ -26,6 +26,9 @@ from sync.commands.migrate import (
     _validate_devcontainer,
     _resolve_repo_path,
     _migrate_repo,
+    FRAMEWORK_IMAGE,
+    OLD_FRAMEWORK_IMAGES,
+    bump_framework_image,
 )
 
 
@@ -217,7 +220,7 @@ class TestValidateDevcontainer:
         dc_dir = repo_path / ".devcontainer"
         dc_dir.mkdir(parents=True, exist_ok=True)
         dc = {
-            "image": "shinojosa/dt-enablement:v1.2",
+            "image": FRAMEWORK_IMAGE,
             "overrideCommand": False,
             "remoteUser": "vscode",
             "postCreateCommand": "./.devcontainer/post-create.sh",
@@ -255,7 +258,7 @@ class TestValidateDevcontainer:
     def test_missing_runargs(self, tmp_path):
         dc_dir = tmp_path / ".devcontainer"
         dc_dir.mkdir()
-        dc = {"image": "shinojosa/dt-enablement:v1.2", "overrideCommand": False,
+        dc = {"image": FRAMEWORK_IMAGE, "overrideCommand": False,
               "remoteUser": "vscode",
               "postCreateCommand": "./.devcontainer/post-create.sh",
               "postStartCommand": "./.devcontainer/post-start.sh",
@@ -269,7 +272,7 @@ class TestValidateDevcontainer:
     def test_non_empty_features(self, tmp_path):
         dc_dir = tmp_path / ".devcontainer"
         dc_dir.mkdir()
-        dc = {"image": "shinojosa/dt-enablement:v1.2", "overrideCommand": False,
+        dc = {"image": FRAMEWORK_IMAGE, "overrideCommand": False,
               "remoteUser": "vscode",
               "postCreateCommand": "./.devcontainer/post-create.sh",
               "postStartCommand": "./.devcontainer/post-start.sh",
@@ -284,7 +287,7 @@ class TestValidateDevcontainer:
     def test_non_empty_extensions(self, tmp_path):
         dc_dir = tmp_path / ".devcontainer"
         dc_dir.mkdir()
-        dc = {"image": "shinojosa/dt-enablement:v1.2", "overrideCommand": False,
+        dc = {"image": FRAMEWORK_IMAGE, "overrideCommand": False,
               "remoteUser": "vscode",
               "postCreateCommand": "./.devcontainer/post-create.sh",
               "postStartCommand": "./.devcontainer/post-start.sh",
@@ -369,3 +372,91 @@ class TestRepoOwnedFilesInCategoryADirs:
         status = _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=True)
         assert status == "up-to-date"
         assert (repo / REPO_TOKENS).read_text() == TOKENS_TEXT
+
+
+# ---------------------------------------------------------------------------
+# Framework image bump (189: v1.3.2 = CVE-2026-111497 Node + ENH-075 entrypoint)
+# ---------------------------------------------------------------------------
+
+def _dc_text(image: str) -> str:
+    return (
+        '{\n  "name": "Dynatrace Enablement Container",\n'
+        '  // Pulling the image from the Dockerhub\n'
+        f'  "image":"{image}",\n'
+        '  "overrideCommand": false\n}\n'
+    )
+
+
+def _repo_with_image(tmp_path, image: str) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".devcontainer").mkdir(parents=True)
+    (repo / ".devcontainer/devcontainer.json").write_text(_dc_text(image))
+    return repo
+
+
+class TestFrameworkImageBump:
+    def test_target_is_v1_3_2(self):
+        assert FRAMEWORK_IMAGE == "shinojosa/dt-enablement:v1.3.2"
+        assert DEVCONTAINER_CHECKS["image"]["expected"] == FRAMEWORK_IMAGE
+
+    @pytest.mark.parametrize("old", ["v1.0", "v1.1", "v1.2", "v1.3", "v1.3.1"])
+    def test_bumps_every_old_framework_tag(self, old):
+        out, replaced = bump_framework_image(_dc_text(f"shinojosa/dt-enablement:{old}"))
+        assert replaced == [f"shinojosa/dt-enablement:{old}"]
+        assert out == _dc_text(FRAMEWORK_IMAGE)
+
+    def test_noop_on_current_image(self):
+        text = _dc_text(FRAMEWORK_IMAGE)
+        assert bump_framework_image(text) == (text, [])
+
+    @pytest.mark.parametrize("image", [
+        "shinojosa/dt-enablement:v1.2-custom",
+        "shinojosa/dt-enablement:v1.3.1-rc1",
+        "shinojosa/dt-enablement:latest",
+        "myorg/dt-enablement:v1.2",
+        "ghcr.io/acme/scenario:v1.2",
+        "mcr.microsoft.com/devcontainers/base:ubuntu",
+    ])
+    def test_leaves_custom_images_alone(self, image):
+        text = _dc_text(image)
+        assert bump_framework_image(text) == (text, [])
+
+    def test_does_not_touch_comments_or_other_keys(self):
+        text = ('{ // was "image":"x"\n'
+                '  "image": "shinojosa/dt-enablement:v1.2",\n'
+                '  "note": "shinojosa/dt-enablement:v1.2"\n}')
+        out, replaced = bump_framework_image(text)
+        assert replaced == ["shinojosa/dt-enablement:v1.2"]
+        assert f'"image": "{FRAMEWORK_IMAGE}"' in out
+        assert '"note": "shinojosa/dt-enablement:v1.2"' in out
+
+    def test_migrate_bumps_v1_2_repo(self, tmp_path, make_repo_entry):
+        repo = _repo_with_image(tmp_path, "shinojosa/dt-enablement:v1.2")
+        _migrate_repo(make_repo_entry(), repo, "1.18.0", dry_run=False)
+        dc = (repo / ".devcontainer/devcontainer.json").read_text()
+        assert f'"image":"{FRAMEWORK_IMAGE}"' in dc
+        assert "dt-enablement:v1.2" not in dc
+
+    def test_migrate_dry_run_writes_nothing(self, tmp_path, make_repo_entry):
+        repo = _repo_with_image(tmp_path, "shinojosa/dt-enablement:v1.2")
+        _migrate_repo(make_repo_entry(), repo, "1.18.0", dry_run=True)
+        assert (repo / ".devcontainer/devcontainer.json").read_text() == \
+            _dc_text("shinojosa/dt-enablement:v1.2")
+
+    def test_migrate_keeps_custom_image(self, tmp_path, make_repo_entry):
+        repo = _repo_with_image(tmp_path, "ghcr.io/acme/scenario:v1.2")
+        _migrate_repo(make_repo_entry(), repo, "1.18.0", dry_run=False)
+        assert '"image":"ghcr.io/acme/scenario:v1.2"' in \
+            (repo / ".devcontainer/devcontainer.json").read_text()
+
+    def test_scaffolded_devcontainer_uses_framework_image(self, tmp_path, make_repo_entry):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _migrate_repo(make_repo_entry(), repo, "1.18.0", dry_run=False)
+        dc = (repo / ".devcontainer/devcontainer.json").read_text()
+        assert f'"image":"{FRAMEWORK_IMAGE}"' in dc
+        assert "@FRAMEWORK_IMAGE@" not in dc
+        assert not any("image" in i for i in _validate_devcontainer(repo))
+
+    def test_old_list_excludes_target(self):
+        assert FRAMEWORK_IMAGE not in OLD_FRAMEWORK_IMAGES
