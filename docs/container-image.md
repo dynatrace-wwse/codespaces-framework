@@ -107,7 +107,8 @@ which fixes CVE-2026-111497 (Brotli decoder out-of-bounds write).
 The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for
 `linux/amd64` and `linux/arm64` and pushes `shinojosa/dt-enablement:<tag>`. Run it by hand from
 the Actions tab on the branch to build (normally `main`), giving the tag. It refuses a tag that
-already exists on Docker Hub, and it also refuses when the lookup itself fails, so a rate limit
+already exists on Docker Hub, refuses a release tag (`v*`) from any branch but `main`, and also
+refuses when the lookup itself fails, so a rate limit
 cannot read as "free". After pushing, it pulls the image on both architectures and prints the OS,
 `node -v` and the tool versions. Throwaway test tags (for example `entrypoint-test-186`) go
 through the same workflow. It needs the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.

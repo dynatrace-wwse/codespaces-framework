@@ -40,6 +40,12 @@ jobs:
           if [ "$TAG" = "latest" ]; then
             echo "::error::'latest' is a moving tag; publish a fixed tag"; exit 1
           fi
+          # Release tags (v1.3, ...) are what devcontainer.json and Orbital point at: build them
+          # from main only. Throwaway test tags may come from any branch.
+          if [[ "$TAG" =~ ^v ]] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::release tag '$TAG' may only be published from main (ref: $GITHUB_REF)"; exit 1
+          fi
+          echo "Publishing ${IMAGE}:${TAG} from ${GITHUB_REF} @ ${GITHUB_SHA}"
 
       # Only a 404 means "absent". Any other answer (rate limit, auth, outage) stops the run, so a
       # failed lookup can never read as "free to push" and overwrite a published tag.
