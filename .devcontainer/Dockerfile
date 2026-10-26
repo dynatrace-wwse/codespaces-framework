@@ -9,6 +9,11 @@ ARG HELM_VERSION=v3.17.0
 # unauthenticated GitHub API 403 left KIND_RELEASE empty and saved an XML error page as `kind`.
 ARG KUBECTL_VERSION=v1.34.1
 ARG KIND_VERSION=v0.30.0
+# Docker CLI pinned to v1.2's 27.5.1. Ubuntu's docker.io moved to 29.x, whose client requires API
+# >= 1.44 and refuses older daemons ("client version 1.52 is too new. Maximum supported API
+# version is 1.43" on the GitHub Codespaces host). 27.x negotiates down. The docker.io package
+# stays for the docker group the entrypoint maps; its daemon is never used (the socket is mounted).
+ARG DOCKER_CLI_VERSION=27.5.1
 # Multiarchitecture, plattform is passed on when building the image.
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -30,6 +35,14 @@ RUN apt update && apt install -y \
     gh \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Replace the docker.io client with the pinned static CLI (same binary at both paths).
+RUN case "$TARGETARCH" in amd64) A=x86_64 ;; arm64) A=aarch64 ;; *) echo "unsupported $TARGETARCH"; exit 1 ;; esac \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/$A/docker-$DOCKER_CLI_VERSION.tgz" | tar -xz -C /tmp docker/docker \
+    && install -o root -g root -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+    && ln -sf /usr/local/bin/docker /usr/bin/docker \
+    && rm -rf /tmp/docker \
+    && test "$(docker version --format '{{.Client.Version}}' 2>/dev/null)" = "$DOCKER_CLI_VERSION"
 
 # Install kubectl (x86_64/amd64, aarch64/arm64)
 RUN curl -fLO "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$TARGETARCH/kubectl" \
