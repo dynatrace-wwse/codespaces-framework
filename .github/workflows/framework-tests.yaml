@@ -33,6 +33,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # test_otel_collector.bats compares the default collector against the
+          # 1.17.0 tag; a shallow clone has no tags and that control would skip.
+          fetch-depth: 0
 
       - name: Install bats
         # zsh: the learner's shell. Without it the zsh test in

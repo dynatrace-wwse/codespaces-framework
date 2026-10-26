@@ -4441,6 +4441,31 @@ undeployOpentelemetryDemo(){
 #  the same contract as astroshop's gateway collector. Independent of the
 #  Dynatrace Operator: works with or without a DynaKube. The token travels
 #  on stdin into a Secret; it is never printed and never in argv.
+#
+#  Overrides (all optional; unset = the defaults above, unchanged since 1.17.0).
+#  Set them before the call, e.g. in the repo's my_functions.sh:
+#
+#    OTEL_COLLECTOR_MODE=daemonset     deployment (default) | daemonset — one
+#                                      collector per node instead of one replica
+#    OTEL_COLLECTOR_POD_LOGS=true      mount the node's /var/log/pods read-only
+#                                      and run as root so a filelog receiver can
+#                                      read container logs. daemonset only.
+#    OTEL_COLLECTOR_CONFIG_FILE=path   replace the whole collector config with
+#                                      this file. It must keep the contract the
+#                                      manifests rely on:
+#                                        - extension health_check on
+#                                          ${env:MY_POD_IP}:13133 (the probes)
+#                                        - receivers on 4317 / 4318
+#                                        - export with ${env:DT_ENDPOINT} and
+#                                          "Api-Token ${env:DT_API_TOKEN}"
+#                                      Also available in the pod: ${env:K8S_NODE_NAME}.
+#                                      Start from `_otelCollectorConfig` (prints
+#                                      the default) and add what the training needs.
+#
+#  Example — per-node collector that also ships pod logs:
+#    OTEL_COLLECTOR_MODE=daemonset OTEL_COLLECTOR_POD_LOGS=true \
+#    OTEL_COLLECTOR_CONFIG_FILE="$REPO_PATH/.devcontainer/yaml/otel-collector.yaml" \
+#      deployOtelCollector
 # ======================================================================
 
 _otelCollectorConfig() {
@@ -4507,8 +4532,33 @@ CFGEOF
 }
 
 _otelCollectorManifests() {
-  # $1 namespace, $2 config sha (rolls the pod when the config changes).
-  local ns="$1" sha="$2"
+  # $1 namespace, $2 config sha (rolls the pod when the config changes),
+  # $3 kind (Deployment | DaemonSet), $4 pod logs (true = mount /var/log/pods).
+  local ns="$1" sha="$2" kind="${3:-Deployment}" podlogs="${4:-false}"
+  local replicas="" podsec="" logmount="" logvol="" nodeenv=""
+  if [ "$kind" = "Deployment" ]; then
+    replicas="
+  replicas: 1"
+  else
+    nodeenv="
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName"
+  fi
+  if [ "$podlogs" = "true" ]; then
+    # Container log files on the node are root-owned 0640.
+    podsec="
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0"
+    logmount="
+            - {name: varlogpods, mountPath: /var/log/pods, readOnly: true}"
+    logvol="
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods"
+  fi
   local image="ghcr.io/dynatrace/dynatrace-otel-collector/dynatrace-otel-collector:${OTEL_COLLECTOR_VERSION}@${OTEL_COLLECTOR_DIGEST}"
   cat <<MANEOF | kubectl apply -f -
 apiVersion: v1
@@ -4543,14 +4593,13 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: $kind
 metadata:
   name: otel-collector
   namespace: $ns
   labels:
     app.kubernetes.io/name: otel-collector
-spec:
-  replicas: 1
+spec:${replicas}
   selector:
     matchLabels:
       app.kubernetes.io/name: otel-collector
@@ -4561,7 +4610,7 @@ spec:
       annotations:
         enablement.dynatrace.com/config-sha: "$sha"
     spec:
-      serviceAccountName: otel-collector
+      serviceAccountName: otel-collector${podsec}
       containers:
         - name: collector
           image: $image
@@ -4570,7 +4619,7 @@ spec:
             - name: MY_POD_IP
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP
+                  fieldPath: status.podIP${nodeenv}
             - name: DT_ENDPOINT
               valueFrom:
                 secretKeyRef:
@@ -4592,11 +4641,11 @@ spec:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 512Mi}
           volumeMounts:
-            - {name: conf, mountPath: /conf}
+            - {name: conf, mountPath: /conf}${logmount}
       volumes:
         - name: conf
           configMap:
-            name: otel-collector-config
+            name: otel-collector-config${logvol}
 ---
 apiVersion: v1
 kind: Service
@@ -4617,7 +4666,23 @@ deployOtelCollector() {
   # exporting to the tenant. Apps send OTLP to
   #   http://otel-collector.<ns>.svc.cluster.local:4318 (HTTP) or :4317 (gRPC).
   # Idempotent: a re-run updates the credentials and the config in place.
-  local ns="$OTEL_COLLECTOR_NAMESPACE" cfg sha
+  # Overrides: OTEL_COLLECTOR_MODE, OTEL_COLLECTOR_POD_LOGS, OTEL_COLLECTOR_CONFIG_FILE
+  # (documented in the section header above).
+  local ns="$OTEL_COLLECTOR_NAMESPACE" cfg sha kind other workload
+  local mode="${OTEL_COLLECTOR_MODE:-deployment}" podlogs="${OTEL_COLLECTOR_POD_LOGS:-false}"
+  case "$mode" in
+    deployment) kind=Deployment other=daemonset workload=deploy/otel-collector ;;
+    daemonset)  kind=DaemonSet other=deployment workload=ds/otel-collector ;;
+    *) printError "deployOtelCollector: OTEL_COLLECTOR_MODE must be deployment or daemonset (got '$mode')"; return 1 ;;
+  esac
+  if [ "$podlogs" = "true" ] && [ "$mode" != "daemonset" ]; then
+    printError "deployOtelCollector: OTEL_COLLECTOR_POD_LOGS=true needs OTEL_COLLECTOR_MODE=daemonset (one collector per node reads that node's logs)"
+    return 1
+  fi
+  if [ -n "${OTEL_COLLECTOR_CONFIG_FILE:-}" ] && [ ! -r "$OTEL_COLLECTOR_CONFIG_FILE" ]; then
+    printError "deployOtelCollector: OTEL_COLLECTOR_CONFIG_FILE '$OTEL_COLLECTOR_CONFIG_FILE' is not a readable file"
+    return 1
+  fi
   if ! kubectl cluster-info >/dev/null 2>&1; then
     printError "deployOtelCollector: no Kubernetes cluster reachable — run startCluster first"
     return 1
@@ -4638,15 +4703,23 @@ deployOtelCollector() {
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
     || { printError "Could not create the collector's credentials secret"; return 1; }
 
-  cfg=$(_otelCollectorConfig)
-  sha=$(printf '%s%s' "$cfg" "$DT_OTEL_ENDPOINT" | sha256sum | cut -c1-16)
+  if [ -n "${OTEL_COLLECTOR_CONFIG_FILE:-}" ]; then
+    printInfo "Collector config from $OTEL_COLLECTOR_CONFIG_FILE"
+    cfg=$(cat "$OTEL_COLLECTOR_CONFIG_FILE")
+  else
+    cfg=$(_otelCollectorConfig)
+  fi
+  # The pod-logs flag joins the sha only when on: the default sha (and pod) stay as in 1.17.0.
+  sha=$(printf '%s%s%s' "$cfg" "$DT_OTEL_ENDPOINT" "${podlogs#false}" | sha256sum | cut -c1-16)
   kubectl -n "$ns" create cm otel-collector-config --from-literal=config.yaml="$cfg" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null || return 1
-  _otelCollectorManifests "$ns" "$sha" >/dev/null || { printError "Could not apply the collector manifests"; return 1; }
+  # Switching mode: the other kind would share the Service selector, so remove it.
+  kubectl -n "$ns" delete "$other" otel-collector --ignore-not-found >/dev/null 2>&1
+  _otelCollectorManifests "$ns" "$sha" "$kind" "$podlogs" >/dev/null || { printError "Could not apply the collector manifests"; return 1; }
 
-  if ! kubectl -n "$ns" rollout status deploy/otel-collector --timeout="${OTEL_COLLECTOR_READY_TIMEOUT:-300}s" >/dev/null; then
+  if ! kubectl -n "$ns" rollout status "$workload" --timeout="${OTEL_COLLECTOR_READY_TIMEOUT:-300}s" >/dev/null; then
     printError "The OpenTelemetry Collector did not become ready"
-    printError "Inspect with: kubectl -n $ns logs deploy/otel-collector --tail=50"
+    printError "Inspect with: kubectl -n $ns logs $workload --tail=50"
     return 1
   fi
   printInfo "OpenTelemetry Collector is ready. Send OTLP to:"
