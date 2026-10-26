@@ -85,9 +85,18 @@ def _get_category_a(image_tier: str) -> tuple[list[str], list[str]]:
 # Reference values that every repo must match for all 3 instantiation modes
 # (Codespaces, VS Code DevContainer, local Docker).
 
+# The framework image every training repo runs. v1.3.2 = Node 22.23.4 (CVE-2026-111497)
+# + the entrypoint fix for Codespace stop/start (ENH-075, #186).
+FRAMEWORK_IMAGE = "shinojosa/dt-enablement:v1.3.2"
+# Older framework images push-update moves to FRAMEWORK_IMAGE. Exact refs only: a
+# custom or scenario image is never rewritten.
+OLD_FRAMEWORK_IMAGES = tuple(
+    f"shinojosa/dt-enablement:{t}" for t in ("v1.0", "v1.1", "v1.2", "v1.3", "v1.3.1")
+)
+
 DEVCONTAINER_CHECKS = {
     "image": {
-        "expected": "shinojosa/dt-enablement:v1.2",
+        "expected": FRAMEWORK_IMAGE,
         "why": "Must reference the pre-built framework image (Docker Hub, multi-arch)",
     },
     "overrideCommand": {
@@ -113,6 +122,21 @@ DEVCONTAINER_REQUIRED_RUNARGS = ["--init", "--privileged", "--network=host"]
 DEVCONTAINER_REQUIRED_MOUNTS = [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
 ]
+
+
+def bump_framework_image(dc_raw: str) -> tuple[str, list[str]]:
+    """devcontainer.json text with every old framework image ref moved to FRAMEWORK_IMAGE.
+
+    Returns (new text, the old refs it replaced). Only an exact, quoted
+    OLD_FRAMEWORK_IMAGES ref matches, so "…:v1.2-custom", another repository or a
+    scenario image is left as is."""
+    old = []
+    for ref in OLD_FRAMEWORK_IMAGES:
+        pattern = re.compile(r'("image"\s*:\s*")' + re.escape(ref) + r'(")')
+        if pattern.search(dc_raw):
+            old.append(ref)
+            dc_raw = pattern.sub(lambda m: m.group(1) + FRAMEWORK_IMAGE + m.group(2), dc_raw)
+    return dc_raw, old
 
 
 def _strip_jsonc_comments(text: str) -> str:
@@ -457,7 +481,7 @@ jobs:
 DEVCONTAINER_JSON_TEMPLATE = r"""{
   "name": "Dynatrace Enablement Container",
   // Pulling the image from the Dockerhub, runs on AMD64 and ARM64. Pulling is normally faster.
-  "image":"shinojosa/dt-enablement:v1.2",
+  "image":"@FRAMEWORK_IMAGE@",
   /*
   // Building the image from the Dockerfile
   "build": {
@@ -685,7 +709,7 @@ def _scaffold_repo(entry, repo_path: Path, version: str):
     dc_path = repo_path / ".devcontainer/devcontainer.json"
     if not dc_path.exists():
         dc_path.parent.mkdir(parents=True, exist_ok=True)
-        dc_path.write_text(DEVCONTAINER_JSON_TEMPLATE)
+        dc_path.write_text(DEVCONTAINER_JSON_TEMPLATE.replace("@FRAMEWORK_IMAGE@", FRAMEWORK_IMAGE))
         created.append("devcontainer.json")
     else:
         # Fix old-style devcontainer.json: dockerFile → image, wrong mount target
@@ -695,7 +719,7 @@ def _scaffold_repo(entry, repo_path: Path, version: str):
             # Replace build with image pull
             content = re.sub(
                 r'"dockerFile"\s*:\s*"Dockerfile"',
-                '"image": "shinojosa/dt-enablement:v1.2"',
+                f'"image": "{FRAMEWORK_IMAGE}"',
                 content, flags=re.IGNORECASE,
             )
             changed = True
@@ -856,15 +880,13 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
     dc_path = repo_path / ".devcontainer/devcontainer.json"
     if dc_path.exists():
         dc_raw = dc_path.read_text()
-        # Auto-fix old image versions (v1.0, v1.1 → v1.2)
-        if '"shinojosa/dt-enablement:v1.1"' in dc_raw or '"shinojosa/dt-enablement:v1.0"' in dc_raw:
-            dc_raw = dc_raw.replace(
-                '"shinojosa/dt-enablement:v1.1"', '"shinojosa/dt-enablement:v1.2"'
-            ).replace(
-                '"shinojosa/dt-enablement:v1.0"', '"shinojosa/dt-enablement:v1.2"'
-            )
-            dc_path.write_text(dc_raw)
-            print(f"    🔄 devcontainer.json image bumped to v1.2")
+        bumped, old = bump_framework_image(dc_raw)
+        if old:
+            if dry_run:
+                print(f"    would bump devcontainer.json image {old} → {FRAMEWORK_IMAGE}")
+            else:
+                dc_path.write_text(bumped)
+                print(f"    🔄 devcontainer.json image bumped {old} → {FRAMEWORK_IMAGE}")
 
     dc_issues = _validate_devcontainer(repo_path)
     if dc_issues:
