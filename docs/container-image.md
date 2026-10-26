@@ -102,6 +102,19 @@ so a failed fetch fails the build instead of saving an error page as a binary.
 A changed image is published under a **new tag** and never rebuilt over an existing one. A retag
 would make rollback impossible and hide drift. `v1.3` is `v1.2`'s toolset with Node **22.23.4**,
 which fixes CVE-2026-111497 (Brotli decoder out-of-bounds write).
+
+### Publishing a new tag
+The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for
+`linux/amd64` and `linux/arm64` and pushes `shinojosa/dt-enablement:<tag>`. Run it by hand from
+the Actions tab on the branch to build (normally `main`), giving the tag. It refuses a tag that
+already exists on Docker Hub, and it also refuses when the lookup itself fails, so a rate limit
+cannot read as "free". After pushing, it pulls the image on both architectures and prints the OS,
+`node -v` and the tool versions. Throwaway test tags (for example `entrypoint-test-186`) go
+through the same workflow. It needs the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+
+Publishing a tag does not move anything that uses the image. Each `devcontainer.json`, Orbital's
+`TEST_IMAGE` and the 29 training repos pick a tag explicitly. They change through a framework
+release and the registry sync.
 [![Downloads](https://img.shields.io/docker/pulls/shinojosa/dt-enablement?logo=docker)](https://hub.docker.com/r/shinojosa/dt-enablement)
 
 
