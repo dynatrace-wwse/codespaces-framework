@@ -133,7 +133,7 @@ To use the pre-built image, specify the "image" property in your devcontainer.js
 
 ``` json
   // Pulling the image from the Dockerhub, runs on AMD64 and ARM64. Pulling is normally faster.
-  "image":"shinojosa/dt-enablement:v1.3",
+  "image":"shinojosa/dt-enablement:v1.3.1",
 
 ```
 This will pull the published image from Docker Hub and use it as the base for your Codespace or Dev Container.
