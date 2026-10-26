@@ -92,6 +92,16 @@ The following `runArgs` configuration in `devcontainer.json` enhances the capabi
 
 ## Image Distribution
 The image is hosted on Docker Hub and is cross-compiled for ARM and AMD architectures.
+
+### Versions and tags
+Everything that changes the image is pinned in `.devcontainer/Dockerfile`, so a rebuild reproduces
+the tag: base `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, `NODE_VERSION` (exact nodesource
+package), `NPM_MAJOR`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
+so a failed fetch fails the build instead of saving an error page as a binary.
+
+A changed image is published under a **new tag** and never rebuilt over an existing one. A retag
+would make rollback impossible and hide drift. `v1.3` is `v1.2`'s toolset with Node **22.23.4**,
+which fixes CVE-2026-111497 (Brotli decoder out-of-bounds write).
 [![Downloads](https://img.shields.io/docker/pulls/shinojosa/dt-enablement?logo=docker)](https://hub.docker.com/r/shinojosa/dt-enablement)
 
 
