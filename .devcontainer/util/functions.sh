@@ -248,9 +248,31 @@ waitForAllReadyPods() {
 
   if [[ $RETRY == $RETRY_MAX ]]; then
     printError "Following pods are not still not running. Please check their events. Exiting installation..."
-    kubectl get pods --field-selector=status.phase!=Running -A
+    printNotReadyPods "$namespace_filter"
+    printPodsDiagnostics "$namespace_filter"
     exit 1
   fi
+}
+
+printNotReadyPods() {
+  # The pods waitForAllReadyPods timed out on, by the SAME test it waits with
+  # (READY column not n/n). A Running pod whose readiness probe never passes
+  # counts here; a `status.phase!=Running` selector hides it and printed
+  # "No resources found" for exactly that failure (BUG-158).
+  local ns_filter="${1:---all-namespaces}"
+  local rows
+  rows=$(kubectl get pods $ns_filter -o wide 2>/dev/null | grep -v -E '(1/1|2/2|3/3|4/4|5/5|6/6)' || true)
+  printInfo "Pods not Ready (Running but not Ready included)"
+  echo "$rows"
+  printInfo "Readiness and events per not-Ready pod"
+  echo "$rows" | awk 'NR>1 {print}' | while read -r first second _; do
+    local ns name
+    if [[ "$ns_filter" == "--all-namespaces" ]]; then ns="$first"; name="$second"; else ns="${ns_filter#-n }"; name="$first"; fi
+    [[ -n "$name" ]] || continue
+    echo "--- $ns/$name"
+    kubectl describe pod -n "$ns" "$name" 2>/dev/null \
+      | grep -E "^ +(Ready|State|Reason|Restart Count|Readiness|Liveness):|^Events:|^  (Warning|Normal) " | tail -30 || true
+  done
 }
 
 waitAppCanHandleRequests(){
