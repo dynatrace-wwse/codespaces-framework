@@ -1,0 +1,99 @@
+# Publish the training image (shinojosa/dt-enablement) to Docker Hub, multi-arch, under a NEW tag.
+#
+# Run by hand: Actions -> "Publish image" -> Run workflow, pick the branch (normally main), give a tag.
+# The workflow refuses a tag that already exists on Docker Hub: a published tag is never rebuilt
+# in place, because a retag makes rollback impossible and hides drift (see docs/container-image.md).
+#
+# Secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (a Docker Hub access token with push on the repo).
+name: Publish image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish, e.g. v1.3 (or a throwaway test tag). Must not exist yet."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-image-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: shinojosa/dt-enablement
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Validate tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::'$TAG' is not a valid Docker tag"; exit 1
+          fi
+          if [ "$TAG" = "latest" ]; then
+            echo "::error::'latest' is a moving tag; publish a fixed tag"; exit 1
+          fi
+          # Release tags (v1.3, ...) are what devcontainer.json and Orbital point at: build them
+          # from main only. Throwaway test tags may come from any branch.
+          if [[ "$TAG" =~ ^v ]] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::release tag '$TAG' may only be published from main (ref: $GITHUB_REF)"; exit 1
+          fi
+          echo "Publishing ${IMAGE}:${TAG} from ${GITHUB_REF} @ ${GITHUB_SHA}"
+
+      # Only a 404 means "absent". Any other answer (rate limit, auth, outage) stops the run, so a
+      # failed lookup can never read as "free to push" and overwrite a published tag.
+      - name: Refuse if the tag already exists on Docker Hub
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://hub.docker.com/v2/repositories/${IMAGE}/tags/${TAG}")
+          case "$code" in
+            404) echo "${IMAGE}:${TAG} does not exist yet - ok to publish" ;;
+            200) echo "::error::${IMAGE}:${TAG} already exists. Publish a new tag instead."; exit 1 ;;
+            *)   echo "::error::Docker Hub tag lookup returned HTTP $code; refusing to guess"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .devcontainer
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ inputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      # Pull what was published (not the build cache) and print what an attendee will get.
+      - name: Verify the published image, both architectures
+        env:
+          TAG: ${{ inputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${TAG}"
+          for p in linux/amd64 linux/arm64; do
+            echo "== $p"
+            docker run --rm --pull always --platform "$p" --entrypoint sh "${IMAGE}:${TAG}" -c \
+              '. /etc/os-release; echo "$PRETTY_NAME"; uname -m; node -v; npm -v; kubectl version --client | head -1; helm version --short; kind version; sha256sum /entrypoint.sh'
+          done
+          echo "Published ${IMAGE}:${TAG} @ ${DIGEST} from ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
