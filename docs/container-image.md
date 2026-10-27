@@ -95,7 +95,7 @@ The image is hosted on Docker Hub and is cross-compiled for ARM and AMD architec
 
 ### Versions and tags
 Everything that changes the image is pinned in `.devcontainer/Dockerfile`, so a rebuild reproduces
-the tag: base `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, `NODE_VERSION` (exact nodesource
+the tag: base `mcr.microsoft.com/devcontainers/base:3.0.10-noble` (by digest), `NODE_VERSION` (exact nodesource
 package), `NPM_MAJOR`, `DOCKER_CLI_VERSION`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
 so a failed fetch fails the build instead of saving an error page as a binary.
 
@@ -114,7 +114,19 @@ socket's docker GID differs from the image's, so `/entrypoint.sh` runs `groupmod
 command. The `groupmod` persists, so after `docker restart` or a stop/start the GIDs match. Up to
 `v1.3.1` the script then returned without running its command and the container exited 0: a
 Codespace that was stopped and started came back in recovery mode. From `v1.3.2` it execs the
-command on that path too. Use `v1.3.2`.
+command on that path too.
+
+`v1.4.0` clears the stale layers `v1.3.2` carried. The base moves to devcontainers `base` v0.4.35
+(2026-10-09), pinned by digest, and the build runs `apt-get upgrade` so the OS packages match the
+Ubuntu security archive on the day it is built. The client tools are upstream's signed release
+binaries, each asserted by version: helm `v3.22.1`, kubectl `v1.37.1`, kind `v0.33.0` and the
+Docker CLI `28.5.2`, plus the GitHub CLI `2.103.3` from its release instead of Ubuntu's 2.45.0.
+The image no longer installs Ubuntu's `docker.io`: it was there only for its `docker` group, and
+it brought a Docker daemon, containerd and runc that nothing runs, because the host socket is
+mounted. The group is created directly and `/entrypoint.sh` maps its GID as before. 28.5.2 is the newest client that still negotiates down to the Codespaces
+daemon's API 1.43. 29.x does not, so the CLI stays on 28.x until that daemon moves. kubectl, kind
+and the Docker CLI were still built with Go older than 1.26.9, so the Go standard library advisory
+GO-2026-6612 remains in them until upstream ships rebuilt binaries (28.x never will). Use `v1.4.0`.
 
 ### Publishing a new tag
 The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for
