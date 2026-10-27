@@ -120,7 +120,10 @@ command on that path too.
 (2026-10-09), pinned by digest, and the build runs `apt-get upgrade` so the OS packages match the
 Ubuntu security archive on the day it is built. The client tools are upstream's signed release
 binaries, each asserted by version: helm `v3.22.1`, kubectl `v1.37.1`, kind `v0.33.0` and the
-Docker CLI `28.5.2`. 28.5.2 is the newest client that still negotiates down to the Codespaces
+Docker CLI `28.5.2`, plus the GitHub CLI `2.103.3` from its release instead of Ubuntu's 2.45.0.
+The image no longer installs Ubuntu's `docker.io`: it was there only for its `docker` group, and
+it brought a Docker daemon, containerd and runc that nothing runs, because the host socket is
+mounted. The group is created directly and `/entrypoint.sh` maps its GID as before. 28.5.2 is the newest client that still negotiates down to the Codespaces
 daemon's API 1.43. 29.x does not, so the CLI stays on 28.x until that daemon moves. kubectl, kind
 and the Docker CLI were still built with Go older than 1.26.9, so the Go standard library advisory
 GO-2026-6612 remains in them until upstream ships rebuilt binaries (28.x never will). Use `v1.4.0`.

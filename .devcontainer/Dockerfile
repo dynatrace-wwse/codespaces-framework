@@ -18,6 +18,8 @@ ARG KIND_VERSION=v0.33.0
 # gets no new upstream builds, so its Go stdlib findings stay until then. The docker.io package
 # stays for the docker group the entrypoint maps; its daemon is never used (the socket is mounted).
 ARG DOCKER_CLI_VERSION=28.5.2
+# GitHub CLI from its release (checksum-verified). Ubuntu's `gh` is 2.45.0 built with go1.22.2.
+ARG GH_VERSION=2.103.3
 # Multiarchitecture, plattform is passed on when building the image.
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -25,11 +27,13 @@ ARG TARGETARCH
 
 RUN echo "Host is running on $BUILDPLATFORM and the binaries will be downloaded for '$TARGETARCH', building for $TARGETPLATFORM"
 
-# Install Docker CLI (not daemon). `upgrade` first: the base layer lags the Ubuntu security
-# archive (v1.3.2 shipped openssl 3.0.13-0ubuntu3.6 and rsync 3.2.7-1ubuntu1.2, both with fixes out).
+# `upgrade` first: the base layer lags the Ubuntu security archive (v1.3.2 shipped openssl
+# 3.0.13-0ubuntu3.6 and rsync 3.2.7-1ubuntu1.2, both with fixes out). No `docker.io`: up to v1.3.2
+# it was installed only for its docker group, and it brought dockerd, containerd, runc, ctr and the
+# docker-trust plugin, which nothing runs (the socket is mounted) but which carried most of the
+# image's Go CRITICAL findings. The group is created directly; /entrypoint.sh maps its GID.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    docker.io \
     curl \
     ca-certificates \
     iptables \
@@ -38,11 +42,21 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     ethtool \
     conntrack \
     sudo \
-    gh \
     python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system docker \
+    && ! command -v dockerd && ! command -v containerd
 
-# Replace the docker.io client with the pinned static CLI (same binary at both paths).
+# Install GitHub CLI
+RUN curl -fsSLO "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$TARGETARCH.tar.gz" \
+    && curl -fsSL "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_checksums.txt" \
+       | grep " gh_${GH_VERSION}_linux_$TARGETARCH.tar.gz\$" | sha256sum -c - \
+    && tar -xzf gh_${GH_VERSION}_linux_$TARGETARCH.tar.gz \
+    && install -o root -g root -m 0755 gh_${GH_VERSION}_linux_$TARGETARCH/bin/gh /usr/local/bin/gh \
+    && rm -rf gh_${GH_VERSION}_linux_$TARGETARCH* \
+    && gh --version | grep -q "^gh version $GH_VERSION "
+
+# Install the pinned static Docker CLI (not the daemon), at both usual paths.
 RUN case "$TARGETARCH" in amd64) A=x86_64 ;; arm64) A=aarch64 ;; *) echo "unsupported $TARGETARCH"; exit 1 ;; esac \
     && curl -fsSL "https://download.docker.com/linux/static/stable/$A/docker-$DOCKER_CLI_VERSION.tgz" | tar -xz -C /tmp docker/docker \
     && install -o root -g root -m 0755 /tmp/docker/docker /usr/local/bin/docker \
