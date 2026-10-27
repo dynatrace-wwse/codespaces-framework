@@ -123,7 +123,7 @@ When `push-update` or `migrate` runs on a repo, it executes these phases:
 | Phase | Action |
 |-------|--------|
 | **1. Audit** | Identifies Category A files and validates `devcontainer.json` |
-| **1b. Fix devcontainer.json** | Moves an exact `shinojosa/dt-enablement:v1.0`…`v1.3.1` image to `FRAMEWORK_IMAGE` (`v1.3.2`: Node 22.23.4 for CVE-2026-111497 + the ENH-075 entrypoint fix). Any other image (custom, scenario, another tag) is left as is. `--dry-run` reports, writes nothing |
+| **1b. Fix devcontainer.json** | Moves an exact `shinojosa/dt-enablement:v1.0`…`v1.3.2` image to `FRAMEWORK_IMAGE` (`v1.4.0`: v1.3.2's Node 22.23.4 / ENH-075 entrypoint fix + base refresh, libbrotli1 USN-8956-1, docker CLI 28.5.2 — #205). Any other image (custom, scenario, another tag) is left as is. `--dry-run` reports, writes nothing |
 | **2. Clean Category A** | Removes framework-owned files (now pulled from cache) |
 | **3. Thin Makefile** | Installs wrapper that delegates to cached `makefile.sh` |
 | **4. source_framework.sh** | Installs/updates versioned pull mechanism |
