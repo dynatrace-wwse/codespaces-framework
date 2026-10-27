@@ -1,0 +1,107 @@
+name: Nightly image scan (grype)
+
+# Scans the PUBLISHED workshop images with grype every night and fails on any Critical/High
+# finding that is not in the committed baseline (security/image-scan/baseline-<tag>.json).
+# A baseline is refreshed only by a PR (compare.py --write-baseline), so every accepted
+# finding has a reviewer. Read-only: pulls public images from Docker Hub, writes artifacts,
+# holds no Dynatrace or registry credential. Tooling backlog SEC-001; owner 2026-10-27.
+#
+# Artifact grype-<tag> (90 days): grype-<tag>.json (native, what AppSec/200 ingests into
+# security.events), grype-<tag>.sarif, summary.json (counts, digest, DB age, new/gone keys).
+# amd64 explicitly, so the digest is stable night to night.
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "security/image-scan/**"
+      - ".github/workflows/image-scan.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-scan-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GRYPE_VERSION: "0.121.0"
+  # sha256 of grype_0.121.0_linux_amd64.tar.gz from the release's checksums.txt
+  GRYPE_SHA256: "64e07133d3486115de647a66581461dccf5c732748a0a3119077395565f15519"
+
+jobs:
+  unit:
+    name: compare.py tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: python3 -m pip install --quiet pytest==8.3.3
+      - run: cd security/image-scan && python3 -m pytest -q
+
+  scan:
+    name: grype ${{ matrix.tag }}
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ["v1.3.2", "v1.4.0"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install grype (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          f="grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/$f"
+          echo "${GRYPE_SHA256}  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" grype
+          "$RUNNER_TEMP/grype" version | grep -E '^(Version|BuildDate)'
+
+      - name: Fresh vulnerability DB
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/grype" db update
+          "$RUNNER_TEMP/grype" db status
+
+      - name: Scan shinojosa/dt-enablement:${{ matrix.tag }} (linux/amd64)
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          "$RUNNER_TEMP/grype" "registry:shinojosa/dt-enablement:${TAG}" --platform linux/amd64 -q \
+            -o "json=out/grype-${TAG}.json" -o "sarif=out/grype-${TAG}.sarif"
+          ls -la out
+
+      - name: Gate against baseline
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -uo pipefail
+          rc=0
+          python3 -I security/image-scan/compare.py --scan "out/grype-${TAG}.json" \
+            --image "shinojosa/dt-enablement:${TAG}" \
+            --baseline "security/image-scan/baseline-${TAG}.json" \
+            --summary out/summary.json > out/report.txt || rc=$?
+          cat out/report.txt
+          { echo "### grype ${TAG}"; echo '```'; cat out/report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          case $rc in
+            0) ;;
+            2) echo "::error::new Critical/High in dt-enablement:${TAG} (listed above). Tell orch (SEC-001); refresh the baseline by PR once reviewed." ;;
+            *) echo "::error::scan for ${TAG} cannot be trusted (rc=${rc}): never read as no new findings" ;;
+          esac
+          exit $rc
+
+      - name: Upload grype-${{ matrix.tag }}
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: grype-${{ matrix.tag }}
+          path: out/
+          retention-days: 90
+          if-no-files-found: error
