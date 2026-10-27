@@ -232,6 +232,20 @@ repos:
     primary_tag: kubernetes
     duration: "1.5h"
 
+  # Henrik Rexed's workshop, migrated to the framework. In the sync set so image/framework bumps reach it
+  # (SEC-001: it reached v1.3.2 only by hand, b6af4aa). listed: false until the owner decides on a Hub listing;
+  # ci: false keeps it out of Orbital's nightly schedule until that is decided too.
+  - name: k8s-autoscaling-workshop
+    repo: dynatrace-wwse/k8s-autoscaling-workshop
+    status: active
+    maintainer: "@shinojosa"
+    description: "Right-size Kubernetes workloads with Dynatrace Smartscape, DQL and Workflows."
+    tags: [kubernetes, devops]
+    title: "K8s Autoscaling Workshop"
+    primary_tag: kubernetes
+    listed: false
+    ci: false
+
   - name: demo-astroshop-problems
     repo: dynatrace-wwse/demo-astroshop-problems
     status: archived
