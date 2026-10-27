@@ -69,7 +69,7 @@ so usage dashboards can count learners only:
 
 Building a throwaway container by hand? `export FRAMEWORK_TRACKER_PURPOSE=test` (or put it in
 `.devcontainer/.env`) so it does not count as a learner. Learner tiles should filter
-`coalesce(content.build.purpose, "") == "learner" or isNull(content.build.purpose)` and
+`not(in(coalesce(content.build.purpose, ""), "ci", "test"))` and
 `coalesce(content.orbital.env, "") != "staging"` — `coalesce`, because events from repos pinned to an
 older framework have none of these fields and a bare `!=` drops them.
 
