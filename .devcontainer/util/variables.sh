@@ -14,7 +14,7 @@ ENDPOINT_CODESPACES_TRACKER=https://codespaces-tracker.whydevslovedynatrace.com/
 CODESPACES_TRACKER_TOKEN_STRING="ilovedynatrace"
 
 # Helm Version
-HELM_VERSION=3.17.0
+HELM_VERSION=3.22.1
 export HELM_VERSION=$HELM_VERSION
 
 #https://cert-manager.io/docs/release-notes/
