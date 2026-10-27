@@ -611,6 +611,73 @@ stub_deploy_pipeline() {
 }
 
 # ============================================================
+# Tracker tags (brief 197): why the build ran, and from where
+# ============================================================
+
+# Mock curl: print the -d payload. Shared by the tag tests below.
+_capture_tracker_payload() {
+  curl() {
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "-d" ]]; then echo "$2"; return 0; fi
+      shift
+    done
+  }
+  export -f curl
+  unset ORBITAL_ENV ORBITAL_JOB_KIND ORBITAL_JOB_ID FRAMEWORK_TRACKER_PURPOSE
+  export ERROR_COUNT=0 DURATION=10 FRAMEWORK_VERSION="1.3.2"
+}
+
+# Field value from the payload; fails the test if the payload is not JSON.
+_field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.argv[1]])' "$1"; }
+
+@test "postCodespaceTracker: payload is valid JSON carrying orbital + purpose tags" {
+  source_functions
+  _capture_tracker_payload
+  export INSTANTIATION_TYPE=orbital ORBITAL_ENV=staging ORBITAL_JOB_KIND=ci ORBITAL_JOB_ID=mk3p9aqz-7f3a
+  payload=$(postCodespaceTracker | sed -n '/^{/,$p')
+  [ "$(_field orbital.env <<<"$payload")" = "staging" ]
+  [ "$(_field orbital.job.kind <<<"$payload")" = "ci" ]
+  [ "$(_field orbital.job.id <<<"$payload")" = "mk3p9aqz-7f3a" ]
+  [ "$(_field build.purpose <<<"$payload")" = "ci" ]
+}
+
+@test "postCodespaceTracker: untagged build is a learner with empty orbital fields" {
+  source_functions
+  _capture_tracker_payload
+  export INSTANTIATION_TYPE=github-codespaces
+  payload=$(postCodespaceTracker | sed -n '/^{/,$p')
+  [ "$(_field build.purpose <<<"$payload")" = "learner" ]
+  [ "$(_field orbital.env <<<"$payload")" = "" ]
+  [ "$(_field orbital.job.kind <<<"$payload")" = "" ]
+}
+
+@test "detectBuildPurpose: learner default, ci for github-workflow and Orbital ci/sysbox, test override" {
+  source_functions
+  unset ORBITAL_JOB_KIND FRAMEWORK_TRACKER_PURPOSE
+  [ "$(detectBuildPurpose orbital)" = "learner" ]
+  [ "$(detectBuildPurpose github-codespaces)" = "learner" ]
+  [ "$(detectBuildPurpose github-workflow)" = "ci" ]
+  [ "$(ORBITAL_JOB_KIND=learner detectBuildPurpose orbital)" = "learner" ]
+  [ "$(ORBITAL_JOB_KIND=ci detectBuildPurpose orbital)" = "ci" ]
+  [ "$(ORBITAL_JOB_KIND=sysbox detectBuildPurpose orbital)" = "ci" ]
+  # test wins over everything — a human marking a throwaway build
+  [ "$(FRAMEWORK_TRACKER_PURPOSE=test detectBuildPurpose github-workflow)" = "test" ]
+  [ "$(FRAMEWORK_TRACKER_PURPOSE=test ORBITAL_JOB_KIND=ci detectBuildPurpose orbital)" = "test" ]
+}
+
+@test "postCodespaceTracker: Orbital CI and learner seats are told apart (old payload could not)" {
+  # The 196 finding: both posted codespace.type=orbital and nothing else differed.
+  source_functions
+  _capture_tracker_payload
+  export INSTANTIATION_TYPE=orbital ORBITAL_ENVIRONMENT=true ORBITAL_ENV=prod
+  ci=$(ORBITAL_JOB_KIND=ci postCodespaceTracker | sed -n '/^{/,$p')
+  seat=$(ORBITAL_JOB_KIND=learner postCodespaceTracker | sed -n '/^{/,$p')
+  [ "$(_field build.purpose <<<"$ci")" = "ci" ]
+  [ "$(_field build.purpose <<<"$seat")" = "learner" ]
+  [ "$ci" != "$seat" ]
+}
+
+# ============================================================
 # Sprint ActiveGate image workaround
 # ============================================================
 

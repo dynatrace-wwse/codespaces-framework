@@ -730,7 +730,8 @@ CERTMANAGER_EMAIL="myemail@example.com" certmanagerEnable
 | Function | Description |
 |---|---|
 | `finalizePostCreation` | Entry point called at the end of `post-create.sh`: runs e2e tests if `CODESPACE_NAME` starts with `dttest-`, otherwise verifies creation and sends telemetry |
-| `postCodespaceTracker` | Sends a DT biz event with codespace creation metrics (repo, duration, errors, type, architecture) |
+| `postCodespaceTracker` | Sends a DT biz event with codespace creation metrics (repo, duration, errors, type, architecture, `build.purpose`, `orbital.*` tags) |
+| `detectBuildPurpose` | Why the build ran: `test` (`FRAMEWORK_TRACKER_PURPOSE=test`), `ci` (`github-workflow`, Orbital `ORBITAL_JOB_KIND=ci`/`sysbox`) or `learner` (default) |
 | `verifyContainerCreation` | Parses container/codespace logs for errors, populates `ERROR_COUNT` and `CODESPACE_ERRORS` |
 | `calculateTime` | Records and exports the codespace creation duration in seconds |
 | `updateEnvVariable` | Updates a variable's value in the count file (handles both bash and zsh indirect expansion) |
