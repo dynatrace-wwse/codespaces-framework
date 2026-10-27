@@ -89,6 +89,23 @@ detectRunEnvironment(){
   fi
 }
 
+detectBuildPurpose(){
+  # Why this container was built — so usage dashboards can count learners only.
+  #   test:    FRAMEWORK_TRACKER_PURPOSE=test (humans/throwaway VMs set it by hand)
+  #   ci:      GitHub Actions integration test, or Orbital ORBITAL_JOB_KIND=ci|sysbox
+  #   learner: everything else (default — an untagged build is assumed to be a person)
+  # Arg 1: the instantiation type (codespace.type); defaults to $INSTANTIATION_TYPE.
+  local itype="${1:-${INSTANTIATION_TYPE:-}}"
+  if [[ "${FRAMEWORK_TRACKER_PURPOSE:-}" == "test" ]]; then
+    echo "test"
+  elif [[ "$itype" == "github-workflow" ]] || [[ "${ORBITAL_JOB_KIND:-}" == "ci" ]] \
+       || [[ "${ORBITAL_JOB_KIND:-}" == "sysbox" ]]; then
+    echo "ci"
+  else
+    echo "learner"
+  fi
+}
+
 postCodespaceTracker(){
 
   printInfo "Sending bizevent for $RepositoryName with $ERROR_COUNT issues built in $DURATION seconds"
@@ -101,8 +118,9 @@ postCodespaceTracker(){
 
   # Unique app ID for RUM monitoring: dynatrace-wwse-{repo-name}
   local app_id="dynatrace-wwse-${RepositoryName}"
-  local run_env
+  local run_env build_purpose
   run_env=$(detectRunEnvironment)
+  build_purpose=$(detectBuildPurpose "$INSTANTIATION_TYPE")
 
   curl -s -X POST "$ENDPOINT_CODESPACES_TRACKER" \
   -H "Content-Type: application/json" \
@@ -120,7 +138,11 @@ postCodespaceTracker(){
   \"run.environment\": \"$run_env\",
   \"environment\": \"$DT_ENVIRONMENT\",
   \"tenant\": \"$DT_TENANT\",
-  \"framework.version\": \"$FRAMEWORK_VERSION\"
+  \"framework.version\": \"$FRAMEWORK_VERSION\",
+  \"build.purpose\": \"$build_purpose\",
+  \"orbital.env\": \"${ORBITAL_ENV:-}\",
+  \"orbital.job.kind\": \"${ORBITAL_JOB_KIND:-}\",
+  \"orbital.job.id\": \"${ORBITAL_JOB_ID:-}\"
   }"
 }
 

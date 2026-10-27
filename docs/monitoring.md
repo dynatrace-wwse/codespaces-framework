@@ -55,6 +55,24 @@ All codespace instantiations are monitored by sending a signal to the Codespaces
 - **postCodespaceTracker:**  
   Sends a JSON payload containing metadata about the codespace (such as repository name, user, and environment details) to the Codespaces-Tracker API endpoint. The payload is authenticated and enriched with geo-information, and BizEvents are generated from the logs for further analysis.
 
+#### Telling learners apart from CI and test builds
+
+Every build posts, including integration tests and Orbital's own CI. Four fields say *why* the build ran,
+so usage dashboards can count learners only:
+
+| Field | Source | Values |
+|---|---|---|
+| `build.purpose` | `detectBuildPurpose` | `test` when `FRAMEWORK_TRACKER_PURPOSE=test`; `ci` for `github-workflow` or Orbital `ORBITAL_JOB_KIND=ci`/`sysbox`; otherwise `learner` |
+| `orbital.env` | `ORBITAL_ENV` (written by Orbital into `.devcontainer/.env`) | `prod`, `staging`, or empty outside Orbital |
+| `orbital.job.kind` | `ORBITAL_JOB_KIND` (Orbital) | `ci`, `learner`, `sysbox`, or empty |
+| `orbital.job.id` | `ORBITAL_JOB_ID` (Orbital) | the Orbital job id, or empty |
+
+Building a throwaway container by hand? `export FRAMEWORK_TRACKER_PURPOSE=test` (or put it in
+`.devcontainer/.env`) so it does not count as a learner. Learner tiles should filter
+`not(in(coalesce(content.build.purpose, ""), "ci", "test"))` and
+`coalesce(content.orbital.env, "") != "staging"` — `coalesce`, because events from repos pinned to an
+older framework have none of these fields and a bare `!=` drops them.
+
 ### 📊 GitHub Pages
 
 GitHub Pages are monitored using Dynatrace Agentless Real User Monitoring (RUM). Both mechanisms live
