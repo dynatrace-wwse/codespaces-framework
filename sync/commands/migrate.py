@@ -12,7 +12,9 @@ Image tiers control which framework files are relevant to each repo:
 import json
 import re
 import shutil
+import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 from sync.core.repos import VALID_IMAGE_TIERS, load_repos
@@ -65,11 +67,50 @@ REPO_CUSTOM_FILES = [
 ]
 
 
+FRAMEWORK_DIR = Path(__file__).resolve().parent.parent.parent  # sync/commands/ -> codespaces-framework
+
+
+@lru_cache(maxsize=None)
+def _framework_owned(d: str) -> frozenset[str]:
+    """Repo-relative paths under Category A dir `d` that the framework ships
+    now or has ever shipped (git history, so legacy copies still count).
+
+    Only these may be deleted from a repo. A Category A dir is "framework
+    content lives here", not "everything here is the framework's":
+    k8s-autoscaling-workshop keeps its own dynakube-config.yaml and
+    otel-collector.yaml in .devcontainer/yaml, and framework 1.19.0's sync
+    wiped them with the dir (same class as dt-tokens.yaml in 1.11.2)."""
+    owned = {p.relative_to(FRAMEWORK_DIR).as_posix()
+             for p in (FRAMEWORK_DIR / d).rglob("*") if p.is_file()}
+    hist = subprocess.run(
+        ["git", "-C", str(FRAMEWORK_DIR), "log", "--format=", "--name-only", "HEAD", "--", d],
+        capture_output=True, text=True, check=False)
+    if hist.returncode == 0:
+        owned.update(line for line in hist.stdout.splitlines() if line)
+    return frozenset(owned)
+
+
+def _is_generated(rel: str) -> bool:
+    """Runtime output (e.g. yaml/gen/dynakube.yaml), gitignored by GITIGNORE_GEN.
+    Never repo content, so never kept: a copy committed by mistake goes."""
+    parts = rel.split("/")
+    return "gen" in parts[:-1] or parts[-1].endswith("-gen.yaml")
+
+
 def _removable_files(repo_path: Path, d: str) -> list[Path]:
-    """Files under Category A dir `d` that the cleanup may delete: all of
-    them except any REPO_CUSTOM_FILES entry that lives inside it."""
+    """Files under Category A dir `d` that the cleanup may delete: the
+    framework-owned ones and generated output; never a REPO_CUSTOM_FILES
+    entry, never any other file the framework has not shipped at that path."""
     keep = {repo_path / f for f in REPO_CUSTOM_FILES}
-    return [p for p in (repo_path / d).rglob("*") if p.is_file() and p not in keep]
+    owned = _framework_owned(d)
+    out = []
+    for p in (repo_path / d).rglob("*"):
+        if not p.is_file() or p in keep:
+            continue
+        rel = p.relative_to(repo_path).as_posix()
+        if rel in owned or _is_generated(rel):
+            out.append(p)
+    return out
 
 
 def _get_category_a(image_tier: str) -> tuple[list[str], list[str]]:
@@ -675,11 +716,7 @@ docs/javascripts/mermaid.min.js
 # mkdocs renders static files in site
 site/*
 
-# No generated file
-**/gen/*/*.yaml
-**/gen/**.yaml
-**-gen.yaml
-
+@GITIGNORE_GEN@
 # no logs
 *.log
 
@@ -697,6 +734,15 @@ node_modules
 # Python
 __pycache__/
 """
+# Runtime-generated manifests (yaml/gen/dynakube.yaml, ...). Every synced repo
+# must ignore them; Phase 8 appends this block to a .gitignore that lacks it.
+GITIGNORE_GEN = """\
+# No generated file
+**/gen/*/*.yaml
+**/gen/**.yaml
+**-gen.yaml
+"""
+GITIGNORE_TEMPLATE = GITIGNORE_TEMPLATE.replace("@GITIGNORE_GEN@\n", GITIGNORE_GEN + "\n")
 
 
 def _scaffold_repo(entry, repo_path: Path, version: str):
@@ -936,20 +982,20 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
             (repo_path / f).unlink()
             print(f"      deleted {f}")
         for d, count in found_dirs:
-            kept = [f for f in REPO_CUSTOM_FILES if (repo_path / f).is_relative_to(repo_path / d)
-                    and (repo_path / f).exists()]
-            if not kept:
-                shutil.rmtree(repo_path / d)
-                print(f"      deleted {d}/ ({count} files)")
-                continue
             for p in _removable_files(repo_path, d):
                 p.unlink()
-            # Drop subdirs the unlinks emptied, deepest first.
+            # Drop dirs the unlinks emptied, deepest first, then `d` itself.
             for sub in sorted((x for x in (repo_path / d).rglob("*") if x.is_dir()),
                               key=lambda x: len(x.parts), reverse=True):
                 if not any(sub.iterdir()):
                     sub.rmdir()
-            print(f"      deleted {d}/ ({count} files, kept {', '.join(kept)})")
+            kept = sorted(x.relative_to(repo_path).as_posix()
+                          for x in (repo_path / d).rglob("*") if x.is_file())
+            if not kept:
+                (repo_path / d).rmdir()
+                print(f"      deleted {d}/ ({count} files)")
+            else:
+                print(f"      deleted {count} framework files from {d}/, kept {', '.join(kept)}")
         for d in [".devcontainer/runlocal", ".devcontainer/test"]:
             p = repo_path / d
             if p.is_dir() and not any(p.iterdir()):
@@ -1069,6 +1115,8 @@ def _migrate_repo(entry, repo_path: Path, version: str, dry_run: bool) -> str:
                 additions.append("\ndocs/stylesheets/extra.css")
             if "docs/javascripts/mermaid.min.js" not in content:
                 additions.append("\ndocs/javascripts/mermaid.min.js")
+        if "**/gen/**.yaml" not in content:
+            additions.append("\n" + GITIGNORE_GEN.rstrip("\n"))
         if "Dockerfile.framework" not in content:
             additions.append("\n# Temporary Dockerfile from cache for local builds\nDockerfile.framework")
         if additions:

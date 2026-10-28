@@ -26,6 +26,8 @@ from sync.commands.migrate import (
     _validate_devcontainer,
     _resolve_repo_path,
     _migrate_repo,
+    _framework_owned,
+    GITIGNORE_GEN,
     FRAMEWORK_IMAGE,
     OLD_FRAMEWORK_IMAGES,
     bump_framework_image,
@@ -372,6 +374,112 @@ class TestRepoOwnedFilesInCategoryADirs:
         status = _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=True)
         assert status == "up-to-date"
         assert (repo / REPO_TOKENS).read_text() == TOKENS_TEXT
+
+
+# ---------------------------------------------------------------------------
+# Repo files that are not framework files (201: framework 1.19.0's sync deleted
+# k8s-autoscaling-workshop's dynakube-config.yaml + otel-collector.yaml)
+# ---------------------------------------------------------------------------
+
+AUTOSCALE_DYNAKUBE = "mode: k8s-only\n"
+AUTOSCALE_OTEL = "receivers:\n  otlp: {}\n"
+
+
+def _autoscale_like_repo(tmp_path):
+    """k8s-autoscaling-workshop's .devcontainer/yaml as of 1.18.0: two files of
+    its own, plus framework copies and generated output a stale tree may hold."""
+    repo = tmp_path / "test-repo"
+    y = repo / ".devcontainer/yaml"
+    (y / "kind").mkdir(parents=True)
+    (y / "gen/sub").mkdir(parents=True)
+    (y / "dynakube-config.yaml").write_text(AUTOSCALE_DYNAKUBE)
+    (y / "otel-collector.yaml").write_text(AUTOSCALE_OTEL)
+    (y / "dynakube-defaults.yaml").write_text("kind: DynaKube\n")       # framework, current
+    (y / "dynakube-skel-head.yaml").write_text("kind: DynaKube\n")      # framework, history only
+    (y / "kind/kind-cluster.yml").write_text("kind: Cluster\n")
+    (y / "gen/dynakube.yaml").write_text("kind: DynaKube\n")            # runtime output
+    (y / "gen/sub/x.yaml").write_text("x: 1\n")
+    (y / "dynakube-gen.yaml").write_text("kind: DynaKube\n")
+    return repo
+
+
+def _files(repo, d=".devcontainer/yaml"):
+    return sorted(p.relative_to(repo / d).as_posix()
+                  for p in (repo / d).rglob("*") if p.is_file())
+
+
+class TestNonFrameworkFilesInCategoryADirs:
+    """A Category A dir is where framework content lives, not "everything in it
+    is the framework's". Only paths the framework ships (or shipped) go."""
+
+    def test_keeps_repo_own_yaml(self, tmp_path, make_repo_entry):
+        # Negative control: fails on 1.19.0, which rmtree'd the whole dir.
+        repo = _autoscale_like_repo(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        y = repo / ".devcontainer/yaml"
+        assert (y / "dynakube-config.yaml").read_text() == AUTOSCALE_DYNAKUBE
+        assert (y / "otel-collector.yaml").read_text() == AUTOSCALE_OTEL
+
+    def test_removes_framework_and_generated_files(self, tmp_path, make_repo_entry):
+        # Control: the fix must not turn into "keep the whole directory".
+        repo = _autoscale_like_repo(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        assert _files(repo) == ["dynakube-config.yaml", "otel-collector.yaml"]
+
+    def test_framework_history_counts_as_framework_owned(self):
+        # dynakube-skel-head.yaml left the framework tree; a repo copy is still a
+        # framework leftover. Fails if history is not read (e.g. shallow clone).
+        assert ".devcontainer/yaml/dynakube-skel-head.yaml" in _framework_owned(".devcontainer/yaml")
+
+    def test_never_keeps_generated_output(self, tmp_path, make_repo_entry):
+        # Owner: gen/ is runtime output — never kept as a repo file, even when
+        # the repo also has files of its own in the dir.
+        repo = _autoscale_like_repo(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        y = repo / ".devcontainer/yaml"
+        assert not (y / "gen").exists()
+        assert not (y / "dynakube-gen.yaml").exists()
+
+    def test_gen_only_dir_is_removed(self, tmp_path, make_repo_entry):
+        repo = tmp_path / "test-repo"
+        (repo / ".devcontainer/yaml/gen").mkdir(parents=True)
+        (repo / ".devcontainer/yaml/gen/dynakube.yaml").write_text("kind: DynaKube\n")
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        assert not (repo / ".devcontainer/yaml").exists()
+
+    def test_gen_is_gitignored_in_synced_repo(self, tmp_path, make_repo_entry):
+        # Fresh .gitignore (scaffold) and an existing one without the rule (Phase 8).
+        repo = _autoscale_like_repo(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        assert GITIGNORE_GEN in (repo / ".gitignore").read_text()
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / ".gitignore").write_text("site/*\n")
+        _migrate_repo(make_repo_entry(), other, "1.19.1", dry_run=False)
+        assert GITIGNORE_GEN.rstrip("\n") in (other / ".gitignore").read_text()
+
+    def test_git_diff_has_no_gen_file(self, tmp_path, make_repo_entry):
+        # End to end on a real git repo: what push-update would commit.
+        import subprocess
+        repo = _autoscale_like_repo(tmp_path)
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
+                                        capture_output=True, text=True).stdout
+        git("init", "-q")
+        git("add", "-A")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+        (repo / ".devcontainer/yaml/gen/dynakube.yaml").write_text("kind: DynaKube\nnew: 1\n")
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        git("add", "-A")
+        staged = git("diff", "--cached", "--name-only").split()
+        added = git("diff", "--cached", "--name-only", "--diff-filter=AM").split()
+        assert not [f for f in added if "/gen/" in f or f.endswith("-gen.yaml")]
+        assert ".devcontainer/yaml/dynakube-config.yaml" not in staged
+        assert ".devcontainer/yaml/otel-collector.yaml" not in staged
+
+    def test_repo_files_alone_are_not_pending_work(self, tmp_path, make_repo_entry):
+        repo = _autoscale_like_repo(tmp_path)
+        _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=False)
+        assert _migrate_repo(make_repo_entry(), repo, "1.19.1", dry_run=True) == "up-to-date"
 
 
 # ---------------------------------------------------------------------------

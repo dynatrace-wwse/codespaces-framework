@@ -124,13 +124,13 @@ When `push-update` or `migrate` runs on a repo, it executes these phases:
 |-------|--------|
 | **1. Audit** | Identifies Category A files and validates `devcontainer.json` |
 | **1b. Fix devcontainer.json** | Moves an exact `shinojosa/dt-enablement:v1.0`…`v1.3.2` image to `FRAMEWORK_IMAGE` (`v1.4.0`: v1.3.2's Node 22.23.4 / ENH-075 entrypoint fix + base refresh, libbrotli1 USN-8956-1, docker CLI 28.5.2 — #205). Any other image (custom, scenario, another tag) is left as is. `--dry-run` reports, writes nothing |
-| **2. Clean Category A** | Removes framework-owned files (now pulled from cache) |
+| **2. Clean Category A** | Removes framework-owned files (now pulled from cache). Inside `.devcontainer/apps`, `p10k` and `yaml` only a path the framework ships or has ever shipped is removed, plus generated output (`gen/`, `*-gen.yaml`); a repo's own files there (e.g. `yaml/dt-tokens.yaml`, `yaml/dynakube-config.yaml`, `yaml/otel-collector.yaml`) are kept (1.19.1) |
 | **3. Thin Makefile** | Installs wrapper that delegates to cached `makefile.sh` |
 | **4. source_framework.sh** | Installs/updates versioned pull mechanism |
 | **5. mkdocs.yaml** | Converts to `INHERIT: mkdocs-base.yaml` pattern |
 | **6. overrides/main.html** | Parameterizes RUM snippet, extracts URL to mkdocs.yaml |
 | **7. deploy-ghpages.yaml** | CI fetches `mkdocs-base.yaml` at framework version |
-| **8. .gitignore** | Adds cache, mkdocs-base, Dockerfile.framework entries |
+| **8. .gitignore** | Adds cache, mkdocs-base, generated-file (`**/gen/**.yaml`, `**-gen.yaml`), Dockerfile.framework entries |
 | **9. .env location** | Moves from `runlocal/.env` to `.devcontainer/.env` |
 | **10. README badges** | Updates branding, adds missing badges, fixes integration test link |
 
