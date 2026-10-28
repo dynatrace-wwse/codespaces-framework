@@ -85,13 +85,14 @@ def _get_category_a(image_tier: str) -> tuple[list[str], list[str]]:
 # Reference values that every repo must match for all 3 instantiation modes
 # (Codespaces, VS Code DevContainer, local Docker).
 
-# The framework image every training repo runs. v1.3.2 = Node 22.23.4 (CVE-2026-111497)
-# + the entrypoint fix for Codespace stop/start (ENH-075, #186).
-FRAMEWORK_IMAGE = "shinojosa/dt-enablement:v1.3.2"
+# The framework image every training repo runs. v1.4.0 (#205) = v1.3.2 (Node 22.23.4,
+# CVE-2026-111497; ENH-075 entrypoint) + base refresh/apt upgrade (libbrotli1 USN-8956-1),
+# current helm/kubectl/kind, docker CLI 28.5.2.
+FRAMEWORK_IMAGE = "shinojosa/dt-enablement:v1.4.0"
 # Older framework images push-update moves to FRAMEWORK_IMAGE. Exact refs only: a
 # custom or scenario image is never rewritten.
 OLD_FRAMEWORK_IMAGES = tuple(
-    f"shinojosa/dt-enablement:{t}" for t in ("v1.0", "v1.1", "v1.2", "v1.3", "v1.3.1")
+    f"shinojosa/dt-enablement:{t}" for t in ("v1.0", "v1.1", "v1.2", "v1.3", "v1.3.1", "v1.3.2")
 )
 
 DEVCONTAINER_CHECKS = {

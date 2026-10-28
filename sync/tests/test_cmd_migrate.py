@@ -375,7 +375,7 @@ class TestRepoOwnedFilesInCategoryADirs:
 
 
 # ---------------------------------------------------------------------------
-# Framework image bump (189: v1.3.2 = CVE-2026-111497 Node + ENH-075 entrypoint)
+# Framework image bump (189: v1.3.2; 201: v1.4.0 = #205 base refresh, USN-8956-1)
 # ---------------------------------------------------------------------------
 
 def _dc_text(image: str) -> str:
@@ -395,11 +395,11 @@ def _repo_with_image(tmp_path, image: str) -> Path:
 
 
 class TestFrameworkImageBump:
-    def test_target_is_v1_3_2(self):
-        assert FRAMEWORK_IMAGE == "shinojosa/dt-enablement:v1.3.2"
+    def test_target_is_v1_4_0(self):
+        assert FRAMEWORK_IMAGE == "shinojosa/dt-enablement:v1.4.0"
         assert DEVCONTAINER_CHECKS["image"]["expected"] == FRAMEWORK_IMAGE
 
-    @pytest.mark.parametrize("old", ["v1.0", "v1.1", "v1.2", "v1.3", "v1.3.1"])
+    @pytest.mark.parametrize("old", ["v1.0", "v1.1", "v1.2", "v1.3", "v1.3.1", "v1.3.2"])
     def test_bumps_every_old_framework_tag(self, old):
         out, replaced = bump_framework_image(_dc_text(f"shinojosa/dt-enablement:{old}"))
         assert replaced == [f"shinojosa/dt-enablement:{old}"]
