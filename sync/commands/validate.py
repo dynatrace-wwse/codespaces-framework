@@ -7,6 +7,7 @@ from sync.core.repos import load_repos, validate_repos
 from sync.core.github_api import check_repo_exists, GHAPIError
 from sync.commands.migrate import (
     _validate_devcontainer, _validate_readme, _resolve_repo_path, _get_category_a,
+    _removable_files,
     SOURCE_FRAMEWORK_TEMPLATE, THIN_MAKEFILE,
 )
 
@@ -38,7 +39,7 @@ def _validate_local(repo_entry, repo_path):
         if (path / f).exists():
             leftovers.append(f)
     for d in cat_a_dirs:
-        if (path / d).is_dir():
+        if (path / d).is_dir() and _removable_files(path, d):
             leftovers.append(f"{d}/")
 
     if leftovers:
