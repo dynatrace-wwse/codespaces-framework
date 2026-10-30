@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-product-catalog
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "otel-demo.selectorLabels" (dict "name" "product-catalog" "root" .) | nindent 4 }}
+  ports:
+    - port: {{ .Values.productCatalog.port }}
+      targetPort: {{ .Values.productCatalog.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-product-catalog
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.productCatalog.replicas }}
+  selector:
+    matchLabels:
+      {{- include "otel-demo.selectorLabels" (dict "name" "product-catalog" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "otel-demo.selectorLabels" (dict "name" "product-catalog" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: product-catalog
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          image: {{ include "otel-demo.image" (dict "img" .Values.images.productCatalog) }}
+          imagePullPolicy: {{ .Values.images.productCatalog.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.productCatalog.port }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: product-catalog
+            - name: POSTGRES_DB
+              value: product_catalog
+            {{- include "otel-demo.otelEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.productCatalog.resources | nindent 12 }}
+          readinessProbe:
+            # Native kubelet gRPC probe: arch-independent (the bundled grpc_health_probe
+            # binary is linux-amd64 only and fails with "exec format error" on arm64).
+            grpc:
+              port: {{ .Values.productCatalog.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5

@@ -573,6 +573,7 @@ Available apps:
 | 7 | g | unguard | ✅ | ❌ |
 | 8 | h | opentelemetry-demo | ✅ | ✅ |
 | 9 | i | gitlab (GitLab CE + Runner) | ✅ | ✅ |
+| 10 | j | astroshop-lite (OpenTelemetry Demo Light, by Henrik Rexed) | ✅ | ✅ |
 
 ### Individual Deploy Functions
 
@@ -588,6 +589,7 @@ Available apps:
 | `undeployUnguard` | Removes Unguard and its MariaDB |
 | `deployOpentelemetryDemo` | Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained) |
 | `undeployOpentelemetryDemo` | Removes the OTel Demo and its namespace |
+| `deployAstroshopLite` / `undeployAstroshopLite` | AstroShop Lite — 5 services in 5 languages, Postgres, Valkey, k6, amd64 + arm64, ~0.5 GiB working set. Helm chart vendored in `apps/astroshop-lite/`, images pinned by digest. Sends OTLP gRPC to the [framework collector](#opentelemetry-collector) (deployed for you; needs `DT_OTEL_ENDPOINT` + `DT_INGEST_TOKEN`), or to `ASTROSHOP_LITE_OTLP_ENDPOINT` when set (no collector is deployed then). Since 1.20.0 |
 | `deployOtelCollector` / `undeployOtelCollector` | A standalone Dynatrace OpenTelemetry Collector that exports to the tenant — see [below](#opentelemetry-collector) |
 | `deployGitlab` / `uninstallGitlab` | GitLab CE (Omnibus, one Deployment) + Runner — see [GitLab & browser IDE](gitlab-ide.md) |
 | `startCodeServer` / `stopCodeServer` | VS Code in the browser inside the learner container — see [GitLab & browser IDE](gitlab-ide.md) |

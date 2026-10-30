@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ include "otel-demo.postgresPassword" . | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "otel-demo.selectorLabels" (dict "name" "postgres" "root" .) | nindent 4 }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}-postgres
+  replicas: {{ .Values.postgres.replicas }}
+  selector:
+    matchLabels:
+      {{- include "otel-demo.selectorLabels" (dict "name" "postgres" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "otel-demo.selectorLabels" (dict "name" "postgres" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgres
+                  key: password
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgres.user | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: {{ .Release.Name }}-postgres-init
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-postgres-init
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+data:
+  01-create-databases.sql: |
+    CREATE DATABASE product_catalog;
+    CREATE DATABASE checkout_orders;
+  02-product-catalog-schema.sql: |
+    \connect product_catalog;
+    CREATE TABLE IF NOT EXISTS products (
+        id VARCHAR(36) PRIMARY KEY, name VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL DEFAULT '', picture VARCHAR(255) NOT NULL DEFAULT '',
+        price_usd_cents INTEGER NOT NULL DEFAULT 0, categories TEXT[] NOT NULL DEFAULT '{}'
+    );
+    INSERT INTO products (id, name, description, picture, price_usd_cents, categories) VALUES
+    ('OLJCESPC7Z','National Park Foundation Explorascope','A 50mm refracting telescope for beginners.','/images/NationalParkFoundationExplorascope.jpg',10199,ARRAY['telescopes']),
+    ('66VCHSJNUP','Starsense Explorer Tabletop Telescope','Uses your smartphone to find stars and planets.','/images/StarsenseExplorerTabletopTelescope.jpg',21999,ARRAY['telescopes']),
+    ('1YMWWN1N4O','Eclipsmart Travel Refractor Telescope','Portable telescope with built-in solar filter.','/images/EclipsmartTravelRefractorTelescope.jpg',12999,ARRAY['telescopes','travel']),
+    ('L9ECAV7KIM','Lens Cleaning Kit','Cleaning kit for telescopes and binoculars.','/images/LensCleaningKit.jpg',3999,ARRAY['accessories']),
+    ('2ZYFJ3GM2N','Roof Binoculars','10x42 roof prism binoculars.','/images/RoofBinoculars.jpg',20999,ARRAY['binoculars']),
+    ('0PUK6V6EV0','Solar System Color Imager','High-speed planetary camera.','/images/SolarSystemColorImager.jpg',17499,ARRAY['accessories','cameras']),
+    ('LS4PSXUNUM','Red Flashlight','Red LED flashlight for astronomy.','/images/RedFlashlight.jpg',1099,ARRAY['accessories']),
+    ('9SIQT8TOJO','Optical Tube Assembly','6-inch f/5 Newtonian OTA.','/images/OpticalTubeAssembly.jpg',34999,ARRAY['telescopes','assemblies']),
+    ('6E92ZMYYFZ','Solar Filter','Glass solar filter for 100-120mm telescopes.','/images/SolarFilter.jpg',2199,ARRAY['accessories','filters']),
+    ('HQTGWGPNH4','The Stargazer Handbook','Illustrated guide to the night sky.','/images/TheStargazerHandbook.jpg',1899,ARRAY['books']);
+  03-checkout-orders-schema.sql: |
+    \connect checkout_orders;
+    CREATE TABLE IF NOT EXISTS orders (
+        id VARCHAR(36) PRIMARY KEY, user_id VARCHAR(255) NOT NULL,
+        items JSONB NOT NULL DEFAULT '[]', total_usd_cents INTEGER NOT NULL DEFAULT 0,
+        shipping_usd_cents INTEGER NOT NULL DEFAULT 0, transaction_id VARCHAR(255) NOT NULL DEFAULT '',
+        email VARCHAR(255) NOT NULL DEFAULT '', address JSONB NOT NULL DEFAULT '{}',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);

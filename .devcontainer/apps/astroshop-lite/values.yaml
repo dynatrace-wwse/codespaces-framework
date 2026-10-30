@@ -1,0 +1,41 @@
+# AstroShop Lite — framework overrides for the vendored chart (./chart).
+#
+# Images are Henrik Rexed's public multi-arch builds (amd64 + arm64), pinned by tag AND
+# OCI index digest so a re-pushed tag can never change what a training deploys.
+# Bump: resolve the new index digest (`docker buildx imagetools inspect <ref>`), re-scan
+# with Trivy, update both fields together.
+#
+# Telemetry: the chart's own collector (debug exporter only) is OFF. Services send OTLP
+# gRPC to `otlp.endpoint`, which deployAstroshopLite sets — to the framework's Dynatrace
+# collector (deployOtelCollector) by default, or to ASTROSHOP_LITE_OTLP_ENDPOINT.
+collector:
+  enabled: false
+
+metrics:
+  aggregation: delta   # Dynatrace ingests delta temporality
+
+postgres:
+  image: postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+valkey:
+  image: valkey/valkey:8-alpine@sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a
+
+images:
+  frontend:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/frontend
+    tag: "0.0.16@sha256:d2879c3ba486dc4ae7d3e57c0f463b75b2ec91bb3285f3f09efafd5b0aeae3d5"
+  productCatalog:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/product-catalog
+    tag: "0.0.16@sha256:0a20daeb180f7c3e57a5745a1b5741e15857a7010012ae2fe64172f27017175f"
+  cart:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/cart
+    tag: "0.0.16@sha256:c9039f732ce17515a081b2646cd3b4147eb6ba43d6be2e459b657ba12658dfd3"
+  checkout:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/checkout
+    tag: "0.0.16@sha256:a085474ab68a89eb9aff5d62e967d2ad06b4256f84dc0328a3de2364710491e8"
+  payment:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/payment
+    tag: "0.0.16@sha256:d4041ab0be57bedfc978e48fcc1d6cfe781caef94b91294f893ba49abf229320"
+  loadGenerator:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/load-generator
+    tag: "0.0.16@sha256:7efc6e41f3f1283c4d14bcc5a8c9a9ba28026dd2ac200e53052c2a0865d096ca"
+    pullPolicy: IfNotPresent
