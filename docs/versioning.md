@@ -88,6 +88,11 @@ the same mermaid.
    finds nothing even when the diagram is fine.
 5. Release a framework version and `sync push-update`, so every repo moves to the same mermaid.
    Repos left on older tags keep the mermaid of the tag they are pinned to.
+6. Bump the **Enablement App** to the same build, so a diagram that draws on the site also draws
+   in the app: its `package.json` pins `mermaid` exactly and commits the same file as
+   `ui/assets/vendor/mermaid.min.js` (`mermaidAsset.test.ts` there fails until pin and file agree).
+   The app draws diagrams in mermaid's `strict` security level — see
+   [Diagrams in the app](enablement-app.md#diagrams-mermaid).
 
 Staying inside mermaid `11.x` is deliberate: Material 9.5.x asks for `mermaid@11`, so the pin
 matches what it expects. A major bump needs a Material upgrade checked alongside it.

@@ -63,6 +63,24 @@ framework already knows which host it is on — `util/variables.sh` sets `INSTAN
 | **Interactive shell** | Orbital PTY bridge (WebSocket) | `${ORBITAL}/shell/<jobId>` |
 | **Progress + telemetry** | Dynatrace state APIs + BizEvents | Cross-tenant training analytics |
 
+### Diagrams (Mermaid)
+
+A ` ```mermaid ` fence in a training page draws as a diagram in the app (learner view, workshops,
+editor preview) as well as on the GitHub Pages site — no change to the training repo is needed
+beyond the framework's `mkdocs-base.yaml` (`pymdownx.superfences` custom fence, framework ≥ 1.12.0).
+Both render with the same mermaid build ([pin](versioning.md#vendored-front-end-assets)). Two
+differences from the site, both deliberate:
+
+- **Strict security level.** Any repo a trainer imports can reach every learner, so in the app
+  labels are text (HTML in a label does not render; `<br/>` still breaks the line), `click`
+  callbacks and links do nothing, and a `%%{init}%%` directive cannot loosen the security level,
+  turn HTML labels on or inject CSS. Write labels as plain text.
+- **A diagram that does not parse** shows its source and the parser's reason instead of the
+  site's "Syntax error" box.
+
+The diagram follows the Dynatrace light/dark theme. Authoring detail:
+`dynatrace-app-enablements/docs/authoring/index.md` → *Diagrams (Mermaid)*.
+
 The app talks to Orbital through a single backend proxy (`api/orbital.function.ts`) because browser
 CSP blocks direct calls; that function adds the `orbital-config` Bearer token and brokers every
 `/api/arena/*` action (provision, status, exec, shell-token, terminate, logs).
