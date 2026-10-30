@@ -1,7 +1,7 @@
 # AstroShop Lite — framework overrides for the vendored chart (./chart).
 #
-# Images are Henrik Rexed's public multi-arch builds (amd64 + arm64), pinned by tag AND
-# OCI index digest so a re-pushed tag can never change what a training deploys.
+# Images are built and published by dynatrace-wwse/astroshop-lite (release.yml, on a v* tag),
+# multi-arch (amd64 + arm64), pinned by tag AND OCI index digest so a re-pushed tag can never change what a training deploys.
 # Bump: resolve the new index digest (`docker buildx imagetools inspect <ref>`), re-scan
 # with Trivy, update both fields together.
 #
@@ -21,21 +21,21 @@ valkey:
 
 images:
   frontend:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/frontend
-    tag: "0.0.16@sha256:d2879c3ba486dc4ae7d3e57c0f463b75b2ec91bb3285f3f09efafd5b0aeae3d5"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/frontend
+    tag: "0.2.0@sha256:43baf4b583e201e429b0bf7ebaa5a19f754e61c689947655081a38717a458df4"
   productCatalog:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/product-catalog
-    tag: "0.0.16@sha256:0a20daeb180f7c3e57a5745a1b5741e15857a7010012ae2fe64172f27017175f"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/product-catalog
+    tag: "0.2.0@sha256:d505c82022511c891ef8f2c96328c91483e6bec32e20dd31406b1726577395f2"
   cart:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/cart
-    tag: "0.0.16@sha256:c9039f732ce17515a081b2646cd3b4147eb6ba43d6be2e459b657ba12658dfd3"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/cart
+    tag: "0.2.0@sha256:7d7364cc1b6164d6649d86ddcebad532f0a716854311dfe59d8a051f2dcb492f"
   checkout:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/checkout
-    tag: "0.0.16@sha256:a085474ab68a89eb9aff5d62e967d2ad06b4256f84dc0328a3de2364710491e8"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/checkout
+    tag: "0.2.0@sha256:272fe6d06fa0c5d28d755c22f775bb0b6ca779bdef3d31d986edc8172da6fb01"
   payment:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/payment
-    tag: "0.0.16@sha256:d4041ab0be57bedfc978e48fcc1d6cfe781caef94b91294f893ba49abf229320"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/payment
+    tag: "0.2.0@sha256:09dbdf0e087226daefd17506e1624b44df072ef4bb4cea27d9fbb8614ae0db8d"
   loadGenerator:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/load-generator
-    tag: "0.0.16@sha256:7efc6e41f3f1283c4d14bcc5a8c9a9ba28026dd2ac200e53052c2a0865d096ca"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/load-generator
+    tag: "0.2.0@sha256:70e34e0fa029b7a828ce13274ebf00a6f0af8a2bce769f605d1b5a3ac76255dc"
     pullPolicy: IfNotPresent
