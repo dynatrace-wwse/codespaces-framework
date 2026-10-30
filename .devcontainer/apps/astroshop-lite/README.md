@@ -5,9 +5,12 @@ PostgreSQL, Valkey and a k6 load generator. Runs on **amd64 and arm64** in well 
 
 - Original: [henrikrexed/opentelemetry-demo-light](https://github.com/henrikrexed/opentelemetry-demo-light)
   by **Henrik Rexed** — all credit for the app and its instrumentation is his.
-- Dynatrace import: `dynatrace-wwse/astroshop-lite` (private), full upstream history.
-- `chart/` is vendored from that import at commit `5580e03` (upstream v0.0.16 + arm64 readiness,
-  non-root security context, cart + checkout memory, generated postgres password). `values.yaml` holds the framework overrides.
+- Dynatrace import: [`dynatrace-wwse/astroshop-lite`](https://github.com/dynatrace-wwse/astroshop-lite), public, full upstream history.
+- `chart/` is vendored from that repo at tag `v0.2.0` (upstream v0.0.16 + arm64 readiness,
+  non-root security context, cart + checkout memory, generated postgres password, payment trace context).
+  `values.yaml` holds the framework overrides.
+- Images are built and published by that repo: `ghcr.io/dynatrace-wwse/astroshop-lite/<service>:0.2.0`,
+  multi-arch, pinned here by index digest.
 
 ```bash
 deployApp astroshop-lite          # or: deployApp 10 / deployApp j / deployAstroshopLite

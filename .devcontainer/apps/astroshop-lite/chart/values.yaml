@@ -65,28 +65,28 @@ containerSecurityContext:
 # Per-service configuration
 images:
   frontend:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/frontend
-    tag: "0.0.16"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/frontend
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   productCatalog:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/product-catalog
-    tag: "0.0.16"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/product-catalog
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   cart:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/cart
-    tag: "0.0.16"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/cart
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   checkout:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/checkout
-    tag: "0.0.16"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/checkout
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   payment:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/payment
-    tag: "0.0.16"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/payment
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
   loadGenerator:
-    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/load-generator
-    tag: "0.0.16"
+    repository: ghcr.io/dynatrace-wwse/astroshop-lite/load-generator
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
 
 frontend:

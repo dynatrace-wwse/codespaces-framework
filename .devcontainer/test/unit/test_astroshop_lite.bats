@@ -56,6 +56,13 @@ source_functions() {
   for l in "${lines[@]}"; do [[ "$l" == *"@sha256:"* ]] || { echo "unpinned: $l"; false; }; done
 }
 
+@test "astroshop-lite: every app image comes from the org's own registry" {
+  run grep -E '^\s*repository:' "$FRAMEWORK_APPS_PATH/astroshop-lite/values.yaml"
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 6 ]
+  for l in "${lines[@]}"; do [[ "$l" == *"ghcr.io/dynatrace-wwse/astroshop-lite/"* ]] || { echo "foreign: $l"; false; }; done
+}
+
 @test "astroshop-lite: the chart's own debug-only collector stays off" {
   grep -qE '^collector:' "$FRAMEWORK_APPS_PATH/astroshop-lite/values.yaml"
   run awk '/^collector:/{f=1;next} f&&/^[^ ]/{f=0} f&&/enabled:/{print $2}' "$FRAMEWORK_APPS_PATH/astroshop-lite/values.yaml"
