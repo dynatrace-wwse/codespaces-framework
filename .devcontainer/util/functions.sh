@@ -4358,6 +4358,42 @@ undeployUnguard() {
   kubectl delete ns unguard --force
 }
 
+deployAstroshopLite(){
+  # AstroShop Lite — Henrik Rexed's OpenTelemetry Demo Light (5 services, 5 languages),
+  # imported as dynatrace-wwse/astroshop-lite. amd64 + arm64.
+  # Telemetry: OTLP gRPC to ASTROSHOP_LITE_OTLP_ENDPOINT when set, otherwise to the
+  # framework's Dynatrace collector (deployOtelCollector), which needs
+  # DT_OTEL_ENDPOINT + DT_INGEST_TOKEN.
+
+  [ -z "$FRAMEWORK_APPS_PATH" ] && { echo "❌ source_framework.sh not loaded — run 'source .devcontainer/util/source_framework.sh' first"; return 1; }
+
+  local ns="astroshop-lite" dir="$FRAMEWORK_APPS_PATH/astroshop-lite" endpoint
+  printInfoSection "Deploying AstroShop Lite in NS='$ns'"
+
+  if [ -n "${ASTROSHOP_LITE_OTLP_ENDPOINT:-}" ]; then
+    endpoint="$ASTROSHOP_LITE_OTLP_ENDPOINT"
+    printInfo "OTLP endpoint (ASTROSHOP_LITE_OTLP_ENDPOINT): $endpoint"
+  else
+    deployOtelCollector || { printError "AstroShop Lite needs a collector: set DT_OTEL_ENDPOINT + DT_INGEST_TOKEN, or ASTROSHOP_LITE_OTLP_ENDPOINT"; return 1; }
+    endpoint="http://otel-collector.${OTEL_COLLECTOR_NAMESPACE}.svc.cluster.local:4317"
+  fi
+
+  helm upgrade --install astroshop-lite "$dir/chart" \
+    --namespace "$ns" --create-namespace \
+    -f "$dir/values.yaml" \
+    --set-string otlp.endpoint="$endpoint" || { printError "helm install of AstroShop Lite failed"; return 1; }
+
+  waitForAllReadyPods "$ns"
+  registerApp "astroshop-lite" "$ns" "astroshop-lite-frontend" 8080
+}
+
+undeployAstroshopLite(){
+  printInfoSection "Undeploying AstroShop Lite"
+  unregisterApp "astroshop-lite" "astroshop-lite"
+  helm uninstall astroshop-lite -n astroshop-lite 2>/dev/null
+  kubectl delete ns astroshop-lite --force
+}
+
 deployOpentelemetryDemo(){
   # Deploys the CNCF OpenTelemetry Demo (upstream, community-maintained)
   # https://opentelemetry.io/docs/demo/kubernetes-deployment/
@@ -5796,6 +5832,14 @@ deployApp(){
       fi
       ;;
 
+    10 | j | astroshop-lite)
+       if [[ $delete ]]; then
+        undeployAstroshopLite
+      else
+        deployAstroshopLite
+      fi
+      ;;
+
     *)
       printWarn "Invalid selection: '$input'. Please choose a valid app identifier."
       showDeployAppUsage
@@ -5824,8 +5868,10 @@ showDeployAppUsage(){
   printInfo "[7]   g   unguard               +       -                                   "
   printInfo "[8]   h   opentelemetry-demo    +       +    (CNCF upstream)                "
   printInfo "[9]   i   gitlab                +       +    (GitLab CE + Runner)          "
+  printInfo "[10]  j   astroshop-lite        +       +    (OTel Demo Light, H. Rexed)   "
   printInfo "----------------------------------------------------------------------------"
   printInfo "Astroshop = Dynatrace-curated demo | OpenTelemetry Demo = CNCF upstream    "
+  printInfo "AstroShop Lite = 5-service OTel demo, <1 GiB, sends to deployOtelCollector "
 }
 
 deleteCache(){

@@ -66,3 +66,10 @@ source_functions_only() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"source_framework.sh not loaded"* ]]
 }
+
+@test "deployAstroshopLite: fails without FRAMEWORK_APPS_PATH" {
+  source_functions_only
+  run deployAstroshopLite
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"source_framework.sh not loaded"* ]]
+}

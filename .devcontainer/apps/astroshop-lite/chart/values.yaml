@@ -1,0 +1,155 @@
+## OpenTelemetry Demo Light — Helm Values
+## See docs/getting-started/helm-values.md for full reference.
+
+collector:
+  enabled: true
+  image: otel/opentelemetry-collector-contrib:0.164.0
+  replicas: 1
+  resources:
+    limits:
+      memory: 256Mi
+    requests:
+      memory: 64Mi
+
+# When collector.enabled=false, services send OTLP directly here
+otlp:
+  endpoint: "http://otel-collector:4317"
+  protocol: grpc  # grpc or http
+
+metrics:
+  aggregation: cumulative  # cumulative or delta
+
+gateway:
+  enabled: false
+  provider: ""       # istio, cilium, envoy, nginx
+  hostname: ""       # e.g. demo.example.com
+  className: ""      # override GatewayClass name (default: derived from provider)
+  tls:
+    enabled: false
+    secretName: ""
+
+# Infrastructure
+postgres:
+  image: postgres:17-alpine
+  replicas: 1
+  user: otel
+  password: ""   # empty: a random password is generated into Secret <release>-postgres and kept across upgrades
+  resources:
+    limits:
+      memory: 80Mi
+    requests:
+      memory: 40Mi
+
+valkey:
+  image: valkey/valkey:8-alpine
+  replicas: 1
+  resources:
+    limits:
+      memory: 20Mi
+    requests:
+      memory: 10Mi
+
+# Security context applied to every application service (frontend, product-catalog,
+# cart, checkout, payment, load-generator). None of the images needs root.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+# Per-service configuration
+images:
+  frontend:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/frontend
+    tag: "0.0.16"
+    pullPolicy: IfNotPresent
+  productCatalog:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/product-catalog
+    tag: "0.0.16"
+    pullPolicy: IfNotPresent
+  cart:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/cart
+    tag: "0.0.16"
+    pullPolicy: IfNotPresent
+  checkout:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/checkout
+    tag: "0.0.16"
+    pullPolicy: IfNotPresent
+  payment:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/payment
+    tag: "0.0.16"
+    pullPolicy: IfNotPresent
+  loadGenerator:
+    repository: ghcr.io/henrikrexed/opentelemetry-demo-light/load-generator
+    tag: "0.0.16"
+    pullPolicy: IfNotPresent
+
+frontend:
+  replicas: 1
+  port: 8080
+  resources:
+    limits:
+      memory: 250Mi
+    requests:
+      memory: 128Mi
+
+productCatalog:
+  replicas: 1
+  port: 3550
+  resources:
+    limits:
+      memory: 20Mi
+    requests:
+      memory: 10Mi
+
+cart:
+  replicas: 1
+  port: 7070
+  jvmOpts: "-Xmx128m"
+  # 200Mi OOMKilled on start (heap 128m + OTel Java agent + metaspace); steady state
+  # measured at ~216Mi working set under the default 5-VU load.
+  resources:
+    limits:
+      memory: 384Mi
+    requests:
+      memory: 256Mi
+
+checkout:
+  replicas: 1
+  port: 5050
+  # 50Mi left no headroom: measured 46Mi working set under the default 5-VU load.
+  resources:
+    limits:
+      memory: 128Mi
+    requests:
+      memory: 64Mi
+
+payment:
+  replicas: 1
+  port: 6060
+  resources:
+    limits:
+      memory: 10Mi
+    requests:
+      memory: 5Mi
+
+loadGenerator:
+  enabled: true
+  replicas: 1
+  vus: 5
+  duration: "87600h"  # ~10 years, effectively forever
+  # otel-extended — export k6 metrics via OTLP to the OTel Collector (default)
+  # output-dynatrace — export k6 metrics directly to Dynatrace API
+  outputMode: otel-extended
+  dynatrace:
+    secretName: dynatrace-credentials  # K8s Secret with keys: url, apitoken
+  resources:
+    limits:
+      memory: 128Mi
+    requests:
+      memory: 64Mi

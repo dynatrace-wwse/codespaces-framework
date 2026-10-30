@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-cart
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "otel-demo.selectorLabels" (dict "name" "cart" "root" .) | nindent 4 }}
+  ports:
+    - port: {{ .Values.cart.port }}
+      targetPort: {{ .Values.cart.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-cart
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.cart.replicas }}
+  selector:
+    matchLabels:
+      {{- include "otel-demo.selectorLabels" (dict "name" "cart" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "otel-demo.selectorLabels" (dict "name" "cart" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: cart
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          image: {{ include "otel-demo.image" (dict "img" .Values.images.cart) }}
+          imagePullPolicy: {{ .Values.images.cart.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.cart.port }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: cart
+            - name: JAVA_TOOL_OPTIONS
+              value: "-javaagent:/app/opentelemetry-javaagent.jar {{ .Values.cart.jvmOpts }}"
+            {{- include "otel-demo.otelEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.cart.resources | nindent 12 }}
+          readinessProbe:
+            # Native kubelet gRPC probe: arch-independent (the bundled grpc_health_probe
+            # binary is linux-amd64 only and fails with "exec format error" on arm64).
+            grpc:
+              port: {{ .Values.cart.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 5

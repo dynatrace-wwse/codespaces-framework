@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-payment
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "otel-demo.selectorLabels" (dict "name" "payment" "root" .) | nindent 4 }}
+  ports:
+    - port: {{ .Values.payment.port }}
+      targetPort: {{ .Values.payment.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-payment
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.payment.replicas }}
+  selector:
+    matchLabels:
+      {{- include "otel-demo.selectorLabels" (dict "name" "payment" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "otel-demo.selectorLabels" (dict "name" "payment" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: payment
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          image: {{ include "otel-demo.image" (dict "img" .Values.images.payment) }}
+          imagePullPolicy: {{ .Values.images.payment.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.payment.port }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: payment
+            {{- include "otel-demo.otelEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.payment.resources | nindent 12 }}
+          readinessProbe:
+            # Native kubelet gRPC probe: arch-independent (the bundled grpc_health_probe
+            # binary is linux-amd64 only and fails with "exec format error" on arm64).
+            grpc:
+              port: {{ .Values.payment.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 5

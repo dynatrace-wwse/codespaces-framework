@@ -1,0 +1,57 @@
+{{- if .Values.loadGenerator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-load-generator
+  labels:
+    {{- include "otel-demo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.loadGenerator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "otel-demo.selectorLabels" (dict "name" "load-generator" "root" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "otel-demo.selectorLabels" (dict "name" "load-generator" "root" .) | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: load-generator
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          image: {{ include "otel-demo.image" (dict "img" .Values.images.loadGenerator) }}
+          imagePullPolicy: {{ .Values.images.loadGenerator.pullPolicy }}
+          env:
+            - name: FRONTEND_URL
+              value: "http://{{ .Release.Name }}-frontend:{{ .Values.frontend.port }}"
+            - name: K6_VUS
+              value: {{ .Values.loadGenerator.vus | quote }}
+            - name: K6_DURATION
+              value: {{ .Values.loadGenerator.duration | quote }}
+            - name: K6_OUTPUT_MODE
+              value: {{ .Values.loadGenerator.outputMode | default "opentelemetry" | quote }}
+            {{- if eq (default "otel-extended" .Values.loadGenerator.outputMode) "otel-extended" }}
+            - name: K6_OTEL_GRPC_EXPORTER_INSECURE
+              value: "true"
+            - name: K6_OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ include "otel-demo.otlpEndpoint" . | quote }}
+            {{- end }}
+            {{- if eq (default "" .Values.loadGenerator.outputMode) "output-dynatrace" }}
+            - name: K6_DYNATRACE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.loadGenerator.dynatrace.secretName | default "dynatrace-credentials" }}
+                  key: url
+            - name: K6_DYNATRACE_APITOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.loadGenerator.dynatrace.secretName | default "dynatrace-credentials" }}
+                  key: apitoken
+            {{- end }}
+            - name: OTEL_SERVICE_NAME
+              value: load-generator
+          resources:
+            {{- toYaml .Values.loadGenerator.resources | nindent 12 }}
+{{- end }}
