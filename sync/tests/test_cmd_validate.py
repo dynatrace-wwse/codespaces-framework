@@ -226,3 +226,33 @@ class TestPostCreateCredentialGuard:
         )
         issues = check_post_create_credentials(content)
         assert len(issues) == 1
+
+
+class TestWorkshopPostCreateValidation:
+    """Orbital ENH-146: the shared machine's build script is held to the same
+    credential rule as post-create.sh, and only when it exists."""
+
+    def _repo(self, tmp_path, workshop=None):
+        dc = tmp_path / ".devcontainer"
+        dc.mkdir()
+        (dc / "post-create.sh").write_text("#!/bin/bash\necho ok\n")
+        if workshop is not None:
+            (dc / "workshop-post-create.sh").write_text(workshop)
+        return tmp_path
+
+    def test_unsafe_workshop_script_is_flagged(self, tmp_path, capsys):
+        from sync.commands.validate import _validate_post_create
+        _validate_post_create(self._repo(tmp_path, "dynatraceDeployOperator\n"))
+        out = capsys.readouterr().out
+        assert "workshop-post-create credentials: 1 issue(s)" in out
+
+    def test_safe_workshop_script_passes(self, tmp_path, capsys):
+        from sync.commands.validate import _validate_post_create
+        _validate_post_create(self._repo(
+            tmp_path, "variablesNeeded DT_OPERATOR_TOKEN:true\ndynatraceDeployOperator\n"))
+        assert "✅ workshop-post-create credential validation" in capsys.readouterr().out
+
+    def test_absent_workshop_script_says_nothing(self, tmp_path, capsys):
+        from sync.commands.validate import _validate_post_create
+        _validate_post_create(self._repo(tmp_path))
+        assert "workshop-post-create" not in capsys.readouterr().out

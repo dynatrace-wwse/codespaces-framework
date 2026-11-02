@@ -660,6 +660,9 @@ _field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.a
   [ "$(ORBITAL_JOB_KIND=learner detectBuildPurpose orbital)" = "learner" ]
   [ "$(ORBITAL_JOB_KIND=ci detectBuildPurpose orbital)" = "ci" ]
   [ "$(ORBITAL_JOB_KIND=sysbox detectBuildPurpose orbital)" = "ci" ]
+  # a shared workshop's machine is neither a learner nor CI (Orbital ENH-146)
+  [ "$(ORBITAL_JOB_KIND=workshop detectBuildPurpose orbital)" = "workshop" ]
+  [ "$(FRAMEWORK_TRACKER_PURPOSE=test ORBITAL_JOB_KIND=workshop detectBuildPurpose orbital)" = "test" ]
   # test wins over everything — a human marking a throwaway build
   [ "$(FRAMEWORK_TRACKER_PURPOSE=test detectBuildPurpose github-workflow)" = "test" ]
   [ "$(FRAMEWORK_TRACKER_PURPOSE=test ORBITAL_JOB_KIND=ci detectBuildPurpose orbital)" = "test" ]

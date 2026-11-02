@@ -568,3 +568,23 @@ class TestFrameworkImageBump:
 
     def test_old_list_excludes_target(self):
         assert FRAMEWORK_IMAGE not in OLD_FRAMEWORK_IMAGES
+
+
+# ---------------------------------------------------------------------------
+# Shared-environment workshop scripts (Orbital ENH-146) are the repo's own.
+
+class TestSharedWorkshopScripts:
+    SCRIPTS = (".devcontainer/workshop-post-create.sh",
+               ".devcontainer/workshop-post-start.sh")
+
+    def test_listed_as_repo_custom(self):
+        for s in self.SCRIPTS:
+            assert s in REPO_CUSTOM_FILES
+
+    def test_migrate_keeps_them_byte_for_byte(self, tmp_path, make_repo_entry):
+        repo = _repo_with_yaml_dir(tmp_path, with_tokens=False)
+        for s in self.SCRIPTS:
+            (repo / s).write_text(f"#!/bin/bash\n# {s}\n")
+        _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=False)
+        for s in self.SCRIPTS:
+            assert (repo / s).read_text() == f"#!/bin/bash\n# {s}\n"
