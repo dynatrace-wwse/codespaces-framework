@@ -375,7 +375,7 @@ undeploy output lands in the provisioning log through `printInfoSection`.
 | Function | Signature | Description |
 |---|---|---|
 | `dynatraceDeployOperator` | `dynatraceDeployOperator [env token ingest]` | Deploys the DT Operator via Helm and creates the credentials secret |
-| `deployDynatrace` | `deployDynatrace [mode] [env token ingest]` | Unified deploy: validates credentials, generates Dynakube, waits for pods. No mode = the configured `mode:` (`apponly` by default) |
+| `deployDynatrace` | `deployDynatrace [mode] [env token ingest]` | Unified deploy: validates credentials, generates Dynakube, waits for pods. Restarts the token consumers when the tokens changed (see below). No mode = the configured `mode:` (`apponly` by default) |
 | `deployCloudNative` | `deployCloudNative [env token ingest]` | Shortcut for `deployDynatrace cloudnative` |
 | `deployApplicationMonitoring` | `deployApplicationMonitoring [env token ingest]` | Shortcut for `deployDynatrace apponly` |
 | `undeployDynakubes` | `undeployDynakubes` | Deletes all Dynakube CRDs and uninstalls the OneAgent if present |
@@ -392,6 +392,31 @@ deployDynatrace apponly "https://abc.apps.dynatrace.com" "$OP_TOKEN" "$INGEST_TO
 
 # Available modes: apponly (default), cloudnative, k8s-only
 ```
+
+#### Re-deploying with new tokens (shared-workshop token refresh)
+
+A shared workshop's machine can run past its tokens' lifetime, so Orbital can hand it new ones
+(ENH-146 A6). The worker rewrites `.devcontainer/.env` and runs the training's
+`.devcontainer/workshop-post-start.sh` again **in the running container**. That script must
+re-read `.env` and call `deployDynatrace`, which is what the shared start-script contract
+requires: credentials are re-read and the DynaKube re-applied on **every** start.
+
+Re-applying the manifest updates the token Secret, but two consumers do not follow on their own:
+
+| Consumer | Without help | What `deployDynatrace` does |
+|---|---|---|
+| Pods that read the Secret as an **env var** (`env.valueFrom.secretKeyRef`, `envFrom.secretRef`). The DynaKube's OTel collector reads `dataIngestToken` this way | keep the **old** value until they restart; once it expires, their ingest fails silently | rollout-restarts every Deployment, StatefulSet and DaemonSet (any namespace) whose pod template reads the Secret, as env or as a `secret` volume |
+| The **operator** | does not watch the Secret. With the DynaKube unchanged, it reads the new operator token only at its next periodic reconcile (up to ~15 min) | annotates the DynaKube (`dynatrace.enablement/tokens-refreshed-at`), so it reconciles now |
+
+This happens only when the Secret's data **changed**: `deployDynatrace` compares a sha256
+fingerprint of it before and after `kubectl apply` (no value is ever printed). A first deploy
+(no Secret yet) and an ordinary restart with the same tokens restart nothing. It needs `jq`; without
+it the restarts are skipped with an error saying the consumers keep the old tokens.
+
+!!! warning "Refresh before the old tokens expire"
+    The restarts make every consumer switch within the refresh itself. A workload the training
+    deploys that copies a token anywhere else (a ConfigMap, a file baked into an image) is not
+    found by this, and must be re-done by the training's own `workshop-post-start.sh`.
 
 ### Dynakube Configuration
 

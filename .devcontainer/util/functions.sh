@@ -3007,7 +3007,17 @@ deployDynatrace() {
     return 1
   fi
 
+  # A re-apply with NEW tokens (a shared workshop's token refresh re-runs this) updates the
+  # token Secret, but nothing that already read it follows: see refreshDynatraceTokenConsumers.
+  local token_fp_before token_fp_after
+  token_fp_before=$(dynakubeTokenFingerprint "$gen_file")
+
   kubectl -n dynatrace apply -f "$gen_file"
+
+  token_fp_after=$(dynakubeTokenFingerprint "$gen_file")
+  if [[ -n "$token_fp_before" && "$token_fp_before" != "$token_fp_after" ]]; then
+    refreshDynatraceTokenConsumers "$gen_file"
+  fi
 
   # Sprint tenants ship an unpullable private-ECR ActiveGate image — swap it for the
   # latest public build so the AG can actually start (no-op on prod/gen2 tenants).
@@ -3032,6 +3042,61 @@ deployDynatrace() {
   fi
 
   printInfo "Dynatrace deployed in $mode mode"
+}
+
+# Fingerprint of the live token Secret(s) a generated DynaKube manifest declares: a sha256 of
+# their data, or "" when none exists yet (a first deploy). Never prints a token value.
+dynakubeTokenFingerprint() {
+  local gen_file="$1" data
+  data=$(kubectl get -f "$gen_file" \
+    -o jsonpath='{range .items[?(@.kind=="Secret")]}{.metadata.namespace}/{.metadata.name}={.data}{"\n"}{end}' 2>/dev/null)
+  [[ -z "$data" ]] && return 0
+  printf '%s' "$data" | sha256sum | cut -d' ' -f1
+}
+
+# The DynaKube's token Secret changed (a shared workshop's token refresh, ENH-146 A6 / BUG-181):
+# move everything that read the OLD tokens onto the new ones, now.
+#   - A pod that takes a token as an ENV var (env.valueFrom.secretKeyRef, envFrom.secretRef) keeps
+#     the old value until it restarts — the DynaKube's OTel collector reads dataIngestToken that
+#     way. A secret VOLUME is refreshed by the kubelet eventually, but not on a schedule anyone
+#     controls. Every Deployment, StatefulSet and DaemonSet whose pod template reads the Secret,
+#     in any namespace, is rollout-restarted.
+#   - The operator does not watch the Secret: with the DynaKube itself unchanged it reads the new
+#     operator token only at its next periodic reconcile (up to ~15 min). Annotating the DynaKube
+#     makes it reconcile now.
+refreshDynatraceTokenConsumers() {
+  local gen_file="$1" secrets dynakubes workloads w ns kind name
+  secrets=$(kubectl get -f "$gen_file" -o jsonpath='{range .items[?(@.kind=="Secret")]}{.metadata.name}{" "}{end}' 2>/dev/null)
+  dynakubes=$(kubectl get -f "$gen_file" -o jsonpath='{range .items[?(@.kind=="DynaKube")]}{.metadata.namespace}/{.metadata.name}{" "}{end}' 2>/dev/null)
+  printInfoSection "Dynatrace tokens changed: restarting what read the old ones"
+  if ! command -v jq >/dev/null 2>&1; then
+    printError "jq not found: cannot tell which workloads read the token Secret — they keep the OLD tokens"
+    workloads=""
+  else
+    # shellcheck disable=SC2016
+    workloads=$(kubectl get deployments,statefulsets,daemonsets -A -o json 2>/dev/null | jq -r --arg s "$secrets" '
+      ($s | split(" ") | map(select(length > 0))) as $names
+      | .items[]
+      | select(any(
+          ( ((.spec.template.spec.containers // []) + (.spec.template.spec.initContainers // []))[]
+              | ((.env // [])[] | .valueFrom.secretKeyRef.name // empty),
+                ((.envFrom // [])[] | .secretRef.name // empty) ),
+          ((.spec.template.spec.volumes // [])[] | .secret.secretName // empty);
+          . as $n | $names | any(. == $n)))
+      | "\(.metadata.namespace) \(.kind | ascii_downcase) \(.metadata.name)"')
+  fi
+  while read -r ns kind name; do
+    [[ -z "$name" ]] && continue
+    printInfo "Restarting $kind/$name in $ns (reads the token Secret)"
+    kubectl -n "$ns" rollout restart "$kind/$name" >/dev/null || printWarn "Could not restart $kind/$name in $ns"
+  done <<< "$workloads"
+  for w in $dynakubes; do
+    ns="${w%%/*}"; name="${w#*/}"
+    printInfo "Asking the operator to reconcile DynaKube $name now"
+    kubectl -n "$ns" annotate dynakube "$name" \
+      "dynatrace.enablement/tokens-refreshed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null \
+      || printWarn "Could not annotate DynaKube $name"
+  done
 }
 
 undeployDynakubes() {
