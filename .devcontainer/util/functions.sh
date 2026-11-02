@@ -3069,6 +3069,15 @@ refreshDynatraceTokenConsumers() {
   secrets=$(kubectl get -f "$gen_file" -o jsonpath='{range .items[?(@.kind=="Secret")]}{.metadata.name}{" "}{end}' 2>/dev/null)
   dynakubes=$(kubectl get -f "$gen_file" -o jsonpath='{range .items[?(@.kind=="DynaKube")]}{.metadata.namespace}/{.metadata.name}{" "}{end}' 2>/dev/null)
   printInfoSection "Dynatrace tokens changed: restarting what read the old ones"
+  # Annotate FIRST: its timestamp is the line a reader must have started after (a training can
+  # check that), so every pod the restarts below create is born after it.
+  for w in $dynakubes; do
+    ns="${w%%/*}"; name="${w#*/}"
+    printInfo "Asking the operator to reconcile DynaKube $name now"
+    kubectl -n "$ns" annotate dynakube "$name" \
+      "dynatrace.enablement/tokens-refreshed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null \
+      || printWarn "Could not annotate DynaKube $name"
+  done
   if ! command -v jq >/dev/null 2>&1; then
     printError "jq not found: cannot tell which workloads read the token Secret — they keep the OLD tokens"
     workloads=""
@@ -3090,13 +3099,6 @@ refreshDynatraceTokenConsumers() {
     printInfo "Restarting $kind/$name in $ns (reads the token Secret)"
     kubectl -n "$ns" rollout restart "$kind/$name" >/dev/null || printWarn "Could not restart $kind/$name in $ns"
   done <<< "$workloads"
-  for w in $dynakubes; do
-    ns="${w%%/*}"; name="${w#*/}"
-    printInfo "Asking the operator to reconcile DynaKube $name now"
-    kubectl -n "$ns" annotate dynakube "$name" \
-      "dynatrace.enablement/tokens-refreshed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null \
-      || printWarn "Could not annotate DynaKube $name"
-  done
 }
 
 undeployDynakubes() {

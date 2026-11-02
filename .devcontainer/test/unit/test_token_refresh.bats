@@ -141,3 +141,12 @@ restarts() { grep -c "rollout restart" "$CALLS" || true; }
   [ "$(restarts)" -eq 0 ]
   grep -q "annotate dynakube dk" "$CALLS"
 }
+
+@test "refresh: the DynaKube is annotated BEFORE the restarts (readers start after its timestamp)" {
+  source_functions
+  echo '{"apiToken":"T0LDVALUE"}' > "$LIVE_SECRET"
+  echo '{"apiToken":"TNEWVALUE"}' > "$NEXT_SECRET"
+
+  run deployDynatrace apponly
+  [ "$(grep -n 'annotate' "$CALLS" | cut -d: -f1)" -lt "$(grep -n 'rollout restart' "$CALLS" | head -1 | cut -d: -f1)" ]
+}
