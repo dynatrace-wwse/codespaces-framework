@@ -56,6 +56,11 @@ REPO_CUSTOM_FILES = [
     ".devcontainer/devcontainer.json",
     ".devcontainer/post-create.sh",
     ".devcontainer/post-start.sh",
+    # A shared-environment workshop's machine (Orbital ENH-146): one container
+    # per workshop runs these instead of post-create/post-start. Optional; a
+    # repo that has them owns them like its post-create.sh.
+    ".devcontainer/workshop-post-create.sh",
+    ".devcontainer/workshop-post-start.sh",
     ".devcontainer/util/source_framework.sh",
     ".devcontainer/util/my_functions.sh",
     ".devcontainer/test/integration.sh",

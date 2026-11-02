@@ -151,6 +151,18 @@ def _validate_post_create(path):
     else:
         print(f"  ✅ post-create credential validation")
 
+    # The shared-workshop build script deploys Dynatrace too, and is held to
+    # the same rule. Optional: most repos have none.
+    wpc = Path(path) / ".devcontainer/workshop-post-create.sh"
+    if wpc.exists():
+        issues = check_post_create_credentials(wpc.read_text())
+        if issues:
+            print(f"  ⚠️  workshop-post-create credentials: {len(issues)} issue(s)")
+            for issue in issues:
+                print(f"    ❌ {issue}")
+        else:
+            print(f"  ✅ workshop-post-create credential validation")
+
 
 def _validate_docs(repo_entry, path):
     """Validate documentation structure for MkDocs GitHub Pages."""

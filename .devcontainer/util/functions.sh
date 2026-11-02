@@ -93,6 +93,8 @@ detectBuildPurpose(){
   # Why this container was built — so usage dashboards can count learners only.
   #   test:    FRAMEWORK_TRACKER_PURPOSE=test (humans/throwaway VMs set it by hand)
   #   ci:      GitHub Actions integration test, or Orbital ORBITAL_JOB_KIND=ci|sysbox
+  #   workshop: a shared-environment workshop's machine (Orbital ORBITAL_JOB_KIND=workshop) —
+  #            one per workshop, not a person, so it must not count as a learner
   #   learner: everything else (default — an untagged build is assumed to be a person)
   # Arg 1: the instantiation type (codespace.type); defaults to $INSTANTIATION_TYPE.
   local itype="${1:-${INSTANTIATION_TYPE:-}}"
@@ -101,6 +103,8 @@ detectBuildPurpose(){
   elif [[ "$itype" == "github-workflow" ]] || [[ "${ORBITAL_JOB_KIND:-}" == "ci" ]] \
        || [[ "${ORBITAL_JOB_KIND:-}" == "sysbox" ]]; then
     echo "ci"
+  elif [[ "${ORBITAL_JOB_KIND:-}" == "workshop" ]]; then
+    echo "workshop"
   else
     echo "learner"
   fi
