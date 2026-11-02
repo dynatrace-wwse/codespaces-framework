@@ -414,7 +414,8 @@ fingerprint of it before and after `kubectl apply` (no value is ever printed). A
 it the restarts are skipped with an error saying the consumers keep the old tokens.
 
 !!! warning "Refresh before the old tokens expire"
-    The restarts make every consumer switch within the refresh itself. A workload the training
+    The DynaKube is annotated first, then the readers are restarted, so every reader starts after
+    the annotation's timestamp (a training can check exactly that). The restarts make every consumer switch within the refresh itself. A workload the training
     deploys that copies a token anywhere else (a ConfigMap, a file baked into an image) is not
     found by this, and must be re-done by the training's own `workshop-post-start.sh`.
 
