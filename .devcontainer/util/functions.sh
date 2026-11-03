@@ -3015,8 +3015,9 @@ deployDynatrace() {
   kubectl -n dynatrace apply -f "$gen_file"
 
   token_fp_after=$(dynakubeTokenFingerprint "$gen_file")
+  local consumers_rc=0
   if [[ -n "$token_fp_before" && "$token_fp_before" != "$token_fp_after" ]]; then
-    refreshDynatraceTokenConsumers "$gen_file"
+    refreshDynatraceTokenConsumers "$gen_file" || consumers_rc=$?
   fi
 
   # Sprint tenants ship an unpullable private-ECR ActiveGate image — swap it for the
@@ -3042,6 +3043,9 @@ deployDynatrace() {
   fi
 
   printInfo "Dynatrace deployed in $mode mode"
+  # A token refresh whose readers did not all come back on the new tokens is not a success,
+  # even though the rest of the deploy is: the caller must not report it "applied" (BUG-181).
+  return "$consumers_rc"
 }
 
 # Fingerprint of the live token Secret(s) a generated DynaKube manifest declares: a sha256 of
@@ -3094,11 +3098,28 @@ refreshDynatraceTokenConsumers() {
           . as $n | $names | any(. == $n)))
       | "\(.metadata.namespace) \(.kind | ascii_downcase) \(.metadata.name)"')
   fi
+  local restarted=() rc=0
   while read -r ns kind name; do
     [[ -z "$name" ]] && continue
     printInfo "Restarting $kind/$name in $ns (reads the token Secret)"
-    kubectl -n "$ns" rollout restart "$kind/$name" >/dev/null || printWarn "Could not restart $kind/$name in $ns"
+    if kubectl -n "$ns" rollout restart "$kind/$name" >/dev/null; then
+      restarted+=("$ns $kind $name")
+    else
+      printError "Could not restart $kind/$name in $ns: it keeps the OLD tokens"; rc=1
+    fi
   done <<< "$workloads"
+  # `rollout restart` only asks for new pods. Until they replace the old ones a reader is still
+  # on the old token, so the refresh is done only once every restarted rollout has finished.
+  for w in "${restarted[@]}"; do
+    read -r ns kind name <<< "$w"
+    if kubectl -n "$ns" rollout status "$kind/$name" --timeout="${TOKEN_ROLLOUT_TIMEOUT:-120}s" >/dev/null 2>&1; then
+      printInfo "$kind/$name in $ns is on the new tokens"
+    else
+      printError "TOKEN REFRESH INCOMPLETE: $kind/$name in $ns did not finish restarting within ${TOKEN_ROLLOUT_TIMEOUT:-120}s — it may still hold the OLD tokens"
+      rc=1
+    fi
+  done
+  return "$rc"
 }
 
 undeployDynakubes() {

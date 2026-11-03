@@ -413,6 +413,13 @@ fingerprint of it before and after `kubectl apply` (no value is ever printed). A
 (no Secret yet) and an ordinary restart with the same tokens restart nothing. It needs `jq`; without
 it the restarts are skipped with an error saying the consumers keep the old tokens.
 
+`rollout restart` only asks for new pods, so `deployDynatrace` then waits (`kubectl rollout
+status`, `TOKEN_ROLLOUT_TIMEOUT` seconds each, default 120) until every restarted workload has
+finished. A rollout that does not finish, or a restart that fails, prints `TOKEN REFRESH
+INCOMPLETE` and makes `deployDynatrace` return non-zero, so the worker never reports the refresh
+`applied` while a reader may still hold the old token. When it returns 0, every reader has
+already started after the annotation, so a training's check can run straight after it.
+
 !!! warning "Refresh before the old tokens expire"
     The DynaKube is annotated first, then the readers are restarted, so every reader starts after
     the annotation's timestamp (a training can check exactly that). The restarts make every consumer switch within the refresh itself. A workload the training

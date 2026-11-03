@@ -39,6 +39,8 @@ EOF
       *"get -f"*'kind=="DynaKube"'*) printf 'dynatrace/dk '; return 0 ;;
       *"get deployments,statefulsets,daemonsets -A -o json"*) cat "$WORKLOADS"; return 0 ;;
       *"rollout restart"*|*"annotate dynakube"*) echo "$args" >> "$CALLS"; return 0 ;;
+      *"rollout status"*) echo "$args" >> "$CALLS"
+        [[ -n "${STUCK:-}" && "$args" == *"$STUCK"* ]] && return 1; return 0 ;;
       *) return 0 ;;
     esac
   }
@@ -149,4 +151,45 @@ restarts() { grep -c "rollout restart" "$CALLS" || true; }
 
   run deployDynatrace apponly
   [ "$(grep -n 'annotate' "$CALLS" | cut -d: -f1)" -lt "$(grep -n 'rollout restart' "$CALLS" | head -1 | cut -d: -f1)" ]
+}
+
+statuses() { grep -c "rollout status" "$CALLS" || true; }
+
+@test "refresh: it waits for every restarted rollout to finish, after its restart" {
+  source_functions
+  echo '{"apiToken":"T0LDVALUE"}' > "$LIVE_SECRET"
+  echo '{"apiToken":"TNEWVALUE"}' > "$NEXT_SECRET"
+
+  run deployDynatrace apponly
+  [ "$status" -eq 0 ]
+  [ "$(statuses)" -eq 3 ]
+  for w in "dynatrace rollout status statefulset/dk-otel-collector" "app rollout status deployment/envfrom" \
+           "app rollout status daemonset/vol"; do
+    grep -q -- "-n $w --timeout=120s" "$CALLS"
+  done
+  # every wait comes after the last restart: nothing is declared done while another is pending
+  [ "$(grep -n 'rollout restart' "$CALLS" | tail -1 | cut -d: -f1)" -lt "$(grep -n 'rollout status' "$CALLS" | head -1 | cut -d: -f1)" ]
+  [[ "$output" == *"statefulset/dk-otel-collector in dynatrace is on the new tokens"* ]]
+}
+
+@test "refresh: a rollout that does not finish fails the deploy, loudly" {
+  source_functions
+  echo '{"apiToken":"T0LDVALUE"}' > "$LIVE_SECRET"
+  echo '{"apiToken":"TNEWVALUE"}' > "$NEXT_SECRET"
+  export STUCK="statefulset/dk-otel-collector"
+
+  run deployDynatrace apponly
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"TOKEN REFRESH INCOMPLETE: statefulset/dk-otel-collector"* ]]
+  [ "$(statuses)" -eq 3 ]           # the others are still waited for
+}
+
+@test "refresh: an unchanged Secret waits for nothing" {
+  source_functions
+  echo '{"apiToken":"TSAMEVALUE"}' > "$LIVE_SECRET"
+  cp "$LIVE_SECRET" "$NEXT_SECRET"
+
+  run deployDynatrace apponly
+  [ "$status" -eq 0 ]
+  [ "$(statuses)" -eq 0 ]
 }
