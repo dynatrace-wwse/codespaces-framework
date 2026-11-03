@@ -150,7 +150,8 @@ for, not every option it takes.
 | `migrate` | Migrate repos to the versioned pull model | `sync migrate --dry-run` |
 | `migrate-mkdocs` | Convert a single repo's `mkdocs.yaml` to the `INHERIT` pattern | `sync migrate-mkdocs --repo <owner/name>` |
 | `revert` | Undo uncommitted changes | `sync revert --repo template` |
-| `validate` | Check `repos.yaml` schema and local repo state, including docs structure | `sync validate` |
+| `validate` | Check `repos.yaml` schema and local repo state, including docs structure and the training's `delivery` front matter | `sync validate` |
+| `check-delivery` | Check one training checkout's `delivery` front matter; exit 1 when invalid (see [Training delivery](#training-delivery)) | `sync check-delivery path/to/repo` |
 
 ### Versioning & Releases
 
@@ -279,3 +280,39 @@ sync list-issues               # Check for open issues
 <div class="grid cards" markdown>
 - [Continue to Testing →](testing.md)
 </div>
+
+## Training delivery
+
+A training declares how it may be delivered in the front matter of its `docs/index.md`
+(the `docs_dir` from `mkdocs.yaml`, if set), next to the catalog fields `description`,
+`tags`, `difficulty` and `duration`:
+
+```yaml
+---
+description: "Build your own observability agent"
+tags: [interactive]
+delivery:
+  availability: workshop-only   # self-service (default) | workshop-only
+  tenancy: single               # any (default) | single | multi
+---
+```
+
+| Field | Values | Meaning |
+|---|---|---|
+| `availability` | `self-service` (default), `workshop-only` | `self-service` can be started by a learner on their own; `workshop-only` only inside a workshop |
+| `tenancy` | `any` (default), `single`, `multi` | how a workshop seats learners: all on the workshop's tenant (`single`), each on their own (`multi`), or the trainer chooses (`any`) |
+
+**No block at all is valid** and means `self-service`, tenancy `any` — what every training
+did before this field existed. A block that *is* present but wrong (an unknown key, a
+misspelt value) is refused, because silently falling back to the default would make the
+training self-service.
+
+**Shared infrastructure is not declared.** A training has it when it ships
+`.devcontainer/workshop-post-create.sh`. Such a training must declare
+`availability: workshop-only` **and** `tenancy: single` — multi-tenant shared
+infrastructure is not supported yet. A `workshop-post-start.sh` without the create script
+is refused too.
+
+`sync check-delivery` and `sync validate` enforce these rules. Nothing reads the block at
+runtime yet — Orbital and the app start reading it together (ENH-152).
+

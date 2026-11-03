@@ -199,6 +199,13 @@ def main():
     )
     gj.add_argument("--output", help="Output file path (default: stdout)")
 
+    # check-delivery (ENH-152)
+    cd = subparsers.add_parser(
+        "check-delivery",
+        help="Check a training repo's delivery front matter; exit 1 when invalid",
+    )
+    cd.add_argument("path", nargs="?", default=".", help="Training repo checkout (default: .)")
+
     if _HAS_ARGCOMPLETE:
         argcomplete.autocomplete(parser)
 
@@ -245,6 +252,8 @@ def main():
         from sync.commands.generate_registry import run
     elif args.command == "generate-json":
         from sync.commands.generate_json import run
+    elif args.command == "check-delivery":
+        from sync.commands.check_delivery import run
     else:
         parser.print_help()
         sys.exit(1)
