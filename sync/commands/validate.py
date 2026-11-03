@@ -85,6 +85,9 @@ def _validate_local(repo_entry, repo_path):
     # Verify docs structure
     _validate_docs(repo_entry, path)
 
+    # Verify the declared delivery block (ENH-152)
+    _validate_delivery(path)
+
 
 # Deploy functions that consume Dynatrace credentials (DT_OPERATOR_TOKEN) at
 # runtime. A post-create.sh that calls any of these MUST first declare the
@@ -162,6 +165,22 @@ def _validate_post_create(path):
                 print(f"    ❌ {issue}")
         else:
             print(f"  ✅ workshop-post-create credential validation")
+
+
+def _validate_delivery(path):
+    """Validate the delivery front matter in <docs_dir>/index.md (ENH-152)."""
+    from sync.core.delivery import check_repo
+
+    effective, issues = check_repo(path)
+    if issues:
+        print(f"  ❌ delivery: {len(issues)} issue(s)")
+        for issue in issues:
+            print(f"    ❌ {issue}")
+    else:
+        print(
+            f"  ✅ delivery: {effective['availability']}, tenancy {effective['tenancy']}, "
+            f"shared infra {'yes' if effective['sharedInfra'] else 'no'}"
+        )
 
 
 def _validate_docs(repo_entry, path):

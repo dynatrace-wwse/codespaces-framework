@@ -1,0 +1,45 @@
+name: Sync CLI tests
+# Runs the sync CLI checks that a training repo's metadata depends on.
+#
+# Scoped on purpose: until now no workflow ran sync/tests at all, and two tests
+# elsewhere in that directory fail on main (test_core_repos
+# test_extra_fields_raise expects a TypeError the loader no longer raises;
+# test_cli test_push_update_requires_version). Widening this to the whole
+# directory is a separate change, made after those two are fixed — not by
+# deselecting them here.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'sync/**'
+      - '.github/workflows/sync-tests.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'sync/**'
+      - '.github/workflows/sync-tests.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  delivery:
+    name: Delivery front matter + validate (ENH-152)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pytest==8.3.3 pyyaml==6.0.2
+      - name: Run tests
+        # The test COUNT is checked as well: a collection error or an import
+        # that silently drops the module would otherwise read as green.
+        run: |
+          set -o pipefail
+          python3 -m pytest -q sync/tests/test_core_delivery.py sync/tests/test_cmd_validate.py \
+            | tee "$RUNNER_TEMP/pytest.out"
+          n=$(grep -oE '^[0-9]+ passed' "$RUNNER_TEMP/pytest.out" | grep -oE '^[0-9]+')
+          [ "${n:-0}" -ge 59 ] || { echo "::error::expected >= 59 tests, ran ${n:-0}"; exit 1; }

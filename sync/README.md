@@ -114,6 +114,9 @@ sync validate
 
 # Validate a specific repo
 sync validate --repo enablement-codespaces-template
+
+# Check one training checkout's delivery front matter (exit 1 when invalid)
+sync check-delivery ../enablement-build-your-own-agent
 ```
 
 ### Migrate repos locally (preview/audit)
