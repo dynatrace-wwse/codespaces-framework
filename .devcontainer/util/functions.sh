@@ -3703,7 +3703,8 @@ SENSEOF
   fi
 
   # mktemp creates 0600; the published file kept the umask mode before, keep it that way.
-  chmod "$(printf '%o' $(( 0666 & ~0$(umask) )))" "$out_file" 2>/dev/null
+  # '=rw' with no who-letters applies the umask. Quoted: zsh expands a bare =word.
+  chmod '=rw' "$out_file" 2>/dev/null
   if ! mv -f "$out_file" "$gen_file"; then
     rm -f "$out_file"
     printError "Could not move the generated Dynakube into place at $gen_file"
@@ -3774,7 +3775,12 @@ print(json.dumps({"kind": "List", "items": docs}))
 DKPARSE
 )" || parse_err="$json"
   elif command -v kubectl >/dev/null 2>&1; then
-    json="$(kubectl create --dry-run=client -o json -f "$file" 2>&1)" || parse_err="$json"
+    # stderr kept apart: kubectl warns on stderr even when it succeeds.
+    local kerr
+    kerr="$(mktemp)"
+    json="$(kubectl create --dry-run=client -o json -f "$file" 2>"$kerr")" || parse_err="$(cat "$kerr")"
+    [[ -n "$parse_err" || -n "$json" ]] || parse_err="kubectl printed nothing"
+    rm -f "$kerr"
   else
     parse_err="no YAML parser available (python3 PyYAML or kubectl)"
   fi
@@ -3792,11 +3798,21 @@ import json, sys
 mode, api_version, log_mon, telemetry, extensions, kspm = sys.argv[1:7]
 mode = {"app-only": "apponly", "cloud-native": "cloudnative", "cnfs": "cloudnative"}.get(mode, mode)
 p = []
+# One {"kind": "List"} from PyYAML; from kubectl, one object per resource, back to back.
+raw, dec, docs, pos = sys.stdin.read(), json.JSONDecoder(), [], 0
 try:
-    doc = json.load(sys.stdin)
+    while raw[pos:].strip():
+        pos += len(raw[pos:]) - len(raw[pos:].lstrip())
+        doc, pos = dec.raw_decode(raw, pos)
+        docs.append(doc)
 except ValueError:
     print("parser output is not JSON"); sys.exit(0)
-items = doc.get("items", [doc]) if isinstance(doc, dict) else []
+items = []
+for doc in docs:
+    if isinstance(doc, dict) and doc.get("kind") == "List":
+        items.extend(doc.get("items") or [])
+    else:
+        items.append(doc)
 items = [i for i in items if isinstance(i, dict)]
 dks = [i for i in items if i.get("kind") == "DynaKube"]
 if len(dks) != 1:

@@ -335,3 +335,103 @@ deploy_stubs() {
   # Still here: an `exit` would have ended this test before the next line.
   [ "$(grep -c apply "$CALLS")" -eq 1 ]
 }
+
+# ---------------------------------------------------------------- zsh, file mode, no PyYAML
+
+@test "generateDynakube: the published file keeps the umask mode (0644 under umask 022)" {
+  source_functions
+  umask 022
+  generateDynakube apponly >/dev/null 2>&1
+  [ "$(stat -c %a "$GEN")" = "644" ]
+}
+
+@test "generate + verify under zsh (integration tests run in zsh)" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  run zsh -c '
+    umask 022; cd "$FAKE_REPO"; source .devcontainer/util/functions.sh >/dev/null 2>&1
+    getLatestEcrTag() { echo 1.2.3; }; isSprintTenant() { return 1; }
+    generateDynakube apponly >/dev/null 2>&1 || { echo GEN-FAILED; exit 1; }
+    stat -c MODE=%a "$GEN"
+    verifyDynakube'
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MODE=644"* ]]
+  [[ "$output" == *"OK (mode apponly)"* ]]
+}
+
+# Without PyYAML (the training image has none) verifyDynakube parses with
+# `kubectl create --dry-run=client -o json`, which prints one JSON object per
+# resource, back to back, and may warn on stderr. A yaml.py that raises
+# ImportError ahead of site-packages hides PyYAML from python3.
+no_pyyaml() {
+  mkdir -p "$TEST_DIR/noyaml"
+  echo 'raise ImportError("hidden by test")' > "$TEST_DIR/noyaml/yaml.py"
+  export PYTHONPATH="$TEST_DIR/noyaml"
+  ! python3 -c 'import yaml' 2>/dev/null
+}
+kubectl_dry_run_from() {
+  # Emits what kubectl would: each document of $1 as its own JSON object (via real
+  # PyYAML, outside the hidden path), plus a warning on stderr. Fails like kubectl
+  # when the YAML does not parse.
+  export KDR_SRC="$1"
+  kubectl() {
+    case "$*" in
+      *"create --dry-run=client -o json -f"*)
+        echo "Warning: resource is missing an annotation" >&2
+        PYTHONPATH= python3 -c '
+import sys, json, yaml
+try:
+    for d in yaml.safe_load_all(open(sys.argv[1])):
+        if d is not None: print(json.dumps(d, indent=2))
+except yaml.YAMLError as e:
+    sys.stderr.write("error: error parsing %s: %s\n" % (sys.argv[1], e)); sys.exit(1)
+' "$KDR_SRC" ;;
+      *) return 0 ;;
+    esac
+  }
+  export -f kubectl
+}
+
+@test "verifyDynakube without PyYAML: a good file passes via kubectl's parser" {
+  source_functions
+  generateDynakube apponly >/dev/null 2>&1
+  no_pyyaml
+  kubectl_dry_run_from "$GEN"
+  run verifyDynakube "$GEN"
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "verifyDynakube without PyYAML: missing logMonitoring still fails" {
+  source_functions
+  generateDynakube apponly >/dev/null 2>&1
+  sed -i '/^  logMonitoring: {}/d' "$GEN"
+  no_pyyaml
+  kubectl_dry_run_from "$GEN"
+  run verifyDynakube "$GEN"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"spec.logMonitoring is missing"* ]]
+}
+
+@test "verifyDynakube without PyYAML: a file kubectl cannot parse fails" {
+  source_functions
+  generateDynakube apponly >/dev/null 2>&1
+  printf '  bad: [unclosed\n' >> "$GEN"
+  no_pyyaml
+  kubectl_dry_run_from "$GEN"
+  run verifyDynakube "$GEN"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not parse"* ]]
+}
+
+@test "verifyDynakube with neither PyYAML nor kubectl fails, never passes" {
+  source_functions
+  generateDynakube apponly >/dev/null 2>&1
+  no_pyyaml
+  unset -f kubectl
+  mkdir -p "$TEST_DIR/bin"; ln -s "$(command -v python3)" "$TEST_DIR/bin/python3"
+  for t in sed head mktemp cat rm; do ln -s "$(command -v $t)" "$TEST_DIR/bin/$t"; done
+  PATH="$TEST_DIR/bin" run verifyDynakube "$GEN"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no YAML parser available"* ]]
+}
