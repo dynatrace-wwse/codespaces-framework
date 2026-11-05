@@ -74,7 +74,7 @@ dynatraceDeployOperator
 # deployCloudNative warns about K3d/Sysbox OneAgent limitations and continues.
 # It waits for ActiveGate (critical component) but does NOT block on OneAgent.
 printInfoSection "3/5  Deploying CloudNativeFullStack"
-deployCloudNative
+deployCloudNative || exit 1
 
 # 4. Deploy todo-app
 printInfoSection "4/5  Deploying todo-app"
@@ -83,6 +83,7 @@ deployTodoApp
 # 5. Assertions
 printInfoSection "5/5  Assertions"
 
+verifyDynakube || exit 1
 assertRunningPod dynatrace operator
 assertRunningPod dynatrace activegate
 assertRunningPod todoapp todoapp

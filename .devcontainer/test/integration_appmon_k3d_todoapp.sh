@@ -42,7 +42,7 @@ dynatraceDeployOperator
 
 # 3. Deploy ApplicationMonitoring (apponly: ActiveGate + CSI code injection, no OneAgent DaemonSet)
 printInfoSection "3/5  Deploying ApplicationMonitoring (apponly)"
-deployApplicationMonitoring
+deployApplicationMonitoring || exit 1
 
 # 4. Deploy todo-app (registers ingress via registerApp)
 printInfoSection "4/5  Deploying todo-app"
@@ -51,6 +51,7 @@ deployTodoApp
 # 5. Assertions
 printInfoSection "5/5  Assertions"
 
+verifyDynakube || exit 1
 assertRunningPod dynatrace operator
 assertRunningPod dynatrace activegate
 assertRunningPod todoapp todoapp

@@ -179,7 +179,7 @@ Now let's break it down.
 - Line 1 - 6: This code is needed for loading the framework and setting up the terminal for the container.
 - Line 8 and 10: `startK3dCluster` and `installK9s` create the Kubernetes Cluster (K3d, the default engine) and install k9s for easy management of your Kubernetes Cluster. For learning more go to [Kubernetes Cluster](framework.md#kubernetes-cluster) section of the Framework section.
 - Line 13: `dynatraceDeployOperator` checks for the needed credentials and deploys the Dynatrace Operator with its components (CSI Driver and Webhook).
-- Line 17: `deployDynatrace` generates the DynaKube from the [DynaKube configuration](#dynakube-configuration-defaults-and-repo-override) and applies it. With no argument it uses the configured `mode:` — **AppOnly** by default.
+- Line 17: `deployDynatrace` generates the DynaKube from the [DynaKube configuration](#dynakube-configuration-defaults-and-repo-override) and applies it. With no argument it uses the configured `mode:` — **AppOnly** by default. Before applying, it checks the file with `verifyDynakube`; a file that fails the check, or a `kubectl apply` that fails, makes `deployDynatrace` return non-zero with the reason instead of reporting success.
 - Line 20: `deployApp astroshop` will call the deployApp repository and deploy Astroshop.
 
 | Function | Mode |
