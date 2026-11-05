@@ -431,7 +431,8 @@ already started after the annotation, so a training's check can run straight aft
 | Function | Signature | Description |
 |---|---|---|
 | `loadDynakubeConfig` | `loadDynakubeConfig` | Loads `DK_*` variables from `dynakube-defaults.yaml`, then overlays `dynakube-config.yaml` |
-| `generateDynakube` | `generateDynakube [mode]` | Generates `.devcontainer/yaml/gen/dynakube.yaml` from config and current credentials |
+| `generateDynakube` | `generateDynakube [mode]` | Generates `.devcontainer/yaml/gen/dynakube.yaml` from config and current credentials. Writes a temp file in `gen/` and renames it into place, so a reader or a second generation never sees a partial file |
+| `verifyDynakube` | `verifyDynakube [file] [mode]` | Checks a generated DynaKube before it is applied: it parses (duplicate keys fail), one DynaKube with the configured apiVersion, name/namespace/`apiUrl` set, the token Secret it names is in the file, the `oneAgent` section matches the mode, and `logMonitoring` / `telemetryIngest` / `extensions` / `kspm` are present exactly when the config asks for them. Non-zero with one line per problem. `deployDynatrace` runs it before `kubectl apply` and refuses a failing file; integration tests call it too |
 | `_parseDynakubeYaml` | `_parseDynakubeYaml <file>` | Internal: parses a flat YAML file into `DK_*` exported variables |
 | `getLatestEcrTag` | `getLatestEcrTag <repo>` | Resolves the latest semver tag from ECR public gallery for a DT image |
 
@@ -440,7 +441,7 @@ Config keys (set in `dynakube-config.yaml` or `dynakube-defaults.yaml`) map to `
 | Key | Variable | Default |
 |---|---|---|
 | `mode` | `DK_MODE` | `apponly` (`cloudnative`, `k8s-only`) |
-| `operator_version` | `DK_OPERATOR_VERSION` | `1.10.2` |
+| `operator_version` | `DK_OPERATOR_VERSION` | `1.11.1` |
 | `dynakube_api_version` | `DK_DYNAKUBE_API_VERSION` | `v1beta6` |
 | `log_monitoring` | `DK_LOG_MONITORING` | `true` |
 | `telemetry_ingest` | `DK_TELEMETRY_INGEST` | `true` |

@@ -54,6 +54,7 @@ source_functions() {
   source ".devcontainer/util/functions.sh"
   dynatraceEvalReadSaveCredentials() { :; }
   generateDynakube() { touch "$REPO_PATH/.devcontainer/yaml/gen/dynakube.yaml"; }
+  verifyDynakube() { :; }  # BUG-167 check: its own tests are in test_verify_dynakube.bats
   fixSprintActiveGateImage() { :; }
   fixSprintCodeModulesImage() { :; }
   waitForPod() { :; }

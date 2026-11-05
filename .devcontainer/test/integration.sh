@@ -9,6 +9,10 @@ assertRunningPod kube-system coredns
 
 printInfoSection "Running integration Tests for $RepositoryName"
 
+# The DynaKube that was applied is the one the config asks for (BUG-167): it parses, its
+# apiVersion, apiUrl and token Secret are right, and the modules match the mode.
+verifyDynakube || exit 1
+
 assertRunningPod dynatrace operator
 
 assertRunningPod dynatrace activegate

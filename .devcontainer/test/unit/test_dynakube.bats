@@ -529,6 +529,7 @@ EOF
 stub_deploy_pipeline() {
   dynatraceEvalReadSaveCredentials() { :; }
   generateDynakube() { echo "GEN=$1"; touch "$REPO_PATH/.devcontainer/yaml/gen/dynakube.yaml"; }
+  verifyDynakube() { :; }  # an empty stub file: the check has its own tests (test_verify_dynakube.bats)
   fixSprintActiveGateImage() { :; }
   fixSprintCodeModulesImage() { :; }
   waitForPod() { :; }
