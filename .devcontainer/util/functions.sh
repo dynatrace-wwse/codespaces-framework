@@ -3062,9 +3062,267 @@ deployDynatrace() {
   fi
 
   printInfo "Dynatrace deployed in $mode mode"
+
+  # Register the cluster in the tenant ourselves (BUG-199 (e)): the operator's own create of the
+  # builtin:cloud.kubernetes object is optional and silent, and without it the cluster never shows
+  # up while the DynaKube says "kubernetesClusterMEID is outdated" forever. Fatal only where the
+  # training opted in (a shared box); elsewhere loud, until the nightly has shown it green.
+  local reg_rc=0
+  dynatraceEnsureK8sRegistration || reg_rc=$?
+  if (( reg_rc != 0 )); then
+    if _dtK8sRegistrationStrict; then
+      printError "Kubernetes cluster NOT registered in ${DT_ENVIRONMENT:-the tenant} — failing the deploy (strict: shared box or DT_K8S_REGISTRATION_STRICT=1)"
+      return "$reg_rc"
+    fi
+    printWarn "⚠️  Kubernetes cluster NOT registered in ${DT_ENVIRONMENT:-the tenant}: it will not show up in Dynatrace. Not fatal for this training (set DT_K8S_REGISTRATION_STRICT=1 to make it fatal)."
+  fi
   # A token refresh whose readers did not all come back on the new tokens is not a success,
   # even though the rest of the deploy is: the caller must not report it "applied" (BUG-181).
   return "$consumers_rc"
+}
+
+# ── Kubernetes cluster registration (BUG-199 (e), ENH-163 F13) ──────────────────────────────
+#
+# A cluster appears in Dynatrace only once a builtin:cloud.kubernetes settings object carries its
+# kube-system UID. The operator creates one only when its token has an EFFECTIVE settings.write
+# (scopes ∩ the token owner's IAM for a platform token) and otherwise skips it silently
+# ("missing optional scope"). The DynaKube then reads "kubernetesClusterMEID is outdated" forever
+# and nothing fails. So the framework creates the object itself, proves it exists, and waits for
+# the operator to resolve the MEID. Every object it creates or adopts is written to a state file,
+# and frameworkTeardown deletes exactly those — guarded by object id, cluster UID and label.
+#
+#   DT_K8S_REGISTRATION=off        skip registration entirely (the operator's own create remains)
+#   DT_K8S_REGISTRATION_STRICT=1   a failure fails deployDynatrace (default: shared box only)
+#   DT_K8S_REGISTRATION_WAIT=300   seconds to wait for the DynaKube's MonitoredEntity condition
+#   DT_K8S_REG_STATE               state file (default $REPO_PATH/.devcontainer/.dt-k8s-registrations)
+
+DT_K8S_SCHEMA="builtin:cloud.kubernetes"
+
+_dtK8sRegistrationStrict() {
+  [[ "${DT_K8S_REGISTRATION_STRICT:-}" == "1" || "${ORBITAL_SHARED_ROLE:-}" == "shared" ]]
+}
+
+_dtK8sRegState() {
+  printf '%s' "${DT_K8S_REG_STATE:-${REPO_PATH:-$PWD}/.devcontainer/.dt-k8s-registrations}"
+}
+
+# _dtK8sApi <METHOD> <path-under-/v2> [json-body] — one settings API call with the OPERATOR token,
+# the credential whose rights decide whether the operator could have registered the cluster.
+# Classic tokens go to the live URL as Api-Token, platform tokens (dt0s16) to the platform proxy as
+# Bearer. The token reaches curl on a file descriptor, never on a command line, and is never printed.
+# Sets K8S_HTTP_CODE and K8S_HTTP_BODY.
+_dtK8sApi() {
+  local method="$1" api_path="$2" data="$3" base scheme out tenant="${DT_TENANT:-}"
+  if [[ "${DT_OPERATOR_TOKEN:-}" == dt0s16.* ]]; then
+    base="${DT_ENVIRONMENT%/}/platform/classic/environment-api/v2"; scheme="Bearer"
+  else
+    # DT_TENANT is derived, not persisted: a fresh shell (the platform's pre-stop) has only
+    # DT_ENVIRONMENT, so derive it the same way the deploy did.
+    [[ -z "$tenant" ]] && tenant=$(parseDynatraceEnvironment "$DT_ENVIRONMENT" >/dev/null 2>&1; printf '%s' "${DT_TENANT:-}")
+    base="${tenant%/}/api/v2"; scheme="Api-Token"
+  fi
+  if [[ "$base" == /* || "$base" == /api/v2 ]]; then
+    K8S_HTTP_CODE=000; K8S_HTTP_BODY='{"error":{"message":"no Dynatrace URL (DT_ENVIRONMENT unset)"}}'; return 1
+  fi
+  out=$(mktemp) || { K8S_HTTP_CODE=000; K8S_HTTP_BODY=""; return 1; }
+  if [[ -n "$data" ]]; then
+    K8S_HTTP_CODE=$(curl -sS --max-time 30 -o "$out" -w '%{http_code}' -X "$method" \
+      -H @<(printf 'Authorization: %s %s\nContent-Type: application/json\n' "$scheme" "$DT_OPERATOR_TOKEN") \
+      --data-binary @<(printf '%s' "$data") "$base$api_path" 2>/dev/null)
+  else
+    K8S_HTTP_CODE=$(curl -sS --max-time 30 -o "$out" -w '%{http_code}' -X "$method" \
+      -H @<(printf 'Authorization: %s %s\n' "$scheme" "$DT_OPERATOR_TOKEN") "$base$api_path" 2>/dev/null)
+  fi
+  [[ -n "$K8S_HTTP_CODE" ]] || K8S_HTTP_CODE=000
+  K8S_HTTP_BODY=$(cat "$out" 2>/dev/null)
+  rm -f "$out"
+}
+
+# Error text from a settings API answer, short and with anything token-shaped removed.
+_dtK8sWhy() {
+  printf '%s' "$1" | jq -r '[.. | .message? // empty | strings] | first // empty' 2>/dev/null \
+    | sed -E 's/dt0[a-z][0-9]{2}\.[A-Za-z0-9._-]+/[redacted]/g' | cut -c1-200
+}
+
+# _dtK8sFindByClusterId <uid> — prints the objectId of the builtin:cloud.kubernetes object whose
+# clusterId is <uid>, nothing when there is none. Returns 2 when the objects could not be READ —
+# "could not tell" must never read as "absent" (a duplicate create would follow).
+_dtK8sFindByClusterId() {
+  local uid="$1" next="" pages=0 found q
+  while :; do
+    if [[ -z "$next" ]]; then
+      q="/settings/objects?schemaIds=$DT_K8S_SCHEMA&fields=objectId,value&pageSize=500"
+    else
+      q="/settings/objects?nextPageKey=$next"
+    fi
+    _dtK8sApi GET "$q"
+    if [[ "$K8S_HTTP_CODE" != 200 ]]; then
+      printError "Kubernetes registration: cannot read $DT_K8S_SCHEMA (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"
+      return 2
+    fi
+    found=$(printf '%s' "$K8S_HTTP_BODY" | jq -r --arg u "$uid" \
+      '[.items[]? | select(.value.clusterId == $u) | .objectId] | first // empty' 2>/dev/null)
+    [[ -n "$found" ]] && { printf '%s\n' "$found"; return 0; }
+    next=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.nextPageKey // empty' 2>/dev/null)
+    pages=$((pages + 1))
+    [[ -z "$next" ]] && return 0
+    if (( pages >= 20 )); then
+      printError "Kubernetes registration: more than 20 pages of $DT_K8S_SCHEMA — cannot tell whether this cluster is registered"
+      return 2
+    fi
+  done
+}
+
+# Record "<uid> <objectId> <label>" once per uid (a re-run replaces the line).
+_dtK8sRecord() {
+  local uid="$1" oid="$2" label="$3" f tmp
+  f=$(_dtK8sRegState)
+  mkdir -p "$(dirname "$f")" 2>/dev/null
+  tmp=$(mktemp) || return 1
+  [[ -f "$f" ]] && grep -v "^$uid " "$f" > "$tmp"
+  printf '%s %s %s\n' "$uid" "$oid" "$label" >> "$tmp"
+  mv "$tmp" "$f"
+}
+
+# dynatraceEnsureK8sRegistration [label] — in the CURRENT kube context: make sure this cluster has
+# its builtin:cloud.kubernetes object (create if absent), then wait for the DynaKube to resolve the
+# MEID. Label defaults to the DynaKube's name — unique per cluster and workshop, and the same
+# string the operator itself would use. Non-zero on any failure; the caller decides if it is fatal.
+dynatraceEnsureK8sRegistration() {
+  if [[ "${DT_K8S_REGISTRATION:-on}" == "off" ]]; then
+    printInfo "Kubernetes registration skipped (DT_K8S_REGISTRATION=off)"
+    return 0
+  fi
+  local uid label dk oid body cond waited=0 wait_s="${DT_K8S_REGISTRATION_WAIT:-300}"
+  uid=$(kubectl get namespace kube-system -o jsonpath='{.metadata.uid}' 2>/dev/null)
+  if [[ ! "$uid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    printError "Kubernetes registration: cannot read the kube-system namespace UID in the current context"
+    return 1
+  fi
+  dk=$(kubectl -n dynatrace get dynakube -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  label="${1:-$dk}"
+  if [[ -z "$label" ]]; then
+    printError "Kubernetes registration: no DynaKube in namespace dynatrace to name the cluster after"
+    return 1
+  fi
+  if [[ -z "${DT_OPERATOR_TOKEN:-}" ]]; then
+    printError "Kubernetes registration: DT_OPERATOR_TOKEN is not set"
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    printError "Kubernetes registration: jq not found"
+    return 1
+  fi
+  printInfoSection "Registering Kubernetes cluster '$label' (kube-system $uid) in ${DT_ENVIRONMENT:-the tenant}"
+
+  oid=$(_dtK8sFindByClusterId "$uid") || return 1
+  if [[ -n "$oid" ]]; then
+    printInfo "Cluster already registered ($DT_K8S_SCHEMA object present for kube-system $uid)"
+  else
+    body=$(jq -cn --arg l "$label" --arg u "$uid" --arg s "$DT_K8S_SCHEMA" \
+      '[{schemaId: $s, scope: "environment", value: {enabled: true, label: $l, clusterIdEnabled: true, clusterId: $u}}]')
+    # Prove the right first: a create refused for permissions is the exact silent failure this
+    # replaces, and it must say so in words, not as a missing cluster an hour later.
+    _dtK8sApi POST "/settings/objects?validateOnly=true" "$body"
+    case "$K8S_HTTP_CODE" in
+      200) ;;
+      401) printError "Kubernetes registration: the operator token was REJECTED (HTTP 401) — revoked or expired"; return 1 ;;
+      403) printError "Kubernetes registration: the operator token has no EFFECTIVE settings.write for $DT_K8S_SCHEMA (HTTP 403). The operator cannot register this cluster either; it would sit at 'kubernetesClusterMEID is outdated'. $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
+      *)   printError "Kubernetes registration: validation of the $DT_K8S_SCHEMA object failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
+    esac
+    _dtK8sApi POST "/settings/objects" "$body"
+    oid=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.[0].objectId // empty' 2>/dev/null)
+    if [[ "$K8S_HTTP_CODE" != 200 || -z "$oid" ]]; then
+      printError "Kubernetes registration: create failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"
+      return 1
+    fi
+    printInfo "Created $DT_K8S_SCHEMA object '$label'"
+  fi
+  # Verify it exists (a 200 create is not proof someone else did not delete it a moment later)
+  # and that the operator resolved the MEID from it.
+  local meid status_meid have_label
+  _dtK8sApi GET "/settings/objects/$oid"
+  meid=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.scope // empty' 2>/dev/null)
+  have_label=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.value.label // empty' 2>/dev/null)
+  if [[ "$K8S_HTTP_CODE" != 200 || "$meid" != KUBERNETES_CLUSTER-* ]]; then
+    printError "Kubernetes registration: object not readable after create (HTTP $K8S_HTTP_CODE)"
+    return 1
+  fi
+  # Adopted or created, it belongs to this cluster's UID: teardown removes it. Record the label
+  # the object really carries (an adopted one may differ), since removal re-checks it.
+  _dtK8sRecord "$uid" "$oid" "${have_label:-$label}" || printWarn "Kubernetes registration: could not write $(_dtK8sRegState); teardown will not remove it"
+  # The DynaKube's "MonitoredEntity: True" alone is not proof: the operator re-reads only on its
+  # periodic reconcile, so the condition stays True for minutes after the object is gone. Proof is
+  # the DynaKube naming THIS object's MEID.
+  [[ -n "$dk" ]] && kubectl -n dynatrace annotate dynakube "$dk" \
+    "dynatrace.enablement/k8s-registered-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null 2>&1
+  while :; do
+    cond=$(kubectl -n dynatrace get dynakube "$dk" \
+      -o jsonpath='{range .status.conditions[?(@.type=="MonitoredEntity")]}{.status}|{.reason}{end}' 2>/dev/null)
+    status_meid=$(kubectl -n dynatrace get dynakube "$dk" -o jsonpath='{.status.kubernetesClusterMEID}' 2>/dev/null)
+    if [[ "$cond" == True\|* && "$status_meid" == "$meid" ]]; then
+      printInfo "Kubernetes cluster '$label' registered as $meid; the DynaKube resolved it"
+      return 0
+    fi
+    if (( waited >= wait_s )); then
+      printError "Kubernetes registration: object $meid exists but the DynaKube reports '${status_meid:-no MEID}' (MonitoredEntity '${cond:-absent}') after ${wait_s}s — the cluster is not resolved in Dynatrace"
+      return 1
+    fi
+    sleep 10; waited=$((waited + 10))
+  done
+}
+
+# dynatraceRemoveK8sRegistrations — delete every builtin:cloud.kubernetes object this environment
+# recorded, and ONLY those: each is re-read first and deleted only when its clusterId and label
+# still match the record. Anything else (another cluster's, a re-labelled one) is left alone.
+dynatraceRemoveK8sRegistrations() {
+  local f uid oid label rc=0 got_uid got_label keep
+  f=$(_dtK8sRegState)
+  if [[ ! -s "$f" ]]; then
+    printInfo "Kubernetes registration: nothing recorded to remove"
+    return 0
+  fi
+  if [[ -z "${DT_OPERATOR_TOKEN:-}" ]] || ! command -v jq >/dev/null 2>&1; then
+    printError "Kubernetes registration: cannot remove (DT_OPERATOR_TOKEN or jq missing); records kept in $f"
+    return 1
+  fi
+  keep=$(mktemp) || return 1
+  while read -r uid oid label; do
+    [[ -z "$oid" ]] && continue
+    _dtK8sApi GET "/settings/objects/$oid"
+    case "$K8S_HTTP_CODE" in
+      404) printInfo "Kubernetes registration '$label': already gone"; continue ;;
+      200) ;;
+      *) printError "Kubernetes registration '$label': cannot read it (HTTP $K8S_HTTP_CODE); kept"
+         printf '%s %s %s\n' "$uid" "$oid" "$label" >> "$keep"; rc=1; continue ;;
+    esac
+    got_uid=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.value.clusterId // empty' 2>/dev/null)
+    got_label=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.value.label // empty' 2>/dev/null)
+    if [[ "$got_uid" != "$uid" || "$got_label" != "$label" ]]; then
+      printWarn "Kubernetes registration: object for '$label' no longer matches its record (clusterId/label changed) — NOT deleting it"
+      continue
+    fi
+    _dtK8sApi DELETE "/settings/objects/$oid"
+    if [[ "$K8S_HTTP_CODE" == 204 || "$K8S_HTTP_CODE" == 200 || "$K8S_HTTP_CODE" == 404 ]]; then
+      printInfo "Kubernetes registration '$label' removed"
+    else
+      printError "Kubernetes registration '$label': delete failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY"); kept"
+      printf '%s %s %s\n' "$uid" "$oid" "$label" >> "$keep"; rc=1
+    fi
+  done < "$f"
+  if [[ -s "$keep" ]]; then mv "$keep" "$f"; else rm -f "$keep" "$f"; fi
+  return "$rc"
+}
+
+# frameworkTeardown — what the platform runs inside the environment just before removing it
+# (Orbital's pre-stop). Removes what this environment created in the tenant: its Kubernetes
+# registrations, then its Monaco configuration. Not for learners to run by hand — it deregisters
+# the live cluster. Every step runs even when an earlier one fails.
+frameworkTeardown() {
+  local rc=0
+  dynatraceRemoveK8sRegistrations || rc=1
+  if command -v undeployMonaco >/dev/null 2>&1; then undeployMonaco || rc=1; fi
+  return "$rc"
 }
 
 # Fingerprint of the live token Secret(s) a generated DynaKube manifest declares: a sha256 of
