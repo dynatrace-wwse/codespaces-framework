@@ -4171,6 +4171,34 @@ getAppURL() {
   fi
 }
 
+_warnSharedAppExposure() {
+  # Shared-infrastructure box (ORBITAL_SHARED_ROLE=shared): Orbital opens every registered
+  # app through the box's port 80 with the app's ingress host as Host. Each of these made
+  # a box report ready while every app window was 502/404 (ENH-163 F10, BYOA):
+  #   - no ingress controller holds the cluster's LoadBalancer (createK3dCluster installs
+  #     none, or an app's own LoadBalancer Service took the port first);
+  #   - the cluster's ingress is published on a port other than 80 and nothing routes 80;
+  #   - the Ingress just written no longer carries this host (a chart wrote one with the
+  #     same name).
+  # Warnings only: what routes :80 is the training's choice.
+  [[ "${ORBITAL_SHARED_ROLE:-}" == "shared" ]] || return 0
+  local app_name="$1" namespace="$2" ingress_host="$3" lb hosts
+  lb=$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  if [[ -z "$lb" ]]; then
+    printWarn "registerApp $app_name: no ingress controller holds this cluster's LoadBalancer — Orbital's window will not reach it (installIngressController; app LoadBalancer Services take port 80 first)"
+  fi
+  if [[ -n "${K3D_LB_HTTP_PORT:-}" && "${K3D_LB_HTTP_PORT}" != "80" ]]; then
+    printWarn "registerApp $app_name: this cluster's ingress is on :${K3D_LB_HTTP_PORT}; Orbital opens apps through the box's :80 — something must route ${ingress_host} there"
+  fi
+  hosts=$(kubectl -n "$namespace" get ingress "${app_name}-ingress" \
+    -o jsonpath='{range .spec.rules[*]}{.host}{" "}{end}' 2>/dev/null)
+  if [[ " $hosts " != *" ${ingress_host} "* ]]; then
+    printWarn "registerApp $app_name: Ingress ${namespace}/${app_name}-ingress does not carry ${ingress_host} (another writer, e.g. a chart, owns that name)"
+  fi
+  return 0
+}
+
 registerApp() {
   # Registers an app in the app registry and creates an Ingress resource.
   # Usage: registerApp <app-name> <namespace> <service-name> <service-port> [extra-annotations]
@@ -4253,6 +4281,8 @@ spec:
             port:
               number: ${service_port}
 INGRESSEOF
+
+  _warnSharedAppExposure "$app_name" "$namespace" "$ingress_host"
 
   # cs_port stays empty — Codespaces uses port 80 via the catch-all ingress rule
   local cs_port=""
