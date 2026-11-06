@@ -151,7 +151,7 @@ for, not every option it takes.
 | `migrate-mkdocs` | Convert a single repo's `mkdocs.yaml` to the `INHERIT` pattern | `sync migrate-mkdocs --repo <owner/name>` |
 | `revert` | Undo uncommitted changes | `sync revert --repo template` |
 | `validate` | Check `repos.yaml` schema and local repo state, including docs structure and the training's `delivery` front matter | `sync validate` |
-| `check-delivery` | Check one training checkout's `delivery` front matter; exit 1 when invalid (see [Training delivery](#training-delivery)) | `sync check-delivery path/to/repo` |
+| `check-delivery` | Check one training checkout's `.devcontainer/delivery.yaml` or `delivery` front matter; exit 1 when invalid (see [Training delivery](#training-delivery)) | `sync check-delivery path/to/repo` |
 
 ### Versioning & Releases
 
@@ -313,6 +313,39 @@ training self-service.
 infrastructure is not supported yet. A `workshop-post-start.sh` without the create script
 is refused too.
 
-`sync check-delivery` and `sync validate` enforce these rules. Nothing reads the block at
-runtime yet — Orbital and the app start reading it together (ENH-152).
+`sync check-delivery` and `sync validate` enforce these rules. Orbital applies the same
+rules at runtime (`shared/delivery.py` mirrors `sync/core/delivery.py`, case for case).
+
+### `.devcontainer/delivery.yaml` (ENH-163)
+
+One file, next to the workshop scripts, that says how the training is delivered. When it
+exists it **wins** over the index.md block.
+
+```yaml
+version: 1                   # required
+type: same-tenant            # same-tenant | multi-tenant   (tenancy single | multi)
+availability: workshop-only  # workshop-only | self-service (default self-service)
+seats:
+  personal: false            # learners get a personal environment
+                             # (default true; false for a shared training)
+  mode: full                 # full | dtctl-only (default full)
+shared:                      # only with .devcontainer/workshop-post-create.sh
+  instance: m6a.4xlarge      # the shared machine's shape (default: Orbital's setting)
+```
+
+- Unknown keys and bad values are refused, as for the block.
+- With `workshop-post-create.sh` the file must say `type: same-tenant` and
+  `availability: workshop-only`; `seats.personal: true` is refused until learners can have
+  a seat beside a shared machine. A `shared:` block without the script is refused.
+- **Both the file and an index.md block:** disagreeing on availability or tenancy is
+  refused (two truths); agreeing passes with a warning to remove the block.
+- **`shared.instance`** is checked by Orbital at booking against its allowlist
+  (`workshop_shared_instance_allowlist`, default `m6a.2xlarge, m6a.4xlarge, r6a.2xlarge,
+  r6a.4xlarge`), its ceiling (`workshop_shared_instance_max_mb`, default 131072 MiB) and
+  its capacity table. A shape outside them refuses the booking with
+  `shared_instance_not_allowed` — never a silent fallback. The lint here checks only the
+  shape's form; the allowlist is Orbital's, read when the workshop is booked.
+
+Moving every training to the file, and later refusing the index.md block, are separate
+steps.
 

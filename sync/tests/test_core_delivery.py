@@ -207,3 +207,93 @@ class TestValidateWiring:
         _repo(tmp_path)
         validate._validate_local(make_repo_entry(name="lab", repo="org/lab"), str(tmp_path))
         assert called and str(called[0]) == str(tmp_path)
+
+
+# ── .devcontainer/delivery.yaml (ENH-163 F2/F3/F15) ───────────────────────
+# Same cases as Orbital's shared/test_delivery.py (the file half).
+
+DY_SHARED = ("version: 1\ntype: same-tenant\navailability: workshop-only\n"
+             "seats: {personal: false}\nshared: {instance: m6a.4xlarge}\n")
+
+
+def _dy(tmp_path, text, **kw):
+    repo = _repo(tmp_path, **kw)
+    (repo / ".devcontainer" / "delivery.yaml").write_text(text)
+    return repo
+
+
+def test_file_declares_shared(tmp_path):
+    eff, issues = check_repo(_dy(tmp_path, DY_SHARED, create=True))
+    assert issues == []
+    assert (eff["availability"], eff["tenancy"], eff["sharedInfra"]) == (
+        "workshop-only", "single", True)
+    assert eff["seats"] == {"personal": False, "mode": "full"}
+    assert eff["sharedInstance"] == "m6a.4xlarge" and eff["warnings"] == []
+
+
+def test_no_file_is_unchanged(tmp_path):
+    eff, issues = check_repo(_repo(tmp_path))
+    assert issues == [] and "seats" not in eff
+
+
+def test_file_shared_seats_default_to_none(tmp_path):
+    eff, issues = check_repo(_dy(
+        tmp_path, "version: 1\ntype: same-tenant\navailability: workshop-only\n", create=True))
+    assert issues == [] and eff["seats"]["personal"] is False
+
+
+@pytest.mark.parametrize("text,needle", [
+    ("type: same-tenant\n", "version must be 1"),
+    ("version: 2\n", "version must be 1"),
+    ("version: 1\ntype: shared\n", "type 'shared'"),
+    ("version: 1\nflavour: x\n", "unknown key 'flavour'"),
+    ("version: 1\nseats: {personal: maybe}\n", "seats.personal"),
+    ("version: 1\nseats: {mode: shell}\n", "seats.mode"),
+    ("version: 1\nseats: {count: 3}\n", "seats.count"),
+    ("version: 1\nshared: {instance: m6a.4xlarge}\n", "needs .devcontainer/workshop-post-create.sh"),
+    ("version: 1\nshared: {instance: 'x; rm'}\n", "not an instance type"),
+    ("- a\n", "must be a mapping"),
+])
+def test_file_invalid(tmp_path, text, needle):
+    _, issues = check_repo(_dy(tmp_path, text))
+    assert any(needle in i for i in issues), issues
+
+
+def test_file_unparseable(tmp_path):
+    eff, issues = check_repo(_dy(tmp_path, "version: [1\n"))
+    assert eff is None and "not valid YAML" in issues[0]
+
+
+@pytest.mark.parametrize("text,needle", [
+    ("version: 1\ntype: same-tenant\nseats: {personal: false}\n", "availability: workshop-only"),
+    ("version: 1\navailability: workshop-only\nseats: {personal: false}\n", "type: same-tenant"),
+    ("version: 1\ntype: multi-tenant\navailability: workshop-only\nseats: {personal: false}\n",
+     "type: same-tenant"),
+    ("version: 1\ntype: same-tenant\navailability: workshop-only\nseats: {personal: true}\n",
+     "seats.personal: true is not available"),
+])
+def test_file_shared_rules(tmp_path, text, needle):
+    _, issues = check_repo(_dy(tmp_path, text, create=True))
+    assert any(needle in i for i in issues), issues
+
+
+def test_file_and_index_disagree(tmp_path):
+    _, issues = check_repo(_dy(tmp_path, "version: 1\n",
+                               front_matter="delivery:\n  availability: workshop-only\n"))
+    assert any("disagree on availability" in i for i in issues), issues
+
+
+def test_file_and_index_agree_warns(tmp_path, capsys):
+    repo = _dy(tmp_path, DY_SHARED, create=True,
+               front_matter="delivery:\n  availability: workshop-only\n  tenancy: single\n")
+    eff, issues = check_repo(repo)
+    assert issues == [] and "repeats" in eff["warnings"][0]
+    cmd.run(SimpleNamespace(path=str(repo)))
+    out = capsys.readouterr().out
+    assert "! delivery:" in out and "personal seats no" in out and "m6a.4xlarge" in out
+
+
+def test_command_fails_on_invalid_file(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        cmd.run(SimpleNamespace(path=str(_dy(tmp_path, "version: 3\n"))))
+    assert e.value.code == 1
