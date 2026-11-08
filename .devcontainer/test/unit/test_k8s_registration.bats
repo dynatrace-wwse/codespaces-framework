@@ -160,6 +160,28 @@ seed() {  # seed <objectId> <uid> <label> <meid>
   run dynatraceEnsureK8sRegistration
   [ "$status" -ne 0 ]
   [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"cannot read builtin:cloud.kubernetes (HTTP 500)"* ]]
+}
+
+@test "ensure: token without settings.read (403 on the read) → says so, creates nothing" {
+  # SRO 2026-11-08: an ingest token failed here with rc 1 and NO message — the error was printed
+  # on stdout inside oid=\$(…) and swallowed. The reason must reach the log.
+  load_fw
+  export LIST_CODE=403
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"cannot READ builtin:cloud.kubernetes (HTTP 403)"* ]]
+  [[ "$output" == *"settings.read"* ]]
+}
+
+@test "ensure: rejected token on the read (401) says revoked or expired" {
+  load_fw
+  export LIST_CODE=401
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"REJECTED (HTTP 401)"* ]]
 }
 
 @test "ensure: object exists but the DynaKube never names its MEID → fails after the wait" {

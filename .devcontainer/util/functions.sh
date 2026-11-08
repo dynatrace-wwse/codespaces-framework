@@ -3156,8 +3156,14 @@ _dtK8sFindByClusterId() {
       q="/settings/objects?nextPageKey=$next"
     fi
     _dtK8sApi GET "$q"
+    # Errors go to STDERR: this runs inside oid=$(…), and a message on stdout would be swallowed
+    # into the objectId — the deploy then failed with no reason at all (seen on SRO, 1.22.0).
     if [[ "$K8S_HTTP_CODE" != 200 ]]; then
-      printError "Kubernetes registration: cannot read $DT_K8S_SCHEMA (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"
+      case "$K8S_HTTP_CODE" in
+        401) printError "Kubernetes registration: the operator token was REJECTED (HTTP 401) — revoked or expired" >&2 ;;
+        403) printError "Kubernetes registration: the operator token cannot READ $DT_K8S_SCHEMA (HTTP 403) — it needs settings.read and settings.write. $(_dtK8sWhy "$K8S_HTTP_BODY")" >&2 ;;
+        *)   printError "Kubernetes registration: cannot read $DT_K8S_SCHEMA (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")" >&2 ;;
+      esac
       return 2
     fi
     found=$(printf '%s' "$K8S_HTTP_BODY" | jq -r --arg u "$uid" \
@@ -3167,7 +3173,7 @@ _dtK8sFindByClusterId() {
     pages=$((pages + 1))
     [[ -z "$next" ]] && return 0
     if (( pages >= 20 )); then
-      printError "Kubernetes registration: more than 20 pages of $DT_K8S_SCHEMA — cannot tell whether this cluster is registered"
+      printError "Kubernetes registration: more than 20 pages of $DT_K8S_SCHEMA — cannot tell whether this cluster is registered" >&2
       return 2
     fi
   done
