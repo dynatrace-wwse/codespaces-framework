@@ -146,6 +146,16 @@ seed() {  # seed <objectId> <uid> <label> <meid>
   [ ! -s "$OBJS" ]
 }
 
+@test "ensure: platform token without write (404 'No write access' on validate) → same settings.write message" {
+  load_fw
+  export VALIDATE_CODE=404
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [ "$(posts)" -eq 1 ]
+  [[ "$output" == *"no EFFECTIVE settings.write"*"(HTTP 404)"* ]]
+  [ ! -s "$OBJS" ]
+}
+
 @test "ensure: rejected token (401) says revoked or expired" {
   load_fw
   export VALIDATE_CODE=401

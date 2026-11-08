@@ -3233,7 +3233,9 @@ dynatraceEnsureK8sRegistration() {
     case "$K8S_HTTP_CODE" in
       200) ;;
       401) printError "Kubernetes registration: the operator token was REJECTED (HTTP 401) — revoked or expired"; return 1 ;;
-      403) printError "Kubernetes registration: the operator token has no EFFECTIVE settings.write for $DT_K8S_SCHEMA (HTTP 403). The operator cannot register this cluster either; it would sit at 'kubernetesClusterMEID is outdated'. $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
+      # A platform token (dt0s16) without the write scope gets 404 "No write access for scope
+      # class tenant", not 403 (PVF, 2026-11-08): same meaning, same message.
+      403|404) printError "Kubernetes registration: the operator token has no EFFECTIVE settings.write for $DT_K8S_SCHEMA (HTTP $K8S_HTTP_CODE). The operator cannot register this cluster either; it would sit at 'kubernetesClusterMEID is outdated'. $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
       *)   printError "Kubernetes registration: validation of the $DT_K8S_SCHEMA object failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
     esac
     _dtK8sApi POST "/settings/objects" "$body"
