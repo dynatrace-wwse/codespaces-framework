@@ -146,6 +146,16 @@ seed() {  # seed <objectId> <uid> <label> <meid>
   [ ! -s "$OBJS" ]
 }
 
+@test "ensure: platform token without write (404 'No write access' on validate) → same settings.write message" {
+  load_fw
+  export VALIDATE_CODE=404
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [ "$(posts)" -eq 1 ]
+  [[ "$output" == *"no EFFECTIVE settings.write"*"(HTTP 404)"* ]]
+  [ ! -s "$OBJS" ]
+}
+
 @test "ensure: rejected token (401) says revoked or expired" {
   load_fw
   export VALIDATE_CODE=401
@@ -160,6 +170,28 @@ seed() {  # seed <objectId> <uid> <label> <meid>
   run dynatraceEnsureK8sRegistration
   [ "$status" -ne 0 ]
   [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"cannot read builtin:cloud.kubernetes (HTTP 500)"* ]]
+}
+
+@test "ensure: token without settings.read (403 on the read) → says so, creates nothing" {
+  # SRO 2026-11-08: an ingest token failed here with rc 1 and NO message — the error was printed
+  # on stdout inside oid=\$(…) and swallowed. The reason must reach the log.
+  load_fw
+  export LIST_CODE=403
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"cannot READ builtin:cloud.kubernetes (HTTP 403)"* ]]
+  [[ "$output" == *"settings.read"* ]]
+}
+
+@test "ensure: rejected token on the read (401) says revoked or expired" {
+  load_fw
+  export LIST_CODE=401
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"REJECTED (HTTP 401)"* ]]
 }
 
 @test "ensure: object exists but the DynaKube never names its MEID → fails after the wait" {
