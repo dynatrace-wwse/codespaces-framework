@@ -10,6 +10,16 @@ repos:
     primary_tag: kubernetes
     duration: "1.5h"
 
+  - name: enablement-monitoring-everywhere
+    repo: dynatrace-wwse/enablement-monitoring-everywhere
+    status: active
+    maintainer: "@shinojosa"
+    description: "Monitoring Everywhere: follow one checkout transaction across Kubernetes (OneAgent), AWS Lambda (Dynatrace layer) and a Sysbox-hosted OpenTelemetry service into PostgreSQL — one end-to-end trace across k8s, cloud and hybrid."
+    tags: [kubernetes, opentelemetry, aws, enablement-app]
+    title: "Monitoring Everywhere: Kubernetes, Cloud & Hybrid"
+    primary_tag: kubernetes
+    duration: "3h"
+
   - name: enablement-dtwiz-101
     repo: dynatrace-wwse/enablement-dtwiz-101
     status: active
