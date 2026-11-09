@@ -23,8 +23,9 @@ CERTMANAGER_VERSION=1.15.3
 # RUNME Version
 RUNME_CLI_VERSION=3.13.2
 
-# dtctl + Monaco, installed in every environment by installDevTools (one pinned,
-# checksum-verified version per framework release; FRAMEWORK_DEVTOOLS=off skips).
+# dtctl + Monaco, installed by installDTTools — opt-in: a repo sets
+# DT_TOOLS=dtctl,monaco|all and setUpTerminal installs them early; anyone can
+# type installDTTools. One pinned, checksum-verified version per release.
 # The sha256 values were REVIEWED for this release and committed here: an install
 # of the pinned version is verified against them first, and against the release's
 # own checksum file second. Bumping a version means bumping its hashes too.
