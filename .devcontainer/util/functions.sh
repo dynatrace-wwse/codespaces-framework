@@ -542,6 +542,15 @@ setUpTerminal(){
   # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
 
+  # dtctl + Monaco are opt-in too. A repo opts in with DT_TOOLS (dtctl, monaco
+  # or all); they are installed HERE, at the start of post-create, so a lab
+  # step that needs them finds them. Not opted in: a hint, like MCP's.
+  if [ -n "${DT_TOOLS:-}" ]; then
+    installDTTools
+  else
+    printInfo "Type 'installDTTools' to install dtctl + Monaco"
+  fi
+
   # Only an Orbital-orchestrated Codespace needs an SSH server: the Enablement App
   # relays its terminal in over `gh codespace ssh`, and the stock image ships no
   # sshd. A plain Codespace opened from GitHub must NOT pay for that install, and
@@ -738,8 +747,8 @@ setupMCPServer(){
 
 # ======================================================================
 #          ------- dtctl & Monaco -------                              #
-#  installDevTools (run by finalizePostCreation in every repo; off     #
-#  with FRAMEWORK_DEVTOOLS=off), installDtctl / enableDtctl /          #
+#  installDTTools (opt-in: DT_TOOLS=dtctl,monaco|all, run early by    #
+#  setUpTerminal; or typed by the learner), installDtctl / enableDtctl #
 #  disableDtctl, installMonaco, deployMonaco / undeployMonaco.         #
 #                                                                      #
 #  Every binary is checksum-verified before it is installed; a         #
@@ -854,7 +863,7 @@ _removeBinary() {
 _fetch() {
   # _fetch <url> <out> <max-seconds> — one download. --connect-timeout so a
   # dead route fails in seconds; --max-time capped by DEVTOOLS_DEADLINE (epoch
-  # seconds, set by installDevTools) so both tools share one time budget.
+  # seconds, set by installDTTools) so both tools share one time budget.
   local url="$1" out="$2" mt="$3" left
   if [ -n "${DEVTOOLS_DEADLINE:-}" ]; then
     left=$(( DEVTOOLS_DEADLINE - $(date +%s) ))
@@ -1243,19 +1252,56 @@ _monacoReady() {
   return 1
 }
 
-installDevTools() {
-  # installDevTools — called from finalizePostCreation, so every repo gets
-  # dtctl and Monaco at the framework's pinned versions (DTCTL_VERSION,
-  # MONACO_VERSION in variables.sh), checksum-verified. When DT_DTCTL_TOKEN is
-  # set it also configures a read-only dtctl context (enableDtctl).
-  # FRAMEWORK_DEVTOOLS=off (environment or .devcontainer/.env) skips it all.
+_dtToolsSelection() {
+  # _dtToolsSelection [value] — parses a DT_TOOLS value (default: $DT_TOOLS)
+  # and prints the selected tools, one per line, in install order (dtctl,
+  # then monaco). Accepted, comma- or space-separated, any case: dtctl,
+  # monaco, all. An unknown entry is a warning (on stderr), never fatal; it
+  # selects nothing. Empty, none, off: nothing.
+  local raw="${1-${DT_TOOLS:-}}" item dtctl="" monaco=""
+  raw=$(printf '%s' "$raw" | tr '[:upper:],' '[:lower:] ')
+  for item in $(printf '%s' "$raw"); do
+    case "$item" in
+      dtctl)  dtctl=1 ;;
+      monaco) monaco=1 ;;
+      all)    dtctl=1; monaco=1 ;;
+      none|off) ;;
+      *) printWarn "DT_TOOLS: unknown tool '$item' ignored — use dtctl, monaco or all" >&2 ;;
+    esac
+  done
+  [ -n "$dtctl" ] && echo dtctl
+  [ -n "$monaco" ] && echo monaco
+  return 0
+}
+
+installDTTools() {
+  # installDTTools [dtctl|monaco|all ...] — Dynatrace tools: dtctl and Monaco
+  # at the framework's pinned versions (DTCTL_VERSION, MONACO_VERSION in
+  # variables.sh), checksum-verified. When DT_DTCTL_TOKEN is set it also
+  # configures a read-only dtctl context (enableDtctl).
+  #
+  # Opt-in, like MCP: setUpTerminal runs it only when the repo sets DT_TOOLS
+  # (dtctl, monaco or all — environment, .devcontainer/.env, containerEnv, or
+  # `export DT_TOOLS=...` in post-create.sh before setUpTerminal). A learner
+  # can type it in any repo: arguments win, then DT_TOOLS, then both tools.
   # Never fatal: a failure is a warning and post-create carries on.
-  case "$(echo "${FRAMEWORK_DEVTOOLS:-on}" | tr '[:upper:]' '[:lower:]')" in
-    off|false|no|0)
-      printInfo "Dev tools (dtctl, Monaco) skipped: FRAMEWORK_DEVTOOLS=$FRAMEWORK_DEVTOOLS"
-      return 0 ;;
-  esac
-  printInfoSection "Installing dev tools: dtctl ${DTCTL_VERSION:-latest}, Monaco ${MONACO_VERSION:-latest}"
+  local selection
+  if [ "$#" -gt 0 ]; then
+    selection=$(_dtToolsSelection "$*")
+  elif [ -n "${DT_TOOLS:-}" ]; then
+    selection=$(_dtToolsSelection)
+  else
+    selection=$(printf 'dtctl\nmonaco\n')
+  fi
+  if [ -z "$selection" ]; then
+    printInfo "Dynatrace tools: nothing selected (DT_TOOLS='${DT_TOOLS:-}') — nothing installed. Type 'installDTTools' to install dtctl + Monaco"
+    return 0
+  fi
+  _varIsSet FRAMEWORK_DEVTOOLS && printWarn "FRAMEWORK_DEVTOOLS is retired and ignored: dtctl and Monaco are opt-in now (DT_TOOLS)"
+  local want_dtctl="" want_monaco=""
+  printf '%s\n' "$selection" | grep -qx dtctl && want_dtctl=1
+  printf '%s\n' "$selection" | grep -qx monaco && want_monaco=1
+  printInfoSection "Installing Dynatrace tools:${want_dtctl:+ dtctl ${DTCTL_VERSION:-latest}}${want_monaco:+ Monaco ${MONACO_VERSION:-latest}}"
   # One download budget for both tools (seconds), read by _fetch. Anything but
   # a plain non-negative integer falls back to 180: $(( )) would otherwise
   # evaluate the value as an expression. Digits are read as base 10 (a
@@ -1273,14 +1319,23 @@ installDevTools() {
   fi
   budget=$(( 10#$budget ))
   DEVTOOLS_DEADLINE=$(( $(date +%s) + budget ))
-  if _varIsSet DT_DTCTL_TOKEN && [ -n "$DT_ENVIRONMENT" ]; then
-    _devToolStep "dtctl" enableDtctl
-  else
-    _devToolStep "dtctl" installDtctl
-    _varIsSet DT_DTCTL_TOKEN && printWarn "DT_DTCTL_TOKEN is set but DT_ENVIRONMENT is not — dtctl installed without a context"
+  if [ -n "$want_dtctl" ]; then
+    if _varIsSet DT_DTCTL_TOKEN && [ -n "$DT_ENVIRONMENT" ]; then
+      _devToolStep "dtctl" enableDtctl
+    else
+      _devToolStep "dtctl" installDtctl
+      _varIsSet DT_DTCTL_TOKEN && printWarn "DT_DTCTL_TOKEN is set but DT_ENVIRONMENT is not — dtctl installed without a context"
+    fi
   fi
-  _devToolStep "Monaco" installMonaco
+  [ -n "$want_monaco" ] && _devToolStep "Monaco" installMonaco
   return 0
+}
+
+installDevTools() {
+  # DEPRECATED (1.23.0): renamed installDTTools. Kept so a script or a habit
+  # that calls the old name still works.
+  printWarn "installDevTools is deprecated. Use 'installDTTools' (dtctl + Monaco, opt-in with DT_TOOLS)."
+  installDTTools "$@"
 }
 
 _maskTokens() {
@@ -6637,10 +6692,6 @@ finalizePostCreation(){
   # and hardcoded to have a name starting with dttest-bash b
   # Then run the e2e test harness
   # Otherwise, send the startup ping
-  # dtctl + Monaco in every environment; FRAMEWORK_DEVTOOLS=off skips it.
-  # Before verifyContainerCreation so its time counts in the creation time.
-  installDevTools
-
   if [[ "$CODESPACE_NAME" == dttest-* ]]; then
       # Set default repository for gh CLI
       gh repo set-default "$GITHUB_REPOSITORY"

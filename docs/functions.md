@@ -127,7 +127,7 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 
 | Function | Signature | Description |
 |---|---|---|
-| `installDevTools` | `installDevTools` | Run by `finalizePostCreation` in **every** repo: installs dtctl and Monaco at the framework's pinned versions, plus a read-only dtctl context when `DT_DTCTL_TOKEN` is set. Off with `FRAMEWORK_DEVTOOLS=off`. Never fatal — see [dtctl & Monaco](dtctl-monaco.md) |
+| `installDTTools` | `installDTTools [dtctl\|monaco\|all]` | **Opt-in** (like MCP): `setUpTerminal` runs it at the start of post-create when the repo sets `DT_TOOLS` (`dtctl`, `monaco`, `all`), else prints the hint `Type 'installDTTools'`. Installs dtctl and/or Monaco at the framework's pinned versions, plus a read-only dtctl context when `DT_DTCTL_TOKEN` is set. An unknown `DT_TOOLS` entry warns. Never fatal — see [dtctl & Monaco](dtctl-monaco.md). `installDevTools` is a deprecated alias |
 | `installDtctl` | `installDtctl [dir]` | Installs dtctl only (no context), checksum-verified |
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
@@ -136,8 +136,8 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `undeployMonaco` | `undeployMonaco [tenant\|env]` · `undeployMonaco -h` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
 | `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
 
-Both binaries are already on the `PATH` in every environment (`installDevTools`, see
-[dtctl & Monaco](dtctl-monaco.md)). Deploying config is still opt-in, from a repo's `post-create.sh`:
+Both binaries are on the `PATH` when the repo opts in with `DT_TOOLS` or the learner types
+`installDTTools` (see [dtctl & Monaco](dtctl-monaco.md)); `deployMonaco` installs Monaco itself. Deploying config is still opt-in, from a repo's `post-create.sh`:
 
 ```bash
 deployMonaco tenant      # early: tenant-only config (dashboards, notebooks, settings)
@@ -189,7 +189,7 @@ So `DT_DTCTL_TOKEN` is **not** read-only: it can write and delete any document a
 setting the minting client's owner can reach on the tenant; dtctl's `readonly` safety level is
 the only thing that keeps `dtctl` from doing so. A seat can be built without the token (the
 per-owner platform-token cap, a tenant with no registered OAuth client) — the app
-says so on screen, and `installDevTools` then installs dtctl with no context. Outside Orbital,
+says so on screen, and `installDTTools` then installs dtctl with no context. Outside Orbital,
 set the variables yourself; Monaco needs a platform token — documents are platform-only.
 
 #### The `monaco/` folder

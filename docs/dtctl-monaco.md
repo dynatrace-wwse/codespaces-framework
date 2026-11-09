@@ -1,20 +1,57 @@
-# dtctl & Monaco in every environment
+# dtctl & Monaco — opt-in Dynatrace tools
 
-Every environment the framework builds — GitHub Codespaces, Orbital, a local container — comes up
-with two Dynatrace command-line tools already on the `PATH`:
+The framework can put two Dynatrace command-line tools on the `PATH` of any environment it
+builds — GitHub Codespaces, Orbital, a local container:
 
 | Tool | What it is for | Pinned version |
 |---|---|---|
 | [`dtctl`](https://github.com/dynatrace-oss/dtctl) | Query and inspect the tenant: DQL, documents, settings | `DTCTL_VERSION` (0.43.0) |
 | [`monaco`](https://github.com/Dynatrace/dynatrace-configuration-as-code) | Configuration as code: deploy dashboards, notebooks, settings | `MONACO_VERSION` (2.30.1, the framework's patched build `2.30.1+wwse.1` — see [below](#monaco-is-a-patched-build)) |
 
-No repo has to change anything. `finalizePostCreation` — the step every repo's `post-create.sh`
-already calls ("do not remove") — runs `installDevTools` first.
+**They are opt-in, like the [MCP server](functions.md#mcp-server-vs-code)** (since framework 1.23.0;
+1.20–1.22 installed them in every repo at the end of post-create). Two ways in:
 
-## What `installDevTools` does
+1. **The repo opts in** with `DT_TOOLS`. `setUpTerminal` — the first step of every
+   `post-create.sh` — then runs `installDTTools` **at the start** of post-create, so every later
+   step (and every lab step) finds the tools:
 
-1. Reads the switch `FRAMEWORK_DEVTOOLS`. `off` (also `false`, `no`, `0`, any case) skips
-   everything below: no download, nothing installed.
+    ```bash
+    # .devcontainer/post-create.sh
+    source .devcontainer/util/source_framework.sh
+
+    export DT_TOOLS=all          # or: dtctl | monaco | dtctl,monaco
+    setUpTerminal
+    ```
+
+    `DT_TOOLS` is read from the environment like every framework variable, so a Codespaces
+    secret, `containerEnv` in `devcontainer.json` or `.devcontainer/.env` also work — but `.env`
+    is not committed, so for a repo the line in `post-create.sh` is the one that travels.
+
+2. **The learner types `installDTTools`** in the terminal, in any repo. Without `DT_TOOLS`,
+   `setUpTerminal` prints the hint `Type 'installDTTools' to install dtctl + Monaco` next to the
+   MCP one. `installDTTools dtctl` or `installDTTools monaco` installs one of them.
+
+| `DT_TOOLS` | Installs |
+|---|---|
+| unset / empty / `none` / `off` | nothing (the hint is printed) |
+| `dtctl` | dtctl (plus its read-only context when `DT_DTCTL_TOKEN` is set) |
+| `monaco` | Monaco |
+| `all`, `dtctl,monaco`, `monaco dtctl` | both |
+
+Comma- or space-separated, any case. An **unknown** entry is a warning
+(`DT_TOOLS: unknown tool 'x' ignored — use dtctl, monaco or all`), never fatal; a value with
+only unknown entries installs nothing. Removing the variable removes the install.
+
+`deployMonaco` does not need the opt-in: it installs the verified Monaco itself when it is
+missing. A lab step that runs `dtctl` does.
+
+`installDevTools`, the 1.20–1.22 name, is a deprecated alias that warns and calls
+`installDTTools`. `FRAMEWORK_DEVTOOLS`, its old off switch, is retired: nothing installs
+unless asked, so it is ignored (with a warning when set).
+
+## What `installDTTools` does
+
+1. Selects the tools: its arguments, else `DT_TOOLS`, else (typed with neither) both.
 2. Installs **dtctl** at `DTCTL_VERSION`, verified against the **reviewed sha256 committed in
    the framework** first, and against the release's `checksums.txt` second.
 3. Installs **Monaco** at `MONACO_VERSION`. For the framework's pinned version that is the
@@ -178,15 +215,9 @@ reference.
 
 ## Turning it off
 
-From the environment (for example a Codespaces secret, or `containerEnv` in
-`devcontainer.json`), or in the repo's `.devcontainer/.env`, which `variables.sh` sources:
-
-```bash
-FRAMEWORK_DEVTOOLS=off
-```
-
-The functions stay available after that — a repo can still call `installMonaco` or
-`enableDtctl` on its own.
+Remove `DT_TOOLS` (or set it to `none`). Nothing installs unless a repo or a learner asks.
+The functions stay available — a repo can still call `installMonaco`, `enableDtctl` or
+`deployMonaco` on its own.
 
 ## Versions
 

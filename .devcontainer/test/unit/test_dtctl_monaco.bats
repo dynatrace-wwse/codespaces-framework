@@ -711,12 +711,12 @@ pin_patched() {
   refute grep -q "dynatrace-wwse" "$CURL_LOG"
 }
 
-@test "installDevTools: the framework pin installs the patched Monaco (wiring)" {
+@test "installDTTools: the framework pin installs the patched Monaco (wiring)" {
   source_functions
   pin_devtools
   pin_patched
   unset DT_DTCTL_TOKEN
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   grep -qxF "$PATCHED_URL/monaco-linux-amd64" "$CURL_LOG"
   refute grep -q "$UPSTREAM_DL/v2.30.1" "$CURL_LOG"
@@ -832,14 +832,14 @@ bake_stock_monaco() {
   [ ! -s "$MONACO_LOG" ]
 }
 
-@test "installDevTools: an integrity refusal is tagged so verifyContainerCreation KEEPS it" {
+@test "installDTTools: an integrity refusal is tagged so verifyContainerCreation KEEPS it" {
   source_functions
   pin_patched
   pin_devtools
   pin_patched
   unset DT_DTCTL_TOKEN
   corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   local left
   left=$(printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter || true)
@@ -849,14 +849,14 @@ bake_stock_monaco() {
   refute grep -q "download of" <<<"$left"
 }
 
-@test "installDevTools: a failed download (not integrity) is still dropped as noise" {
+@test "installDTTools: a failed download (not integrity) is still dropped as noise" {
   source_functions
   pin_patched
   pin_devtools
   pin_patched
   unset DT_DTCTL_TOKEN
   rm -f "$FIXTURES/monaco-linux-amd64"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "devtools (non-fatal): .*download of the patched"
   local left
@@ -864,12 +864,12 @@ bake_stock_monaco() {
   [ -z "$left" ]
 }
 
-@test "installDevTools: a corrupt dtctl archive is an INTEGRITY failure the filter keeps" {
+@test "installDTTools: a corrupt dtctl archive is an INTEGRITY failure the filter keeps" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   corrupt_one_byte "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter | grep -q "devtools INTEGRITY FAILED: .*MISMATCH for dtctl_9.9.9_linux_amd64.tar.gz"
 }
@@ -1267,7 +1267,7 @@ MONACO_OUT="$BATS_TEST_DIRNAME/monaco-output"
   [ "$(grep -c '^monaco delete' "$MONACO_LOG")" -eq 2 ]
 }
 
-# ── installDevTools (every environment, from finalizePostCreation) ────────────
+# ── installDTTools (opt-in: DT_TOOLS → setUpTerminal; or typed by hand) ──────
 
 pin_devtools() {
   # The framework pin is 9.9.9, with reviewed hashes taken from the fixtures.
@@ -1291,11 +1291,11 @@ fake_present() {
   sha256sum "$INSTALL_DIR/$1" | cut -d' ' -f1
 }
 
-@test "installDevTools: default installs dtctl and Monaco at the pinned versions, verified" {
+@test "installDTTools: default installs dtctl and Monaco at the pinned versions, verified" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/dtctl" ]
   [ -x "$INSTALL_DIR/monaco" ]
@@ -1305,67 +1305,131 @@ fake_present() {
   echo "$output" | grep -q "Checksum OK"
 }
 
-@test "installDevTools: no DT_DTCTL_TOKEN → binary only, no dtctl context" {
+@test "installDTTools: no DT_DTCTL_TOKEN → binary only, no dtctl context" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   refute grep -q "config set-context" "$DTCTL_LOG"
   [ ! -f "$XDG_CONFIG_HOME/dtctl/config" ]
 }
 
-@test "installDevTools: DT_DTCTL_TOKEN set → readonly context with a REFERENCE, value never written" {
+@test "installDTTools: DT_DTCTL_TOKEN set → readonly context with a REFERENCE, value never written" {
   source_functions
   pin_devtools
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   grep -q "safety-level: readonly" "$XDG_CONFIG_HOME/dtctl/config"
   grep -qF 'token: ${DT_DTCTL_TOKEN}' "$XDG_CONFIG_HOME/dtctl/config"
   no_sentinel_anywhere
 }
 
-@test "installDevTools: token set but no DT_ENVIRONMENT → installed, warned, no context" {
+@test "installDTTools: token set but no DT_ENVIRONMENT → installed, warned, no context" {
   source_functions
   pin_devtools
   unset DT_ENVIRONMENT
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/dtctl" ]
   echo "$output" | grep -q "DT_ENVIRONMENT is not"
   refute grep -q "config set-context" "$DTCTL_LOG"
 }
 
-@test "installDevTools: FRAMEWORK_DEVTOOLS=off (any case) skips everything — no download" {
+@test "installDTTools: DT_TOOLS=dtctl installs dtctl only — no Monaco download" {
   source_functions
   pin_devtools
+  unset DT_DTCTL_TOKEN
+  DT_TOOLS=dtctl run installDTTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  refute grep -q "monaco" "$CURL_LOG"
+}
+
+@test "installDTTools: DT_TOOLS=monaco installs Monaco only — no dtctl download" {
+  source_functions
+  pin_devtools
+  DT_TOOLS=MONACO run installDTTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  refute grep -q "dtctl" "$CURL_LOG"
+}
+
+@test "installDTTools: DT_TOOLS 'dtctl,monaco' and 'all' (any case) install both" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
   local v
-  for v in off OFF false 0 no; do
-    FRAMEWORK_DEVTOOLS="$v" run installDevTools
+  for v in "dtctl,monaco" "ALL" "monaco dtctl"; do
+    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+    DT_TOOLS="$v" run installDTTools
     [ "$status" -eq 0 ]
-    echo "$output" | grep -q "skipped"
+    [ -x "$INSTALL_DIR/dtctl" ]
+    [ -x "$INSTALL_DIR/monaco" ]
   done
+}
+
+@test "installDTTools: arguments win over DT_TOOLS" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  DT_TOOLS=all run installDTTools dtctl
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+}
+
+@test "installDTTools: an unknown DT_TOOLS entry warns, is ignored, never fatal" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  DT_TOOLS="dtctl,kubectl" run installDTTools
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF "DT_TOOLS: unknown tool 'kubectl' ignored"
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+}
+
+@test "installDTTools: DT_TOOLS with only unknown entries installs nothing, with a hint" {
+  source_functions
+  pin_devtools
+  DT_TOOLS="bogus" run installDTTools
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF "unknown tool 'bogus'"
+  echo "$output" | grep -qF "nothing selected"
   [ ! -s "$CURL_LOG" ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
 }
 
-@test "installDevTools: FRAMEWORK_DEVTOOLS=off from .devcontainer/.env is honoured" {
-  echo "FRAMEWORK_DEVTOOLS=off" > "$FAKE_REPO/.devcontainer/.env"
-  echo '[ -e "$ENV_FILE" ] && source "$ENV_FILE"' >> "$FAKE_REPO/.devcontainer/util/variables.sh"
+@test "installDTTools: the retired FRAMEWORK_DEVTOOLS is named, and does not switch anything" {
   source_functions
   pin_devtools
-  run installDevTools
+  unset DT_DTCTL_TOKEN
+  FRAMEWORK_DEVTOOLS=off run installDTTools dtctl
   [ "$status" -eq 0 ]
-  [ ! -s "$CURL_LOG" ]
+  echo "$output" | grep -qF "FRAMEWORK_DEVTOOLS is retired"
+  [ -x "$INSTALL_DIR/dtctl" ]
 }
 
-@test "installDevTools: corrupt dtctl archive is refused, NOT fatal, Monaco still installs" {
+@test "installDevTools: deprecated alias warns and still installs" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  run installDevTools dtctl
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF "installDevTools is deprecated"
+  [ -x "$INSTALL_DIR/dtctl" ]
+}
+
+@test "installDTTools: corrupt dtctl archive is refused, NOT fatal, Monaco still installs" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   corrupt_one_byte "$FIXTURES/dtctl_9.9.9_linux_amd64.tar.gz"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ -x "$INSTALL_DIR/monaco" ]
@@ -1373,24 +1437,24 @@ fake_present() {
   echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
 }
 
-@test "installDevTools: corrupt Monaco binary is refused, NOT fatal" {
+@test "installDTTools: corrupt Monaco binary is refused, NOT fatal" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   corrupt_one_byte "$FIXTURES/monaco-linux-amd64"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/monaco" ]
   [ -x "$INSTALL_DIR/dtctl" ]
   echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
 }
 
-@test "installDevTools: a failure is not counted as a container-creation error" {
+@test "installDTTools: a failure is not counted as a container-creation error" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/monaco-*
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   # Its real output holds tagged "failed" lines...
   echo "$output" | grep -i -E 'error|failed' | grep -qF 'devtools (non-fatal)'
@@ -1412,50 +1476,50 @@ fake_present() {
   grep -qF '"$raw_errors" | _creationNoiseFilter' "$BATS_TEST_DIRNAME/../../util/functions.sh"
 }
 
-@test "installDevTools: binaries matching the pinned sha256 + version are kept, not downloaded" {
+@test "installDTTools: binaries matching the pinned sha256 + version are kept, not downloaded" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   export DTCTL_PIN_BIN_SHA256_AMD64="$(fake_present dtctl 9.9.9)"
   export MONACO_PIN_BIN_SHA256_AMD64="$(fake_present monaco 9.9.9)"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ ! -s "$CURL_LOG" ]
   echo "$output" | grep -q "dtctl v9.9.9 already present"
   echo "$output" | grep -q "Monaco v9.9.9 already present"
 }
 
-@test "installDevTools: a present binary reporting the RIGHT version but other bytes is replaced" {
+@test "installDTTools: a present binary reporting the RIGHT version but other bytes is replaced" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   fake_present dtctl 9.9.9 >/dev/null     # says 9.9.9, but its sha256 is NOT the pin
   fake_present monaco 9.9.9 >/dev/null
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   grep -q "dtctl_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
   grep -q "monaco-linux-amd64" "$CURL_LOG"
   refute grep -q 'echo "dtctl version 9.9.9"' "$INSTALL_DIR/dtctl"
 }
 
-@test "installDevTools: a binary at a DIFFERENT version is replaced by the verified pin" {
+@test "installDTTools: a binary at a DIFFERENT version is replaced by the verified pin" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   export DTCTL_PIN_BIN_SHA256_AMD64="$(fake_present dtctl 9.9.10)"   # bytes match, version does not
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   grep -q "dtctl_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
   refute grep -q 'echo "dtctl version 9.9.10"' "$INSTALL_DIR/dtctl"
 }
 
-@test "installDevTools: asset whose sha256 differs from the REVIEWED pin is refused (release file agrees)" {
+@test "installDTTools: asset whose sha256 differs from the REVIEWED pin is refused (release file agrees)" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   # The release checksum files still match the assets: only the committed pin catches this.
   export DTCTL_PIN_SHA256_AMD64="$(printf '%064d' 1)" MONACO_PIN_SHA256_AMD64="$(printf '%064d' 2)"
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
@@ -1474,13 +1538,13 @@ fake_present() {
   echo "$output" | grep -q "not the framework's pinned version"
 }
 
-@test "installDevTools: the framework's pinned version with NO pin for this arch is refused, no fallback" {
+@test "installDTTools: the framework's pinned version with NO pin for this arch is refused, no fallback" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   # The release checksum files are fine; only the committed per-arch pin is missing.
   export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64=""
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
@@ -1496,12 +1560,12 @@ fake_present() {
   done
 }
 
-@test "installDevTools: arm64 machine installs the arm64 assets against the arm64 pins" {
+@test "installDTTools: arm64 machine installs the arm64 assets against the arm64 pins" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   export FAKE_UNAME_M=aarch64
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   grep -q "dtctl_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
   grep -q "monaco-linux-arm64" "$CURL_LOG"
@@ -1520,7 +1584,7 @@ fake_present() {
   [ "$output" = "amd64" ]
 }
 
-@test "installDevTools: no passwordless sudo → sudo -n fails fast, non-fatal" {
+@test "installDTTools: no passwordless sudo → sudo -n fails fast, non-fatal" {
   [ "$(id -u)" -ne 0 ] || skip "root can write anywhere: the sudo path is never taken"
   source_functions
   pin_devtools
@@ -1531,7 +1595,7 @@ fake_present() {
   chmod +x "$BIN/sudo"
   mkdir -p "$SUBDIR"; chmod 0555 "$SUBDIR"
   DTCTL_INSTALL_DIR="$SUBDIR" MONACO_INSTALL_DIR="$SUBDIR" run timeout 20 bash -c \
-    'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh; installDevTools'
+    'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh; installDTTools'
   chmod 0755 "$SUBDIR"
   [ "$status" -eq 0 ]
   [ -s "$SUDO_LOG" ]
@@ -1553,12 +1617,12 @@ fake_present() {
   grep -q '^sudo -n rm -f ' "$SUDO_LOG"
 }
 
-@test "installDevTools: every download has --connect-timeout 10 and fits one time budget" {
+@test "installDTTools: every download has --connect-timeout 10 and fits one time budget" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   export CURL_ARGS_LOG="$TEST_DIR/curl-args.log" DEVTOOLS_TIME_BUDGET=60
-  run installDevTools
+  run installDTTools
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$CURL_ARGS_LOG")" -eq 4 ]
   refute grep -v -- "--connect-timeout 10 " "$CURL_ARGS_LOG"
@@ -1568,7 +1632,7 @@ fake_present() {
   done
 }
 
-@test "installDevTools: a non-numeric DEVTOOLS_TIME_BUDGET falls back to 180 s" {
+@test "installDTTools: a non-numeric DEVTOOLS_TIME_BUDGET falls back to 180 s" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
@@ -1576,7 +1640,7 @@ fake_present() {
   local b
   for b in abc "1+1" "-5" "60s"; do
     : > "$CURL_ARGS_LOG"; rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
-    DEVTOOLS_TIME_BUDGET="$b" run installDevTools
+    DEVTOOLS_TIME_BUDGET="$b" run installDTTools
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "DEVTOOLS_TIME_BUDGET '$b' is not a number of seconds — using 180"
     [ -x "$INSTALL_DIR/dtctl" ]
@@ -1586,14 +1650,14 @@ fake_present() {
   done
 }
 
-@test "installDevTools: DEVTOOLS_TIME_BUDGET is base 10 and capped at 900 s" {
+@test "installDTTools: DEVTOOLS_TIME_BUDGET is base 10 and capped at 900 s" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   export CURL_ARGS_LOG="$TEST_DIR/curl-args.log"
   # 08 / 09 are invalid octal: base-10 parsing must take them as 8 / 9 s.
   : > "$CURL_ARGS_LOG"
-  DEVTOOLS_TIME_BUDGET=08 run installDevTools
+  DEVTOOLS_TIME_BUDGET=08 run installDTTools
   [ "$status" -eq 0 ]
   refute grep -q "value too great for base\|not a number" <<< "$output"
   grep -q -- "--max-time [0-8] " "$CURL_ARGS_LOG"
@@ -1603,7 +1667,7 @@ fake_present() {
   local b
   for b in 18446744073709551616 99999999999999999999 1000; do
     rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
-    DEVTOOLS_TIME_BUDGET="$b" run installDevTools
+    DEVTOOLS_TIME_BUDGET="$b" run installDTTools
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "DEVTOOLS_TIME_BUDGET '$b' is above the 900 s cap — using 900"
     [ -x "$INSTALL_DIR/dtctl" ]
@@ -1611,11 +1675,11 @@ fake_present() {
   done
 }
 
-@test "installDevTools: exhausted time budget downloads nothing, non-fatal" {
+@test "installDTTools: exhausted time budget downloads nothing, non-fatal" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
-  DEVTOOLS_TIME_BUDGET=0 run installDevTools
+  DEVTOOLS_TIME_BUDGET=0 run installDTTools
   [ "$status" -eq 0 ]
   [ ! -s "$CURL_LOG" ]
   echo "$output" | grep -q "time budget exhausted"
@@ -1712,13 +1776,62 @@ fake_echoing_dtctl() {
   [ "$output" = "a <redacted> b <redacted> c" ]
 }
 
-@test "finalizePostCreation runs installDevTools (every repo gets it with no edits)" {
+@test "finalizePostCreation does NOT install the Dynatrace tools (opt-in, not every repo)" {
   source_functions
-  installDevTools() { echo "INSTALL_DEVTOOLS_RAN"; }
+  installDTTools() { echo "INSTALL_DTTOOLS_RAN"; }
+  installDevTools() { echo "INSTALL_DTTOOLS_RAN"; }
   verifyContainerCreation() { :; }
   postCodespaceTracker() { :; }
-  CODESPACE_NAME="learner" run finalizePostCreation
-  echo "$output" | grep -q "INSTALL_DEVTOOLS_RAN"
+  DT_TOOLS=all CODESPACE_NAME="learner" run finalizePostCreation
+  refute grep -q "INSTALL_DTTOOLS_RAN" <<< "$output"
+}
+
+# setUpTerminal with everything but the DT tools decision stubbed out.
+run_setUpTerminal() {
+  source_functions
+  ensureDockerGroupAccess() { :; }
+  bindFunctionsInShell() { :; }
+  setupAliases() { :; }
+  installCodespaceSSH() { :; }
+  git() { :; }
+  cp() { :; }
+  installDTTools() { echo "INSTALL_DTTOOLS_RAN args=[$*]"; }
+  run setUpTerminal
+}
+
+@test "setUpTerminal installs the Dynatrace tools when the repo opts in (DT_TOOLS)" {
+  export DT_TOOLS="dtctl,monaco"
+  run_setUpTerminal
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "INSTALL_DTTOOLS_RAN"
+  refute grep -qF "Type 'installDTTools'" <<< "$output"
+}
+
+@test "setUpTerminal does NOT install them without DT_TOOLS — prints the hint instead" {
+  unset DT_TOOLS
+  run_setUpTerminal
+  [ "$status" -eq 0 ]
+  refute grep -q "INSTALL_DTTOOLS_RAN" <<< "$output"
+  echo "$output" | grep -qF "Type 'installDTTools' to install dtctl + Monaco"
+}
+
+@test "setUpTerminal installs them BEFORE the long setup (right after the MCP hint)" {
+  local f="$BATS_TEST_DIRNAME/../../util/functions.sh" body
+  body=$(sed -n '/^setUpTerminal(){/,/^}/p' "$f")
+  # installDTTools comes after bindFunctionsInShell and before installCodespaceSSH.
+  local b i c
+  b=$(grep -n "bindFunctionsInShell" <<< "$body" | head -1 | cut -d: -f1)
+  i=$(grep -n "installDTTools$" <<< "$body" | head -1 | cut -d: -f1)
+  c=$(grep -n "installCodespaceSSH$" <<< "$body" | head -1 | cut -d: -f1)
+  [ -n "$b" ] && [ -n "$i" ] && [ -n "$c" ]
+  [ "$b" -lt "$i" ] && [ "$i" -lt "$c" ]
+}
+
+@test "post-create.sh: setUpTerminal runs before startCluster (tools exist for every later step)" {
+  local pc="$BATS_TEST_DIRNAME/../../post-create.sh" s k
+  s=$(grep -n "^setUpTerminal" "$pc" | cut -d: -f1)
+  k=$(grep -n "^startCluster" "$pc" | cut -d: -f1)
+  [ -n "$s" ] && [ -n "$k" ] && [ "$s" -lt "$k" ]
 }
 
 @test "variables.sh pins DTCTL_VERSION and MONACO_VERSION to x.y.z (never 'latest')" {
