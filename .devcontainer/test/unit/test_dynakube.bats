@@ -2,6 +2,8 @@
 # Tests for Phase 2 Task 3: Config-driven Dynakube generation
 # Covers: loadDynakubeConfig, generateDynakube, deployDynatrace wrappers
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   export TEST_DIR="$(mktemp -d)"
   export HOME="$TEST_DIR/home"
@@ -778,4 +780,103 @@ _field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.a
   run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
   [[ "$output" == *"dynatrace-activegate:1.2.3.4-5"* ]]
   [[ "$output" != *"SHOULD_NOT_RUN"* ]]
+}
+
+# ============================================================
+# BUG-204: getLatestEcrTag must put ONLY a tag on stdout. Every caller captures stdout
+# as the image tag; a printWarn on a transient ECR miss used to land inside
+# dynakube.yaml (ANSI codes + "WARN ... check network" + "latest") and kubectl
+# rejected the manifest. The colours are set for real here: setup() blanks them,
+# which would hide the ESC bytes this test exists to catch.
+# ============================================================
+
+_ecr_real_colours() {
+  GREEN=$'\e[32m'; YELLOW=$'\e[38;5;226m'; CYAN=$'\e[36m'; LILA=$'\e[35m'
+  RESET=$'\e[0m'; RED=$'\e[31m'; BLUE=$'\e[34m'
+}
+
+_ecr_miss() { curl() { return 7; }; }   # ECR unreachable: no token, no tag list
+
+_ecr_hit() {
+  curl() {
+    case "$*" in
+      *public.ecr.aws/token/*) echo '{"token":"t"}' ;;
+      *tags/list*) echo '{"tags":["1.2.3","1.10.0","1.10.0-fips","1.10.0-arm64","latest"]}' ;;
+      *) return 7 ;;
+    esac
+  }
+}
+
+_ecr_all_features_config() {
+  cat > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml" <<'CFG'
+mode: cloudnative
+kspm: true
+log_monitoring: true
+telemetry_ingest: true
+extensions: true
+CFG
+}
+
+@test "BUG-204 getLatestEcrTag: ECR miss -> stdout is one clean pinned tag, warning on stderr" {
+  source_functions
+  _ecr_real_colours
+  _ecr_miss
+
+  local out err
+  out="$(getLatestEcrTag dynatrace-logmodule 2>"$TEST_DIR/stderr")"
+  err="$(cat "$TEST_DIR/stderr")"
+
+  [[ "$out" != *$'\e'* ]]
+  [[ "$out" != *"WARN"* ]]
+  [[ "$out" != "latest" ]]
+  [[ "$out" =~ ^[0-9][A-Za-z0-9_.-]*$ ]]
+  [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ]
+  [[ "$err" == *"dynatrace-logmodule"* ]]
+}
+
+@test "BUG-204 getLatestEcrTag: ECR hit -> newest clean version, no suffixes" {
+  source_functions
+  _ecr_real_colours
+  _ecr_hit
+
+  run --separate-stderr getLatestEcrTag dynatrace-logmodule
+  [ "$status" -eq 0 ]
+  [ "$output" = "1.10.0" ]
+}
+
+@test "BUG-204 getLatestEcrTag: miss on a repo with no known pin -> non-zero, empty stdout" {
+  source_functions
+  _ecr_miss
+
+  run --separate-stderr getLatestEcrTag dynatrace-no-such-image
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "BUG-204 generateDynakube: ECR miss on every lookup -> YAML has no ESC/WARN/latest, all tags pinned" {
+  source_functions
+  _ecr_real_colours
+  _ecr_miss
+  _ecr_all_features_config
+
+  ARCH="aarch64" generateDynakube 2>/dev/null
+  local y="$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+
+  ! grep -q $'\e' "$y"
+  ! grep -q 'WARN' "$y"
+  ! grep -q 'check network' "$y"
+  ! grep -qE '(:|tag: ")latest"' "$y"
+  # six lookups: AG + OA image lines, four template tags
+  [ "$(grep -cE 'image: "public\.ecr\.aws/dynatrace/dynatrace-(activegate|oneagent):[0-9][A-Za-z0-9_.-]*"$' "$y")" -eq 2 ]
+  [ "$(grep -cE '^        tag: "[0-9][A-Za-z0-9_.-]*"$' "$y")" -eq 4 ]
+}
+
+@test "BUG-204 generateDynakube: a garbage tag is refused, not written into the YAML" {
+  source_functions
+  _ecr_all_features_config
+  getLatestEcrTag() { echo "[test| WARN |now| Could not resolve latest tag"; echo "latest"; }
+
+  run generateDynakube
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ERROR"* ]]
 }
