@@ -434,7 +434,7 @@ already started after the annotation, so a training's check can run straight aft
 | `generateDynakube` | `generateDynakube [mode]` | Generates `.devcontainer/yaml/gen/dynakube.yaml` from config and current credentials. Writes a temp file in `gen/` and renames it into place, so a reader or a second generation never sees a partial file |
 | `verifyDynakube` | `verifyDynakube [file] [mode]` | Checks a generated DynaKube before it is applied: it parses (duplicate keys fail), one DynaKube with the configured apiVersion, name/namespace/`apiUrl` set, the token Secret it names is in the file, the `oneAgent` section matches the mode, and `logMonitoring` / `telemetryIngest` / `extensions` / `kspm` are present exactly when the config asks for them. Non-zero with one line per problem. `deployDynatrace` runs it before `kubectl apply` and refuses a failing file; integration tests call it too |
 | `_parseDynakubeYaml` | `_parseDynakubeYaml <file>` | Internal: parses a flat YAML file into `DK_*` exported variables |
-| `getLatestEcrTag` | `getLatestEcrTag <repo>` | Resolves the latest semver tag from ECR public gallery for a DT image |
+| `getLatestEcrTag` | `getLatestEcrTag <repo>` | Prints ONLY the newest version tag from the ECR public gallery for a DT image on stdout (diagnostics on stderr). On an ECR miss it prints the `ecr_pin_<image>` pin from `dynakube-defaults.yaml`; with no pin it returns 1 and prints nothing. `generateDynakube` refuses (returns 1, no manifest) on any tag that is not a version (BUG-204) |
 
 Config keys (set in `dynakube-config.yaml` or `dynakube-defaults.yaml`) map to `DK_*` variables:
 
