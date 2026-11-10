@@ -35,3 +35,16 @@ ag_cpu_limit: "500m"
 ag_memory_request: "512Mi"
 ag_memory_limit: "1Gi"
 ag_replicas: 1
+
+# ECR fallback image tags (BUG-204). generateDynakube resolves the newest tag of each image
+# from public.ecr.aws at generation time; when that lookup misses (network blip, ECR rate
+# limit) it uses the pin below instead of writing a warning — or "latest" — into the YAML.
+# Values are the tags getLatestEcrTag itself resolved on 2026-11-10 (the ones every build
+# that day pulled; otel-collector 0.60.0 also seen in staging build rc431b). Bump them when
+# you bump operator_version. Repo dynakube-config.yaml may override any of them.
+ecr_pin_activegate: "1.349.67.20261029-110441"
+ecr_pin_oneagent: "1.349.106.20261029-103936"
+ecr_pin_k8s_node_config_collector: "1.6.3"
+ecr_pin_logmodule: "1.349.109.20261102-164952"
+ecr_pin_eec: "1.349.109.20261102-164952"
+ecr_pin_otel_collector: "0.60.0"

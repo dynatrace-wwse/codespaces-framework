@@ -823,6 +823,7 @@ CFG
   _ecr_miss
 
   local out err
+  loadDynakubeConfig >/dev/null
   out="$(getLatestEcrTag dynatrace-logmodule 2>"$TEST_DIR/stderr")"
   err="$(cat "$TEST_DIR/stderr")"
 
@@ -879,4 +880,6 @@ CFG
   run generateDynakube
   [ "$status" -ne 0 ]
   [[ "$output" == *"ERROR"* ]]
+  # no half-written manifest left behind, and no stale one created
+  [ -z "$(ls -A "$FAKE_REPO/.devcontainer/yaml/gen/")" ]
 }

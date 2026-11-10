@@ -3553,12 +3553,43 @@ except:
 " 2>/dev/null)
   fi
 
-  if [[ -z "$tag" ]]; then
-    printWarn "Could not resolve latest tag for $repo from ECR — check network"
-    echo "latest"
-  else
+  # stdout carries ONLY the tag: every caller captures it straight into dynakube.yaml
+  # (BUG-204 — a printWarn here once landed ANSI codes + "latest" inside the manifest).
+  # All diagnostics go to stderr.
+  if [[ -n "$tag" ]]; then
     echo "$tag"
+    return 0
   fi
+
+  # Miss: fall back to the known-good pin from dynakube-defaults.yaml (ecr_pin_<image>,
+  # exported as DK_ECR_PIN_* by loadDynakubeConfig). Never "latest", never empty.
+  local pin_var="DK_ECR_PIN_$(echo "${repo#dynatrace-}" | tr '[:lower:]-' '[:upper:]_')"
+  local pin="${!pin_var:-}"
+  if [[ -n "$pin" ]]; then
+    printWarn "Could not resolve latest tag for $repo from ECR — using pinned ${pin} (${pin_var})" >&2
+    echo "$pin"
+    return 0
+  fi
+  printError "Could not resolve a tag for $repo from ECR and no pin is set (${pin_var})" >&2
+  return 1
+}
+
+_isImageTag() {
+  # True when $1 is a usable version tag: starts with a digit, then only the characters
+  # an OCI tag allows, max 128. Rejects "latest", empty, and captured log text.
+  [[ "$1" =~ ^[0-9][A-Za-z0-9_.-]{0,127}$ ]]
+}
+
+_ecrTagOrFail() {
+  # Echo a validated ECR tag for repo $1, or print why on stderr and return 1.
+  # generateDynakube refuses to write a manifest with a garbage tag in it (BUG-204).
+  local repo="$1" tag
+  tag="$(getLatestEcrTag "$repo")" || tag=""
+  if ! _isImageTag "$tag"; then
+    printError "Refusing to write image tag for $repo: '$(printf '%s' "$tag" | tr -d '\033' | head -c 120)' is not a version tag — Dynakube NOT generated" >&2
+    return 1
+  fi
+  echo "$tag"
 }
 
 loadDynakubeConfig() {
@@ -3782,9 +3813,9 @@ generateDynakube() {
   if [[ "$ARCH" == *"arm"* || "$ARCH" == *"aarch64"* ]]; then
     printInfo "ARM architecture detected — resolving latest AG and OA images from ECR..."
     local ag_tag
-    ag_tag=$(getLatestEcrTag "dynatrace-activegate")
+    ag_tag=$(_ecrTagOrFail "dynatrace-activegate") || { rm -f "$out_file"; return 1; }
     local oa_tag
-    oa_tag=$(getLatestEcrTag "dynatrace-oneagent")
+    oa_tag=$(_ecrTagOrFail "dynatrace-oneagent") || { rm -f "$out_file"; return 1; }
     # NOTE: indentation is added by the template expansions below
     # (${ag_image_line:+    ...} and ${oa_image_line:+      ...}).
     # Putting spaces here too would double-indent and slot the line
@@ -3922,7 +3953,7 @@ AOEOF
 
   if [[ "$kspm" == "true" ]]; then
     local kspm_tag
-    kspm_tag=$(getLatestEcrTag "dynatrace-k8s-node-config-collector")
+    kspm_tag=$(_ecrTagOrFail "dynatrace-k8s-node-config-collector") || { rm -f "$out_file"; return 1; }
     has_templates=true
     templates_block="${templates_block}
     kspmNodeConfigurationCollector:
@@ -3934,7 +3965,7 @@ AOEOF
 
   if [[ "$log_mon" == "true" ]]; then
     local logmod_tag
-    logmod_tag=$(getLatestEcrTag "dynatrace-logmodule")
+    logmod_tag=$(_ecrTagOrFail "dynatrace-logmodule") || { rm -f "$out_file"; return 1; }
     has_templates=true
     templates_block="${templates_block}
     logMonitoring:
@@ -3946,7 +3977,7 @@ AOEOF
 
   if [[ "$extensions" == "true" ]]; then
     local eec_tag
-    eec_tag=$(getLatestEcrTag "dynatrace-eec")
+    eec_tag=$(_ecrTagOrFail "dynatrace-eec") || { rm -f "$out_file"; return 1; }
     has_templates=true
     templates_block="${templates_block}
     extensionExecutionController:
@@ -3958,7 +3989,7 @@ AOEOF
 
   if [[ "$telemetry" == "true" || "$extensions" == "true" ]]; then
     local otelcol_tag
-    otelcol_tag=$(getLatestEcrTag "dynatrace-otel-collector")
+    otelcol_tag=$(_ecrTagOrFail "dynatrace-otel-collector") || { rm -f "$out_file"; return 1; }
     has_templates=true
     templates_block="${templates_block}
     otelCollector:
