@@ -3199,6 +3199,23 @@ _dtK8sWhy() {
     | sed -E 's/dt0[a-z][0-9]{2}\.[A-Za-z0-9._-]+/[redacted]/g' | cut -c1-200
 }
 
+# BUG-216: the tenant refuses a new builtin:cloud.kubernetes object once its cap of monitored
+# clusters (1,000 on COE, 2026-11-12) is reached. The operator then logs a 400 and leaves the
+# DynaKube at "kubernetesClusterMEID is not available" (KSPM / log-monitoring settings Skipped),
+# which reads like a token or ActiveGate fault. Name it instead.
+DT_K8S_CAP_MARKER="Maximum number of monitored Kubernetes clusters reached"
+_dtK8sCapMessage() {
+  printf '%s' "the tenant's limit of monitored Kubernetes clusters is reached ($DT_K8S_SCHEMA: '$DT_K8S_CAP_MARKER'). Nothing is wrong with this environment: stale clusters in ${DT_ENVIRONMENT:-the tenant} must be disabled (Settings > Cloud and virtualization > Kubernetes) before a new cluster can be monitored (BUG-216)"
+}
+# _dtK8sCapInBody <api body> — true when a settings API answer is the cluster-cap refusal.
+_dtK8sCapInBody() { printf '%s' "$1" | grep -qF "$DT_K8S_CAP_MARKER"; }
+# dynatraceOperatorClusterCapHit [ns] — true when the operator's log shows the tenant refused the
+# cluster for the cap. Read-only; false when the log cannot be read (never a false alarm).
+dynatraceOperatorClusterCapHit() {
+  kubectl logs -n "${1:-dynatrace}" deploy/dynatrace-operator --tail="${DT_OPERATOR_LOG_TAIL:-3000}" 2>/dev/null \
+    | grep -qF "$DT_K8S_CAP_MARKER"
+}
+
 # _dtK8sFindByClusterId <uid> — prints the objectId of the builtin:cloud.kubernetes object whose
 # clusterId is <uid>, nothing when there is none. Returns 2 when the objects could not be READ —
 # "could not tell" must never read as "absent" (a duplicate create would follow).
@@ -3291,11 +3308,15 @@ dynatraceEnsureK8sRegistration() {
       # A platform token (dt0s16) without the write scope gets 404 "No write access for scope
       # class tenant", not 403 (PVF, 2026-11-08): same meaning, same message.
       403|404) printError "Kubernetes registration: the operator token has no EFFECTIVE settings.write for $DT_K8S_SCHEMA (HTTP $K8S_HTTP_CODE). The operator cannot register this cluster either; it would sit at 'kubernetesClusterMEID is outdated'. $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
-      *)   printError "Kubernetes registration: validation of the $DT_K8S_SCHEMA object failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
+      *)   if _dtK8sCapInBody "$K8S_HTTP_BODY"; then
+             printError "Kubernetes registration: $(_dtK8sCapMessage)"; return 1
+           fi
+           printError "Kubernetes registration: validation of the $DT_K8S_SCHEMA object failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"; return 1 ;;
     esac
     _dtK8sApi POST "/settings/objects" "$body"
     oid=$(printf '%s' "$K8S_HTTP_BODY" | jq -r '.[0].objectId // empty' 2>/dev/null)
     if [[ "$K8S_HTTP_CODE" != 200 || -z "$oid" ]]; then
+      _dtK8sCapInBody "$K8S_HTTP_BODY" && { printError "Kubernetes registration: $(_dtK8sCapMessage)"; return 1; }
       printError "Kubernetes registration: create failed (HTTP $K8S_HTTP_CODE) $(_dtK8sWhy "$K8S_HTTP_BODY")"
       return 1
     fi
@@ -3328,6 +3349,7 @@ dynatraceEnsureK8sRegistration() {
       return 0
     fi
     if (( waited >= wait_s )); then
+      dynatraceOperatorClusterCapHit && printError "Kubernetes registration: the operator reports $(_dtK8sCapMessage)"
       printError "Kubernetes registration: object $meid exists but the DynaKube reports '${status_meid:-no MEID}' (MonitoredEntity '${cond:-absent}') after ${wait_s}s — the cluster is not resolved in Dynatrace"
       return 1
     fi
@@ -7054,7 +7076,11 @@ checkDynakube() {
     done
   fi
   if kubectl get dynakube -n dynatrace --no-headers 2>/dev/null | grep -q .; then
-    printInfo "DynaKube custom resource is present"; return 0
+    printInfo "DynaKube custom resource is present"
+    # BUG-216: present, but the tenant refused the cluster. The step itself still passes (the
+    # learner cannot fix a tenant limit); the named error tells the trainer what to fix.
+    dynatraceOperatorClusterCapHit && printError "DynaKube: $(_dtK8sCapMessage)"
+    return 0
   fi
   printError "No DynaKube found in the dynatrace namespace — apply the DynaKube, then check again"; return 1
 }

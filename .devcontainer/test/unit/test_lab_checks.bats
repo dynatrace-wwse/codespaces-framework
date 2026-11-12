@@ -37,6 +37,7 @@ VARSEOF
     case "$*" in
       "get nodes"*)          cat "$TEST_DIR/nodes" ;;
       "get dynakube"*)       cat "$TEST_DIR/dynakube" ;;
+      "logs -n dynatrace deploy/dynatrace-operator"*) cat "$TEST_DIR/oplog" 2>/dev/null ;;
       "get pods"*jsonpath*)  cat "$TEST_DIR/inject" ;;
       "get pods"*)           cat "$TEST_DIR/pods" ;;
       "rollout"*)            return "$(cat "$TEST_DIR/rollout_rc")" ;;
@@ -255,4 +256,23 @@ MYEOF
   source_functions
   run checkNodeReady
   [ "$output" = "repo copy" ]
+}
+
+@test "checkDynakube: operator log shows the tenant's cluster cap → named error, step still passes (BUG-216)" {
+  source_functions
+  echo "my-dynakube   https://x/api   Running   1m" > "$TEST_DIR/dynakube"
+  echo 'error creating dynatrace settings object: create kubernetes setting: HTTP 400: Validation failed for 1 Validators. - builtin:cloud.kubernetes: Maximum number of monitored Kubernetes clusters reached. Please disable monitoring of some clusters.' > "$TEST_DIR/oplog"
+  run checkDynakube
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"limit of monitored Kubernetes clusters is reached"* ]]
+  [[ "$output" == *"BUG-216"* ]]
+}
+
+@test "checkDynakube: clean operator log → no cap error (negative control)" {
+  source_functions
+  echo "my-dynakube   https://x/api   Running   1m" > "$TEST_DIR/dynakube"
+  echo 'no MEs found, no kubernetesClusterMEID will be set in the dynakube status' > "$TEST_DIR/oplog"
+  run checkDynakube
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"limit of monitored Kubernetes clusters"* ]]
 }
