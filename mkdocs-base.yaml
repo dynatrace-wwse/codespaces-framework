@@ -64,7 +64,13 @@ markdown_extensions:
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.snippets:
-      base_path: ["docs"]
+      # docs/ first (every existing `--8<-- "snippets/…"` resolves as before), then the repo
+      # root, so a lab page can show a repository file inside a code fence (ENH-173):
+      #   ```bash { title="scripts/setup.sh" }
+      #   --8<-- "scripts/setup.sh"
+      #   ```
+      # The Dynatrace app inlines the same file at import, whatever this framework version.
+      base_path: ["docs", "."]
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.highlight:
