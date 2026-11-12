@@ -54,7 +54,9 @@ setup() {
         body=$(jq -sc '{items: .}' "$OBJS") ;;
       "POST "*"validateOnly=true")
         code="${VALIDATE_CODE:-200}"; body='[{"code":200}]'
-        [[ "$code" != 200 ]] && body='{"error":{"code":'"$code"',"message":"Token is missing required scope settings.write"}}' ;;
+        [[ "$code" != 200 ]] && body='{"error":{"code":'"$code"',"message":"Token is missing required scope settings.write"}}'
+        # BUG-216: the real cap refusal (COE 2026-11-12) carries the reason in constraintViolations.
+        [[ "$code" == 400 && -n "${VALIDATE_CAP:-}" ]] && body='{"error":{"code":400,"message":"Constraints violated.","constraintViolations":[{"path":"","message":"Validation failed for 1 Validators.\n\t- builtin:cloud.kubernetes: Maximum number of monitored Kubernetes clusters reached. Please disable monitoring of some clusters."}]}}' ;;
       "POST "*"/settings/objects")
         code="${CREATE_CODE:-200}"
         if [[ "$code" == 200 ]]; then
@@ -82,6 +84,7 @@ setup() {
       *"get dynakube -o jsonpath={.items[0].metadata.name}"*) printf '%s' "$DK" ;;
       *"annotate dynakube"*) echo "kubectl annotate" >> "$CALLS" ;;
       *'MonitoredEntity'*) printf 'True|StatusUpdated' ;;
+      *"logs -n dynatrace deploy/dynatrace-operator"*) [[ -n "${OPERATOR_LOG:-}" ]] && cat "$OPERATOR_LOG" ;;
       *'kubernetesClusterMEID'*)
         if [[ "$STATUS_MEID" == auto ]]; then
           jq -r --arg u "$KUID" 'select(.value.clusterId == $u) | .scope' "$OBJS" | head -1
@@ -355,4 +358,46 @@ deploy_stubbed() {
   run frameworkTeardown
   [ "$status" -ne 0 ]
   grep -q "monaco-ran" "$CALLS"
+}
+
+# ── BUG-216: the tenant's cap of monitored clusters ─────────────────────────────────────────
+
+@test "ensure: tenant at its cluster cap (400 on validate) → names the cap, creates nothing" {
+  load_fw
+  export VALIDATE_CODE=400 VALIDATE_CAP=1
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"limit of monitored Kubernetes clusters is reached"* ]]
+  [[ "$output" == *"BUG-216"* ]]
+  [[ "$output" != *"validation of the"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ ! -s "$OBJS" ]
+}
+
+@test "ensure: an ordinary 400 on validate is NOT reported as the cap (negative control)" {
+  load_fw
+  export VALIDATE_CODE=400
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"validation of the"* ]]
+  [[ "$output" != *"limit of monitored Kubernetes clusters"* ]]
+}
+
+@test "ensure: MEID never resolves and the operator log shows the cap → names the cap" {
+  load_fw
+  export STATUS_MEID="" OPERATOR_LOG="$TEST_DIR/oplog"
+  echo '{"level":"error","msg":"Reconciler error","error":"create kubernetes setting: HTTP 400: Validation failed for 1 Validators.\n\t- builtin:cloud.kubernetes: Maximum number of monitored Kubernetes clusters reached. Please disable monitoring of some clusters."}' > "$OPERATOR_LOG"
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the operator reports the tenant's limit of monitored Kubernetes clusters is reached"* ]]
+  [[ "$output" == *"no MEID"* ]]
+}
+
+@test "ensure: MEID never resolves, operator log clean → no cap message (negative control)" {
+  load_fw
+  export STATUS_MEID="" OPERATOR_LOG="$TEST_DIR/oplog"
+  echo '{"level":"info","msg":"no MEs found, no kubernetesClusterMEID will be set"}' > "$OPERATOR_LOG"
+  run dynatraceEnsureK8sRegistration
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"limit of monitored Kubernetes clusters"* ]]
 }
