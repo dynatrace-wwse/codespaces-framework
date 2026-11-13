@@ -164,7 +164,7 @@ EOF
   # The "released" monaco: logs arguments + whether the token is present.
   cat > "$FIXTURES/monaco-linux-amd64" <<'EOF'
 #!/bin/bash
-echo "monaco $* | LEARNER_PREFIX=${LEARNER_PREFIX:-} | token-set=$([ -n "$DT_MONACO_TOKEN" ] && echo yes || echo no) | cwd=$PWD | rum=${TODO_RUM_APP_ID:-}" >> "$MONACO_LOG"
+echo "monaco $* | LEARNER_PREFIX=${LEARNER_PREFIX:-} | token-set=$([ -n "$DT_MONACO_TOKEN" ] && echo yes || echo no) | cwd=$PWD | rumf=${TODO_RUM_APP_ID_FRONTEND:-} | rum=${TODO_RUM_APP_ID:-}" >> "$MONACO_LOG"
 if [ "$1 $2" = "generate deletefile" ]; then
   dir="" file="delete.yaml"
   while [ $# -gt 0 ]; do
@@ -1857,9 +1857,14 @@ run_setUpTerminal() {
   grep -q "|todoapp-job123abc|" "$RUM_STATE"
   grep -qx "TODOApp learner-ab12 (job123abc)" "$TEST_DIR/display"
   local aid; aid=$(cut -d'|' -f3 "$RUM_STATE")
-  # Monaco ran with the CLASSIC id (APPLICATION-…), never the FRONTEND id
+  # Monaco ran with the CLASSIC id (APPLICATION-…) under <ENV_VAR>, never the FRONTEND id
   grep "^monaco deploy" "$MONACO_LOG" | grep -q "rum=$aid$"
   grep -qx "TODO_RUM_APP_ID|todoapp-job123abc|FRONTEND-[0-9A-F]*|$aid" "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state"
+  # ...and with the FRONTEND id under <ENV_VAR>_FRONTEND (what a frontend health alert takes)
+  local fid; fid=$(cut -d'|' -f3 "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state")
+  [[ "$fid" =~ ^FRONTEND-[0-9A-F]+$ ]]
+  grep "^monaco deploy" "$MONACO_LOG" | grep -q "| rumf=$fid | rum=$aid$"
+  echo "$output" | grep -q "TODO_RUM_APP_ID_FRONTEND=$fid"
   echo "$output" | grep -q "Dynatrace API: POST /platform/rum/v1/frontends"
   echo "$output" | grep -q "Dynatrace API: GET /platform/classic/environment-api/v2/settings/objects?schemaIds=builtin:rum.frontend.name"
   echo "$output" | grep -q "RUM frontend(s) undeployMonaco also deletes: todoapp-job123abc"
@@ -2039,10 +2044,10 @@ run_setUpTerminal() {
 @test "RUM frontend deploy + undeploy work under zsh (the learner's shell)" {
   command -v zsh >/dev/null || skip "zsh not installed"
   rum_project tenant
-  run zsh -c 'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh >/dev/null; deployMonaco tenant && echo "APP=$TODO_RUM_APP_ID" && undeployMonaco tenant && echo "AFTER=${TODO_RUM_APP_ID:-unset}"'
+  run zsh -c 'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh >/dev/null; deployMonaco tenant && echo "APP=$TODO_RUM_APP_ID FE=$TODO_RUM_APP_ID_FRONTEND" && undeployMonaco tenant && echo "AFTER=${TODO_RUM_APP_ID:-unset} ${TODO_RUM_APP_ID_FRONTEND:-unset}"'
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "^APP=APPLICATION-"
-  echo "$output" | grep -q "^AFTER=unset"
+  echo "$output" | grep -qE "^APP=APPLICATION-[0-9A-F]+ FE=FRONTEND-[0-9A-F]+$"
+  echo "$output" | grep -q "^AFTER=unset unset$"
   [ ! -s "$RUM_STATE" ]
 }
 

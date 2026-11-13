@@ -1550,7 +1550,9 @@ What it does, step by step:
      creates YOUR web frontend <name>-<seat id> ("<display name> <session>")
        POST /platform/rum/v1/frontends   (reused if it already exists)
      and exports <ENV_VAR>=APPLICATION-… (its classic id, what an app-detection
-     rule takes). Every API call is printed, method and path; never the token.
+     rule takes) and <ENV_VAR>_FRONTEND=FRONTEND-… (its platform id, what a
+     builtin:health-experience.frontend-alert takes).
+     Every API call is printed, method and path; never the token.
   5. Runs: monaco generate deletefile manifest.yaml -o . --file delete.yaml
      — BEFORE deploying, so even a partial deploy can be undone.
   6. Runs: monaco deploy manifest.yaml -e learner
@@ -1579,7 +1581,11 @@ HELPEOF
 # deployMonaco creates each one for THIS seat before Monaco runs
 # (POST /platform/rum/v1/frontends, frontendName <name>-<seat id>) and exports
 # <ENV_VAR> with its classic id (APPLICATION-…), which is what a
-# builtin:rum.web.app-detection rule takes — the FRONTEND-… id is refused.
+# builtin:rum.web.app-detection rule takes — the FRONTEND-… id is refused —
+# and <ENV_VAR>_FRONTEND with the FRONTEND-… id, which is what a
+# builtin:health-experience.frontend-alert takes (newest-experience tenants
+# refuse the APPLICATION-… id there: "not SmartScape Ids").
+# undeployMonaco unsets both once the frontend is proven gone.
 # Monaco has no type for a frontend, so the framework owns its lifecycle;
 # undeployMonaco deletes it after monaco delete and proves it is gone by
 # reading it back (the DELETE answers 204 or 404 for an id that is already
@@ -1777,8 +1783,9 @@ _monacoRumFrontends() {
       printInfo "  created $fid ($aid)"
     fi
     _rumStateSet "$run/rum-frontends.state" "$var" "$fname" "$fid" "$aid"
-    export "$var=$aid"
+    export "$var=$aid" "${var}_FRONTEND=$fid"
     printInfo "  $var=$aid (classic id — the app-detection rule's applicationId)"
+    printInfo "  ${var}_FRONTEND=$fid (platform id — what a frontend health alert's frontends list takes)"
   done < "$decl"
   return $rc
 }
@@ -1865,7 +1872,7 @@ _monacoRumUndeploy() {
       sleep "${RUM_RETRY_SLEEP:-10}"
     done
     if [ -n "$gone" ]; then
-      unset "$var"
+      unset "$var" "${var}_FRONTEND"
     else
       printError "  kept for the next undeployMonaco"
       printf '%s|%s|%s|%s\n' "$var" "$fname" "$fid" "$aid" >> "$left"; rc=1

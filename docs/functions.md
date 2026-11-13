@@ -255,8 +255,14 @@ TODO_RUM_APP_ID todoapp TODOApp
 ```
 
 Before Monaco runs, `deployMonaco` creates **the seat's own** frontend for each line and exports
-`<ENV_VAR>` with its **classic id** (`APPLICATION-…`) — the id a detection rule's
-`applicationId` takes; the rule refuses the `FRONTEND-…` id. Use it like any environment
+two variables:
+
+| Variable | Value | Takes it |
+|---|---|---|
+| `<ENV_VAR>` | the **classic id**, `APPLICATION-…` | a detection rule's `applicationId` (`builtin:rum.web.app-detection`), which refuses the `FRONTEND-…` id; the scope of `builtin:rum.web.*` settings |
+| `<ENV_VAR>_FRONTEND` | the **platform id**, `FRONTEND-…` | a frontend health alert's `frontends` list (`builtin:health-experience.frontend-alert`): newest-experience tenants refuse the `APPLICATION-…` id there ("not SmartScape Ids", PVF 2026-11-13) |
+
+`undeployMonaco` unsets both once the frontend is proven gone. Use them like any environment
 parameter:
 
 ```yaml
@@ -271,6 +277,14 @@ configs:
     template: rule.json      # {"applicationId": "{{ .applicationId }}", "matcher": "URL_CONTAINS", "pattern": "{{ .host }}", ...}
   type:
     settings: {schema: builtin:rum.web.app-detection, scope: environment}
+- id: todoapp-request-errors
+  config:
+    name: {type: environment, name: LEARNER_PREFIX}
+    parameters:
+      frontendId: {type: environment, name: TODO_RUM_APP_ID_FRONTEND}
+    template: alert.json     # {"alertKey": "errorRateRequestErrors", "frontends": ["{{ .frontendId }}"], ...}
+  type:
+    settings: {schema: builtin:health-experience.frontend-alert, scope: environment}
 ```
 
 | | Value |
