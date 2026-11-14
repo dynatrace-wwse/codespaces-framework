@@ -235,6 +235,53 @@ source_functions() {
   [[ "$output" == *"todoapp|todoapp|todoapp|8080|todoapp.10.0.0.1.sslip.io|"* ]]
 }
 
+# ENH-163 F10: a shared box opens apps through :80 — registerApp warns, never fails.
+_shared_kubectl() {
+  # $1: LB ip the controller reports ("" = none); $2: hosts the Ingress reads back
+  export SK_LB="$1" SK_HOSTS="$2"
+  kubectl() {
+    case "$*" in
+      apply*) return 0 ;;
+      *"get svc ingress-nginx-controller"*) printf '%s' "$SK_LB" ;;
+      *"get ingress"*) printf '%s' "$SK_HOSTS" ;;
+      *) return 1 ;;
+    esac
+  }
+  export -f kubectl
+  printWarn() { echo "WARN $*"; }
+}
+
+@test "registerApp: a healthy shared box gets no warning" {
+  source_functions
+  export EXTERNAL_IP="10.0.0.1" ORBITAL_SHARED_ROLE=shared K3D_LB_HTTP_PORT=80
+  _shared_kubectl 172.18.0.2 "todoapp.10.0.0.1.sslip.io todoapp.$(hostname) "
+  run registerApp "todoapp" "todoapp" "todoapp" 8080
+  [ "$status" -eq 0 ]
+  [[ "$output" != *WARN* ]]
+}
+
+@test "registerApp: shared box warns on no controller LB, a non-80 port, and a foreign Ingress" {
+  source_functions
+  export EXTERNAL_IP="10.0.0.1" ORBITAL_SHARED_ROLE=shared K3D_LB_HTTP_PORT=31080
+  _shared_kubectl "" "unguard.kube "
+  run registerApp "unguard" "unguard" "unguard-envoy-proxy" 8080
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no ingress controller holds this cluster's LoadBalancer"* ]]
+  [[ "$output" == *"ingress is on :31080"* ]]
+  [[ "$output" == *"does not carry unguard.10.0.0.1.sslip.io"* ]]
+  grep -q '^unguard|' "$APP_REGISTRY"
+}
+
+@test "registerApp: outside a shared box nothing is checked" {
+  source_functions
+  export EXTERNAL_IP="10.0.0.1" K3D_LB_HTTP_PORT=31080
+  unset ORBITAL_SHARED_ROLE
+  _shared_kubectl "" ""
+  run registerApp "todoapp" "todoapp" "todoapp" 8080
+  [ "$status" -eq 0 ]
+  [[ "$output" != *WARN* ]]
+}
+
 @test "registerApp: fails with missing arguments" {
   source_functions
 
