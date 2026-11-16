@@ -2,12 +2,18 @@
  "image": "shinojosa/dt-enablement:v1.4.0",
  "digest": "sha256:dc8ddc5be28f3db98944ae474b2b0e15e4a5ba4744d2085ac0446b6ff9dfa6fb",
  "grype_version": "0.121.0",
- "db_built": "2026-10-27T06:30:41Z",
+ "db_built": "2026-11-15T06:19:39Z",
  "gated": [
   "Critical",
   "High"
  ],
  "keys": [
+  "CVE-2026-109518|apt-transport-https|2.8.3",
+  "CVE-2026-109518|apt-utils|2.8.3",
+  "CVE-2026-109518|apt|2.8.3",
+  "CVE-2026-109518|libapt-pkg6.0t64|2.8.3",
+  "GHSA-2m5v-pch6-74hx|undici|6.29.0",
+  "GHSA-qrxm-fqhp-jwvm|undici|6.29.0",
   "GHSA-xjj6-f33q-929c|undici|6.29.0",
   "GO-2025-4155|stdlib|go1.25.3",
   "GO-2026-4337|stdlib|go1.25.3",
