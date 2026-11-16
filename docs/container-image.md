@@ -96,7 +96,7 @@ The image is hosted on Docker Hub and is cross-compiled for ARM and AMD architec
 ### Versions and tags
 Everything that changes the image is pinned in `.devcontainer/Dockerfile`, so a rebuild reproduces
 the tag: base `mcr.microsoft.com/devcontainers/base:3.0.10-noble` (by digest), `NODE_VERSION` (exact nodesource
-package), `NPM_MAJOR`, `DOCKER_CLI_VERSION`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
+package), `NPM_VERSION`, `DOCKER_CLI_VERSION`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
 so a failed fetch fails the build instead of saving an error page as a binary.
 
 A changed image is published under a **new tag** and never rebuilt over an existing one. A retag
@@ -126,7 +126,13 @@ it brought a Docker daemon, containerd and runc that nothing runs, because the h
 mounted. The group is created directly and `/entrypoint.sh` maps its GID as before. 28.5.2 is the newest client that still negotiates down to the Codespaces
 daemon's API 1.43. 29.x does not, so the CLI stays on 28.x until that daemon moves. kubectl, kind
 and the Docker CLI were still built with Go older than 1.26.9, so the Go standard library advisory
-GO-2026-6612 remains in them until upstream ships rebuilt binaries (28.x never will). Use `v1.4.0`.
+GO-2026-6612 remains in them until upstream ships rebuilt binaries (28.x never will).
+
+`v1.4.1` is `v1.4.0` rebuilt for findings the nightly grype scan added after its release (SEC-001,
+brief 244). npm is pinned to exactly `11.21.2`, which bundles undici `6.29.1` (GHSA-2m5v-pch6-74hx,
+GHSA-qrxm-fqhp-jwvm; `v1.4.0` has 6.29.0 inside npm). The build's `apt-get upgrade` takes apt
+`2.8.4ubuntu0.1` (CVE-2026-109518). kubectl moves to `v1.37.2`, the first stable release built with
+Go 1.26.10, which clears GO-2026-6612 from kubectl. kind and the Docker CLI still carry it. Use `v1.4.1`.
 
 ### Publishing a new tag
 The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for
