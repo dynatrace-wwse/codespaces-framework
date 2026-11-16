@@ -10,7 +10,7 @@ ARG USERNAME=vscode
 # failed silently: an unauthenticated GitHub API 403 left KIND_RELEASE empty and saved an XML error
 # page as `kind`. Bump them with a new image tag; each build asserts the version it installed.
 ARG HELM_VERSION=v3.22.1
-ARG KUBECTL_VERSION=v1.37.1
+ARG KUBECTL_VERSION=v1.37.2
 ARG KIND_VERSION=v0.33.0
 # Docker CLI: the newest 28.x. 29.x requires API >= 1.44 and refuses older daemons ("client
 # version 1.52 is too new. Maximum supported API version is 1.43" on the GitHub Codespaces host);
@@ -87,12 +87,17 @@ RUN curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/$KIND_VERSION/
 # Pinned so a rebuild is reproducible. 22.23.4 fixes CVE-2026-111497 (Brotli decoder OOB write);
 # do not lower it. Bump to a newer 22.x patch with a new image tag, never by retagging.
 ARG NODE_VERSION=22.23.4
-# npm major held to v1.2's; @latest moved to npm 12. Move it on purpose with a new tag.
-ARG NPM_MAJOR=11
+# npm pinned exactly (was the floating major 11). 11.21.2 bundles undici 6.29.1, which fixes
+# GHSA-2m5v-pch6-74hx and GHSA-qrxm-fqhp-jwvm (v1.4.0 shipped undici 6.29.0). The build asserts
+# both versions. Move it on purpose with a new tag.
+ARG NPM_VERSION=11.21.2
+ARG NPM_UNDICI_VERSION=6.29.1
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs=${NODE_VERSION}-1nodesource1 \
     && test "$(node -v)" = "v${NODE_VERSION}" \
-    && npm install -g npm@${NPM_MAJOR} \
+    && npm install -g npm@${NPM_VERSION} \
+    && test "$(npm -v)" = "${NPM_VERSION}" \
+    && test "$(node -p "require('/usr/lib/node_modules/npm/node_modules/undici/package.json').version")" = "${NPM_UNDICI_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /
