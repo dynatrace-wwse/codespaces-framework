@@ -3,6 +3,7 @@ an unchanged scan, and refuse to conclude anything from a scan it cannot trust."
 from __future__ import annotations
 
 import json
+import re
 import pathlib
 from datetime import datetime, timezone
 
@@ -117,9 +118,21 @@ def test_write_baseline_roundtrip(tmp_path):
     assert cmp.main(["--scan", s, "--baseline", str(b)], now=NOW) == 0
 
 
+def _matrix_tags():
+    wf = (HERE.parents[1] / ".github/workflows/image-scan.yaml").read_text()
+    m = re.search(r"^\s*tag:\s*\[([^\]]*)\]", wf, re.M)
+    assert m, "image-scan.yaml has no `tag: [...]` matrix line"
+    tags = re.findall(r'"([^"]+)"', m.group(1))
+    assert tags, "image-scan.yaml matrix lists no tags"
+    return set(tags)
+
+
 def test_committed_baselines_are_well_formed():
     files = sorted(HERE.glob("baseline-*.json"))
-    assert {f.name for f in files} == {"baseline-v1.3.2.json", "baseline-v1.4.0.json"}
+    # One baseline per scanned tag and no orphan baseline: a matrix tag without one would gate on
+    # nothing, and a baseline nobody scans hides that a tag was dropped.
+    assert {f.name for f in files} == {f"baseline-{t}.json" for t in _matrix_tags()}
+    assert {"v1.3.2", "v1.4.0", "v1.4.1"} <= _matrix_tags()
     for f in files:
         b = json.loads(f.read_text())
         tag = f.stem.removeprefix("baseline-")
