@@ -26,3 +26,10 @@ pulls it.
 | v1.3.2 | GO-2026-6865\|klauspost/compress\|v1.18.1, v1.18.2 | High | v1.4.0 (docker.io removed, #205) | same |
 
 v1.4.1's own baseline was written from a fresh scan at publish (45 Critical/High, none new vs v1.4.0).
+
+## 2026-11-17 (brief 249, SEC-001) — v1.3.2 no longer scanned
+
+`enablement-openinference-aiobs`, the last repo pinning v1.3.2, moved to v1.4.1
+(enablement-openinference-aiobs #5, `3099e82`; its integration test passed on v1.4.1). Nothing pulls
+v1.3.2 any more, so it left the scan matrix and `baseline-v1.3.2.json` was deleted (it stays in git
+history). The v1.3.2 rows above are kept as the record of what was accepted while it was pulled.
