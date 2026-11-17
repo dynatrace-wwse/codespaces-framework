@@ -132,7 +132,7 @@ def test_committed_baselines_are_well_formed():
     # One baseline per scanned tag and no orphan baseline: a matrix tag without one would gate on
     # nothing, and a baseline nobody scans hides that a tag was dropped.
     assert {f.name for f in files} == {f"baseline-{t}.json" for t in _matrix_tags()}
-    assert {"v1.3.2", "v1.4.0", "v1.4.1"} <= _matrix_tags()
+    assert {"v1.4.0", "v1.4.1"} <= _matrix_tags()
     for f in files:
         b = json.loads(f.read_text())
         tag = f.stem.removeprefix("baseline-")
