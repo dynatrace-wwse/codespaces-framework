@@ -303,6 +303,13 @@ the token never is — it reaches curl through a file descriptor, not its comman
   lags a new frontend by up to ~80 s). It must not be POSTed twice: a second create of the same
   name answers the **same** `FRONTEND` id but adds **another** classic application (measured on
   PVF), and that orphan has no frontend node, so the RUM API cannot delete it.
+- **A new frontend is waited for.** After the create, `deployMonaco` asks Smartscape for the new
+  `FRONTEND` id (`smartscapeNodes FRONTEND | filter id == toSmartscapeId(…)`, every
+  `RUM_RETRY_SLEEP` s, up to `RUM_SMARTSCAPE_WAIT` = 180 s) before Monaco runs, as it does on
+  reuse. Without the wait a frontend health alert in the same project was refused on fresh
+  seats: "The following frontend applications no longer exist in Grail: FRONTEND-…". If the
+  wait runs out, the deploy goes on with the classic id from the settings listing and warns that
+  a config naming `<ENV_VAR>_FRONTEND` may be refused — deploy again then.
 - **Undo.** `undeployMonaco` runs `monaco delete` first, then
   `DELETE /platform/rum/v1/frontends/<FRONTEND id>` — deleting a frontend also removes the
   detection rules pointing at it — and **proves it gone by reading its

@@ -1772,12 +1772,14 @@ _monacoRumFrontends() {
       printf '%s' "$fid" | grep -qxE 'FRONTEND-[0-9A-F]+' || { printError "creating RUM frontend '$fname' answered no FRONTEND id"; rc=1; break; }
       # Recorded before the classic id is known: undeployMonaco can delete it either way.
       _rumStateSet "$run/rum-frontends.state" "$var" "$fname" "$fid" ""
-      ids=$(_rumAppIdsByName "$fname") || { rc=1; break; }
-      if [ "$(printf '%s' "$ids" | grep -c .)" -eq 1 ]; then
-        aid="$ids"
-      else
-        # Ambiguous (or not yet visible): ask Smartscape which classic id is this FRONTEND's.
-        aid=$(_rumSmartscapeWait "id == toSmartscapeId(\"$fid\")" | awk '{print $2}') || aid=""
+      # Wait for Smartscape on create too, as reuse does: a config that names the
+      # FRONTEND id (a frontend health alert) is refused until Grail knows it
+      # ("no longer exist in Grail: FRONTEND-…", fresh seats 2026-11-16).
+      aid=$(_rumSmartscapeWait "id == toSmartscapeId(\"$fid\")" | awk '{print $2}') || aid=""
+      if [ -z "$aid" ]; then
+        ids=$(_rumAppIdsByName "$fname") || { rc=1; break; }
+        [ "$(printf '%s' "$ids" | grep -c .)" -eq 1 ] && aid="$ids"
+        [ -z "$aid" ] || printWarn "  $fid is not in Smartscape yet — a config that names ${var}_FRONTEND may be refused; deploy again if it is"
       fi
       [ -n "$aid" ] || { printError "RUM frontend $fid created, but its classic APPLICATION id could not be resolved — undo with: undeployMonaco $phase"; rc=1; break; }
       printInfo "  created $fid ($aid)"
