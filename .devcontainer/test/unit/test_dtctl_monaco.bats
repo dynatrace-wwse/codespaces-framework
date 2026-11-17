@@ -270,7 +270,8 @@ if u.path == "/platform/classic/environment-api/v2/settings/objects" and method 
 if u.path == "/platform/storage/query/v1/query:execute" and method == "POST":
     dq = json.loads(data)["query"]
     recs = []
-    if not env.get("RUM_FAKE_SMARTSCAPE_EMPTY"):
+    lag = bump("smartscape") <= int(env.get("RUM_FAKE_SMARTSCAPE_LAG", "0"))  # a new frontend is not there yet
+    if not env.get("RUM_FAKE_SMARTSCAPE_EMPTY") and not lag:
         n = re.search(r'frontend\.name == "([^"]+)"', dq); i_ = re.search(r'toSmartscapeId\("([^"]+)"\)', dq)
         seen = set()
         for r in rows:
@@ -1871,6 +1872,31 @@ run_setUpTerminal() {
   # the token reached the API only through the header FILE, never curl's argv
   refute grep -q SENTINEL "$RUM_ARGS_LOG"
   no_sentinel_anywhere
+}
+
+@test "deployMonaco: create waits until Smartscape knows the new FRONTEND before Monaco runs" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_SMARTSCAPE_LAG=2 run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  local fid; fid=$(cut -d'|' -f3 "$FAKE_REPO/.devcontainer/.monaco/tenant/rum-frontends.state")
+  echo "$output" | grep -q "DQL: smartscapeNodes FRONTEND | filter id == toSmartscapeId(\"$fid\")"
+  # asked twice while lagging, found on the third ask, and only then Monaco ran
+  [ "$(rum_count POST /platform/storage/query/v1/query:execute)" -eq 3 ]
+  [ "$(echo "$output" | grep -c "not in Smartscape yet — asking again")" -eq 2 ]
+  local last; last=$(grep -n "^POST /platform/storage/query/v1/query:execute" "$RUM_LOG" | tail -1 | cut -d: -f1)
+  [ "$last" -gt "$(grep -n "^POST /platform/rum/v1/frontends" "$RUM_LOG" | cut -d: -f1)" ]
+  grep "^monaco deploy" "$MONACO_LOG" | grep -q "| rumf=$fid | rum=APPLICATION-"
+  refute grep -q "a config that names" <<< "$output"
+}
+
+@test "deployMonaco: create whose FRONTEND outlasts the Smartscape wait still deploys with the classic id, and warns" {
+  source_functions
+  rum_project tenant
+  RUM_FAKE_SMARTSCAPE_EMPTY=1 RUM_SMARTSCAPE_WAIT=0 run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "is not in Smartscape yet — a config that names TODO_RUM_APP_ID_FRONTEND may be refused"
+  grep "^monaco deploy" "$MONACO_LOG" | grep -q "rum=APPLICATION-"
 }
 
 @test "deployMonaco: a re-deploy reuses the seat's frontend — no second POST (a second POST adds another classic app)" {
