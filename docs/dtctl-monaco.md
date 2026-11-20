@@ -6,7 +6,7 @@ builds — GitHub Codespaces, Orbital, a local container:
 | Tool | What it is for | Pinned version |
 |---|---|---|
 | [`dtctl`](https://github.com/dynatrace-oss/dtctl) | Query and inspect the tenant: DQL, documents, settings | `DTCTL_VERSION` (0.43.0) |
-| [`monaco`](https://github.com/Dynatrace/dynatrace-configuration-as-code) | Configuration as code: deploy dashboards, notebooks, settings | `MONACO_VERSION` (2.30.1, the framework's patched build `2.30.1+wwse.1` — see [below](#monaco-is-a-patched-build)) |
+| [`monaco`](https://github.com/Dynatrace/dynatrace-configuration-as-code) | Configuration as code: deploy dashboards, notebooks, settings, Automation workflows | `MONACO_VERSION` (2.30.1, the framework's patched build `2.30.1+wwse.1` — see [below](#monaco-is-a-patched-build)) |
 
 **They are opt-in, like the [MCP server](functions.md#mcp-server-vs-code)** (since framework 1.23.0;
 1.20–1.22 installed them in every repo at the end of post-create). Two ways in:

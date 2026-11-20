@@ -164,7 +164,7 @@ EOF
   # The "released" monaco: logs arguments + whether the token is present.
   cat > "$FIXTURES/monaco-linux-amd64" <<'EOF'
 #!/bin/bash
-echo "monaco $* | LEARNER_PREFIX=${LEARNER_PREFIX:-} | token-set=$([ -n "$DT_MONACO_TOKEN" ] && echo yes || echo no) | cwd=$PWD | rumf=${TODO_RUM_APP_ID_FRONTEND:-} | rum=${TODO_RUM_APP_ID:-}" >> "$MONACO_LOG"
+echo "monaco $* | LEARNER_PREFIX=${LEARNER_PREFIX:-} | token-set=$([ -n "$DT_MONACO_TOKEN" ] && echo yes || echo no) | cwd=$PWD | key=${LEARNER_KEY:-} | rumf=${TODO_RUM_APP_ID_FRONTEND:-} | rum=${TODO_RUM_APP_ID:-}" >> "$MONACO_LOG"
 if [ "$1 $2" = "generate deletefile" ]; then
   dir="" file="delete.yaml"
   while [ $# -gt 0 ]; do
@@ -973,7 +973,7 @@ EOF
   [ ! -e "$MONACO_LOG" ]
 }
 
-@test "deployMonaco: block-form classic api and automation types are refused too" {
+@test "deployMonaco: block-form classic api and non-workflow automation types are refused too" {
   source_functions
   mkdir -p "$FAKE_REPO/monaco/tenant"
   cat > "$FAKE_REPO/monaco/tenant/a.yaml" <<'EOF'
@@ -982,16 +982,129 @@ configs:
     type:
       api: application-web
     config: {name: app, template: a.json}
-  - id: wf
-    config: {name: wf, template: w.json}
+  - id: cal
+    config: {name: cal, template: c.json}
     type:
       automation:
-        resource: workflow
+        resource: business-calendar
 EOF
   run deployMonaco tenant
   [ "$status" -ne 0 ]
   echo "$output" | grep -q "a.yaml: api"
-  echo "$output" | grep -q "a.yaml: automation"
+  echo "$output" | grep -q "a.yaml: automation/business-calendar"
+  echo "$output" | grep -q "v1: settings, document and workflow"
+  [ ! -e "$MONACO_LOG" ]
+}
+
+# ── BYOA-256: Automation workflows ───────────────────────────────────────────
+
+make_workflow_project() {
+  # make_workflow_project <phase> — one Automation workflow, block form (SRO-measured shape).
+  local d="$FAKE_REPO/monaco/$1/workflows"
+  mkdir -p "$d"
+  cat > "$d/config.yaml" <<'EOF'
+configs:
+  - id: byoa-triage
+    type:
+      automation:
+        resource: workflow
+    config:
+      name:
+        type: environment
+        name: LEARNER_KEY
+      template: workflow.json
+EOF
+  echo '{}' > "$d/workflow.json"
+}
+
+@test "BYOA-256: an Automation workflow (block form) is accepted and deployed" {
+  source_functions
+  make_workflow_project tenant
+  run _monacoUnsupportedTypes "$FAKE_REPO/monaco/tenant"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  grep -q "^monaco deploy manifest.yaml -e learner" "$MONACO_LOG"
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/tenant/project/workflows/config.yaml" ]
+  no_sentinel_anywhere
+}
+
+@test "BYOA-256: flow-form workflow types are accepted (quoted, nested flow, inline comment)" {
+  source_functions
+  mkdir -p "$FAKE_REPO/monaco/env"
+  cat > "$FAKE_REPO/monaco/env/w.yaml" <<'EOF'
+configs:
+  - id: a
+    type: {automation: {resource: workflow}}
+    config: {name: a, template: w.json}
+  - id: b
+    type: { automation: { resource: "workflow" } }   # quoted
+    config: {name: b, template: w.json}
+  - id: c
+    type:
+      automation: {resource: workflow}
+    config: {name: c, template: w.json}
+- id: d
+  type:
+    automation:
+      resource: workflow   # comment
+EOF
+  run _monacoUnsupportedTypes "$FAKE_REPO/monaco/env"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "BYOA-256: business-calendar and scheduling-rule are refused, block and flow form — nothing deployed" {
+  source_functions
+  make_workflow_project tenant
+  cat > "$FAKE_REPO/monaco/tenant/other.yaml" <<'EOF'
+configs:
+  - id: cal
+    type:
+      automation:
+        resource: business-calendar
+    config: {name: cal, template: c.json}
+  - id: rule
+    type: {automation: {resource: scheduling-rule}}
+    config: {name: rule, template: r.json}
+  - id: rule2
+    type:
+      automation: {resource: scheduling-rule}
+    config: {name: rule2, template: r.json}
+EOF
+  run deployMonaco tenant
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "other.yaml: automation/business-calendar"
+  [ "$(echo "$output" | grep -c "other.yaml: automation/scheduling-rule")" -eq 2 ]
+  # the workflow file is not reported
+  ! echo "$output" | grep -q "workflows/config.yaml:" || false
+  echo "$output" | grep -q "Nothing was deployed"
+  [ ! -e "$MONACO_LOG" ]
+}
+
+@test "BYOA-256: an automation type whose resource cannot be read fails closed" {
+  source_functions
+  mkdir -p "$FAKE_REPO/monaco/tenant"
+  cat > "$FAKE_REPO/monaco/tenant/x.yaml" <<'EOF'
+configs:
+  - id: a
+    type:
+      automation:
+    config: {name: a, template: w.json}
+  - id: b
+    type: {automation: workflow}
+    config: {name: b, template: w.json}
+  - id: c
+    type:
+      automation:
+        resource:
+    config: {name: c, template: w.json}
+  - id: d
+    type: {automation: {resource: workflow, extra: 1}}
+EOF
+  run _monacoUnsupportedTypes "$FAKE_REPO/monaco/tenant"
+  [ "$(echo "$output" | grep -c "x.yaml: automation")" -eq 4 ]
 }
 
 @test "deployMonaco: a configs file the parser cannot read fails closed" {
@@ -2304,8 +2417,8 @@ project_in_manifest() {
   run deployMonaco tenant
   [ "$status" -eq 0 ]
   echo "$output" | grep -qF '→ cd .devcontainer/.monaco/tenant'
-  echo "$output" | grep -qF '→ LEARNER_PREFIX=$DT_SESSION_ID monaco generate deletefile manifest.yaml -o . --file delete.yaml'
-  echo "$output" | grep -qF '→ LEARNER_PREFIX=$DT_SESSION_ID monaco deploy manifest.yaml -e learner'
+  echo "$output" | grep -qF '→ LEARNER_PREFIX=$DT_SESSION_ID LEARNER_KEY=$DT_SESSION_ID monaco generate deletefile manifest.yaml -o . --file delete.yaml'
+  echo "$output" | grep -qF '→ LEARNER_PREFIX=$DT_SESSION_ID LEARNER_KEY=$DT_SESSION_ID monaco deploy manifest.yaml -e learner'
   echo "$output" | grep -qF 'token from $DT_MONACO_TOKEN, by name'
   # printed BEFORE it ran: the deploy line precedes monaco's success
   [ "$(echo "$output" | grep -nF 'monaco deploy manifest.yaml' | head -1 | cut -d: -f1)" -lt "$(echo "$output" | grep -n 'deployed — to undo' | cut -d: -f1)" ]
@@ -2347,4 +2460,133 @@ project_in_manifest() {
   echo "$output" | grep -q "^RC1=1"
   echo "$output" | grep -q "^RC2=0"
   [ "$(project_in_manifest tenant)" = "test-enablement-learner-ab12-g1" ]
+}
+
+
+# ── BYOA-256: deployMonaco / undeployMonaco --for <learner key> ─────────────────
+
+@test "BYOA-256 --for: project <repo>-<key>, run dir <phase>--<key>, LEARNER_KEY and LEARNER_PREFIX = key" {
+  source_functions
+  make_workflow_project tenant
+  run deployMonaco tenant --for alice-01
+  [ "$status" -eq 0 ]
+  local run_dir="$FAKE_REPO/.devcontainer/.monaco/tenant--alice-01"
+  grep -qx "  - name: test-enablement-alice-01" "$run_dir/manifest.yaml"
+  [ -f "$run_dir/delete.yaml" ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant" ]
+  sed -n 2p "$MONACO_LOG" | grep -q "^monaco deploy manifest.yaml -e learner | LEARNER_PREFIX=alice-01 | .* | key=alice-01 |"
+  sed -n 2p "$MONACO_LOG" | grep -q "cwd=$run_dir "
+  # says exactly what is deployed for whom, and how to undo it
+  echo "$output" | grep -q "FOR learner 'alice-01' (--for): project 'test-enablement-alice-01'"
+  echo "$output" | grep -q "to undo: undeployMonaco tenant --for alice-01"
+  no_sentinel_anywhere
+}
+
+@test "BYOA-256: without --for LEARNER_KEY = LEARNER_PREFIX = DT_SESSION_ID (unchanged project, run dir)" {
+  source_functions
+  make_workflow_project tenant
+  run deployMonaco tenant
+  [ "$status" -eq 0 ]
+  grep -qx "  - name: test-enablement-learner-ab12" "$FAKE_REPO/.devcontainer/.monaco/tenant/manifest.yaml"
+  sed -n 2p "$MONACO_LOG" | grep -q "LEARNER_PREFIX=learner-ab12 | .* | key=learner-ab12 |"
+}
+
+@test "BYOA-256 --for: a bad key is refused before anything runs" {
+  source_functions
+  make_workflow_project tenant
+  local k
+  for k in "Alice" "-alice" "a_b" "a b" "a/../b" "" "abcdefghijklmnopqrstuvwxyz0123456" "$(printf 'ok\nbad')"; do
+    run deployMonaco tenant --for "$k"
+    [ "$status" -eq 2 ] || { echo "deploy accepted key '$k'"; return 1; }
+    echo "$output" | grep -q "is not a learner key" || { echo "no reason for '$k'"; return 1; }
+    run undeployMonaco tenant --for "$k"
+    [ "$status" -eq 2 ] || { echo "undeploy accepted key '$k'"; return 1; }
+  done
+  run deployMonaco tenant --for
+  [ "$status" -eq 2 ]
+  run deployMonaco --for bob
+  [ "$status" -eq 2 ]
+  # the longest valid key (32) is fine
+  run deployMonaco tenant --for abcdefghijklmnopqrstuvwxyz012345
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^monaco deploy' "$MONACO_LOG")" -eq 1 ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant--" ]
+}
+
+@test "BYOA-256 --for: two keys (and the seat's own deploy) do not collide" {
+  source_functions
+  make_workflow_project tenant
+  deployMonaco tenant --for alice >/dev/null
+  deployMonaco tenant --for bob >/dev/null
+  deployMonaco tenant >/dev/null
+  local m="$FAKE_REPO/.devcontainer/.monaco"
+  grep -q "name: test-enablement-alice$" "$m/tenant--alice/manifest.yaml"
+  grep -q "name: test-enablement-bob$" "$m/tenant--bob/manifest.yaml"
+  grep -q "name: test-enablement-learner-ab12$" "$m/tenant/manifest.yaml"
+  # a generation bump (trash) for one key is that key's only
+  _monacoBumpGeneration tenant--alice
+  [ "$(_monacoGeneration tenant--alice)" -eq 1 ]
+  [ "$(_monacoGeneration tenant--bob)" -eq 0 ]
+  [ "$(_monacoGeneration tenant)" -eq 0 ]
+  run deployMonaco tenant --for alice
+  grep -q "name: test-enablement-alice-g1$" "$m/tenant--alice/manifest.yaml"
+  grep -q "name: test-enablement-bob$" "$m/tenant--bob/manifest.yaml"
+}
+
+@test "BYOA-256 undeploy --for: removes only its own run dir; no phase = both phases for that key" {
+  source_functions
+  make_workflow_project tenant
+  make_workflow_project env
+  deployMonaco tenant --for alice >/dev/null
+  deployMonaco env --for alice >/dev/null
+  deployMonaco tenant --for bob >/dev/null
+  deployMonaco tenant >/dev/null
+  local m="$FAKE_REPO/.devcontainer/.monaco"
+  : > "$MONACO_LOG"
+  run undeployMonaco --for alice
+  [ "$status" -eq 0 ]
+  [ ! -e "$m/tenant--alice" ]
+  [ ! -e "$m/env--alice" ]
+  [ -f "$m/tenant--bob/delete.yaml" ]
+  [ -f "$m/tenant/delete.yaml" ]
+  [ "$(grep -c '^monaco delete' "$MONACO_LOG")" -eq 2 ]
+  ! grep -q "cwd=$m/tenant--bob\|cwd=$m/tenant " "$MONACO_LOG" || false
+  echo "$output" | grep -q "monaco/tenant (for alice) removed"
+  # one phase for bob, then nothing left for bob
+  run undeployMonaco tenant --for bob
+  [ "$status" -eq 0 ]
+  [ ! -e "$m/tenant--bob" ]
+  [ -f "$m/tenant/delete.yaml" ]
+  run undeployMonaco --for bob
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "monaco/env (for bob): nothing deployed"
+  # the seat's own undeploy never touches --for dirs either
+  deployMonaco tenant --for carol >/dev/null
+  run undeployMonaco
+  [ "$status" -eq 0 ]
+  [ ! -e "$m/tenant" ]
+  [ -f "$m/tenant--carol/delete.yaml" ]
+}
+
+@test "BYOA-256 -h documents workflows, scopes, actor = token owner, and --for" {
+  source_functions
+  run deployMonaco -h
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "deployMonaco <tenant|env> \[--for <learner-key>\]"
+  echo "$output" | grep -q "automation:workflows:read"
+  echo "$output" | grep -q "owner AND actor are the token's"
+  run undeployMonaco -h
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "undeployMonaco \[tenant|env\] \[--for <learner-key>\]"
+  [ ! -e "$MONACO_LOG" ]
+}
+
+@test "BYOA-256 --for under zsh (the learner's shell)" {
+  command -v zsh >/dev/null || skip "zsh not installed"
+  make_workflow_project tenant
+  run zsh -c 'cd "$FAKE_REPO" && source .devcontainer/util/variables.sh && source .devcontainer/util/functions.sh \
+    && deployMonaco tenant --for alice && deployMonaco tenant --for bob && undeployMonaco --for alice'
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant--alice" ]
+  [ -f "$FAKE_REPO/.devcontainer/.monaco/tenant--bob/delete.yaml" ]
 }

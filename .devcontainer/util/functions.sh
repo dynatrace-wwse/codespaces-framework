@@ -1372,27 +1372,57 @@ _devToolStep() {
 
 _monacoUnsupportedTypes() {
   # _monacoUnsupportedTypes <dir> — prints "<file>: <type>" for every config
-  # whose type is not settings or document. v1 deploys only those two; a
-  # scalar type (`type: synthetic-monitor`) is a classic API and needs a
-  # classic token. Only the `type:` key of a config item is read, never a
-  # parameter's `type: environment`. A file the parser cannot read (no
-  # top-level block `configs:` list) is reported too: it fails closed.
+  # whose type is not settings, document or an Automation workflow
+  # (`type: {automation: {resource: workflow}}`, block or flow form). Every
+  # other automation resource (business-calendar, scheduling-rule) is
+  # reported as automation/<resource>; a scalar type (`type: synthetic-monitor`)
+  # is a classic API and needs a classic token. Only the `type:` key of a
+  # config item is read, never a parameter's `type: environment`. A file the
+  # parser cannot read (no top-level block `configs:` list, an automation
+  # type whose resource cannot be read) is reported too: it fails closed.
   find "$1" -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | sort | while IFS= read -r f; do
     awk -v F="$f" '
       function ind(s) { match(s, /^ */); return RLENGTH }
+      function flat(v) { gsub(/[ \t"\047]/, "", v); return v }
+      # A flow-form automation type: only {automation:{resource:workflow}}.
+      function autoflow(v,   r) {
+        v = flat(v)
+        if (v == "{automation:{resource:workflow}}") return
+        r = v; if (sub(/^\{automation:\{resource:/, "", r) && sub(/\}\}$/, "", r) && r ~ /^[a-z-]+$/) print F ": automation/" r
+        else print F ": automation (resource not readable — cannot check it)"
+      }
       function check(v) {
         sub(/^[ \t]+/, "", v); sub(/[ \t]+(#.*)?$/, "", v)
         if (v == "") { pending = 1; return }
-        if (v ~ /^\{/) { v = substr(v, 2); sub(/^[ \t]+/, "", v); sub(/[ \t:].*$/, "", v) }
+        if (v ~ /^\{/) {
+          if (flat(v) ~ /^\{automation:/) { autoflow(v); return }
+          v = substr(v, 2); sub(/^[ \t]+/, "", v); sub(/[ \t:].*$/, "", v)
+        }
         if (v != "settings" && v != "document") print F ": " v
       }
       {
         line = $0; sub(/\r$/, "", line)
         if (line ~ /^[ \t]*(#.*)?$/) next
         i = ind(line)
+        if (autopend) {
+          # `automation:` (block form) — the next deeper line names the resource.
+          autopend = 0
+          if (i > autoi && line ~ /^ *resource:/) {
+            r = line; sub(/^ *resource:/, "", r); sub(/#.*$/, "", r); r = flat(r)
+            if (r != "workflow") print F ": automation/" (r == "" ? "(empty resource)" : r)
+            next
+          }
+          print F ": automation (resource not readable — cannot check it)"
+        }
         if (pending) {
           pending = 0
           if (i > col) { k = line; sub(/^ *(- *)?/, "", k); sub(/:.*$/, "", k)
+                         if (k == "automation") {
+                           v = line; sub(/^ *(- *)?automation:/, "", v); sub(/[ \t]+#.*$/, "", v)
+                           if (flat(v) == "") { autopend = 1; autoi = i }
+                           else autoflow("{automation:" v "}")
+                           next
+                         }
                          if (k != "settings" && k != "document") print F ": " k; next }
           print F ": (empty type)"
         }
@@ -1414,6 +1444,7 @@ _monacoUnsupportedTypes() {
       }
       END {
         if (pending) print F ": (empty type)"
+        if (autopend) print F ": automation (resource not readable — cannot check it)"
         if (!sawconf) print F ": (no top-level configs: list — cannot check its types)"
       }
     ' "$f"
@@ -1436,13 +1467,56 @@ _monacoMergeDeleteFiles() {
 }
 
 _monacoRunDir() {
+  # _monacoRunDir <run-name> — <phase>, or <phase>--<key> for deployMonaco --for <key>.
   echo "${MONACO_RUN_DIR:-$REPO_PATH/.devcontainer/.monaco}/$1"
 }
 
+_monacoValidKey() {
+  # _monacoValidKey <key> — a learner key for --for: ^[a-z0-9][a-z0-9-]{0,31}$.
+  printf '%s' "$1" | grep -qxE '[a-z0-9][a-z0-9-]{0,31}' && [ "$(printf '%s' "$1" | wc -l)" -eq 0 ]
+}
+
+_monacoParseArgs() {
+  # _monacoParseArgs <deploy|undeploy> <args...> — sets MONACO_ARG_PHASE,
+  # MONACO_ARG_KEY and MONACO_ARG_HELP. Returns 2 on a usage error (printed).
+  local what="$1" usage
+  shift
+  MONACO_ARG_PHASE="" MONACO_ARG_KEY="" MONACO_ARG_HELP=""
+  if [ "$what" = deploy ]; then
+    usage="Usage: deployMonaco <tenant|env> [--for <learner-key>]   (deployMonaco -h for help)"
+  else
+    usage="Usage: undeployMonaco [tenant|env] [--for <learner-key>]   (undeployMonaco -h for help)"
+  fi
+  local forset=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help) MONACO_ARG_HELP=1; return 0 ;;
+      --for)
+        [ $# -ge 2 ] || { printError "--for needs a learner key"; printError "$usage"; return 2; }
+        forset=1; MONACO_ARG_KEY="$2"; shift ;;
+      --for=*) forset=1; MONACO_ARG_KEY="${1#--for=}" ;;
+      tenant|env)
+        [ -z "$MONACO_ARG_PHASE" ] || { printError "$usage"; return 2; }
+        MONACO_ARG_PHASE="$1" ;;
+      *) printError "$usage"; return 2 ;;
+    esac
+    shift
+  done
+  if [ -n "$forset" ] && ! _monacoValidKey "$MONACO_ARG_KEY"; then
+    printError "--for '$MONACO_ARG_KEY' is not a learner key: 1-32 characters, lowercase letters, digits and dashes, not starting with a dash (^[a-z0-9][a-z0-9-]{0,31}\$). Nothing was done."
+    return 2
+  fi
+  if [ "$what" = deploy ] && [ -z "$MONACO_ARG_PHASE" ]; then
+    printError "$usage"; return 2
+  fi
+  return 0
+}
+
 _monacoProjectName() {
+  # _monacoProjectName [key] — <repo>-<key> with --for <key>, else <repo>-<DT_SESSION_ID>.
   local repo session
   repo=$(echo "${RepositoryName:-$(basename "$REPO_PATH")}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g')
-  session="${DT_SESSION_ID:-$(getDtSessionId)}"
+  session="${1:-${DT_SESSION_ID:-$(getDtSessionId)}}"
   [ -n "$session" ] || return 1
   # Written into the generated manifest: lowercase, digits and dashes only.
   echo "${repo}-${session}" | grep -qxE '[a-z0-9][a-z0-9-]*' || return 1
@@ -1450,6 +1524,7 @@ _monacoProjectName() {
 }
 
 _monacoGenerationFile() {
+  # _monacoGenerationFile <run-name> — one per phase, and per phase and key.
   echo "$(dirname "$(_monacoRunDir "$1")")/.$1-generation"
 }
 
@@ -1494,12 +1569,15 @@ _monacoHelp() {
   local token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
   if [ "$1" = "undeploy" ]; then
     cat <<HELPEOF
-Usage: undeployMonaco [tenant|env]
+Usage: undeployMonaco [tenant|env] [--for <learner-key>]
        undeployMonaco -h | --help
 
 Deletes what deployMonaco created in your Dynatrace environment.
-  (no argument)  both phases, env first, then tenant
-  tenant | env   only that phase
+  (no phase)          both phases, env first, then tenant
+  tenant | env        only that phase
+  --for <learner-key> only what 'deployMonaco <phase> --for <learner-key>'
+                      created (.devcontainer/.monaco/<phase>--<key>/); no
+                      other learner's deploy, nor this seat's own, is touched
 
 What it does, step by step:
   1. Reads the delete file deployMonaco wrote BEFORE it deployed:
@@ -1528,23 +1606,32 @@ HELPEOF
     return 0
   fi
   cat <<HELPEOF
-Usage: deployMonaco <tenant|env>
+Usage: deployMonaco <tenant|env> [--for <learner-key>]
        deployMonaco -h | --help
 
 Deploys the Monaco project in monaco/<phase>/ of this repo to your Dynatrace
 environment, as configuration-as-code.
   tenant   monaco/tenant/ — configuration for the whole environment
   env      monaco/env/    — configuration for this lab's environment
+  --for <learner-key>
+           deploy for ANOTHER learner from this seat (a trainer on a shared
+           box). <learner-key>: 1-32 of a-z 0-9 -, not starting with '-'.
+           Project <repo>-<learner-key>, run dir
+           .devcontainer/.monaco/<phase>--<learner-key>/, and
+           LEARNER_PREFIX=LEARNER_KEY=<learner-key>. Learners coexist;
+           undeployMonaco <phase> --for <learner-key> removes only theirs.
 
 What it does, step by step:
   1. Checks monaco/<phase>/ exists and holds only supported config types
-     (v1: settings and documents).
+     (v1: settings, documents and Automation workflows —
+     type: {automation: {resource: workflow}}; business calendars,
+     scheduling rules and classic APIs are refused).
   2. Checks DT_ENVIRONMENT and the platform token are set, and that the
      framework's verified Monaco build is installed (installs it if not).
   3. Copies monaco/<phase>/ to .devcontainer/.monaco/<phase>/ and writes a
      manifest.yaml naming ONE project per learner: <repo>-<DT_SESSION_ID>.
-     LEARNER_PREFIX=<DT_SESSION_ID> is exported for config names, so your
-     objects never collide with another learner's.
+     LEARNER_PREFIX and LEARNER_KEY (both <DT_SESSION_ID>) are exported for
+     config names, so your objects never collide with another learner's.
   4. RUM frontends: for each line of monaco/<phase>/rum-frontends.txt
        <ENV_VAR> <name> <display name>     e.g.  TODO_RUM_APP_ID todoapp TODOApp
      creates YOUR web frontend <name>-<seat id> ("<display name> <session>")
@@ -1567,6 +1654,10 @@ Required variables (names only):
   DT_SESSION_ID   your learner id (derived from DT_HOSTGROUP or GITHUB_USER)
   (rum-frontends.txt only) the token needs rum:frontends:write and
   rum:frontends:delete; jq
+  (workflows only) the token needs automation:workflows:read and
+  automation:workflows:write. A workflow's owner AND actor are the token's
+  owner: its JavaScript tasks run as that principal. Grant these scopes only
+  to trainer-only tokens.
 
 Undo: undeployMonaco <tenant|env>   (undeployMonaco -h for details)
 Docs: $(_monacoDocsUrl)
@@ -1704,20 +1795,23 @@ _rumReservedVar() {
   case "$1" in
     *TOKEN*|*SECRET*|*PASSWORD*|*KEY*|DT_*|ORBITAL_*|MONACO_*|DTCTL_*|GITHUB_*|CODESPACE*|RUM_*) return 0 ;;
     PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|IFS|PS1|PS2|PS4|TERM|LANG|TMPDIR|HOSTNAME) return 0 ;;
-    KUBECONFIG|LEARNER_PREFIX|REPO_PATH|RepositoryName|ENV_FILE|LD_*|BASH*|ZSH*|FPATH|PROMPT_COMMAND) return 0 ;;
+    KUBECONFIG|LEARNER_PREFIX|LEARNER_KEY|REPO_PATH|RepositoryName|ENV_FILE|LD_*|BASH*|ZSH*|FPATH|PROMPT_COMMAND) return 0 ;;
   esac
   return 1
 }
 
 _monacoRumFrontends() {
-  # _monacoRumFrontends <phase> <run-dir> [previous-state] — the deploy pre-hook.
+  # _monacoRumFrontends <phase> <run-dir> [previous-state] [key] — the deploy pre-hook.
   # Creates (or reuses) every frontend monaco/<phase>/rum-frontends.txt
   # declares, exports its <ENV_VAR>, records it in <run>/rum-frontends.state.
+  # With --for <key> the frontend is the key's own (<name>-<seat>-<key>), so
+  # two learners deployed from one seat never share (or undeploy) one.
   local phase="$1" run="$2" prev="$3" decl="$2/project/rum-frontends.txt" seat session
   [ -f "$decl" ] || return 0
   command -v jq >/dev/null 2>&1 || { printError "rum-frontends.txt needs jq, which is not installed — nothing was deployed"; return 1; }
   seat=$(_rumSeatId) || { printError "No seat id (ORBITAL_JOB_ID, CODESPACE_NAME or hostname) for the RUM frontend name — nothing was deployed"; return 1; }
   session="${DT_SESSION_ID:-$(getDtSessionId)}"
+  if [ -n "$4" ]; then seat="$seat-$4"; session="$4"; fi
   local var name display fname ids n fid aid line rc=0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%#*}"
@@ -1885,14 +1979,14 @@ _monacoRumUndeploy() {
 }
 
 _monacoUndoHint() {
-  # _monacoUndoHint <phase> <deployed|failed> <run-dir> — the closing block
+  # _monacoUndoHint <phase> <deployed|failed> <run-dir> [key] — the closing block
   # of every deploy that reached the tenant, so the way back is the last
   # thing on screen (not buried under Monaco's log).
-  local phase="$1" outcome="$2" run="$3"
+  local phase="$1" outcome="$2" run="$3" key="$4"
   if [ "$outcome" = "deployed" ]; then
-    printInfoSection "monaco/$phase deployed — to undo: undeployMonaco $phase"
+    printInfoSection "monaco/$phase deployed${key:+ for $key} — to undo: undeployMonaco $phase${key:+ --for $key}"
   else
-    printInfoSection "monaco/$phase FAILED part-way — undo what landed: undeployMonaco $phase"
+    printInfoSection "monaco/$phase FAILED part-way${key:+ for $key} — undo what landed: undeployMonaco $phase${key:+ --for $key}"
   fi
   printInfo "Delete file: $run/delete.yaml"
   [ -s "$run/rum-frontends.state" ] && printInfo "RUM frontend(s) undeployMonaco also deletes: $(cut -d'|' -f2,3 "$run/rum-frontends.state" | tr '|\n' ' ;')"
@@ -1900,19 +1994,21 @@ _monacoUndoHint() {
 }
 
 deployMonaco() {
-  # deployMonaco <tenant|env> — deploys monaco/<phase>/ from the repo as ONE
-  # project per learner, named <repo>-<DT_SESSION_ID>. That name is Monaco's
-  # isolation key for settings and documents; LEARNER_PREFIX=<DT_SESSION_ID>
-  # is exported for config names. The delete file is generated BEFORE the
+  # deployMonaco <tenant|env> [--for <key>] — deploys monaco/<phase>/ from
+  # the repo as ONE project per learner, named <repo>-<DT_SESSION_ID>. That
+  # name is Monaco's isolation key for settings, documents and workflows;
+  # LEARNER_PREFIX and LEARNER_KEY (both <DT_SESSION_ID>) are exported for
+  # config names. --for <key> deploys for ANOTHER learner from this seat (a
+  # trainer on a shared box): project <repo>-<key>, run dir <phase>--<key>,
+  # LEARNER_PREFIX=LEARNER_KEY=<key>. The delete file is generated BEFORE the
   # deploy, so even a partial deploy can be undone with undeployMonaco.
-  # v1 deploys settings and documents with the platform token in
-  # $DT_MONACO_TOKEN (override the name with MONACO_TOKEN_VAR).
-  local phase="$1" token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
-  case "$phase" in
-    tenant|env) ;;
-    -h|--help) _monacoHelp deploy; return 0 ;;
-    *) printError "Usage: deployMonaco <tenant|env>   (deployMonaco -h for help)"; return 2 ;;
-  esac
+  # v1 deploys settings, documents and Automation workflows with the platform
+  # token in $DT_MONACO_TOKEN (override the name with MONACO_TOKEN_VAR).
+  local token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}" MONACO_ARG_PHASE MONACO_ARG_KEY MONACO_ARG_HELP
+  _monacoParseArgs deploy "$@" || return $?
+  [ -n "$MONACO_ARG_HELP" ] && { _monacoHelp deploy; return 0; }
+  local phase="$MONACO_ARG_PHASE" key="$MONACO_ARG_KEY" runname="$MONACO_ARG_PHASE"
+  [ -n "$key" ] && runname="$phase--$key"
 
   local src="${MONACO_DIR:-$REPO_PATH/monaco}/$phase"
   if [ ! -d "$src" ]; then
@@ -1928,7 +2024,7 @@ deployMonaco() {
   local unsupported
   unsupported=$(_monacoUnsupportedTypes "$src")
   if [ -n "$unsupported" ]; then
-    printError "monaco/$phase holds config types that are not supported yet (v1: settings and document only; synthetic/RUM-app need a classic token):"
+    printError "monaco/$phase holds config types that are not supported yet (v1: settings, document and workflow — automation resource workflow only; synthetic/RUM-app need a classic token):"
     echo "$unsupported" | while IFS= read -r u; do printError "  $u"; done
     printError "Nothing was deployed."
     return 1
@@ -1942,13 +2038,13 @@ deployMonaco() {
     return 1
   fi
   local project session
-  session="${DT_SESSION_ID:-$(getDtSessionId)}"
-  if ! project=$(_monacoProjectName); then
+  session="${key:-${DT_SESSION_ID:-$(getDtSessionId)}}"
+  if ! project=$(_monacoProjectName "$key"); then
     printError "No usable DT_SESSION_ID (DT_HOSTGROUP or GITHUB_USER; lowercase, digits, dashes) — refusing: without it every learner would share one Monaco project. Nothing was deployed."
     return 1
   fi
   local generation
-  generation=$(_monacoGeneration "$phase")
+  generation=$(_monacoGeneration "$runname")
   [ "$generation" -gt 0 ] && project="$project-g$generation"
   _monacoReady "Nothing was deployed." || return 1
 
@@ -1956,7 +2052,7 @@ deployMonaco() {
   # project relative to it), so the run dir holds a snapshot of the configs.
   # It also makes undeployMonaco independent of later edits to monaco/.
   local run previous=""
-  run=$(_monacoRunDir "$phase")
+  run=$(_monacoRunDir "$runname")
   mkdir -p "$(dirname "$run")"
   echo '*' > "$(dirname "$run")/.gitignore"
   # Keep what an earlier deploy created: a config removed from monaco/ since
@@ -1992,14 +2088,20 @@ environmentGroups:
             type: environment
             name: $token_var
 MANIFESTEOF
-  printInfo "Monaco project '$project' (LEARNER_PREFIX=$session) → $DT_ENVIRONMENT"
+  if [ -n "$key" ]; then
+    printInfo "Deploying monaco/$phase FOR learner '$key' (--for): project '$project', LEARNER_PREFIX=LEARNER_KEY=$key, run dir ${run#"$REPO_PATH"/} → $DT_ENVIRONMENT"
+    printInfo "  as the owner of \$$token_var — workflows it creates are owned by, and run as, that token's owner"
+  else
+    printInfo "Monaco project '$project' (LEARNER_PREFIX=LEARNER_KEY=$session) → $DT_ENVIRONMENT"
+  fi
+  printInfo "Configs: $(find "$run/project" -type f \( -name '*.yaml' -o -name '*.yml' \) | wc -l | tr -d ' ') config file(s) from monaco/$phase"
 
   # Pre-hook: the RUM frontends monaco/<phase>/rum-frontends.txt declares (ENH-130 M5).
-  if ! _monacoRumFrontends "$phase" "$run" "$prev_rum"; then
+  if ! _monacoRumFrontends "$phase" "$run" "$prev_rum" "$key"; then
     rm -f "$prev_rum"
     [ -n "$previous" ] && mv "$previous" "$run/delete.yaml"
     printError "monaco/$phase: RUM frontend step failed — Monaco did not run."
-    [ -s "$run/rum-frontends.state" ] && printError "  What it created is recorded; undo with: undeployMonaco $phase"
+    [ -s "$run/rum-frontends.state" ] && printError "  What it created is recorded; undo with: undeployMonaco $phase${key:+ --for $key}"
     return 1
   fi
   rm -f "$prev_rum"
@@ -2007,8 +2109,10 @@ MANIFESTEOF
   local rel="${run#"$REPO_PATH"/}"
   printInfo "manifest.yaml reads the URL from \$DT_ENVIRONMENT and the token from \$$token_var, by name"
   _showCmd "cd $rel"
-  _showCmd 'LEARNER_PREFIX=$DT_SESSION_ID monaco generate deletefile manifest.yaml -o . --file delete.yaml'
-  if ! (cd "$run" && LEARNER_PREFIX="$session" monaco generate deletefile manifest.yaml -o . --file delete.yaml) \
+  local pfx='$DT_SESSION_ID'
+  [ -n "$key" ] && pfx="$key"
+  _showCmd "LEARNER_PREFIX=$pfx LEARNER_KEY=$pfx monaco generate deletefile manifest.yaml -o . --file delete.yaml"
+  if ! (cd "$run" && LEARNER_PREFIX="$session" LEARNER_KEY="$session" monaco generate deletefile manifest.yaml -o . --file delete.yaml) \
      || [ ! -f "$run/delete.yaml" ]; then
     [ -n "$previous" ] && mv "$previous" "$run/delete.yaml"
     printError "monaco: could not generate $run/delete.yaml — refusing to deploy what could not be undone"
@@ -2018,29 +2122,29 @@ MANIFESTEOF
     _monacoMergeDeleteFiles "$run/delete.yaml" "$previous"
     rm -f "$previous"
   fi
-  _showCmd 'LEARNER_PREFIX=$DT_SESSION_ID monaco deploy manifest.yaml -e learner'
+  _showCmd "LEARNER_PREFIX=$pfx LEARNER_KEY=$pfx monaco deploy manifest.yaml -e learner"
   # Shown as it runs (tee) and kept in a file: a trash collision is told apart
   # by monaco's output. The exit code travels in a file: zsh and bash name
   # the pipeline status differently.
   local out
   out=$(mktemp) || { printError "monaco/$phase: mktemp failed — nothing was deployed"; return 1; }
-  { (cd "$run" && LEARNER_PREFIX="$session" monaco deploy manifest.yaml -e learner) 2>&1; echo $? > "$out.rc"; } | tee "$out"
+  { (cd "$run" && LEARNER_PREFIX="$session" LEARNER_KEY="$session" monaco deploy manifest.yaml -e learner) 2>&1; echo $? > "$out.rc"; } | tee "$out"
   if [ "$(cat "$out.rc" 2>/dev/null)" != 0 ]; then
     if _monacoTrashCollision "$out"; then
-      _monacoBumpGeneration "$phase"
+      _monacoBumpGeneration "$runname"
       printError "monaco/$phase: a document id is still held by a document in the tenant's trash (HTTP 409 \"id already exists\")."
       printError "  An earlier undeploy left it there; the learner token cannot purge the trash (by design)."
-      printError "  The next deploy uses a new project name, $(_monacoProjectName)-g$(_monacoGeneration "$phase"), and with it new document ids."
-      printError "  Run again: deployMonaco $phase"
+      printError "  The next deploy uses a new project name, $(_monacoProjectName "$key")-g$(_monacoGeneration "$runname"), and with it new document ids."
+      printError "  Run again: deployMonaco $phase${key:+ --for $key}"
     else
-      printError "monaco deploy of monaco/$phase failed — undo what landed with: undeployMonaco $phase"
+      printError "monaco deploy of monaco/$phase failed — undo what landed with: undeployMonaco $phase${key:+ --for $key}"
     fi
     rm -f "$out" "$out.rc"
-    _monacoUndoHint "$phase" failed "$run"
+    _monacoUndoHint "$phase" failed "$run" "$key"
     return 1
   fi
   rm -f "$out" "$out.rc"
-  _monacoUndoHint "$phase" deployed "$run"
+  _monacoUndoHint "$phase" deployed "$run" "$key"
 }
 
 _monacoOnlyTrashRefused() {
@@ -2066,21 +2170,24 @@ _monacoOnlyTrashRefused() {
 }
 
 undeployMonaco() {
-  # undeployMonaco [tenant|env] — deletes what deployMonaco created, using the
-  # delete file persisted at deploy time. No argument: both phases, env first.
-  local phases rc=0 phase run out trashed drc token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}"
-  case "$1" in
-    "") phases="env tenant" ;;
-    tenant|env) phases="$1" ;;
-    -h|--help) _monacoHelp undeploy; return 0 ;;
-    *) printError "Usage: undeployMonaco [tenant|env]   (undeployMonaco -h for help)"; return 2 ;;
-  esac
-  printInfoSection "Removing Monaco configuration ($phases)"
+  # undeployMonaco [tenant|env] [--for <key>] — deletes what deployMonaco
+  # created, using the delete file persisted at deploy time. No phase: both
+  # phases, env first. --for <key>: only what deployMonaco --for <key> created
+  # (run dir <phase>--<key>); another key's, or this seat's own, is never touched.
+  local phases rc=0 phase run runname out trashed drc token_var="${MONACO_TOKEN_VAR:-DT_MONACO_TOKEN}" MONACO_ARG_PHASE MONACO_ARG_KEY MONACO_ARG_HELP
+  _monacoParseArgs undeploy "$@" || return $?
+  [ -n "$MONACO_ARG_HELP" ] && { _monacoHelp undeploy; return 0; }
+  local key="$MONACO_ARG_KEY" fk=""
+  phases="${MONACO_ARG_PHASE:-env tenant}"
+  [ -n "$key" ] && fk=" --for $key"
+  printInfoSection "Removing Monaco configuration ($phases)${key:+ deployed FOR learner '$key'}"
   # read lines, not `for p in $phases`: zsh does not word-split.
   while IFS= read -r phase; do
-    run=$(_monacoRunDir "$phase")
+    runname="$phase"
+    [ -n "$key" ] && runname="$phase--$key"
+    run=$(_monacoRunDir "$runname")
     if [ ! -f "$run/delete.yaml" ] && [ ! -f "$run/rum-frontends.state" ]; then
-      printInfo "monaco/$phase: nothing deployed (no $run/delete.yaml)"
+      printInfo "monaco/$phase${key:+ (for $key)}: nothing deployed (no $run/delete.yaml)"
       continue
     fi
     if ! _varIsSet "$token_var"; then
@@ -2092,7 +2199,7 @@ undeployMonaco() {
       # Only frontends (a deploy that stopped before Monaco ran).
       if _monacoRumUndeploy "$run"; then
         rm -rf "$run"
-        printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+        printInfo "monaco/$phase${key:+ (for $key)} removed from ${DT_ENVIRONMENT:-the tenant}"
       else
         printError "monaco/$phase: RUM frontend(s) not proven gone — kept in $run/rum-frontends.state"
         rc=1
@@ -2111,18 +2218,18 @@ undeployMonaco() {
     if [ "$drc" -eq 0 ] || trashed=$(_monacoOnlyTrashRefused "$out"); then
       # Documents now in the trash still hold their ids: the next deploy of
       # this phase must not create them again (_monacoGeneration).
-      [ -n "$trashed" ] && _monacoBumpGeneration "$phase"
+      [ -n "$trashed" ] && _monacoBumpGeneration "$runname"
       # Post-hook: the frontends, after monaco delete (deleting one also drops its detection rules).
       if ! _monacoRumUndeploy "$run"; then
         rm -f "$run/delete.yaml"
-        printError "monaco/$phase: configuration deleted, but RUM frontend(s) not proven gone — kept in $run/rum-frontends.state; run undeployMonaco $phase again"
+        printError "monaco/$phase: configuration deleted, but RUM frontend(s) not proven gone — kept in $run/rum-frontends.state; run undeployMonaco $phase$fk again"
         rc=1
       elif [ "$drc" -eq 0 ]; then
         rm -rf "$run"
-        printInfo "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}"
+        printInfo "monaco/$phase${key:+ (for $key)} removed from ${DT_ENVIRONMENT:-the tenant}"
       else
         rm -rf "$run"
-        printWarn "monaco/$phase removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed. They keep their ids, so the next deployMonaco $phase uses a new project name (-g$(_monacoGeneration "$phase")) and fresh ids."
+        printWarn "monaco/$phase${key:+ (for $key)} removed from ${DT_ENVIRONMENT:-the tenant}: $trashed document(s) deleted but left in the tenant's trash — the learner token has no document:trash.documents:delete, by design (ENH-114). monaco reported this as an error; nothing else failed. They keep their ids, so the next deployMonaco $phase$fk uses a new project name (-g$(_monacoGeneration "$runname")) and fresh ids."
       fi
     else
       printError "monaco/$phase: monaco delete failed — delete file kept at $run/delete.yaml"

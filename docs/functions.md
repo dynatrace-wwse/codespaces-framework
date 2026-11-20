@@ -132,8 +132,8 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
 | `installMonaco` | `installMonaco` | Installs [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) at `MONACO_VERSION`: for the framework's pin, the framework's [patched build](dtctl-monaco.md#monaco-is-a-patched-build) (reviewed sha256, never a stock fallback; a refusal removes any `monaco` left in the install dir); otherwise the upstream release (checksum-verified) |
-| `deployMonaco` | `deployMonaco <tenant\|env>` · `deployMonaco -h` | Deploys the repo's `monaco/<phase>/` as a per-learner project. Runs only the verified patched Monaco (pinned sha256 or `+wwse.1` in `monaco version`); otherwise one `installMonaco`, then fails loudly |
-| `undeployMonaco` | `undeployMonaco [tenant\|env]` · `undeployMonaco -h` | Deletes what `deployMonaco` created, from the delete file it persisted. No argument: both phases |
+| `deployMonaco` | `deployMonaco <tenant\|env> [--for <learner-key>]` · `deployMonaco -h` | Deploys the repo's `monaco/<phase>/` as a per-learner project (settings, documents, Automation workflows). `--for <learner-key>` deploys for another learner from this seat — see [Deploying for another learner](#deploying-for-another-learner-for). Runs only the verified patched Monaco (pinned sha256 or `+wwse.1` in `monaco version`); otherwise one `installMonaco`, then fails loudly |
+| `undeployMonaco` | `undeployMonaco [tenant\|env] [--for <learner-key>]` · `undeployMonaco -h` | Deletes what `deployMonaco` created, from the delete file it persisted. No phase: both phases. `--for <learner-key>`: only that learner's |
 | `verifySha256` | `verifySha256 <file> <sha256>` | Returns 0 only on a match; a mismatch, a missing file or a malformed checksum all refuse |
 
 Both binaries are on the `PATH` when the repo opts in with `DT_TOOLS` or the learner types
@@ -209,7 +209,8 @@ project of their own.
 | What | Value | Why |
 |---|---|---|
 | project name | `<repo>-<DT_SESSION_ID>`, then `…-g<N>` after an undeploy left documents in the trash | Monaco derives settings and document ids from the project name. Two learners with the same project overwrite each other in a shared tenant. The `-g<N>` suffix: see "A trashed document keeps its id" |
-| `LEARNER_PREFIX` | `<DT_SESSION_ID>` | Exported to Monaco. Use it in every `name:` so learners can find their own objects |
+| `LEARNER_PREFIX` | `<DT_SESSION_ID>` (`<learner-key>` with `--for`) | Exported to Monaco. Use it in every `name:` so learners can find their own objects |
+| `LEARNER_KEY` | same value as `LEARNER_PREFIX` | Exported to Monaco too; the name new configs (e.g. a workflow title) should use, since it reads right for `--for` deploys |
 | environment | `learner`, URL from `DT_ENVIRONMENT`, `platformToken` from `DT_MONACO_TOKEN` | |
 
 ```yaml
@@ -230,10 +231,66 @@ configs:
 (`DT_HOSTGROUP` under Orbital, `GITHUB_USER` in a Codespace): without it every learner would
 share one project.
 
-**Supported types (v1): `document` (dashboards, notebooks) and `settings`.** Any other config
-type — a classic API such as `synthetic-monitor` or `application-web`, `automation`, `bucket` —
-is reported by file and refused with "not supported yet"; nothing is deployed. Those need a
-classic token or IAM bindings that are not settled yet.
+**Supported types (v1): `document` (dashboards, notebooks), `settings` and Automation
+workflows (`automation` with `resource: workflow`).** Any other config type — a classic API
+such as `synthetic-monitor` or `application-web`, the other `automation` resources
+(`business-calendar`, `scheduling-rule`), `bucket` — is reported by file and refused with
+"not supported yet"; nothing is deployed. Those need a classic token or IAM bindings that are
+not settled yet. An `automation` type whose resource the check cannot read is refused too
+(fails closed).
+
+**Workflows.** Block or flow form, as Monaco 2.30.1+wwse.1 deploys it with a platform token
+(measured on SRO):
+
+```yaml
+# monaco/tenant/workflows/config.yaml
+configs:
+  - id: byoa-triage
+    type:
+      automation:
+        resource: workflow      # or: type: {automation: {resource: workflow}}
+    config:
+      name:
+        type: environment
+        name: LEARNER_KEY
+      template: workflow.json
+```
+
+- **Scopes.** The token in `DT_MONACO_TOKEN` needs `automation:workflows:read` and
+  `automation:workflows:write`. Undo (`monaco delete`, delete-file entry `type: workflow`) needs
+  nothing more. Workflows are not documents: a deleted workflow is gone, there is no trash and
+  no 409 id collision, so no `-g<N>` project move.
+- **Owner and actor = the token's owner.** Monaco creates the workflow as the principal that
+  owns the token, and the workflow runs as that principal: its JavaScript tasks can do whatever
+  that identity may. Give the workflow scopes **only to trainer-only tokens**, never to a
+  learner seat's token, and keep workflow code to what the trainer would run themselves.
+
+#### Deploying for another learner (`--for`)
+
+A trainer on a shared box deploys a learner's copy from their own seat:
+
+```bash
+deployMonaco tenant --for alice-01     # project <repo>-alice-01
+deployMonaco tenant --for bob          # project <repo>-bob — alongside alice's
+undeployMonaco tenant --for alice-01   # removes alice-01's only
+undeployMonaco --for bob               # both phases, bob's only
+```
+
+| What | Without `--for` | With `--for <key>` |
+|---|---|---|
+| key | — | `^[a-z0-9][a-z0-9-]{0,31}$`; anything else refused (rc 2), nothing done |
+| project name | `<repo>-<DT_SESSION_ID>` | `<repo>-<key>` (then `…-g<N>` as usual) |
+| run dir | `.devcontainer/.monaco/<phase>/` | `.devcontainer/.monaco/<phase>--<key>/` |
+| trash generation | `.devcontainer/.monaco/.<phase>-generation` | `.devcontainer/.monaco/.<phase>--<key>-generation` |
+| `LEARNER_PREFIX` / `LEARNER_KEY` | `<DT_SESSION_ID>` | `<key>` |
+| RUM frontend | `<name>-<seat>` | `<name>-<seat>-<key>` |
+
+Each key has its own run dir and delete file, so several learners coexist and `undeployMonaco
+--for <key>` never touches another key's objects — nor the seat's own (`undeployMonaco` without
+`--for` likewise leaves every `--for` deploy alone). `deployMonaco` prints the learner, project,
+`LEARNER_KEY` and run dir before it runs, and the closing undo line names `--for <key>`.
+Everything is created with the seat's token, so it is **owned by the trainer**, not the
+learner (see "Owner and actor" above).
 
 **Undo.** Before deploying, `deployMonaco` snapshots the phase folder into
 `.devcontainer/.monaco/<phase>/` (git-ignored; override with `MONACO_RUN_DIR`) together with
