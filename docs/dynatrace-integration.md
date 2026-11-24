@@ -299,6 +299,11 @@ Operator is installed with `csidriver.enabled=false`. `k8s-only` is unaffected.
     with no error and no agent. Check a node with
     `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.containerRuntimeVersion}'`.
 
+Proof that injection happened, not just that pods run: `integration_imagevolume_k3d_todoapp.sh`
+(see [Testing](testing.md)). Verified on SRO 2026-11-24 with v1.5.0 (arm64): the todo-app pod got
+an `image` volume `oneagent-bin` with the codemodules image, `liboneagent` loaded, no CSI driver,
+and its spans arrived under the session's cluster name. amd64: untested locally.
+
 ### Undeploying Dynakube
 
 Now, let's say you want to undeploy the Dynakubes, there is a comfort function for you to do so, just type `undeployDynakubes` and this will undeploy the Dynakubes. For changing the monitoring mode to `ApplicationMonitoring` just type `deployApplicationMonitoring` and this will deploy the Application Monitoring mode in the cluster.
