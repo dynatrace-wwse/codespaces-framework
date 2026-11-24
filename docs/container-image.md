@@ -32,6 +32,7 @@ Dynatrace OneAgent FullStack and Kubernetes CloudNativeFullstack deployments are
     - [Kubectl](https://kubernetes.io/docs/reference/kubectl/)
     - [Helm](https://helm.sh)
     - [Kind](https://kind.sigs.k8s.io/)
+    - [K3d](https://k3d.io) — the **default** cluster engine; from `v1.5.0` (older tags: see below)
     - [Docker CLI](https://www.docker.com/) — the client only; it talks to the host daemon through the mounted socket (see below)
     - [NodeJs](https://nodejs.org/)
     - [Python](https://www.python.org/) (`python3-pip`)
@@ -41,7 +42,8 @@ Dynatrace OneAgent FullStack and Kubernetes CloudNativeFullstack deployments are
     Kept out of the image so their versions can move without an image rebuild. A repo's
     `post-create.sh` calls the installer it needs:
 
-    - [K3d](https://k3d.io) — `installK3d`; the **default** cluster engine
+    - [K3d](https://k3d.io) — `installK3d` only on images up to `v1.4.1`, which carry no k3d
+      (it downloads v5.8.3 then). From `v1.5.0` it uses the image's k3d and downloads nothing.
     - [K9s](https://k9scli.io/) — `installK9s`
     - [MkDocs](https://www.mkdocs.org/) — `installMkdocs`, for previewing the repo's own docs
     - [bats](https://bats-core.readthedocs.io/) — added by `make test-in-container` when the image does not carry it
@@ -96,7 +98,8 @@ The image is hosted on Docker Hub and is cross-compiled for ARM and AMD architec
 ### Versions and tags
 Everything that changes the image is pinned in `.devcontainer/Dockerfile`, so a rebuild reproduces
 the tag: base `mcr.microsoft.com/devcontainers/base:3.0.10-noble` (by digest), `NODE_VERSION` (exact nodesource
-package), `NPM_VERSION`, `DOCKER_CLI_VERSION`, `KUBECTL_VERSION`, `KIND_VERSION` and `HELM_VERSION`. Downloads use `curl -f`,
+package), `NPM_VERSION`, `DOCKER_CLI_VERSION`, `KUBECTL_VERSION`, `KIND_VERSION`, `K3D_VERSION` (with the k3s default it
+must report, `K3D_DEFAULT_K3S`) and `HELM_VERSION`. Downloads use `curl -f`,
 so a failed fetch fails the build instead of saving an error page as a binary.
 
 A changed image is published under a **new tag** and never rebuilt over an existing one. A retag
@@ -132,7 +135,18 @@ GO-2026-6612 remains in them until upstream ships rebuilt binaries (28.x never w
 brief 244). npm is pinned to exactly `11.21.2`, which bundles undici `6.29.1` (GHSA-2m5v-pch6-74hx,
 GHSA-qrxm-fqhp-jwvm; `v1.4.0` has 6.29.0 inside npm). The build's `apt-get upgrade` takes apt
 `2.8.4ubuntu0.1` (CVE-2026-109518). kubectl moves to `v1.37.2`, the first stable release built with
-Go 1.26.10, which clears GO-2026-6612 from kubectl. kind and the Docker CLI still carry it. Use `v1.4.1`.
+Go 1.26.10, which clears GO-2026-6612 from kubectl. kind and the Docker CLI still carry it.
+
+`v1.5.0` bakes **k3d `v5.9.0`** into the image (checksum-verified release binary). Its built-in
+default is k3s `v1.35.5-k3s1` with containerd `2.2.3`, which is what Dynatrace Operator **image
+volumes** need (code modules without the CSI driver: Kubernetes >= 1.35, containerd >= 2.2 for
+image volumes with `subPath`). Up to `v1.4.1` the image had no k3d and `installK3d` downloaded
+v5.8.3 at every session start, whose default is k3s `v1.31.5` / containerd `1.7.23`. On that the
+image volume is dropped by the API server, and on k3s 1.33 (containerd 2.1) the `subPath` is
+ignored; in both cases the pod runs with no error and no agent. The build asserts both the k3d
+version and its k3s default, so a different k3d cannot slip in. kubectl moves to `v1.36.6` to stay
+within the +/-1 skew of that 1.35 server; it is built with the same Go 1.26.10 as `v1.37.2`.
+Nothing in the framework pins a k3s image: the cluster version comes from the image's k3d.
 
 ### Publishing a new tag
 The **Publish image** workflow (`.github/workflows/publish-image.yaml`) builds `.devcontainer/` for

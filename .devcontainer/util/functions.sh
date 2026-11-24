@@ -2506,9 +2506,11 @@ for c in clusters:
 startK3sCluster() { startK3dCluster "$@"; }
 
 installK3d() {
-  # Installs K3d if not already present.
-  # Version pinned: v5.9.0 shipped 2026-06-02 with a missing ghcr.io proxy
-  # image (manifest unknown). Pin to last known-good release.
+  # Uses the k3d the image ships and never downloads over it: shinojosa/dt-enablement
+  # >= v1.5.0 carries k3d (Dockerfile K3D_VERSION, v5.9.0 -> k3s v1.35.5 / containerd 2.2,
+  # what Operator image volumes need). The download below runs only on older images
+  # (<= v1.4.1, no k3d), keeping their v5.8.3 -> k3s v1.31.5. (The old note that v5.9.0's
+  # ghcr.io proxy image was missing is stale: its manifest resolves since 2026-11.)
   if command -v k3d &>/dev/null; then
     return 0
   fi
