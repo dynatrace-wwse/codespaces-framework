@@ -470,7 +470,7 @@ Reusable shell functions loaded into every shell session:
 | `APP_REGISTRY` | `~/.cache/dt-framework/app-registry` | Persisted ingress registrations |
 | `CLUSTER_ENGINE` | `k3d` | Cluster engine (`k3d` or `kind`) |
 | `ENV_FILE` | `.devcontainer/.env` | Secrets file path |
-| `DT_TOOLS` | unset | Opt-in Dynatrace tools installed early by `setUpTerminal`: `dtctl`, `monaco` or `all` ([dtctl & Monaco](dtctl-monaco.md)) |
+| `DT_TOOLS` | unset | Opt-in Dynatrace tools installed early by `setUpTerminal`: `dtctl`, `dtui`, `monaco` or `all` ([dtctl, dtui & Monaco](dtctl-monaco.md)) |
 
 ---
 

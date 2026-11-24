@@ -1,11 +1,12 @@
-# dtctl & Monaco — opt-in Dynatrace tools
+# dtctl, dtui & Monaco — opt-in Dynatrace tools
 
-The framework can put two Dynatrace command-line tools on the `PATH` of any environment it
+The framework can put three Dynatrace command-line tools on the `PATH` of any environment it
 builds — GitHub Codespaces, Orbital, a local container:
 
 | Tool | What it is for | Pinned version |
 |---|---|---|
 | [`dtctl`](https://github.com/dynatrace-oss/dtctl) | Query and inspect the tenant: DQL, documents, settings | `DTCTL_VERSION` (0.43.0) |
+| [`dtui`](https://github.com/dynatrace-oss/dtui) | Keyboard-driven terminal UI over the tenant: problems, services, Kubernetes, traces, logs, SLOs, topology. Read-only; reuses dtctl's contexts and credentials, so it needs dtctl's context to connect | `DTUI_VERSION` (0.2.0) |
 | [`monaco`](https://github.com/Dynatrace/dynatrace-configuration-as-code) | Configuration as code: deploy dashboards, notebooks, settings, Automation workflows | `MONACO_VERSION` (2.30.1, the framework's patched build `2.30.1+wwse.1` — see [below](#monaco-is-a-patched-build)) |
 
 **They are opt-in, like the [MCP server](functions.md#mcp-server-vs-code)** (since framework 1.23.0;
@@ -19,7 +20,7 @@ builds — GitHub Codespaces, Orbital, a local container:
     # .devcontainer/post-create.sh
     source .devcontainer/util/source_framework.sh
 
-    export DT_TOOLS=all          # or: dtctl | monaco | dtctl,monaco
+    export DT_TOOLS=all          # or: dtctl | dtui | monaco | dtctl,dtui
     setUpTerminal
     ```
 
@@ -28,22 +29,25 @@ builds — GitHub Codespaces, Orbital, a local container:
     is not committed, so for a repo the line in `post-create.sh` is the one that travels.
 
 2. **The learner types `installDTTools`** in the terminal, in any repo. Without `DT_TOOLS`,
-   `setUpTerminal` prints the hint `Type 'installDTTools' to install dtctl + Monaco` next to the
-   MCP one. `installDTTools dtctl` or `installDTTools monaco` installs one of them.
+   `setUpTerminal` prints the hint `Type 'installDTTools' to install dtctl, dtui + Monaco` next to the
+   MCP one. `installDTTools dtctl`, `installDTTools dtui` or `installDTTools monaco` installs one
+   of them.
 
 | `DT_TOOLS` | Installs |
 |---|---|
 | unset / empty / `none` / `off` | nothing (the hint is printed) |
 | `dtctl` | dtctl (plus its read-only context when `DT_DTCTL_TOKEN` is set) |
+| `dtui` | dtui (it connects through dtctl's context, so a repo that wants it working usually lists `dtctl,dtui`) |
 | `monaco` | Monaco |
-| `all`, `dtctl,monaco`, `monaco dtctl` | both |
+| `dtctl,monaco`, `monaco dtctl` | dtctl and Monaco — **not** dtui (a repo that opted in before dtui existed keeps what it had) |
+| `all`, `dtctl,dtui,monaco` | all three |
 
 Comma- or space-separated, any case. An **unknown** entry is a warning
-(`DT_TOOLS: unknown tool 'x' ignored — use dtctl, monaco or all`), never fatal; a value with
+(`DT_TOOLS: unknown tool 'x' ignored — use dtctl, dtui, monaco or all`), never fatal; a value with
 only unknown entries installs nothing. Removing the variable removes the install.
 
 `deployMonaco` does not need the opt-in: it installs the verified Monaco itself when it is
-missing. A lab step that runs `dtctl` does.
+missing. A lab step that runs `dtctl` or `dtui` does.
 
 `installDevTools`, the 1.20–1.22 name, is a deprecated alias that warns and calls
 `installDTTools`. `FRAMEWORK_DEVTOOLS`, its old off switch, is retired: nothing installs
@@ -51,25 +55,30 @@ unless asked, so it is ignored (with a warning when set).
 
 ## What `installDTTools` does
 
-1. Selects the tools: its arguments, else `DT_TOOLS`, else (typed with neither) both.
+1. Selects the tools: its arguments, else `DT_TOOLS`, else (typed with neither) all three.
 2. Installs **dtctl** at `DTCTL_VERSION`, verified against the **reviewed sha256 committed in
    the framework** first, and against the release's `checksums.txt` second.
-3. Installs **Monaco** at `MONACO_VERSION`. For the framework's pinned version that is the
+3. Installs **dtui** at `DTUI_VERSION` the same way as dtctl (same release layout:
+   `dtui_<version>_linux_<arch>.tar.gz` + `checksums.txt`; only the `dtui` binary is installed).
+   dtui has no authentication of its own: it reads dtctl's config, so with `DT_DTCTL_TOKEN` set
+   it uses the read-only `enablement` context from step 5. dtui refuses to start without a
+   terminal (and inside an AI-agent session); `dtui --version` works anywhere.
+4. Installs **Monaco** at `MONACO_VERSION`. For the framework's pinned version that is the
    framework's **patched build** ([why](#monaco-is-a-patched-build)), verified against the
    reviewed sha256 only; another version is the upstream release, verified like dtctl (its
    `.sha256` file second).
-4. When **`DT_DTCTL_TOKEN`** is set (and `DT_ENVIRONMENT` is), it also runs `enableDtctl`: a
+5. When **`DT_DTCTL_TOKEN`** is set (and `DT_ENVIRONMENT` is), it also runs `enableDtctl`: a
    `readonly` context named `enablement` whose token is the literal reference
    `${DT_DTCTL_TOKEN}`. The token value is never printed and never written to the config, and
    the config is left **read-only** (see below). Without the token, dtctl is installed with no
    context.
-5. Monaco needs no context: `deployMonaco` reads `DT_MONACO_TOKEN` by name when a repo deploys.
+6. Monaco needs no context: `deployMonaco` reads `DT_MONACO_TOKEN` by name when a repo deploys.
    How a repo deploys and undoes it: [The `monaco/` folder](functions.md#the-monaco-folder), or
    `deployMonaco -h` / `undeployMonaco -h` in the terminal.
 
 A binary already present is **kept, not downloaded**, only when its sha256 equals the committed
-pin for the installed binary **and** `<tool> version` names the pinned version. An image that
-bakes both tools in therefore pays nothing here — the step only verifies what is present. Any
+pin for the installed binary **and** `<tool> version` (`dtui --version`) names the pinned version. An image
+that bakes the tools in therefore pays nothing here — the step only verifies what is present. Any
 other binary (other bytes, other version) is replaced by the verified pin.
 
 The architecture is always `uname -m`: `x86_64`/`amd64` or `aarch64`/`arm64`. A 32-bit ARM
@@ -86,13 +95,15 @@ therefore commits, next to each pinned version in `.devcontainer/util/variables.
 |---|---|
 | `DTCTL_PIN_SHA256_AMD64` / `_ARM64` | the dtctl release archive (`.tar.gz`) |
 | `DTCTL_PIN_BIN_SHA256_AMD64` / `_ARM64` | the dtctl binary inside it (for the already-present check) |
+| `DTUI_PIN_SHA256_AMD64` / `_ARM64` | the dtui release archive (`.tar.gz`) |
+| `DTUI_PIN_BIN_SHA256_AMD64` / `_ARM64` | the dtui binary inside it |
 | `MONACO_PIN_SHA256_AMD64` / `_ARM64` | the Monaco binary — for the pinned version, the framework's **patched** build at `MONACO_PIN_URL` |
 | `MONACO_PIN_BUILD` / `MONACO_PIN_URL` | the patched build's suffix (`wwse.1`) and the release it is downloaded from |
 
 A download that does not match the committed hash is refused even when the release's checksum
 file agrees with it. For the framework's own pinned version a **missing** hash for the machine's
 architecture also refuses — there is no fallback to the release file. Only a repo that overrides
-`DTCTL_VERSION` / `MONACO_VERSION` to another version gets no reviewed hash; that install warns
+`DTCTL_VERSION` / `DTUI_VERSION` / `MONACO_VERSION` to another version gets no reviewed hash; that install warns
 and checks the release file only. **Bumping a version is a
 framework release that bumps its hashes in the same commit.**
 
@@ -170,12 +181,13 @@ container is reported as having an error — a tampered download is not noise.
 ```
 devtools INTEGRITY FAILED: ... INTEGRITY: Checksum MISMATCH for dtctl_0.43.0_linux_amd64.tar.gz ...
 WARN | devtools (non-fatal): dtctl not installed — post-create continues without it
-``` The other tool
-still installs. Token values are masked (`<redacted>`) in everything replayed.
+```
+
+The other tools still install. Token values are masked (`<redacted>`) in everything replayed.
 
 Nothing in the step can hang post-create:
 
-- every download has `--connect-timeout 10`, and both tools share **one time budget** of
+- every download has `--connect-timeout 10`, and all the tools share **one time budget** of
   180 s (`DEVTOOLS_TIME_BUDGET`; anything but a whole number of seconds falls back to 180); once spent, the remaining downloads are skipped as a failure;
 - `sudo` runs as `sudo -n`, so a box without passwordless sudo fails at once instead of
   waiting on a password prompt.
@@ -227,11 +239,15 @@ whatever "latest" was on the day:
 
 ```bash
 DTCTL_VERSION="${DTCTL_VERSION:-0.43.0}"
+DTUI_VERSION="${DTUI_VERSION:-0.2.0}"        # the latest dtui release when pinned
 MONACO_VERSION="${MONACO_VERSION:-2.30.1}"   # installs the patched 2.30.1+wwse.1
 ```
 
-A repo may override either (environment or `.devcontainer/.env`). A value that is not `x.y.z`
-is refused before any download. Bumping a pin is a framework release.
+A repo may override any of them (environment or `.devcontainer/.env`). A value that is not
+`x.y.z` is refused before any download. Bumping a pin is a framework release. An **empty**
+`DTCTL_VERSION=` / `DTUI_VERSION=` installs the latest upstream release at that moment, verified
+against the release's checksum file only (there is no reviewed hash for a version nobody
+reviewed).
 
 ## Cost
 
@@ -242,11 +258,12 @@ Measured on an arm64 EC2 host (real release assets, no tenant):
 | First run (both tools installed) | 0.7–1.7 s | 26.5 MB arm64 (dtctl 10.4 MB archive + Monaco 16.1 MB); 29.3 MB on amd64 |
 | Re-run, versions already present (sha256 + version checked) | 0.08 s | 0 |
 
-On disk: 44 MB (dtctl 28.0 MB + Monaco 16.1 MB). A Codespace's network is slower than an EC2
+On disk: 44 MB (dtctl 28.0 MB + Monaco 16.1 MB). dtui adds a 10.8 MB (amd64) / 9.8 MB (arm64)
+download and 30 MB on disk. A Codespace's network is slower than an EC2
 host's, so expect a few seconds there.
 
 ## Related
 
 - [Functions reference — dtctl & Monaco](functions.md#dtctl-monaco): `enableDtctl`,
-  `installDtctl`, `installMonaco`, `deployMonaco`, `undeployMonaco`, `verifySha256`, the dtctl
+  `installDtctl`, `installDtui`, `installMonaco`, `deployMonaco`, `undeployMonaco`, `verifySha256`, the dtctl
   token caveats and the `monaco/` folder layout.
