@@ -569,7 +569,7 @@ K3d (K3s in Docker) is the default cluster engine — 3× faster startup and low
 | `attachK3dCluster` | Merges kubeconfig and switches context to the K3d cluster |
 | `stopK3dCluster` | Stops the K3d cluster |
 | `deleteK3dCluster` | Deletes the K3d cluster |
-| `installK3d` | Installs k3d CLI if not already present |
+| `installK3d` | Uses the image's k3d (`v1.5.0`+); downloads v5.8.3 only when the image has none |
 
 K3d port configuration (env vars for `createK3dCluster`):
 

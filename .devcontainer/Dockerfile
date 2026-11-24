@@ -10,8 +10,16 @@ ARG USERNAME=vscode
 # failed silently: an unauthenticated GitHub API 403 left KIND_RELEASE empty and saved an XML error
 # page as `kind`. Bump them with a new image tag; each build asserts the version it installed.
 ARG HELM_VERSION=v3.22.1
-ARG KUBECTL_VERSION=v1.37.2
+# kubectl within the +/-1 skew of the k3s server k3d starts (v1.35, see K3D_VERSION below).
+ARG KUBECTL_VERSION=v1.36.6
 ARG KIND_VERSION=v0.33.0
+# k3d ships in the image (v1.5): installK3d used to download v5.8.3 at every session start, whose
+# built-in k3s default is v1.31.5 (containerd 1.7.23). Dynatrace Operator image volumes (code
+# modules without the CSI driver) need Kubernetes >= 1.35 and containerd >= 2.2 for image volumes
+# WITH subPath; on older k3s the volume is dropped or the subPath ignored, both silently (brief 261).
+# k3d v5.9.0's built-in default is k3s v1.35.5-k3s1 / containerd 2.2.3; the build asserts it.
+ARG K3D_VERSION=v5.9.0
+ARG K3D_DEFAULT_K3S=v1.35.5-k3s1
 # Docker CLI: the newest 28.x. 29.x requires API >= 1.44 and refuses older daemons ("client
 # version 1.52 is too new. Maximum supported API version is 1.43" on the GitHub Codespaces host);
 # 28.x still negotiates down to 1.43. Do not move to 29.x until the Codespaces daemon does. 28.x
@@ -82,6 +90,15 @@ RUN curl -fLO https://get.helm.sh/helm-$HELM_VERSION-linux-$TARGETARCH.tar.gz \
 RUN curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-$TARGETARCH \
     && chmod +x /usr/local/bin/kind \
     && kind version | grep -q "^kind $KIND_VERSION "
+
+# Install k3d (checksum-verified release binary; no install.sh, which tracks main)
+RUN curl -fsSLO "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/k3d-linux-$TARGETARCH" \
+    && curl -fsSL "https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION/checksums.txt" \
+       | sed -n "s|  _dist/k3d-linux-$TARGETARCH\$|  k3d-linux-$TARGETARCH|p" | sha256sum -c - \
+    && install -o root -g root -m 0755 k3d-linux-$TARGETARCH /usr/local/bin/k3d \
+    && rm k3d-linux-$TARGETARCH \
+    && k3d version | grep -qx "k3d version $K3D_VERSION" \
+    && k3d version | grep -qx "k3s version $K3D_DEFAULT_K3S (default)"
     
 # Install Node.js and npm (multi-architecture support)
 # Pinned so a rebuild is reproducible. 22.23.4 fixes CVE-2026-111497 (Brotli decoder OOB write);
