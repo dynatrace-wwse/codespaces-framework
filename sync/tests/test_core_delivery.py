@@ -270,7 +270,9 @@ def test_file_unparseable(tmp_path):
     ("version: 1\ntype: multi-tenant\navailability: workshop-only\nseats: {personal: false}\n",
      "type: same-tenant"),
     ("version: 1\ntype: same-tenant\navailability: workshop-only\nseats: {personal: true}\n",
-     "seats.personal: true is not available"),
+     "seats.personal: true needs seats.mode: dtctl-only"),
+    ("version: 1\ntype: same-tenant\navailability: workshop-only\n"
+     "seats: {personal: true, mode: full}\n", "seats.personal: true needs seats.mode: dtctl-only"),
 ])
 def test_file_shared_rules(tmp_path, text, needle):
     _, issues = check_repo(_dy(tmp_path, text, create=True))
@@ -297,3 +299,14 @@ def test_command_fails_on_invalid_file(tmp_path):
     with pytest.raises(SystemExit) as e:
         cmd.run(SimpleNamespace(path=str(_dy(tmp_path, "version: 3\n"))))
     assert e.value.code == 1
+
+
+def test_file_shared_light_seats_are_valid(tmp_path, capsys):
+    """ENH-163 F7: a shared training may declare light personal seats."""
+    repo = _dy(tmp_path, "version: 1\ntype: same-tenant\navailability: workshop-only\n"
+               "seats: {personal: true, mode: dtctl-only}\n", create=True)
+    eff, issues = check_repo(repo)
+    assert issues == [], issues
+    assert eff["seats"] == {"personal": True, "mode": "dtctl-only"}
+    cmd.run(SimpleNamespace(path=str(repo)))
+    assert "personal seats yes" in capsys.readouterr().out

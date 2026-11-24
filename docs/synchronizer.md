@@ -335,8 +335,12 @@ shared:                      # only with .devcontainer/workshop-post-create.sh
 
 - Unknown keys and bad values are refused, as for the block.
 - With `workshop-post-create.sh` the file must say `type: same-tenant` and
-  `availability: workshop-only`; `seats.personal: true` is refused until learners can have
-  a seat beside a shared machine. A `shared:` block without the script is refused.
+  `availability: workshop-only`. Beside a shared machine, `seats.personal: true` needs
+  `seats.mode: dtctl-only` (ENH-163 F7): each learner gets a **light personal seat** with
+  dtctl, dtui and Monaco and no cluster or apps. Orbital sets `ORBITAL_SEAT_MODE=dtctl-only`
+  in the seat and holds it to 2 GiB and 1 CPU, and the training's `post-create.sh` reads the
+  variable. A full personal seat there is still refused. A `shared:` block without the
+  script is refused.
 - **Both the file and an index.md block:** disagreeing on availability or tenancy is
   refused (two truths); agreeing passes with a warning to remove the block.
 - **`shared.instance`** is checked by Orbital at booking against its allowlist
