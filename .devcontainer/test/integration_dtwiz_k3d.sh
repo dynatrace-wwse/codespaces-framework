@@ -133,7 +133,8 @@ if ! command -v dtwiz >/dev/null 2>&1; then
   printError "❌ dtwiz not on PATH after install"
   deleteK3dCluster; exit 1
 fi
-printInfo "dtwiz version: $(dtwiz --version 2>/dev/null || echo unknown)"
+# dtwiz has no --version flag; `dtwiz version` prints "dtwiz version: <v>".
+printInfo "$(dtwiz version 2>/dev/null || echo "dtwiz version: unknown")"
 
 # 3. dtwiz connectivity — token must validate against the tenant
 #
