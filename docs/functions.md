@@ -521,6 +521,8 @@ Config keys (set in `dynakube-config.yaml` or `dynakube-defaults.yaml`) map to `
 | `mode` | `DK_MODE` | `apponly` (`cloudnative`, `k8s-only`) |
 | `operator_version` | `DK_OPERATOR_VERSION` | `1.11.1` |
 | `dynakube_api_version` | `DK_DYNAKUBE_API_VERSION` | `v1beta6` |
+| `code_modules_delivery` | `DK_CODE_MODULES_DELIVERY` | `csi` (`image-volume`: see [Code modules via image volumes](dynatrace-integration.md#code-modules-via-image-volumes-opt-in)) |
+| `ecr_pin_codemodules` | `DK_ECR_PIN_CODEMODULES` | fallback codemodules tag for `image-volume` when ECR does not answer |
 | `log_monitoring` | `DK_LOG_MONITORING` | `true` |
 | `telemetry_ingest` | `DK_TELEMETRY_INGEST` | `true` |
 | `sensitive_data` | `DK_SENSITIVE_DATA` | `true` |

@@ -16,6 +16,16 @@ dynakube_api_version: "v1beta6"
 # Monitoring mode: k8s-only | apponly | cloudnative
 mode: apponly
 
+# How code modules reach injected pods (apponly / cloudnative only):
+#   csi           - Operator CSI driver (default; the only option up to dt-enablement v1.4.1)
+#   image-volume  - Kubernetes image volumes: no CSI driver. Needs Kubernetes >= 1.35 and
+#                   containerd >= 2.2, i.e. dt-enablement >= v1.5.0 (k3d v5.9.0 -> k3s 1.35).
+#                   Writes the DynaKube annotation
+#                   feature.dynatrace.com/mount-code-modules-via-image-volume, pins a public
+#                   codeModulesImage and installs the Operator with csidriver.enabled=false.
+#                   On an older cluster it fails SILENTLY (pods run, no agent) -- opt in per repo.
+code_modules_delivery: csi
+
 # Features (all optional, toggle on/off)
 kspm: false
 log_monitoring: true
@@ -48,3 +58,4 @@ ecr_pin_k8s_node_config_collector: "1.6.3"
 ecr_pin_logmodule: "1.349.109.20261102-164952"
 ecr_pin_eec: "1.349.109.20261102-164952"
 ecr_pin_otel_collector: "0.60.0"
+ecr_pin_codemodules: "1.347.62.20261019-084101"

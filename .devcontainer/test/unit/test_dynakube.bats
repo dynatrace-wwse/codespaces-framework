@@ -307,7 +307,7 @@ EOF
   source_functions
 
   run getDtSessionId
-  [ "$status" -eq 0 ]
+  echo "PY: $output" >&3; [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
@@ -691,9 +691,9 @@ _field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.a
   source_functions
 
   run isSprintTenant "https://ydi9582h.sprint.apps.dynatracelabs.com"
-  [ "$status" -eq 0 ]
+  echo "PY: $output" >&3; [ "$status" -eq 0 ]
   run isSprintTenant "https://ydi9582h.sprint.dynatracelabs.com/api"
-  [ "$status" -eq 0 ]
+  echo "PY: $output" >&3; [ "$status" -eq 0 ]
 
   run isSprintTenant "https://geu80787.apps.dynatrace.com"
   [ "$status" -ne 0 ]
@@ -705,7 +705,7 @@ _field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.a
   source_functions
 
   DT_ENVIRONMENT="https://ydi9582h.sprint.apps.dynatracelabs.com" run isSprintTenant
-  [ "$status" -eq 0 ]
+  echo "PY: $output" >&3; [ "$status" -eq 0 ]
   DT_ENVIRONMENT="https://geu80787.apps.dynatrace.com" run isSprintTenant
   [ "$status" -ne 0 ]
 }
@@ -738,7 +738,7 @@ _field() { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.a
   export -f kubectl
 
   DT_ENVIRONMENT="https://geu80787.apps.dynatrace.com" run fixSprintActiveGateImage
-  [ "$status" -eq 0 ]
+  echo "PY: $output" >&3; [ "$status" -eq 0 ]
   [[ "$output" != *"KUBECTL_SHOULD_NOT_RUN"* ]]
   [[ "$output" != *"downgrading to the latest available"* ]]
 }
@@ -841,7 +841,7 @@ CFG
   _ecr_hit
 
   run --separate-stderr getLatestEcrTag dynatrace-logmodule
-  [ "$status" -eq 0 ]
+  echo "PY: $output" >&3; [ "$status" -eq 0 ]
   [ "$output" = "1.10.0" ]
 }
 
@@ -882,4 +882,87 @@ CFG
   [[ "$output" == *"ERROR"* ]]
   # no half-written manifest left behind, and no stale one created
   [ -z "$(ls -A "$FAKE_REPO/.devcontainer/yaml/gen/")" ]
+}
+
+# ============================================================
+# Brief 261b: code_modules_delivery: image-volume (opt-in; default csi)
+# ============================================================
+
+@test "image-volume: default csi writes no annotation and no codeModulesImage on prod" {
+  source_functions
+  latestPublicCodeModulesImage() { echo "public.ecr.aws/dynatrace/dynatrace-codemodules:SHOULD_NOT_RUN"; }
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  generateDynakube apponly
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" != *"mount-code-modules-via-image-volume"* ]]
+  [[ "$output" != *"codeModulesImage"* ]]
+  [[ "$output" == *"applicationMonitoring: {}"* ]]
+}
+
+@test "image-volume: apponly opt-in writes the annotation and pins the public image" {
+  source_functions
+  echo 'code_modules_delivery: image-volume' > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+  latestPublicCodeModulesImage() { echo "public.ecr.aws/dynatrace/dynatrace-codemodules:9.9.9.9-9"; }
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  generateDynakube apponly
+
+  local f="$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  # Position, not just presence: the annotation under DynaKube metadata (2/4 spaces), the
+  # image under applicationMonitoring (4/6 spaces).
+  run grep -A4 '^kind: DynaKube$' "$f"
+  [ "${lines[1]}" = "metadata:" ]
+  [ "${lines[4]}" = "  annotations:" ]
+  run grep -A1 '^  annotations:$' "$f"
+  [ "${lines[1]}" = '    feature.dynatrace.com/mount-code-modules-via-image-volume: "true"' ]
+  run grep -A1 '^    applicationMonitoring:$' "$f"
+  [ "${lines[1]}" = '      codeModulesImage: "public.ecr.aws/dynatrace/dynatrace-codemodules:9.9.9.9-9"' ]
+}
+
+@test "image-volume: cloudnative opt-in falls back to ecr_pin_codemodules when ECR misses" {
+  source_functions
+  echo 'code_modules_delivery: image-volume' > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+  latestPublicCodeModulesImage() { return 1; }
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  generateDynakube cloudnative
+
+  local f="$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  pin="$(grep '^ecr_pin_codemodules:' "$FAKE_REPO/.devcontainer/yaml/dynakube-defaults.yaml" | sed 's/.*"\(.*\)"/\1/')"
+  [ -n "$pin" ]
+  run grep -A1 '^  annotations:$' "$f"
+  [ "${lines[1]}" = '    feature.dynatrace.com/mount-code-modules-via-image-volume: "true"' ]
+  run grep -A6 '^    cloudNativeFullStack:$' "$f"
+  [[ "$output" == *"      codeModulesImage: \"public.ecr.aws/dynatrace/dynatrace-codemodules:$pin\""* ]]
+}
+
+@test "image-volume: k8s-only opt-in writes no annotation" {
+  source_functions
+  echo 'code_modules_delivery: image-volume' > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+  getLatestEcrTag() { echo "1.2.3.4-5"; }
+
+  generateDynakube k8s-only
+
+  run cat "$FAKE_REPO/.devcontainer/yaml/gen/dynakube.yaml"
+  [[ "$output" != *"mount-code-modules-via-image-volume"* ]]
+}
+
+@test "image-volume: dynatraceDeployOperator disables the CSI driver only when opted in" {
+  source_functions
+  helm() { echo "HELM $*" >> "$TEST_DIR/helm.log"; return 0; }
+  dynatraceEvalReadSaveCredentials() { DT_TENANT="https://abc123.live.dynatrace.com"; }
+  generateDynakube() { :; }
+  kubectl() { return 0; }
+
+  dynatraceDeployOperator >/dev/null 2>&1 || true
+  run grep -c 'csidriver.enabled=false' "$TEST_DIR/helm.log"
+  [ "$output" = "0" ]
+
+  : > "$TEST_DIR/helm.log"
+  echo 'code_modules_delivery: image-volume' > "$FAKE_REPO/.devcontainer/yaml/dynakube-config.yaml"
+  dynatraceDeployOperator >/dev/null 2>&1 || true
+  run grep -c 'install dynatrace-operator .*--set csidriver.enabled=false' "$TEST_DIR/helm.log"
+  [ "$output" = "1" ]
 }

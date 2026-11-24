@@ -3050,6 +3050,13 @@ latestPublicCodeModulesImage() {
   echo "${repo}:${tag}"
 }
 
+codeModulesViaImageVolume() {
+  # True when the repo opted into image-volume code-module delivery
+  # (dynakube-defaults.yaml / dynakube-config.yaml: code_modules_delivery: image-volume).
+  # Call after loadDynakubeConfig.
+  [[ "${DK_CODE_MODULES_DELIVERY:-csi}" == "image-volume" ]]
+}
+
 fixSprintActiveGateImage() {
   # Post-apply fallback. generateDynakube already pins the public AG image on sprint,
   # so this is a safety net for DynaKubes applied from outside the generator.
@@ -3639,10 +3646,16 @@ dynatraceDeployOperator() {
     return 1
   fi
 
-  # Deploy Operator via Helm
+  # Deploy Operator via Helm. Image-volume delivery needs no CSI driver: leaving it out
+  # saves its DaemonSet and keeps it from serving pods the DynaKube annotation moves off it.
+  local helm_extra=()
+  if codeModulesViaImageVolume; then
+    helm_extra=(--set csidriver.enabled=false)
+    printInfo "Code modules via image volumes — installing the Operator without the CSI driver"
+  fi
   helm install dynatrace-operator oci://public.ecr.aws/dynatrace/dynatrace-operator \
     --version "$operator_version" \
-    --create-namespace --namespace dynatrace --atomic
+    --create-namespace --namespace dynatrace --atomic "${helm_extra[@]}"
 
   # Create the secret for Dynakube to use. Name must be lowercase (k8s RFC-1123)
   # and match the lowercased Dynakube name derived in generateDynakube.
@@ -4000,6 +4013,27 @@ generateDynakube() {
     fi
   fi
 
+  # Image-volume delivery: the kubelet pulls the codemodules image itself, anonymously, per
+  # node -- there is no tenant-registry pull secret on these sessions, so pin the PUBLIC image
+  # on every tenant (not only sprint), falling back to ecr_pin_codemodules when ECR does not
+  # answer. Never empty: an image volume without a pullable reference leaves pods in Init.
+  local dk_annotations=""
+  if codeModulesViaImageVolume && [[ "$mode" =~ ^(apponly|app-only|cloudnative|cloud-native|cnfs)$ ]]; then
+    dk_annotations="  annotations:
+    feature.dynatrace.com/mount-code-modules-via-image-volume: \"true\""
+    if [[ -z "$cm_image_line" ]]; then
+      local iv_cm_img
+      if iv_cm_img="$(latestPublicCodeModulesImage)"; then
+        :
+      elif [[ -n "${DK_ECR_PIN_CODEMODULES:-}" ]]; then
+        iv_cm_img="public.ecr.aws/dynatrace/dynatrace-codemodules:${DK_ECR_PIN_CODEMODULES}"
+        printWarn "No public codemodules tag resolved — using the pin ${iv_cm_img}"
+      fi
+      [[ -n "$iv_cm_img" ]] && cm_image_line="codeModulesImage: \"${iv_cm_img}\""
+    fi
+    printInfo "Code modules via image volumes (${cm_image_line:-no codeModulesImage resolved})"
+  fi
+
   # --- Build the Dynakube YAML ---
 
   cat > "$out_file" <<DKEOF
@@ -4022,6 +4056,7 @@ kind: DynaKube
 metadata:
   name: ${cluster_name}
   namespace: dynatrace
+${dk_annotations}
 spec:
   apiUrl: ${api_url}
   tokens: ${cluster_name}
