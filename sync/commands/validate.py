@@ -248,6 +248,14 @@ def _validate_docs(repo_entry, path):
     if not mf.exists():
         issues.append(".devcontainer/util/my_functions.sh missing")
 
+    # workshop-my-functions.sh is loaded only on a shared machine, which only a
+    # training with workshop-post-create.sh has (ENH-186): without that script
+    # the file is never sourced anywhere.
+    wmf = path / ".devcontainer/util/workshop-my-functions.sh"
+    if wmf.exists() and not (path / ".devcontainer/workshop-post-create.sh").exists():
+        issues.append(".devcontainer/util/workshop-my-functions.sh without "
+                      ".devcontainer/workshop-post-create.sh is never loaded")
+
     if issues:
         print(f"  ⚠️  repo structure: {len(issues)} issue(s)")
         for issue in issues:
