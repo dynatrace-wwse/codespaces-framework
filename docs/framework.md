@@ -63,6 +63,7 @@ Files in `.devcontainer/` are classified into categories that determine how the 
 | `post-start.sh` | Repo-specific post-start actions |
 | `util/source_framework.sh` | Version pin + cache logic |
 | `util/my_functions.sh` | Repo-specific custom functions |
+| `util/workshop-my-functions.sh` | Shared-infrastructure functions — loaded only on the workshop shared machine (optional, ENH-186) |
 | `test/integration.sh` | Repo-specific integration tests |
 | `.env` | Secrets for local runs and MCP (gitignored) |
 | `manifests/` | Repo-specific K8s manifests |
@@ -90,6 +91,7 @@ Defined per repo in `repos.yaml` via the `image_tier` field:
   util/
     source_framework.sh  # Version pin + cache mechanism
     my_functions.sh      # Custom functions
+    workshop-my-functions.sh  # Shared machine only (trainings with workshop-post-create.sh)
   test/
     integration.sh       # Repo-specific integration tests
   manifests/             # Repo-specific K8s manifests (if any)
@@ -495,6 +497,34 @@ deployMyApp() {
   registerApp "myapp" "myapp" "myapp-svc" 8080
 }
 ```
+
+### Shared infrastructure: `workshop-my-functions.sh` (ENH-186)
+
+A training with shared infrastructure (it ships `.devcontainer/workshop-post-create.sh`) can
+keep the shared machine's functions in their own file,
+`.devcontainer/util/workshop-my-functions.sh`. `functions.sh` sources it **only on the
+workshop shared machine**, right after `my_functions.sh` (so a function of the same name
+there wins on the shared machine):
+
+| Box | `ORBITAL_SHARED_ROLE` | `workshop-my-functions.sh` |
+|---|---|---|
+| Workshop shared machine (Orbital) | `shared` | sourced |
+| Shared machine the training editor builds | `shared` | sourced |
+| Learner seat, trainer seat, editor trainer environment | unset | **not** sourced |
+| GitHub Codespace, local run | unset | **not** sourced |
+
+The signal is Orbital's, never a guess: Orbital writes `ORBITAL_SHARED_ROLE=shared` into the
+shared job's `.devcontainer/.env` and into no other job's (`orbital shared/shared_seat.py`
+`env_lines`). The match is exact — `learner`, `true`, `1`, `SHARED` load nothing. Next to it
+Orbital sets `ORBITAL_WORKSHOP_ID`: the workshop id (`ws_…`) in a workshop, and
+`editor-<job id>` when the training editor builds the shared machine. Name resources from
+`getDtSessionId`, not from `ORBITAL_WORKSHOP_ID`.
+
+Call these functions only from `workshop-post-create.sh` / `workshop-post-start.sh`. The file
+is optional; `sync migrate` creates a commented stub for a shared training and never
+overwrites one, and `sync validate` flags it in a training **without**
+`workshop-post-create.sh` (it would never be loaded there). Tests:
+`.devcontainer/test/unit/test_workshop_my_functions.bats`.
 
 ### Common patterns
 

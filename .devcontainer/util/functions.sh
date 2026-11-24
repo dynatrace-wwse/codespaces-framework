@@ -7437,3 +7437,15 @@ generateTodoTraffic() {
 if [ -f "$REPO_PATH/.devcontainer/util/my_functions.sh" ]; then
   source "$REPO_PATH/.devcontainer/util/my_functions.sh"
 fi
+
+# A training's shared infrastructure owns workshop-my-functions.sh (ENH-186).
+# Sourced ONLY on the workshop shared machine, after my_functions.sh so it can
+# override it. Orbital is the only one that says "this is the shared machine":
+# it writes ORBITAL_SHARED_ROLE=shared into that job's .env and into no other
+# (orbital shared/shared_seat.py env_lines). Exact match on purpose — unset,
+# "learner", "true" or "1" is a learner/trainer seat or a Codespace and never
+# loads it.
+if [ "${ORBITAL_SHARED_ROLE:-}" = "shared" ] && \
+   [ -f "$REPO_PATH/.devcontainer/util/workshop-my-functions.sh" ]; then
+  source "$REPO_PATH/.devcontainer/util/workshop-my-functions.sh"
+fi

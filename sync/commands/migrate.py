@@ -63,6 +63,10 @@ REPO_CUSTOM_FILES = [
     ".devcontainer/workshop-post-start.sh",
     ".devcontainer/util/source_framework.sh",
     ".devcontainer/util/my_functions.sh",
+    # The shared machine's own functions (ENH-186). Optional, owned by the
+    # repo like my_functions.sh; functions.sh sources it only when Orbital sets
+    # ORBITAL_SHARED_ROLE=shared, i.e. never in a seat or a Codespace.
+    ".devcontainer/util/workshop-my-functions.sh",
     ".devcontainer/test/integration.sh",
     # A repo's own token contract. It lives inside a Category A dir, so the
     # dir cleanup below must skip it: functions.sh and Orbital both read it as
@@ -651,6 +655,20 @@ MY_FUNCTIONS_TEMPLATE = """\
 # Define your own functions here and call them from post-create.sh
 """
 
+WORKSHOP_MY_FUNCTIONS_TEMPLATE = """\
+#!/bin/bash
+# Functions for this training's SHARED INFRASTRUCTURE (ENH-186).
+#
+# functions.sh sources this file only on the workshop shared machine — when
+# Orbital has set ORBITAL_SHARED_ROLE=shared — and after my_functions.sh, so a
+# function defined here overrides one of the same name there. Learner and
+# trainer seats and Codespaces never load it: call these functions from
+# workshop-post-create.sh / workshop-post-start.sh only.
+#
+# On the shared machine Orbital also sets ORBITAL_WORKSHOP_ID: the workshop id
+# (ws_...) in a workshop, editor-<job id> when the training editor builds it.
+"""
+
 POST_CREATE_TEMPLATE = """\
 #!/bin/bash
 #loading functions to script
@@ -812,6 +830,15 @@ def _scaffold_repo(entry, repo_path: Path, version: str):
         mf_path.parent.mkdir(parents=True, exist_ok=True)
         mf_path.write_text(MY_FUNCTIONS_TEMPLATE)
         created.append("util/my_functions.sh")
+
+    # workshop-my-functions.sh — only for a training with shared
+    # infrastructure (it ships workshop-post-create.sh); anything else never
+    # loads it, so creating it there would be dead weight.
+    wmf_path = repo_path / ".devcontainer/util/workshop-my-functions.sh"
+    if (repo_path / ".devcontainer/workshop-post-create.sh").exists() and not wmf_path.exists():
+        wmf_path.parent.mkdir(parents=True, exist_ok=True)
+        wmf_path.write_text(WORKSHOP_MY_FUNCTIONS_TEMPLATE)
+        created.append("util/workshop-my-functions.sh")
 
     # test/integration.sh
     ti_path = repo_path / ".devcontainer/test/integration.sh"

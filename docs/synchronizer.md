@@ -313,6 +313,11 @@ training self-service.
 infrastructure is not supported yet. A `workshop-post-start.sh` without the create script
 is refused too.
 
+The shared machine's own functions go in `.devcontainer/util/workshop-my-functions.sh`,
+loaded only there (see [Framework → Shared infrastructure](framework.md)); `sync migrate`
+scaffolds it for such a training and `sync validate` flags it in a training without the create
+script.
+
 `sync check-delivery` and `sync validate` enforce these rules. Orbital applies the same
 rules at runtime (`shared/delivery.py` mirrors `sync/core/delivery.py`, case for case).
 

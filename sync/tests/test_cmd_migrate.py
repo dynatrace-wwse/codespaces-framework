@@ -65,6 +65,7 @@ class TestCategoryA:
         assert ".devcontainer/post-create.sh" in REPO_CUSTOM_FILES
         assert ".devcontainer/util/source_framework.sh" in REPO_CUSTOM_FILES
         assert ".devcontainer/util/my_functions.sh" in REPO_CUSTOM_FILES
+        assert ".devcontainer/util/workshop-my-functions.sh" in REPO_CUSTOM_FILES
         assert ".devcontainer/test/integration.sh" in REPO_CUSTOM_FILES
 
     def test_no_overlap_a_and_custom(self):
@@ -588,3 +589,32 @@ class TestSharedWorkshopScripts:
         _migrate_repo(make_repo_entry(), repo, "1.11.2", dry_run=False)
         for s in self.SCRIPTS:
             assert (repo / s).read_text() == f"#!/bin/bash\n# {s}\n"
+
+
+class TestWorkshopMyFunctionsScaffold:
+    """ENH-186: migrate creates workshop-my-functions.sh only for a training
+    with shared infrastructure, and never overwrites the repo's own."""
+
+    def _run(self, tmp_path, make_repo_entry, *, wpc, existing=None):
+        from sync.commands.migrate import _scaffold_repo
+        if wpc:
+            (tmp_path / ".devcontainer").mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".devcontainer/workshop-post-create.sh").write_text("#!/bin/bash\n")
+        wmf = tmp_path / ".devcontainer/util/workshop-my-functions.sh"
+        if existing is not None:
+            wmf.parent.mkdir(parents=True, exist_ok=True)
+            wmf.write_text(existing)
+        _scaffold_repo(make_repo_entry(), tmp_path, "1.0.0")
+        return wmf
+
+    def test_created_for_shared_training(self, tmp_path, make_repo_entry):
+        from sync.commands.migrate import WORKSHOP_MY_FUNCTIONS_TEMPLATE
+        wmf = self._run(tmp_path, make_repo_entry, wpc=True)
+        assert wmf.read_text() == WORKSHOP_MY_FUNCTIONS_TEMPLATE
+
+    def test_not_created_without_shared_script(self, tmp_path, make_repo_entry):
+        assert not self._run(tmp_path, make_repo_entry, wpc=False).exists()
+
+    def test_repo_copy_kept(self, tmp_path, make_repo_entry):
+        wmf = self._run(tmp_path, make_repo_entry, wpc=True, existing="mine\n")
+        assert wmf.read_text() == "mine\n"

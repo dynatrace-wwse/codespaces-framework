@@ -256,3 +256,35 @@ class TestWorkshopPostCreateValidation:
         from sync.commands.validate import _validate_post_create
         _validate_post_create(self._repo(tmp_path))
         assert "workshop-post-create" not in capsys.readouterr().out
+
+
+class TestWorkshopMyFunctions:
+    """ENH-186: workshop-my-functions.sh is loaded only on a shared machine, so
+    it is valid only beside workshop-post-create.sh."""
+
+    def _repo(self, tmp_path, *, wpc: bool, wmf: bool):
+        util = tmp_path / ".devcontainer/util"
+        util.mkdir(parents=True)
+        (util / "my_functions.sh").write_text("#!/bin/bash\n")
+        if wpc:
+            (tmp_path / ".devcontainer/workshop-post-create.sh").write_text("#!/bin/bash\n")
+        if wmf:
+            (util / "workshop-my-functions.sh").write_text("#!/bin/bash\n")
+        return tmp_path
+
+    def _out(self, make_repo_entry, path, capsys):
+        from sync.commands.validate import _validate_docs
+        _validate_docs(make_repo_entry(), path)
+        return capsys.readouterr().out
+
+    def test_orphan_file_is_flagged(self, tmp_path, make_repo_entry, capsys):
+        out = self._out(make_repo_entry, self._repo(tmp_path, wpc=False, wmf=True), capsys)
+        assert "workshop-my-functions.sh without" in out
+
+    def test_beside_shared_script_is_fine(self, tmp_path, make_repo_entry, capsys):
+        out = self._out(make_repo_entry, self._repo(tmp_path, wpc=True, wmf=True), capsys)
+        assert "workshop-my-functions.sh" not in out
+
+    def test_absent_is_fine_either_way(self, tmp_path, make_repo_entry, capsys):
+        out = self._out(make_repo_entry, self._repo(tmp_path, wpc=True, wmf=False), capsys)
+        assert "workshop-my-functions.sh" not in out
