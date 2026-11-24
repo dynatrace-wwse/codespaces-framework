@@ -257,6 +257,7 @@ on the [Orbital](ops-platform.md) ops platform, in a Codespace, or on a local ma
 | `integration_k3d_aitraveladvisor.sh` | AI Travel Advisor stack (Ollama, Weaviate, app) on K3d | AMD64 only (Ollama has no ARM64 image) | `DT_LLM_TOKEN` — skips gracefully when absent |
 | `integration_appmon_k3d_todoapp.sh` | Dynatrace **ApplicationMonitoring** end to end on K3d | AMD64 **and** ARM64, run independently | `DT_ENVIRONMENT`, `DT_OPERATOR_TOKEN`, `DT_INGEST_TOKEN` |
 | `integration_cnfs_k3d_todoapp.sh` | Dynatrace **CloudNativeFullStack** on K3d | AMD64 **and** ARM64 | same three |
+| `integration_imagevolume_k3d_todoapp.sh` | ApplicationMonitoring with code modules as **image volumes** (`code_modules_delivery: image-volume`): asserts kubelet >= 1.35 / containerd >= 2.2, no CSI driver, an `image` volume on the injected pod and `liboneagent` loaded in its process — never the pod phase, since both failure modes leave the pod Running. Needs dt-enablement >= v1.5.0; on v1.4.x it stops red at the node check | AMD64 **and** ARM64 | same three |
 | `integration_dtwiz_k3d.sh` | The `dtwiz` CLI path: install, `status`, `analyze`, `install kubernetes` | any | `DT_ENVIRONMENT` + **`DT_PLATFORM_TOKEN`** (`dt0s16`), not the classic tokens — **or** the tenant's own OAuth client, from which the suite mints one for the run (see below) |
 | `integration_k3d_otel_collector.sh` | `deployOtelCollector` on K3d **without** the Operator: pod Ready, one OTLP/HTTP log and span with a unique marker accepted by the collector **and found in Grail** by DQL; no export errors in the collector log | AMD64 **and** ARM64 | `DT_ENVIRONMENT`, `DT_INGEST_TOKEN`, plus `DT_PLATFORM_TOKEN` (or the tenant's OAuth client, minted for the run) to read Grail |
 | `integration_kind_astroshop.sh` | Astroshop on Kind: ingress, HTML content, static assets | AMD64 only; skipped on Sysbox | No |
@@ -277,6 +278,7 @@ each — a single-arch run cannot show that.
 # Requires .devcontainer/.env with the credentials the suite needs
 bash .devcontainer/test/integration_appmon_k3d_todoapp.sh
 bash .devcontainer/test/integration_cnfs_k3d_todoapp.sh
+bash .devcontainer/test/integration_imagevolume_k3d_todoapp.sh
 ```
 
 ### Platform tokens: supplied, or minted for the run
