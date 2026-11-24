@@ -51,6 +51,17 @@ DTUI_PIN_BIN_SHA256_AMD64=0017b6b1c8c845f42bcd279cc6d0050bd8906f24c0c40257c25c1d
 DTUI_PIN_BIN_SHA256_ARM64=811dbeb2c5704b01c7603a1322ff9c5b7401e91a355b23ead52ae578b1d0d660
 DTUI_VERSION="${DTUI_VERSION:-$DTUI_PIN_VERSION}"
 export DTUI_VERSION
+# dtwiz: analyzes a system and installs a Dynatrace ingestion method (OneAgent,
+# Kubernetes, OpenTelemetry). Same release shape as dtctl and dtui. 1.16.0 is the
+# latest release (2026-11-24; the newer "snapshot-*" tags are pre-releases).
+# https://github.com/dynatrace-oss/dtwiz/releases
+DTWIZ_PIN_VERSION=1.16.0
+DTWIZ_PIN_SHA256_AMD64=55d2a9363672411fa1d6e5b91068e46a290c8ca2cd83256e9eb139c8e63e36cc
+DTWIZ_PIN_SHA256_ARM64=888d4f0a68af5db85e632b0046f87f7866b10d20dd0a300edb9a392b32590cf9
+DTWIZ_PIN_BIN_SHA256_AMD64=e582ec8257e2aa3d6d1440d52f71121c7cdf0dbb1f53f3e87a3a74c2755f8387
+DTWIZ_PIN_BIN_SHA256_ARM64=295682a5ef83374a97e158c7f98dea384098ba74c99645d88da749076bc8f792
+DTWIZ_VERSION="${DTWIZ_VERSION:-$DTWIZ_PIN_VERSION}"
+export DTWIZ_VERSION
 # Monaco: the framework ships a PATCHED build of the pinned version (ENH-114).
 # Stock Monaco asks /platform/metadata/v1/classic-environment-domain on every
 # platform-token run, which needs 'app-engine:apps:run' — a scope a learner's

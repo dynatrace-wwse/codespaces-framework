@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for enableDtctl / disableDtctl / installDtui / installMonaco / deployMonaco /
+# Tests for enableDtctl / disableDtctl / installDtui / installDtwiz / installMonaco / deployMonaco /
 # undeployMonaco / verifySha256 (ENH-089, ENH-091).
 #
 # Nothing touches the network or a tenant: curl is a stub that serves release
@@ -19,7 +19,7 @@ setup() {
   export XDG_CONFIG_HOME="$HOME/.config"
   export XDG_DATA_HOME="$HOME/.local/share"
   mkdir -p "$HOME"
-  unset DTCTL_CONFIG DTCTL_VERSION DTUI_VERSION MONACO_VERSION DTCTL_TOKEN_VAR MONACO_TOKEN_VAR DT_SESSION_ID GITHUB_USER
+  unset DTCTL_CONFIG DTCTL_VERSION DTUI_VERSION DTWIZ_VERSION MONACO_VERSION DTCTL_TOKEN_VAR MONACO_TOKEN_VAR DT_SESSION_ID GITHUB_USER
 
   export FAKE_REPO="$TEST_DIR/workspaces/test-enablement"
   mkdir -p "$FAKE_REPO/.devcontainer/util" "$FAKE_REPO/.devcontainer/test"
@@ -43,7 +43,7 @@ VARSEOF
   export BIN="$TEST_DIR/bin" FIXTURES="$TEST_DIR/fixtures"
   export CURL_LOG="$TEST_DIR/curl.log" DTCTL_LOG="$TEST_DIR/dtctl.log" MONACO_LOG="$TEST_DIR/monaco.log"
   export INSTALL_DIR="$TEST_DIR/install"
-  export DTCTL_INSTALL_DIR="$INSTALL_DIR" MONACO_INSTALL_DIR="$INSTALL_DIR" DTUI_INSTALL_DIR="$INSTALL_DIR"
+  export DTCTL_INSTALL_DIR="$INSTALL_DIR" MONACO_INSTALL_DIR="$INSTALL_DIR" DTUI_INSTALL_DIR="$INSTALL_DIR" DTWIZ_INSTALL_DIR="$INSTALL_DIR"
   mkdir -p "$BIN" "$FIXTURES" "$INSTALL_DIR"
   # Only the stubs and the system tools: no real dtctl/monaco can leak in.
   export PATH="$INSTALL_DIR:$BIN:/usr/bin:/bin"
@@ -178,6 +178,20 @@ EOF
   # dtctl and dtui both publish "checksums.txt"; the curl stub serves by
   # basename, so one file holds both tools' lines (each looks up its asset).
   (cd "$FIXTURES" && sha256sum dtui_9.9.9_linux_amd64.tar.gz dtui_9.9.9_linux_arm64.tar.gz >> checksums.txt)
+  # The "released" dtwiz: like the real one, `version` prints
+  # "dtwiz version: <v>" and --version is an unknown flag.
+  cat > "$stage/dtwiz" <<'EOF'
+#!/bin/bash
+[ "$1" = "version" ] && { printf 'dtwiz version: 9.9.9\ncommit: abc1234\n'; exit 0; }
+echo "Error: unknown flag: $1" >&2
+exit 1
+EOF
+  chmod +x "$stage/dtwiz"
+  for a in amd64 arm64; do
+    tar --mtime="@$([ "$a" = amd64 ] && echo 1400000000 || echo 1500000000)" \
+      -czf "$FIXTURES/dtwiz_9.9.9_linux_${a}.tar.gz" -C "$stage" dtwiz README.md
+  done
+  (cd "$FIXTURES" && sha256sum dtwiz_9.9.9_linux_amd64.tar.gz dtwiz_9.9.9_linux_arm64.tar.gz >> checksums.txt)
 
   # The "released" monaco: logs arguments + whether the token is present.
   cat > "$FIXTURES/monaco-linux-amd64" <<'EOF'
@@ -1403,8 +1417,8 @@ MONACO_OUT="$BATS_TEST_DIRNAME/monaco-output"
 
 pin_devtools() {
   # The framework pin is 9.9.9, with reviewed hashes taken from the fixtures.
-  export DTCTL_VERSION=9.9.9 MONACO_VERSION=9.9.9 DTUI_VERSION=9.9.9
-  export DTCTL_PIN_VERSION=9.9.9 MONACO_PIN_VERSION=9.9.9 DTUI_PIN_VERSION=9.9.9
+  export DTCTL_VERSION=9.9.9 MONACO_VERSION=9.9.9 DTUI_VERSION=9.9.9 DTWIZ_VERSION=9.9.9
+  export DTCTL_PIN_VERSION=9.9.9 MONACO_PIN_VERSION=9.9.9 DTUI_PIN_VERSION=9.9.9 DTWIZ_PIN_VERSION=9.9.9
   local a A
   for a in amd64 arm64; do
     A=$(echo "$a" | tr '[:lower:]' '[:upper:]')
@@ -1414,6 +1428,8 @@ pin_devtools() {
     export "MONACO_PIN_BIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
     export "DTUI_PIN_SHA256_$A=$(sha256sum "$FIXTURES/dtui_9.9.9_linux_$a.tar.gz" | cut -d' ' -f1)"
     export "DTUI_PIN_BIN_SHA256_$A=$(sha256sum "$TEST_DIR/stage/dtui" | cut -d' ' -f1)"
+    export "DTWIZ_PIN_SHA256_$A=$(sha256sum "$FIXTURES/dtwiz_9.9.9_linux_$a.tar.gz" | cut -d' ' -f1)"
+    export "DTWIZ_PIN_BIN_SHA256_$A=$(sha256sum "$TEST_DIR/stage/dtwiz" | cut -d' ' -f1)"
   done
 }
 
@@ -1425,6 +1441,14 @@ fake_present_dtui() {
   sha256sum "$INSTALL_DIR/dtui" | cut -d' ' -f1
 }
 
+# fake_present_dtwiz <version> — a present dtwiz printing "dtwiz version: <v>"
+# for `version` (the real format); prints its sha256.
+fake_present_dtwiz() {
+  printf '#!/bin/bash\n[ "$1" = "version" ] && echo "dtwiz version: %s" && exit 0\nexit 1\n' "$1" > "$INSTALL_DIR/dtwiz"
+  chmod +x "$INSTALL_DIR/dtwiz"
+  sha256sum "$INSTALL_DIR/dtwiz" | cut -d' ' -f1
+}
+
 # fake_present <tool> <version> — a present binary that reports <version>;
 # prints its sha256.
 fake_present() {
@@ -1433,7 +1457,7 @@ fake_present() {
   sha256sum "$INSTALL_DIR/$1" | cut -d' ' -f1
 }
 
-@test "installDTTools: default installs dtctl, dtui and Monaco at the pinned versions, verified" {
+@test "installDTTools: default installs dtctl, dtui, dtwiz and Monaco at the pinned versions, verified" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
@@ -1441,6 +1465,9 @@ fake_present() {
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/dtctl" ]
   [ -x "$INSTALL_DIR/dtui" ]
+  [ -x "$INSTALL_DIR/dtwiz" ]
+  "$INSTALL_DIR/dtwiz" version | grep -qx "dtwiz version: 9.9.9"
+  grep -q "dtwiz/releases/download/v9.9.9/dtwiz_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
   [ -x "$INSTALL_DIR/monaco" ]
   "$INSTALL_DIR/dtui" --version | grep -qx "dtui version 9.9.9"
   grep -q "dtctl/releases/download/v9.9.9/checksums.txt" "$CURL_LOG"
@@ -1492,8 +1519,10 @@ fake_present() {
   [ -x "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
   [ ! -e "$INSTALL_DIR/dtui" ]
+  [ ! -e "$INSTALL_DIR/dtwiz" ]
   refute grep -q "monaco" "$CURL_LOG"
   refute grep -q "dtui" "$CURL_LOG"
+  refute grep -q "dtwiz" "$CURL_LOG"
 }
 
 @test "installDTTools: DT_TOOLS=monaco installs Monaco only — no dtctl download" {
@@ -1514,6 +1543,7 @@ fake_present() {
   DT_TOOLS=DTUI run installDTTools
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/dtui" ]
+  [ ! -e "$INSTALL_DIR/dtwiz" ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
   refute grep -q "dtctl_\|monaco" "$CURL_LOG"
@@ -1526,12 +1556,14 @@ fake_present() {
   unset DT_DTCTL_TOKEN
   local v
   for v in "dtctl,dtui,monaco" "ALL" "monaco dtui dtctl"; do
-    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/dtui" "$INSTALL_DIR/monaco"
+    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/dtui" "$INSTALL_DIR/dtwiz" "$INSTALL_DIR/monaco"
     DT_TOOLS="$v" run installDTTools
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dtctl" ]
     [ -x "$INSTALL_DIR/dtui" ]
     [ -x "$INSTALL_DIR/monaco" ]
+    # dtwiz comes with 'all' only; an explicit list without it (BYOA) never gets it.
+    if [ "$v" = "ALL" ]; then [ -x "$INSTALL_DIR/dtwiz" ]; else [ ! -e "$INSTALL_DIR/dtwiz" ]; fi
   done
   # 'dtctl,monaco' (a repo that opted in before dtui existed) does not get dtui.
   rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/dtui" "$INSTALL_DIR/monaco"
@@ -1623,7 +1655,7 @@ fake_present() {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
-  rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/dtui_* "$FIXTURES"/monaco-*
+  rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/dtui_* "$FIXTURES"/dtwiz_* "$FIXTURES"/monaco-*
   run installDTTools
   [ "$status" -eq 0 ]
   # Its real output holds tagged "failed" lines...
@@ -1653,9 +1685,11 @@ fake_present() {
   export DTCTL_PIN_BIN_SHA256_AMD64="$(fake_present dtctl 9.9.9)"
   export MONACO_PIN_BIN_SHA256_AMD64="$(fake_present monaco 9.9.9)"
   export DTUI_PIN_BIN_SHA256_AMD64="$(fake_present_dtui 9.9.9)"
+  export DTWIZ_PIN_BIN_SHA256_AMD64="$(fake_present_dtwiz 9.9.9)"
   run installDTTools
   [ "$status" -eq 0 ]
   [ ! -s "$CURL_LOG" ]
+  echo "$output" | grep -q "dtwiz v9.9.9 already present"
   echo "$output" | grep -q "dtctl v9.9.9 already present"
   echo "$output" | grep -q "dtui v9.9.9 already present"
   echo "$output" | grep -q "Monaco v9.9.9 already present"
@@ -1691,13 +1725,14 @@ fake_present() {
   unset DT_DTCTL_TOKEN
   # The release checksum files still match the assets: only the committed pin catches this.
   export DTCTL_PIN_SHA256_AMD64="$(printf '%064d' 1)" MONACO_PIN_SHA256_AMD64="$(printf '%064d' 2)"
-  export DTUI_PIN_SHA256_AMD64="$(printf '%064d' 3)"
+  export DTUI_PIN_SHA256_AMD64="$(printf '%064d' 3)" DTWIZ_PIN_SHA256_AMD64="$(printf '%064d' 4)"
   run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/dtui" ]
+  [ ! -e "$INSTALL_DIR/dtwiz" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
-  [ "$(echo "$output" | grep -c "MISMATCH")" -eq 3 ]
+  [ "$(echo "$output" | grep -c "MISMATCH")" -eq 4 ]
 }
 
 @test "installDtctl: a version the repo overrode (not the pin) falls back to the release file, with a warning" {
@@ -1717,13 +1752,14 @@ fake_present() {
   pin_devtools
   unset DT_DTCTL_TOKEN
   # The release checksum files are fine; only the committed per-arch pin is missing.
-  export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64="" DTUI_PIN_SHA256_AMD64=""
+  export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64="" DTUI_PIN_SHA256_AMD64="" DTWIZ_PIN_SHA256_AMD64=""
   run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/dtui" ]
+  [ ! -e "$INSTALL_DIR/dtwiz" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
-  [ "$(echo "$output" | grep -c "no reviewed sha256 is pinned for amd64 — refusing")" -eq 3 ]
+  [ "$(echo "$output" | grep -c "no reviewed sha256 is pinned for amd64 — refusing")" -eq 4 ]
   refute grep -q "Checksum OK" <<< "$output"
 }
 
@@ -1731,7 +1767,8 @@ fake_present() {
   local real="$BATS_TEST_DIRNAME/../../util/variables.sh" v
   for v in DTCTL_PIN_SHA256_AMD64 DTCTL_PIN_SHA256_ARM64 DTCTL_PIN_BIN_SHA256_AMD64 DTCTL_PIN_BIN_SHA256_ARM64 \
            MONACO_PIN_SHA256_AMD64 MONACO_PIN_SHA256_ARM64 \
-           DTUI_PIN_SHA256_AMD64 DTUI_PIN_SHA256_ARM64 DTUI_PIN_BIN_SHA256_AMD64 DTUI_PIN_BIN_SHA256_ARM64; do
+           DTUI_PIN_SHA256_AMD64 DTUI_PIN_SHA256_ARM64 DTUI_PIN_BIN_SHA256_AMD64 DTUI_PIN_BIN_SHA256_ARM64 \
+           DTWIZ_PIN_SHA256_AMD64 DTWIZ_PIN_SHA256_ARM64 DTWIZ_PIN_BIN_SHA256_AMD64 DTWIZ_PIN_BIN_SHA256_ARM64; do
     grep -qE "^$v=[0-9a-f]{64}$" "$real"
   done
 }
@@ -1745,6 +1782,7 @@ fake_present() {
   [ "$status" -eq 0 ]
   grep -q "dtctl_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
   grep -q "dtui_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
+  grep -q "dtwiz_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
   grep -q "monaco-linux-arm64" "$CURL_LOG"
   refute grep -q "amd64" "$CURL_LOG"
   [ -x "$INSTALL_DIR/dtctl" ]
@@ -1772,7 +1810,7 @@ fake_present() {
   printf '#!/bin/bash\necho "sudo $*" >> "$SUDO_LOG"\nif [ "$1" = "-n" ]; then echo "sudo: a password is required" >&2; exit 1; fi\nsleep 30; exit 1\n' > "$BIN/sudo"
   chmod +x "$BIN/sudo"
   mkdir -p "$SUBDIR"; chmod 0555 "$SUBDIR"
-  DTCTL_INSTALL_DIR="$SUBDIR" MONACO_INSTALL_DIR="$SUBDIR" DTUI_INSTALL_DIR="$SUBDIR" run timeout 20 bash -c \
+  DTCTL_INSTALL_DIR="$SUBDIR" MONACO_INSTALL_DIR="$SUBDIR" DTUI_INSTALL_DIR="$SUBDIR" DTWIZ_INSTALL_DIR="$SUBDIR" run timeout 20 bash -c \
     'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh; installDTTools'
   chmod 0755 "$SUBDIR"
   [ "$status" -eq 0 ]
@@ -1780,6 +1818,7 @@ fake_present() {
   refute grep -qv '^sudo -n ' "$SUDO_LOG"
   echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
   echo "$output" | grep -q "devtools (non-fatal): dtui not installed"
+  echo "$output" | grep -q "devtools (non-fatal): dtwiz not installed"
   echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
 }
 
@@ -1803,7 +1842,7 @@ fake_present() {
   export CURL_ARGS_LOG="$TEST_DIR/curl-args.log" DEVTOOLS_TIME_BUDGET=60
   run installDTTools
   [ "$status" -eq 0 ]
-  [ "$(wc -l < "$CURL_ARGS_LOG")" -eq 6 ]
+  [ "$(wc -l < "$CURL_ARGS_LOG")" -eq 8 ]
   refute grep -v -- "--connect-timeout 10 " "$CURL_ARGS_LOG"
   local mt
   for mt in $(grep -o -- "--max-time [0-9]*" "$CURL_ARGS_LOG" | awk '{print $2}'); do
@@ -1864,6 +1903,7 @@ fake_present() {
   echo "$output" | grep -q "time budget exhausted"
   echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
   echo "$output" | grep -q "devtools (non-fatal): dtui not installed"
+  echo "$output" | grep -q "devtools (non-fatal): dtwiz not installed"
   echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
 }
 
@@ -1877,6 +1917,9 @@ fake_present() {
   run installDtui
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "dtui: could not create a temporary directory"
+  run installDtwiz
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "dtwiz: could not create a temporary directory"
   run installMonaco
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "could not create a temporary directory"
@@ -1995,7 +2038,7 @@ run_setUpTerminal() {
   run_setUpTerminal
   [ "$status" -eq 0 ]
   refute grep -q "INSTALL_DTTOOLS_RAN" <<< "$output"
-  echo "$output" | grep -qF "Type 'installDTTools' to install dtctl, dtui + Monaco"
+  echo "$output" | grep -qF "Type 'installDTTools' to install dtctl, dtui, dtwiz + Monaco"
 }
 
 @test "setUpTerminal installs them BEFORE the long setup (right after the MCP hint)" {
@@ -2023,6 +2066,9 @@ run_setUpTerminal() {
   d=$(sed -n 's/^DTCTL_PIN_VERSION=//p' "$real")
   m=$(sed -n 's/^MONACO_PIN_VERSION=//p' "$real")
   u=$(sed -n 's/^DTUI_PIN_VERSION=//p' "$real")
+  local w; w=$(sed -n 's/^DTWIZ_PIN_VERSION=//p' "$real")
+  grep -qxF 'DTWIZ_VERSION="${DTWIZ_VERSION:-$DTWIZ_PIN_VERSION}"' "$real"
+  _isVersion "$w"
   grep -qxF 'DTCTL_VERSION="${DTCTL_VERSION:-$DTCTL_PIN_VERSION}"' "$real"
   grep -qxF 'MONACO_VERSION="${MONACO_VERSION:-$MONACO_PIN_VERSION}"' "$real"
   grep -qxF 'DTUI_VERSION="${DTUI_VERSION:-$DTUI_PIN_VERSION}"' "$real"
@@ -2813,4 +2859,113 @@ project_in_manifest() {
   local left
   left=$(printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter || true)
   [ -z "$left" ]
+}
+
+# ── dtwiz (dynatrace-oss/dtwiz) ──────────────────────────────────────────────
+
+@test "installDtwiz: pinned version verified against the reviewed pin AND checksums.txt, installed" {
+  source_functions
+  pin_devtools
+  run installDtwiz
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtwiz" ]
+  [ "$(echo "$output" | grep -c "Checksum OK for dtwiz_9.9.9_linux_amd64.tar.gz")" -eq 2 ]
+  [ ! -e "$INSTALL_DIR/README.md" ]
+  grep -q "github.com/dynatrace-oss/dtwiz/releases/download/v9.9.9/checksums.txt" "$CURL_LOG"
+  # The release asset, never dtwiz's install.sh (no checksum, posts events).
+  refute grep -q "install.sh\|raw.githubusercontent" "$CURL_LOG"
+}
+
+@test "installDtwiz: one-byte-corrupt archive is refused — nothing installed" {
+  source_functions
+  pin_devtools
+  corrupt_one_byte "$FIXTURES/dtwiz_9.9.9_linux_amd64.tar.gz"
+  run installDtwiz
+  [ "$status" -eq 1 ]
+  [ ! -e "$INSTALL_DIR/dtwiz" ]
+  echo "$output" | grep -q "INTEGRITY: Checksum MISMATCH for dtwiz_9.9.9_linux_amd64.tar.gz"
+}
+
+@test "installDtwiz: DTWIZ_VERSION empty resolves the LATEST dtwiz release" {
+  source_functions
+  pin_devtools
+  export DTWIZ_VERSION=""
+  run installDtwiz
+  [ "$status" -eq 0 ]
+  grep -q "api.github.com/repos/dynatrace-oss/dtwiz/releases/latest" "$CURL_LOG"
+  [ -x "$INSTALL_DIR/dtwiz" ]
+}
+
+@test "installDtwiz: a non-x.y.z DTWIZ_VERSION is refused before any download" {
+  source_functions
+  pin_devtools
+  export DTWIZ_VERSION="snapshot-main"
+  run installDtwiz
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "DTWIZ_VERSION 'snapshot-main' is not a version"
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "installDtwiz: a version the repo overrode falls back to the release file, with a warning" {
+  source_functions
+  pin_devtools
+  export DTWIZ_VERSION=9.9.8
+  cp "$FIXTURES/dtwiz_9.9.9_linux_amd64.tar.gz" "$FIXTURES/dtwiz_9.9.8_linux_amd64.tar.gz"
+  (cd "$FIXTURES" && sha256sum dtwiz_9.9.8_linux_amd64.tar.gz >> checksums.txt)
+  run installDtwiz
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "DTWIZ v9.9.8 is not the framework's pinned version"
+}
+
+@test "installDtwiz: arm64 machine downloads and verifies the arm64 asset" {
+  source_functions
+  pin_devtools
+  export FAKE_UNAME_M=aarch64
+  run installDtwiz
+  [ "$status" -eq 0 ]
+  grep -q "dtwiz_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
+  refute grep -q "amd64" "$CURL_LOG"
+}
+
+@test "installDtwiz: a present dtwiz is kept only on the pinned sha256 AND a matching 'dtwiz version: <v>'" {
+  source_functions
+  pin_devtools
+  export DTWIZ_PIN_BIN_SHA256_AMD64="$(fake_present_dtwiz 9.9.9)"
+  run installDtwiz
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "dtwiz v9.9.9 already present"
+  [ ! -s "$CURL_LOG" ]
+  # Negative control: right bytes per the pin, wrong version -> replaced.
+  export DTWIZ_PIN_BIN_SHA256_AMD64="$(fake_present_dtwiz 9.9.10)"
+  run installDtwiz
+  [ "$status" -eq 0 ]
+  grep -q "dtwiz_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  "$INSTALL_DIR/dtwiz" version | grep -qx "dtwiz version: 9.9.9"
+}
+
+@test "installDTTools: corrupt dtwiz archive is an INTEGRITY failure, NOT fatal, the others still install" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/dtwiz_9.9.9_linux_amd64.tar.gz"
+  run installDTTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtwiz" ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/dtui" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  echo "$output" | grep -q "devtools INTEGRITY FAILED: .*dtwiz_9.9.9_linux_amd64.tar.gz"
+  echo "$output" | grep -q "devtools (non-fatal): dtwiz not installed"
+}
+
+@test "installDTTools: DT_TOOLS=dtwiz installs dtwiz only" {
+  source_functions
+  pin_devtools
+  DT_TOOLS=dtwiz run installDTTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtwiz" ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  echo "$output" | grep -q "Installing Dynatrace tools: dtwiz 9.9.9"
 }
