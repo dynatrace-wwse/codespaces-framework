@@ -542,13 +542,13 @@ setUpTerminal(){
   # MCP is opt-in — not auto-configured. Users can type 'enableMCP' to set it up.
   printInfo "Type 'enableMCP' to connect VS Code to a Dynatrace MCP Server"
 
-  # dtctl + Monaco are opt-in too. A repo opts in with DT_TOOLS (dtctl, monaco
-  # or all); they are installed HERE, at the start of post-create, so a lab
+  # dtctl, dtui + Monaco are opt-in too. A repo opts in with DT_TOOLS (dtctl,
+  # dtui, monaco or all); they are installed HERE, at the start of post-create, so a lab
   # step that needs them finds them. Not opted in: a hint, like MCP's.
   if [ -n "${DT_TOOLS:-}" ]; then
     installDTTools
   else
-    printInfo "Type 'installDTTools' to install dtctl + Monaco"
+    printInfo "Type 'installDTTools' to install dtctl, dtui + Monaco"
   fi
 
   # Only an Orbital-orchestrated Codespace needs an SSH server: the Enablement App
@@ -863,7 +863,7 @@ _removeBinary() {
 _fetch() {
   # _fetch <url> <out> <max-seconds> — one download. --connect-timeout so a
   # dead route fails in seconds; --max-time capped by DEVTOOLS_DEADLINE (epoch
-  # seconds, set by installDTTools) so both tools share one time budget.
+  # seconds, set by installDTTools) so every tool shares one time budget.
   local url="$1" out="$2" mt="$3" left
   if [ -n "${DEVTOOLS_DEADLINE:-}" ]; then
     left=$(( DEVTOOLS_DEADLINE - $(date +%s) ))
@@ -877,11 +877,11 @@ _fetch() {
 }
 
 _pinnedSha() {
-  # _pinnedSha <DTCTL|MONACO> <version> <amd64|arm64> [BIN_] — prints the
+  # _pinnedSha <DTCTL|MONACO|DTUI> <version> <amd64|arm64> [BIN_] — prints the
   # reviewed sha256 committed in variables.sh, only when <version> is that
   # tool's pinned version. Prints nothing for any other version.
   local pin arch_up
-  case "$1" in DTCTL|MONACO) ;; *) return 1 ;; esac
+  case "$1" in DTCTL|MONACO|DTUI) ;; *) return 1 ;; esac
   case "$3" in amd64) arch_up=AMD64 ;; arm64) arch_up=ARM64 ;; *) return 1 ;; esac
   case "${4:-}" in ''|BIN_) ;; *) return 1 ;; esac
   eval "pin=\${${1}_PIN_VERSION:-}"
@@ -914,20 +914,21 @@ _dtctlDropLeakedConfig() {
 }
 
 _devToolReports() {
-  # _devToolReports <binary> <version> <pinned-binary-sha256> — 0 only when
-  # <binary>'s sha256 equals the reviewed pin AND its `version` output names
+  # _devToolReports <binary> <version> <pinned-binary-sha256> [version-arg] —
+  # 0 only when <binary>'s sha256 equals the reviewed pin AND its version
+  # output (`<binary> version`, or [version-arg]: dtui takes --version) names
   # <version>. Lets an image that bakes the binary in skip the download;
   # anything else (no pin, other bytes, other version) gets a verified install.
-  local bin="$1" want="${2#v}" pin="$3"
+  local bin="$1" want="${2#v}" pin="$3" varg="${4:-version}"
   [ -x "$bin" ] && [ -n "$want" ] && [ -n "$pin" ] || return 1
   [ "$(_sha256Of "$bin")" = "$(echo "$pin" | tr '[:upper:]' '[:lower:]')" ] || return 1
-  "$bin" version 2>/dev/null | awk -v v="$want" '
+  "$bin" "$varg" 2>/dev/null | awk -v v="$want" '
     NR == 1 { for (i = 1; i <= NF; i++) { f = $i; sub(/^v/, "", f); if (f == v) ok = 1 } }
     END { exit !ok }'
 }
 
 _verifyAsset() {
-  # _verifyAsset <DTCTL|MONACO> <version> <arch> <file> <release-sha256> — the
+  # _verifyAsset <DTCTL|MONACO|DTUI> <version> <arch> <file> <release-sha256> — the
   # reviewed pin first, the release's own checksum file second; both must
   # match. For the framework's own pinned version a missing pin REFUSES: the
   # release file alone is not enough. Only a version the repo overrode (not
@@ -1006,6 +1007,72 @@ installDtctl() {
   fi
   rm -rf "$tmp"
   printInfo "dtctl v$version installed at $dir/dtctl"
+}
+
+installDtui() {
+  # installDtui [dir] — installs dtui (https://github.com/dynatrace-oss/dtui),
+  # the read-only terminal UI for Dynatrace. Same release shape and the same
+  # verification as dtctl: the reviewed pin in variables.sh first, the
+  # release's checksums.txt second. Version: DTUI_VERSION, else the latest
+  # release. dtui has no auth of its own — it reads dtctl's contexts, so the
+  # context enableDtctl configures is the one it uses.
+  local dir="${1:-${DTUI_INSTALL_DIR:-/usr/local/bin}}"
+  local arch version tag
+  if ! arch=$(_releaseArch); then
+    printError "dtui: unsupported architecture '$(uname -m)' (amd64 and arm64 only)"
+    return 1
+  fi
+  if [ -n "$DTUI_VERSION" ]; then
+    if ! _isVersion "$DTUI_VERSION"; then
+      printError "dtui: DTUI_VERSION '$DTUI_VERSION' is not a version (x.y.z)"
+      return 1
+    fi
+    version="${DTUI_VERSION#v}"
+  else
+    if ! tag=$(_githubLatestTag "dynatrace-oss/dtui"); then
+      printError "dtui: could not resolve the latest release — set DTUI_VERSION to pin one"
+      return 1
+    fi
+    version="${tag#v}"
+  fi
+
+  # dtui takes --version: a bare `dtui version` would try to start the TUI.
+  if _devToolReports "$dir/dtui" "$version" "$(_pinnedSha DTUI "$version" "$arch" BIN_)" --version; then
+    printInfo "dtui v$version already present at $dir/dtui (sha256 matches the pin)"
+    return 0
+  fi
+
+  local asset="dtui_${version}_linux_${arch}.tar.gz"
+  local base="https://github.com/dynatrace-oss/dtui/releases/download/v${version}"
+  local tmp expected
+  if ! tmp=$(mktemp -d); then
+    printError "dtui: could not create a temporary directory"
+    return 1
+  fi
+  printInfo "Downloading $asset and checksums.txt (dtui v$version)"
+  if ! _fetch "$base/$asset" "$tmp/$asset" 120 \
+     || ! _fetch "$base/checksums.txt" "$tmp/checksums.txt" 30; then
+    printError "dtui: download of v$version failed"
+    rm -rf "$tmp"
+    return 1
+  fi
+  expected=$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1; exit}' "$tmp/checksums.txt")
+  if ! _verifyAsset DTUI "$version" "$arch" "$tmp/$asset" "$expected"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! tar -xzf "$tmp/$asset" -C "$tmp" dtui 2>/dev/null || [ ! -f "$tmp/dtui" ]; then
+    printError "dtui: archive $asset holds no dtui binary"
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! _installBinary "$tmp/dtui" "$dir" dtui; then
+    printError "dtui: could not install into $dir"
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  printInfo "dtui v$version installed at $dir/dtui"
 }
 
 enableDtctl() {
@@ -1255,35 +1322,38 @@ _monacoReady() {
 _dtToolsSelection() {
   # _dtToolsSelection [value] — parses a DT_TOOLS value (default: $DT_TOOLS)
   # and prints the selected tools, one per line, in install order (dtctl,
-  # then monaco). Accepted, comma- or space-separated, any case: dtctl,
-  # monaco, all. An unknown entry is a warning (on stderr), never fatal; it
-  # selects nothing. Empty, none, off: nothing.
-  local raw="${1-${DT_TOOLS:-}}" item dtctl="" monaco=""
+  # dtui, then monaco). Accepted, comma- or space-separated, any case: dtctl,
+  # dtui, monaco, all. An unknown entry is a warning (on stderr), never fatal;
+  # it selects nothing. Empty, none, off: nothing.
+  local raw="${1-${DT_TOOLS:-}}" item dtctl="" dtui="" monaco=""
   raw=$(printf '%s' "$raw" | tr '[:upper:],' '[:lower:] ')
   for item in $(printf '%s' "$raw"); do
     case "$item" in
       dtctl)  dtctl=1 ;;
+      dtui)   dtui=1 ;;
       monaco) monaco=1 ;;
-      all)    dtctl=1; monaco=1 ;;
+      all)    dtctl=1; dtui=1; monaco=1 ;;
       none|off) ;;
-      *) printWarn "DT_TOOLS: unknown tool '$item' ignored — use dtctl, monaco or all" >&2 ;;
+      *) printWarn "DT_TOOLS: unknown tool '$item' ignored — use dtctl, dtui, monaco or all" >&2 ;;
     esac
   done
   [ -n "$dtctl" ] && echo dtctl
+  [ -n "$dtui" ] && echo dtui
   [ -n "$monaco" ] && echo monaco
   return 0
 }
 
 installDTTools() {
-  # installDTTools [dtctl|monaco|all ...] — Dynatrace tools: dtctl and Monaco
-  # at the framework's pinned versions (DTCTL_VERSION, MONACO_VERSION in
+  # installDTTools [dtctl|dtui|monaco|all ...] — Dynatrace tools: dtctl, dtui
+  # and Monaco at the framework's pinned versions (DTCTL_VERSION, DTUI_VERSION,
+  # MONACO_VERSION in
   # variables.sh), checksum-verified. When DT_DTCTL_TOKEN is set it also
   # configures a read-only dtctl context (enableDtctl).
   #
   # Opt-in, like MCP: setUpTerminal runs it only when the repo sets DT_TOOLS
-  # (dtctl, monaco or all — environment, .devcontainer/.env, containerEnv, or
+  # (dtctl, dtui, monaco or all — environment, .devcontainer/.env, containerEnv, or
   # `export DT_TOOLS=...` in post-create.sh before setUpTerminal). A learner
-  # can type it in any repo: arguments win, then DT_TOOLS, then both tools.
+  # can type it in any repo: arguments win, then DT_TOOLS, then all three.
   # Never fatal: a failure is a warning and post-create carries on.
   local selection
   if [ "$#" -gt 0 ]; then
@@ -1291,18 +1361,19 @@ installDTTools() {
   elif [ -n "${DT_TOOLS:-}" ]; then
     selection=$(_dtToolsSelection)
   else
-    selection=$(printf 'dtctl\nmonaco\n')
+    selection=$(printf 'dtctl\ndtui\nmonaco\n')
   fi
   if [ -z "$selection" ]; then
-    printInfo "Dynatrace tools: nothing selected (DT_TOOLS='${DT_TOOLS:-}') — nothing installed. Type 'installDTTools' to install dtctl + Monaco"
+    printInfo "Dynatrace tools: nothing selected (DT_TOOLS='${DT_TOOLS:-}') — nothing installed. Type 'installDTTools' to install dtctl, dtui + Monaco"
     return 0
   fi
   _varIsSet FRAMEWORK_DEVTOOLS && printWarn "FRAMEWORK_DEVTOOLS is retired and ignored: dtctl and Monaco are opt-in now (DT_TOOLS)"
-  local want_dtctl="" want_monaco=""
+  local want_dtctl="" want_dtui="" want_monaco=""
   printf '%s\n' "$selection" | grep -qx dtctl && want_dtctl=1
+  printf '%s\n' "$selection" | grep -qx dtui && want_dtui=1
   printf '%s\n' "$selection" | grep -qx monaco && want_monaco=1
-  printInfoSection "Installing Dynatrace tools:${want_dtctl:+ dtctl ${DTCTL_VERSION:-latest}}${want_monaco:+ Monaco ${MONACO_VERSION:-latest}}"
-  # One download budget for both tools (seconds), read by _fetch. Anything but
+  printInfoSection "Installing Dynatrace tools:${want_dtctl:+ dtctl ${DTCTL_VERSION:-latest}}${want_dtui:+ dtui ${DTUI_VERSION:-latest}}${want_monaco:+ Monaco ${MONACO_VERSION:-latest}}"
+  # One download budget for all the tools (seconds), read by _fetch. Anything but
   # a plain non-negative integer falls back to 180: $(( )) would otherwise
   # evaluate the value as an expression. Digits are read as base 10 (a
   # leading 0 is not octal) and capped at 900; a value too long to be a sane
@@ -1327,6 +1398,7 @@ installDTTools() {
       _varIsSet DT_DTCTL_TOKEN && printWarn "DT_DTCTL_TOKEN is set but DT_ENVIRONMENT is not — dtctl installed without a context"
     fi
   fi
+  [ -n "$want_dtui" ] && _devToolStep "dtui" installDtui
   [ -n "$want_monaco" ] && _devToolStep "Monaco" installMonaco
   return 0
 }
@@ -1334,7 +1406,7 @@ installDTTools() {
 installDevTools() {
   # DEPRECATED (1.23.0): renamed installDTTools. Kept so a script or a habit
   # that calls the old name still works.
-  printWarn "installDevTools is deprecated. Use 'installDTTools' (dtctl + Monaco, opt-in with DT_TOOLS)."
+  printWarn "installDevTools is deprecated. Use 'installDTTools' (dtctl, dtui + Monaco, opt-in with DT_TOOLS)."
   installDTTools "$@"
 }
 

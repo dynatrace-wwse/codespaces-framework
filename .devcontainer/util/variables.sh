@@ -39,6 +39,18 @@ DTCTL_PIN_BIN_SHA256_AMD64=7cb79a5db80720dde5bf90af4d1586c06eb7656d30908949d66b7
 DTCTL_PIN_BIN_SHA256_ARM64=4ee4f1f808553c6cc7eaafc72d0f2fa2bc3ffb21bd204f12a3e4e01015df0185
 DTCTL_VERSION="${DTCTL_VERSION:-$DTCTL_PIN_VERSION}"
 export DTCTL_VERSION
+# dtui: read-only terminal UI for Dynatrace. It reads dtctl's contexts and
+# credentials (no auth of its own), so it pairs with dtctl. Same release shape
+# as dtctl: dtui_<v>_linux_<arch>.tar.gz + checksums.txt. 0.2.0 is the latest
+# release (2026-11-24); bump it, with its four hashes, when upstream releases.
+# https://github.com/dynatrace-oss/dtui/releases
+DTUI_PIN_VERSION=0.2.0
+DTUI_PIN_SHA256_AMD64=89fbaf8e22643e16d7be1ea748c1ce0122b925baddcf5a4e10767086e8fcf5ac
+DTUI_PIN_SHA256_ARM64=cada62121bb7e990c8117e4501af8371300ed0cbde56fe7991c8688db4cd2fcc
+DTUI_PIN_BIN_SHA256_AMD64=0017b6b1c8c845f42bcd279cc6d0050bd8906f24c0c40257c25c1dbfdb629c3a
+DTUI_PIN_BIN_SHA256_ARM64=811dbeb2c5704b01c7603a1322ff9c5b7401e91a355b23ead52ae578b1d0d660
+DTUI_VERSION="${DTUI_VERSION:-$DTUI_PIN_VERSION}"
+export DTUI_VERSION
 # Monaco: the framework ships a PATCHED build of the pinned version (ENH-114).
 # Stock Monaco asks /platform/metadata/v1/classic-environment-domain on every
 # platform-token run, which needs 'app-engine:apps:run' — a scope a learner's

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for enableDtctl / disableDtctl / installMonaco / deployMonaco /
+# Tests for enableDtctl / disableDtctl / installDtui / installMonaco / deployMonaco /
 # undeployMonaco / verifySha256 (ENH-089, ENH-091).
 #
 # Nothing touches the network or a tenant: curl is a stub that serves release
@@ -19,7 +19,7 @@ setup() {
   export XDG_CONFIG_HOME="$HOME/.config"
   export XDG_DATA_HOME="$HOME/.local/share"
   mkdir -p "$HOME"
-  unset DTCTL_CONFIG DTCTL_VERSION MONACO_VERSION DTCTL_TOKEN_VAR MONACO_TOKEN_VAR DT_SESSION_ID GITHUB_USER
+  unset DTCTL_CONFIG DTCTL_VERSION DTUI_VERSION MONACO_VERSION DTCTL_TOKEN_VAR MONACO_TOKEN_VAR DT_SESSION_ID GITHUB_USER
 
   export FAKE_REPO="$TEST_DIR/workspaces/test-enablement"
   mkdir -p "$FAKE_REPO/.devcontainer/util" "$FAKE_REPO/.devcontainer/test"
@@ -43,7 +43,7 @@ VARSEOF
   export BIN="$TEST_DIR/bin" FIXTURES="$TEST_DIR/fixtures"
   export CURL_LOG="$TEST_DIR/curl.log" DTCTL_LOG="$TEST_DIR/dtctl.log" MONACO_LOG="$TEST_DIR/monaco.log"
   export INSTALL_DIR="$TEST_DIR/install"
-  export DTCTL_INSTALL_DIR="$INSTALL_DIR" MONACO_INSTALL_DIR="$INSTALL_DIR"
+  export DTCTL_INSTALL_DIR="$INSTALL_DIR" MONACO_INSTALL_DIR="$INSTALL_DIR" DTUI_INSTALL_DIR="$INSTALL_DIR"
   mkdir -p "$BIN" "$FIXTURES" "$INSTALL_DIR"
   # Only the stubs and the system tools: no real dtctl/monaco can leak in.
   export PATH="$INSTALL_DIR:$BIN:/usr/bin:/bin"
@@ -160,6 +160,24 @@ EOF
       -czf "$FIXTURES/dtctl_9.9.9_linux_${a}.tar.gz" -C "$stage" dtctl
   done
   (cd "$FIXTURES" && sha256sum dtctl_9.9.9_linux_amd64.tar.gz dtctl_9.9.9_linux_arm64.tar.gz > checksums.txt)
+  # The "released" dtui: like the real one, `--version` prints the version and
+  # anything else would start the TUI (here: fails loudly), so a version probe
+  # that used `dtui version` cannot pass. Its archive holds docs next to it.
+  cat > "$stage/dtui" <<'EOF'
+#!/bin/bash
+[ "$1" = "--version" ] && { echo "dtui version 9.9.9"; exit 0; }
+echo "Error: dtui is interactive-only (stub called with: $*)" >&2
+exit 1
+EOF
+  chmod +x "$stage/dtui"
+  echo "readme" > "$stage/README.md"
+  for a in amd64 arm64; do
+    tar --mtime="@$([ "$a" = amd64 ] && echo 1200000000 || echo 1300000000)" \
+      -czf "$FIXTURES/dtui_9.9.9_linux_${a}.tar.gz" -C "$stage" dtui README.md
+  done
+  # dtctl and dtui both publish "checksums.txt"; the curl stub serves by
+  # basename, so one file holds both tools' lines (each looks up its asset).
+  (cd "$FIXTURES" && sha256sum dtui_9.9.9_linux_amd64.tar.gz dtui_9.9.9_linux_arm64.tar.gz >> checksums.txt)
 
   # The "released" monaco: logs arguments + whether the token is present.
   cat > "$FIXTURES/monaco-linux-amd64" <<'EOF'
@@ -1385,8 +1403,8 @@ MONACO_OUT="$BATS_TEST_DIRNAME/monaco-output"
 
 pin_devtools() {
   # The framework pin is 9.9.9, with reviewed hashes taken from the fixtures.
-  export DTCTL_VERSION=9.9.9 MONACO_VERSION=9.9.9
-  export DTCTL_PIN_VERSION=9.9.9 MONACO_PIN_VERSION=9.9.9
+  export DTCTL_VERSION=9.9.9 MONACO_VERSION=9.9.9 DTUI_VERSION=9.9.9
+  export DTCTL_PIN_VERSION=9.9.9 MONACO_PIN_VERSION=9.9.9 DTUI_PIN_VERSION=9.9.9
   local a A
   for a in amd64 arm64; do
     A=$(echo "$a" | tr '[:lower:]' '[:upper:]')
@@ -1394,7 +1412,17 @@ pin_devtools() {
     export "DTCTL_PIN_BIN_SHA256_$A=$(sha256sum "$TEST_DIR/stage/dtctl" | cut -d' ' -f1)"
     export "MONACO_PIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
     export "MONACO_PIN_BIN_SHA256_$A=$(sha256sum "$FIXTURES/monaco-linux-$a" | cut -d' ' -f1)"
+    export "DTUI_PIN_SHA256_$A=$(sha256sum "$FIXTURES/dtui_9.9.9_linux_$a.tar.gz" | cut -d' ' -f1)"
+    export "DTUI_PIN_BIN_SHA256_$A=$(sha256sum "$TEST_DIR/stage/dtui" | cut -d' ' -f1)"
   done
+}
+
+# fake_present_dtui <version> — a present dtui that, like the real one, reports
+# <version> only for --version; prints its sha256.
+fake_present_dtui() {
+  printf '#!/bin/bash\n[ "$1" = "--version" ] && echo "dtui version %s" && exit 0\nexit 1\n' "$1" > "$INSTALL_DIR/dtui"
+  chmod +x "$INSTALL_DIR/dtui"
+  sha256sum "$INSTALL_DIR/dtui" | cut -d' ' -f1
 }
 
 # fake_present <tool> <version> — a present binary that reports <version>;
@@ -1405,15 +1433,20 @@ fake_present() {
   sha256sum "$INSTALL_DIR/$1" | cut -d' ' -f1
 }
 
-@test "installDTTools: default installs dtctl and Monaco at the pinned versions, verified" {
+@test "installDTTools: default installs dtctl, dtui and Monaco at the pinned versions, verified" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   run installDTTools
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/dtui" ]
   [ -x "$INSTALL_DIR/monaco" ]
+  "$INSTALL_DIR/dtui" --version | grep -qx "dtui version 9.9.9"
   grep -q "dtctl/releases/download/v9.9.9/checksums.txt" "$CURL_LOG"
+  grep -q "dtui/releases/download/v9.9.9/dtui_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  grep -q "dtui/releases/download/v9.9.9/checksums.txt" "$CURL_LOG"
+  echo "$output" | grep -q "dtui v9.9.9 installed at $INSTALL_DIR/dtui"
   grep -q "configuration-as-code/releases/download/v9.9.9/monaco-linux-amd64.sha256" "$CURL_LOG"
   refute grep -q "releases/latest" "$CURL_LOG"
   echo "$output" | grep -q "Checksum OK"
@@ -1458,7 +1491,9 @@ fake_present() {
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/dtctl" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
   refute grep -q "monaco" "$CURL_LOG"
+  refute grep -q "dtui" "$CURL_LOG"
 }
 
 @test "installDTTools: DT_TOOLS=monaco installs Monaco only — no dtctl download" {
@@ -1468,21 +1503,42 @@ fake_present() {
   [ "$status" -eq 0 ]
   [ -x "$INSTALL_DIR/monaco" ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
   refute grep -q "dtctl" "$CURL_LOG"
+  refute grep -q "dtui" "$CURL_LOG"
 }
 
-@test "installDTTools: DT_TOOLS 'dtctl,monaco' and 'all' (any case) install both" {
+@test "installDTTools: DT_TOOLS=dtui installs dtui only — no dtctl or Monaco download" {
+  source_functions
+  pin_devtools
+  DT_TOOLS=DTUI run installDTTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtui" ]
+  [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/monaco" ]
+  refute grep -q "dtctl_\|monaco" "$CURL_LOG"
+  echo "$output" | grep -q "Installing Dynatrace tools: dtui 9.9.9"
+}
+
+@test "installDTTools: DT_TOOLS 'dtctl,dtui,monaco' and 'all' (any case) install all three" {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
   local v
-  for v in "dtctl,monaco" "ALL" "monaco dtctl"; do
-    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/monaco"
+  for v in "dtctl,dtui,monaco" "ALL" "monaco dtui dtctl"; do
+    rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/dtui" "$INSTALL_DIR/monaco"
     DT_TOOLS="$v" run installDTTools
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dtctl" ]
+    [ -x "$INSTALL_DIR/dtui" ]
     [ -x "$INSTALL_DIR/monaco" ]
   done
+  # 'dtctl,monaco' (a repo that opted in before dtui existed) does not get dtui.
+  rm -f "$INSTALL_DIR/dtctl" "$INSTALL_DIR/dtui" "$INSTALL_DIR/monaco"
+  DT_TOOLS="dtctl,monaco" run installDTTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
 }
 
 @test "installDTTools: arguments win over DT_TOOLS" {
@@ -1567,7 +1623,7 @@ fake_present() {
   source_functions
   pin_devtools
   unset DT_DTCTL_TOKEN
-  rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/monaco-*
+  rm -f "$FIXTURES"/dtctl_* "$FIXTURES"/dtui_* "$FIXTURES"/monaco-*
   run installDTTools
   [ "$status" -eq 0 ]
   # Its real output holds tagged "failed" lines...
@@ -1596,10 +1652,12 @@ fake_present() {
   unset DT_DTCTL_TOKEN
   export DTCTL_PIN_BIN_SHA256_AMD64="$(fake_present dtctl 9.9.9)"
   export MONACO_PIN_BIN_SHA256_AMD64="$(fake_present monaco 9.9.9)"
+  export DTUI_PIN_BIN_SHA256_AMD64="$(fake_present_dtui 9.9.9)"
   run installDTTools
   [ "$status" -eq 0 ]
   [ ! -s "$CURL_LOG" ]
   echo "$output" | grep -q "dtctl v9.9.9 already present"
+  echo "$output" | grep -q "dtui v9.9.9 already present"
   echo "$output" | grep -q "Monaco v9.9.9 already present"
 }
 
@@ -1633,11 +1691,13 @@ fake_present() {
   unset DT_DTCTL_TOKEN
   # The release checksum files still match the assets: only the committed pin catches this.
   export DTCTL_PIN_SHA256_AMD64="$(printf '%064d' 1)" MONACO_PIN_SHA256_AMD64="$(printf '%064d' 2)"
+  export DTUI_PIN_SHA256_AMD64="$(printf '%064d' 3)"
   run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
-  [ "$(echo "$output" | grep -c "MISMATCH")" -eq 2 ]
+  [ "$(echo "$output" | grep -c "MISMATCH")" -eq 3 ]
 }
 
 @test "installDtctl: a version the repo overrode (not the pin) falls back to the release file, with a warning" {
@@ -1657,19 +1717,21 @@ fake_present() {
   pin_devtools
   unset DT_DTCTL_TOKEN
   # The release checksum files are fine; only the committed per-arch pin is missing.
-  export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64=""
+  export DTCTL_PIN_SHA256_AMD64="" MONACO_PIN_SHA256_AMD64="" DTUI_PIN_SHA256_AMD64=""
   run installDTTools
   [ "$status" -eq 0 ]
   [ ! -e "$INSTALL_DIR/dtctl" ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
   [ ! -e "$INSTALL_DIR/monaco" ]
-  [ "$(echo "$output" | grep -c "no reviewed sha256 is pinned for amd64 — refusing")" -eq 2 ]
+  [ "$(echo "$output" | grep -c "no reviewed sha256 is pinned for amd64 — refusing")" -eq 3 ]
   refute grep -q "Checksum OK" <<< "$output"
 }
 
 @test "variables.sh: committed pins are 64-hex for both tools and both arches" {
   local real="$BATS_TEST_DIRNAME/../../util/variables.sh" v
   for v in DTCTL_PIN_SHA256_AMD64 DTCTL_PIN_SHA256_ARM64 DTCTL_PIN_BIN_SHA256_AMD64 DTCTL_PIN_BIN_SHA256_ARM64 \
-           MONACO_PIN_SHA256_AMD64 MONACO_PIN_SHA256_ARM64; do
+           MONACO_PIN_SHA256_AMD64 MONACO_PIN_SHA256_ARM64 \
+           DTUI_PIN_SHA256_AMD64 DTUI_PIN_SHA256_ARM64 DTUI_PIN_BIN_SHA256_AMD64 DTUI_PIN_BIN_SHA256_ARM64; do
     grep -qE "^$v=[0-9a-f]{64}$" "$real"
   done
 }
@@ -1682,9 +1744,11 @@ fake_present() {
   run installDTTools
   [ "$status" -eq 0 ]
   grep -q "dtctl_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
+  grep -q "dtui_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
   grep -q "monaco-linux-arm64" "$CURL_LOG"
   refute grep -q "amd64" "$CURL_LOG"
   [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/dtui" ]
   [ -x "$INSTALL_DIR/monaco" ]
 }
 
@@ -1708,13 +1772,14 @@ fake_present() {
   printf '#!/bin/bash\necho "sudo $*" >> "$SUDO_LOG"\nif [ "$1" = "-n" ]; then echo "sudo: a password is required" >&2; exit 1; fi\nsleep 30; exit 1\n' > "$BIN/sudo"
   chmod +x "$BIN/sudo"
   mkdir -p "$SUBDIR"; chmod 0555 "$SUBDIR"
-  DTCTL_INSTALL_DIR="$SUBDIR" MONACO_INSTALL_DIR="$SUBDIR" run timeout 20 bash -c \
+  DTCTL_INSTALL_DIR="$SUBDIR" MONACO_INSTALL_DIR="$SUBDIR" DTUI_INSTALL_DIR="$SUBDIR" run timeout 20 bash -c \
     'cd "$FAKE_REPO"; source .devcontainer/util/variables.sh; source .devcontainer/util/functions.sh; installDTTools'
   chmod 0755 "$SUBDIR"
   [ "$status" -eq 0 ]
   [ -s "$SUDO_LOG" ]
   refute grep -qv '^sudo -n ' "$SUDO_LOG"
   echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
+  echo "$output" | grep -q "devtools (non-fatal): dtui not installed"
   echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
 }
 
@@ -1738,7 +1803,7 @@ fake_present() {
   export CURL_ARGS_LOG="$TEST_DIR/curl-args.log" DEVTOOLS_TIME_BUDGET=60
   run installDTTools
   [ "$status" -eq 0 ]
-  [ "$(wc -l < "$CURL_ARGS_LOG")" -eq 4 ]
+  [ "$(wc -l < "$CURL_ARGS_LOG")" -eq 6 ]
   refute grep -v -- "--connect-timeout 10 " "$CURL_ARGS_LOG"
   local mt
   for mt in $(grep -o -- "--max-time [0-9]*" "$CURL_ARGS_LOG" | awk '{print $2}'); do
@@ -1798,16 +1863,20 @@ fake_present() {
   [ ! -s "$CURL_LOG" ]
   echo "$output" | grep -q "time budget exhausted"
   echo "$output" | grep -q "devtools (non-fatal): dtctl not installed"
+  echo "$output" | grep -q "devtools (non-fatal): dtui not installed"
   echo "$output" | grep -q "devtools (non-fatal): Monaco not installed"
 }
 
-@test "installDtctl / installMonaco: a failing mktemp refuses, no download" {
+@test "installDtctl / installDtui / installMonaco: a failing mktemp refuses, no download" {
   source_functions
   pin_devtools
   printf '#!/bin/bash\nexit 1\n' > "$BIN/mktemp"; chmod +x "$BIN/mktemp"
   run installDtctl
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "could not create a temporary directory"
+  run installDtui
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "dtui: could not create a temporary directory"
   run installMonaco
   [ "$status" -eq 1 ]
   echo "$output" | grep -q "could not create a temporary directory"
@@ -1926,7 +1995,7 @@ run_setUpTerminal() {
   run_setUpTerminal
   [ "$status" -eq 0 ]
   refute grep -q "INSTALL_DTTOOLS_RAN" <<< "$output"
-  echo "$output" | grep -qF "Type 'installDTTools' to install dtctl + Monaco"
+  echo "$output" | grep -qF "Type 'installDTTools' to install dtctl, dtui + Monaco"
 }
 
 @test "setUpTerminal installs them BEFORE the long setup (right after the MCP hint)" {
@@ -1948,15 +2017,18 @@ run_setUpTerminal() {
   [ -n "$s" ] && [ -n "$k" ] && [ "$s" -lt "$k" ]
 }
 
-@test "variables.sh pins DTCTL_VERSION and MONACO_VERSION to x.y.z (never 'latest')" {
+@test "variables.sh pins DTCTL_VERSION, DTUI_VERSION and MONACO_VERSION to x.y.z (never 'latest')" {
   source_functions
-  local real="$BATS_TEST_DIRNAME/../../util/variables.sh" d m
+  local real="$BATS_TEST_DIRNAME/../../util/variables.sh" d m u
   d=$(sed -n 's/^DTCTL_PIN_VERSION=//p' "$real")
   m=$(sed -n 's/^MONACO_PIN_VERSION=//p' "$real")
+  u=$(sed -n 's/^DTUI_PIN_VERSION=//p' "$real")
   grep -qxF 'DTCTL_VERSION="${DTCTL_VERSION:-$DTCTL_PIN_VERSION}"' "$real"
   grep -qxF 'MONACO_VERSION="${MONACO_VERSION:-$MONACO_PIN_VERSION}"' "$real"
+  grep -qxF 'DTUI_VERSION="${DTUI_VERSION:-$DTUI_PIN_VERSION}"' "$real"
   _isVersion "$d"
   _isVersion "$m"
+  _isVersion "$u"
 }
 
 # ── RUM frontends: rum-frontends.txt (ENH-130 M5) ────────────────────────────
@@ -2589,4 +2661,156 @@ project_in_manifest() {
   [ "$status" -eq 0 ]
   [ ! -e "$FAKE_REPO/.devcontainer/.monaco/tenant--alice" ]
   [ -f "$FAKE_REPO/.devcontainer/.monaco/tenant--bob/delete.yaml" ]
+}
+
+# ── dtui (dynatrace-oss/dtui) ────────────────────────────────────────────────
+
+@test "installDtui: pinned version verified against the reviewed pin AND checksums.txt, installed" {
+  source_functions
+  pin_devtools
+  run installDtui
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtui" ]
+  [ "$(echo "$output" | grep -c "Checksum OK for dtui_9.9.9_linux_amd64.tar.gz")" -eq 2 ]
+  # Only the binary is installed, not the docs that ship next to it.
+  [ ! -e "$INSTALL_DIR/README.md" ]
+  refute grep -q "releases/latest" "$CURL_LOG"
+}
+
+@test "installDtui: one-byte-corrupt archive is refused — nothing installed" {
+  source_functions
+  pin_devtools
+  corrupt_one_byte "$FIXTURES/dtui_9.9.9_linux_amd64.tar.gz"
+  run installDtui
+  [ "$status" -eq 1 ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
+  echo "$output" | grep -q "INTEGRITY: Checksum MISMATCH for dtui_9.9.9_linux_amd64.tar.gz"
+}
+
+@test "installDtui: asset missing from checksums.txt is refused (version not pinned)" {
+  source_functions
+  pin_devtools
+  export DTUI_VERSION=9.9.8
+  cp "$FIXTURES/dtui_9.9.9_linux_amd64.tar.gz" "$FIXTURES/dtui_9.9.8_linux_amd64.tar.gz"
+  run installDtui
+  [ "$status" -eq 1 ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
+  echo "$output" | grep -q "no valid expected checksum"
+}
+
+@test "installDtui: a version the repo overrode falls back to the release file, with a warning" {
+  source_functions
+  pin_devtools
+  export DTUI_VERSION=9.9.8
+  cp "$FIXTURES/dtui_9.9.9_linux_amd64.tar.gz" "$FIXTURES/dtui_9.9.8_linux_amd64.tar.gz"
+  (cd "$FIXTURES" && sha256sum dtui_9.9.8_linux_amd64.tar.gz >> checksums.txt)
+  run installDtui
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtui" ]
+  echo "$output" | grep -q "DTUI v9.9.8 is not the framework's pinned version"
+}
+
+@test "installDtui: DTUI_VERSION empty resolves the LATEST dtui release" {
+  source_functions
+  pin_devtools
+  export DTUI_VERSION=""
+  run installDtui
+  [ "$status" -eq 0 ]
+  grep -q "api.github.com/repos/dynatrace-oss/dtui/releases/latest" "$CURL_LOG"
+  grep -q "dtui/releases/download/v9.9.9/dtui_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  [ -x "$INSTALL_DIR/dtui" ]
+}
+
+@test "installDtui: a DTUI_VERSION that is not x.y.z is refused before any download" {
+  source_functions
+  pin_devtools
+  export DTUI_VERSION="latest"
+  run installDtui
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "DTUI_VERSION 'latest' is not a version"
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "installDtui: arm64 machine downloads the arm64 asset; unknown arch refused" {
+  source_functions
+  pin_devtools
+  export FAKE_UNAME_M=aarch64
+  run installDtui
+  [ "$status" -eq 0 ]
+  grep -q "dtui_9.9.9_linux_arm64.tar.gz" "$CURL_LOG"
+  refute grep -q "amd64" "$CURL_LOG"
+  rm -f "$INSTALL_DIR/dtui"; : > "$CURL_LOG"
+  export FAKE_UNAME_M=armv7l
+  run installDtui
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "dtui: unsupported architecture 'armv7l'"
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "installDtui: the amd64 archive under the arm64 name is refused (per-arch pin)" {
+  source_functions
+  pin_devtools
+  export FAKE_UNAME_M=aarch64
+  cp "$FIXTURES/dtui_9.9.9_linux_amd64.tar.gz" "$FIXTURES/dtui_9.9.9_linux_arm64.tar.gz"
+  run installDtui
+  [ "$status" -eq 1 ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
+  echo "$output" | grep -q "MISMATCH"
+}
+
+@test "installDtui: a present binary is kept only with the pinned sha256 AND --version naming the version" {
+  source_functions
+  pin_devtools
+  export DTUI_PIN_BIN_SHA256_AMD64="$(fake_present_dtui 9.9.9)"
+  run installDtui
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "dtui v9.9.9 already present"
+  [ ! -s "$CURL_LOG" ]
+  # Negative control: the bytes match the pin, the version does not → replaced.
+  export DTUI_PIN_BIN_SHA256_AMD64="$(fake_present_dtui 9.9.10)"
+  run installDtui
+  [ "$status" -eq 0 ]
+  grep -q "dtui_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+  "$INSTALL_DIR/dtui" --version | grep -qx "dtui version 9.9.9"
+}
+
+@test "installDtui: a dtui answering only 'dtui version' (not --version) is NOT trusted" {
+  source_functions
+  pin_devtools
+  printf '#!/bin/bash\n[ "$1" = "version" ] && echo "dtui version 9.9.9" && exit 0\nexit 1\n' > "$INSTALL_DIR/dtui"
+  chmod +x "$INSTALL_DIR/dtui"
+  export DTUI_PIN_BIN_SHA256_AMD64="$(sha256sum "$INSTALL_DIR/dtui" | cut -d' ' -f1)"
+  run installDtui
+  [ "$status" -eq 0 ]
+  refute grep -q "already present" <<< "$output"
+  grep -q "dtui_9.9.9_linux_amd64.tar.gz" "$CURL_LOG"
+}
+
+@test "installDTTools: corrupt dtui archive is refused, NOT fatal, dtctl and Monaco still install" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  corrupt_one_byte "$FIXTURES/dtui_9.9.9_linux_amd64.tar.gz"
+  run installDTTools
+  [ "$status" -eq 0 ]
+  [ ! -e "$INSTALL_DIR/dtui" ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  echo "$output" | grep -q "devtools INTEGRITY FAILED: .*dtui_9.9.9_linux_amd64.tar.gz"
+  echo "$output" | grep -q "devtools (non-fatal): dtui not installed"
+}
+
+@test "installDTTools: a failed dtui download is non-fatal and dropped as creation noise" {
+  source_functions
+  pin_devtools
+  unset DT_DTCTL_TOKEN
+  rm -f "$FIXTURES"/dtui_*
+  run installDTTools
+  [ "$status" -eq 0 ]
+  [ -x "$INSTALL_DIR/dtctl" ]
+  [ -x "$INSTALL_DIR/monaco" ]
+  echo "$output" | grep -q "devtools (non-fatal): .*dtui: download of v9.9.9 failed"
+  local left
+  left=$(printf '%s\n' "$output" | grep -i -E 'error|failed' | _creationNoiseFilter || true)
+  [ -z "$left" ]
 }

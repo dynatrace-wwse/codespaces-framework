@@ -127,8 +127,9 @@ MCP is opt-in. The generated `mcp.json` runs `@dynatrace-oss/dynatrace-mcp-serve
 
 | Function | Signature | Description |
 |---|---|---|
-| `installDTTools` | `installDTTools [dtctl\|monaco\|all]` | **Opt-in** (like MCP): `setUpTerminal` runs it at the start of post-create when the repo sets `DT_TOOLS` (`dtctl`, `monaco`, `all`), else prints the hint `Type 'installDTTools'`. Installs dtctl and/or Monaco at the framework's pinned versions, plus a read-only dtctl context when `DT_DTCTL_TOKEN` is set. An unknown `DT_TOOLS` entry warns. Never fatal — see [dtctl & Monaco](dtctl-monaco.md). `installDevTools` is a deprecated alias |
+| `installDTTools` | `installDTTools [dtctl\|dtui\|monaco\|all]` | **Opt-in** (like MCP): `setUpTerminal` runs it at the start of post-create when the repo sets `DT_TOOLS` (`dtctl`, `dtui`, `monaco`, `all`), else prints the hint `Type 'installDTTools'`. Installs dtctl, dtui and/or Monaco at the framework's pinned versions, plus a read-only dtctl context when `DT_DTCTL_TOKEN` is set. An unknown `DT_TOOLS` entry warns. Never fatal — see [dtctl, dtui & Monaco](dtctl-monaco.md). `installDevTools` is a deprecated alias |
 | `installDtctl` | `installDtctl [dir]` | Installs dtctl only (no context), checksum-verified |
+| `installDtui` | `installDtui [dir]` | Installs [dtui](https://github.com/dynatrace-oss/dtui) (`DTUI_VERSION`, checksum-verified like dtctl) — the read-only terminal UI; it connects through dtctl's context |
 | `enableDtctl` | `enableDtctl [--readwrite] [--token-var NAME]` | Installs the latest [dtctl](https://github.com/dynatrace-oss/dtctl) (checksum-verified) and configures a context for `$DT_ENVIRONMENT`. Safety level `readonly` unless `--readwrite` — a client-side guard only: under Orbital the token itself can write and delete (see **Credentials** below) |
 | `disableDtctl` | `disableDtctl` | Removes the dtctl binary, its config and any file-stored tokens |
 | `installMonaco` | `installMonaco` | Installs [Monaco](https://github.com/Dynatrace/dynatrace-configuration-as-code) at `MONACO_VERSION`: for the framework's pin, the framework's [patched build](dtctl-monaco.md#monaco-is-a-patched-build) (reviewed sha256, never a stock fallback; a refusal removes any `monaco` left in the install dir); otherwise the upstream release (checksum-verified) |
@@ -147,18 +148,18 @@ deployMonaco env         # after the app answers
 enableDtctl              # optional: learners inspect what was deployed
 ```
 
-**Verified installs.** Both installers use the version in `DTCTL_VERSION` / `MONACO_VERSION` —
+**Verified installs.** The installers use the version in `DTCTL_VERSION` / `DTUI_VERSION` / `MONACO_VERSION` —
 pinned by the framework in `variables.sh` — or, when that is empty, the latest GitHub release.
 For the pinned version the download must match the reviewed sha256 committed in `variables.sh`
 **and** the release's checksum file; see [dtctl & Monaco](dtctl-monaco.md#supply-chain). A
-binary is kept only when its sha256 matches the pin and it reports the wanted version. dtctl's archive is checked against the release's
+binary is kept only when its sha256 matches the pin and it reports the wanted version. dtctl's and dtui's archives are checked against the release's
 `checksums.txt`, Monaco's binary against its `.sha256`. A mismatch, or an asset missing from the
 checksum file, refuses the install. The pinned Monaco is the framework's
 [patched build](dtctl-monaco.md#monaco-is-a-patched-build), checked against the reviewed sha256
 only; a mismatch refuses it and does **not** install stock Monaco instead. The checksum file comes from the same release, so this
 proves the download is intact, not who published it; pin a reviewed version for a delivery.
 A pin that is not `x.y.z` is refused before any download: nothing is written to `/usr/local/bin` (override with
-`DTCTL_INSTALL_DIR` / `MONACO_INSTALL_DIR`). Architectures: `amd64` and `arm64`.
+`DTCTL_INSTALL_DIR` / `DTUI_INSTALL_DIR` / `MONACO_INSTALL_DIR`). Architectures: `amd64` and `arm64`.
 
 **dtctl context.** `enableDtctl` runs non-interactively:
 
