@@ -222,10 +222,13 @@ def check_delivery_file(data, has_shared_create: bool) -> tuple[dict, list[str]]
             issues.append(f"shared infrastructure ({SHARED_CREATE}) requires "
                           "type: same-tenant — multi-tenant shared infrastructure is "
                           "not supported yet")
-        if eff["seats"]["personal"]:
-            issues.append(f"shared infrastructure ({SHARED_CREATE}) gives learners no "
-                          "personal environment yet: seats.personal: true is not "
-                          "available (ENH-163 F7)")
+        # ENH-163 F7: beside a shared machine a learner may have a LIGHT
+        # personal seat only (dtctl, dtui and Monaco; no cluster, no apps).
+        # Mirrors Orbital's shared/delivery.py, which refuses the same file.
+        if eff["seats"]["personal"] and eff["seats"]["mode"] != "dtctl-only":
+            issues.append(f"shared infrastructure ({SHARED_CREATE}): seats.personal: "
+                          "true needs seats.mode: dtctl-only — a full personal "
+                          "environment beside a shared machine is not available")
     return eff, issues
 
 
